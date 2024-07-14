@@ -31,7 +31,7 @@ setup(
     author="Jiang Lab", author_email="",
     url="https://github.com/jianglab/helicon",
     package_dir={'': 'src'},
-    packages=find_packages(exclude=["tests", ".github", ".git", ".sync"]),
+    packages=find_packages(where="src"),
     install_requires=read_requirements("requirements.txt"),
     entry_points={
         "console_scripts": ["helicon = helicon.helicon:main"]
