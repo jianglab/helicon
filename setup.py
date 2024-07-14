@@ -3,8 +3,6 @@ import io
 import os
 from setuptools import find_packages, setup
 
-from src.helicon.__version__ import __version__
-
 def read_file(*paths, **kwargs):
     content = ""
     with io.open(
@@ -14,6 +12,8 @@ def read_file(*paths, **kwargs):
         content = open_file.read().strip()
     return content
 
+def read_version(path):
+    return read_file(path).split("\n")[0].split("=")[-1].strip().strip('"')
 
 def read_requirements(path):
     return [
@@ -24,7 +24,7 @@ def read_requirements(path):
 
 setup(
     name="helicon",
-    version=__version__,
+    version=read_version("src/helicon/__version__.py"),
     description="A collection of tools for cryo-EM 3D reconstruction of helical structures",
     long_description=read_file("README.md"),
     long_description_content_type="text/markdown",
