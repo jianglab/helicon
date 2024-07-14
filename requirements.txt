@@ -1,0 +1,16 @@
+bokeh==2.4.3
+colorama
+gemmi
+joblib
+lazy_import
+matplotlib
+mrcfile
+numba
+numpy
+pandas
+plotly
+psutil
+scikit-image
+scikit-learn
+scipy
+tqdm
