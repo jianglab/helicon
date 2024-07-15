@@ -2,7 +2,7 @@
 
 '''A command line tool for helical indexing and 3D reconstruction from a single 2D image'''
 
-import itertools, sys, pathlib, datetime
+import itertools, os, sys, pathlib, datetime
 import numpy as np
 import helicon
 
@@ -18,25 +18,29 @@ except ImportError:
     return
   prange = range
 
-from joblib import Memory
-memory = Memory(location=f'{pathlib.Path(__file__).stem}.cache', bytes_limit=2**36, verbose=0)
+memory = helicon.DummyMemory(location=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".cache", bytes_limit=2**36, verbose=0)
 
 def main(args):
   helicon.log_command_line()
-  
+
+  logger = helicon.get_logger(logfile=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".log", verbose=args.verbose)
+
+  from joblib import Memory
+  global memory
+  memory = Memory(location=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".cache", bytes_limit=2**36, verbose=0)
+
   output_path = pathlib.Path(args.output_prefix)
   output_path.parent.mkdir(parents=True, exist_ok=True)
 
   if args.force: memory.clear(warn=False)
   
-  logger = get_logger(verbose=args.verbose)
   logger.info(' '.join(sys.argv))
 
   start_time = datetime.datetime.now()
   logger.info(f"Started at {start_time}")
 
   if args.cpu <= 0:
-    args.cpu = available_cpu()
+    args.cpu = helicon.available_cpu()
     logger.info(f"Will use {args.cpu} CPUs")
 
   input_file = pathlib.Path(args.input_file)
@@ -87,7 +91,7 @@ def main(args):
     info = f"size={nx}x{ny}pixels apix={apix}Å/pixel length={round(nx*apix)}Å (X-axis)"
     logger.info(f"Input: {len(images)} image{'s' if len(images)>1 else ''} in {str(input_file)} with {info}") 
   else: # simulation
-    name, params = parse_simulation_options(args.input_file)
+    name, params = helicon.parse_param_str(args.input_file)
     if name is None: name = "Simulation"
     args.transpose = 0
     args.horizontalize = 0
@@ -135,7 +139,7 @@ def main(args):
     tr_pairs = []
     for pitch, rise in pr_pairs:
       if pitch<=rise: continue
-      twist = set_to_periodic_range(360/(pitch/rise), min=-180, max=180)
+      twist = helicon.set_to_periodic_range(360/(pitch/rise), min=-180, max=180)
       tr_pairs.append((twist, rise))
   
   itrtpy_list = list(itertools.product(images, tr_pairs, args.tilts, args.psis, args.dys))
@@ -144,7 +148,7 @@ def main(args):
   tasks = []
   for ti, t in  enumerate(itrtpy_list):
     (data, imageFile, imageIndex), (twist, rise), tilt, psi, dy = t
-    twist = np.round(set_to_periodic_range(twist, min=-180, max=180), 6)
+    twist = np.round(helicon.set_to_periodic_range(twist, min=-180, max=180), 6)
     if abs(twist)<0.01:
       logger.warning(f"WARNING: (twist={round(twist, 3)}, rise={round(rise, 3)}) will be ignored due to very small twist value (twist={round(twist, 3)}°)")
       continue
@@ -167,7 +171,7 @@ def main(args):
     if args.reconstruct_length>0: reconstruct_length = max(rise, args.reconstruct_length)
     elif args.reconstruct_length_pitch>0: reconstruct_length = max(rise, args.reconstruct_length_pitch * rise*360/abs(twist))
     elif args.reconstruct_length_rise>0: reconstruct_length = max(rise, args.reconstruct_length_rise * rise)
-    tasks.append((ti, len(itrtpy_list), data, imageFile, imageIndex, twist, rise, (np.min(args.rises), np.max(args.rises)), args.csym, tilt, (np.min(args.tilts), np.max(args.tilts)), psi, dy, apix, args.denoise, args.low_pass, args.transpose, args.horizontalize, args.target_apix3d, args.target_apix2d, args.thresh_fraction, args.positive_constraint, args.tube_length, args.tube_diameter, args.tube_diameter_inner, reconstruct_length, args.sym_oversample, args.interpolation, args.fsc_test, return_3d, max(0,args.verbose-2), args.algorithm))
+    tasks.append((ti, len(itrtpy_list), data, imageFile, imageIndex, twist, rise, (np.min(args.rises), np.max(args.rises)), args.csym, tilt, (np.min(args.tilts), np.max(args.tilts)), psi, dy, apix, args.denoise, args.low_pass, args.transpose, args.horizontalize, args.target_apix3d, args.target_apix2d, args.thresh_fraction, args.positive_constraint, args.tube_length, args.tube_diameter, args.tube_diameter_inner, reconstruct_length, args.sym_oversample, args.interpolation, args.fsc_test, return_3d, args.algorithm, max(0,args.verbose-2), logger))
   
   if len(tasks)<1:
     logger.warning("Nothing to do. I will quit")
@@ -239,24 +243,13 @@ def main(args):
 
 np.set_printoptions(precision=6)  # to speed up joblib memory cache for input numpy arrays and avoid the "UserWarning: Persisting input arguments took 0.65s to run"
 
-@memory.cache(ignore=["ti", "ntasks", "verbose"])
-def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_range, csym, tilt, tilt_range, psi, dy, apix2d_orig, denoise, low_pass, transpose, horizontalize, target_apix3d, target_apix2d, thresh_fraction, positive_constraint, tube_length, tube_diameter, tube_diameter_inner, reconstruct_length, sym_oversample, interpolation, fsc_test, return_3d, verbose, algorithm):
-    
-  @memory.cache()
-  def read_image(imageFile, imageIndex):
-    import mrcfile
-    with mrcfile.open(imageFile, header_only=False) as mrc:
-      if len(mrc.data.shape)==3:
-        data = mrc.data[imageIndex-1].astype(np.float32)
-      else:
-        if imageIndex!=1: raise
-        data = mrc.data.astype(np.float32)
-    return data
+@memory.cache(ignore=["ti", "ntasks", "verbose", "logger"])
+def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_range, csym, tilt, tilt_range, psi, dy, apix2d_orig, denoise, low_pass, transpose, horizontalize, target_apix3d, target_apix2d, thresh_fraction, positive_constraint, tube_length, tube_diameter, tube_diameter_inner, reconstruct_length, sym_oversample, interpolation, fsc_test, return_3d, algorithm, verbose, logger):
 
   @memory.cache()
   def prepare_data(data, imageFile, imageIndex, denoise, low_pass, transpose, horizontalize, apix):
     if low_pass>2*apix:
-      data = low_high_pass_filter(data, low_pass_fraction=2*apix/low_pass, high_pass_fraction=2./np.max(data.shape))
+      data = helicon.low_high_pass_filter(data, low_pass_fraction=2*apix/low_pass, high_pass_fraction=2./np.max(data.shape))
     if denoise:
       if denoise == "nl_mean":
         from skimage.restoration import denoise_nl_means
@@ -271,32 +264,14 @@ def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_
       data = data.T
     if horizontalize:
       data, theta_best, shift_best = auto_horizontalize(data, n_theta=180)
-      get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: rotation={round(theta_best, 2)}° shift={round(shift_best*apix, 1)}Å")
+      logger.debug(f"Image {imageFile}-{imageIndex}: rotation={round(theta_best, 2)}° shift={round(shift_best*apix, 1)}Å")
     return data
   
-  def down_scale_data(data, target_apix, apix_orig):
-    if target_apix == apix_orig:
-      return data
-    elif target_apix > apix_orig:
-      scale_factor = apix_orig/target_apix
-      from skimage.transform import rescale
-      ny0, nx0 = data.shape
-      data = rescale(data, scale_factor, anti_aliasing=True, order=3)
-      ny, nx = data.shape
-      ny = ny + ny%2
-      nx = nx + nx%2
-      data = pad_to_size(data, shape=(ny, nx))
-      get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: resample the image from {nx0}x{ny0}@{apix_orig}Å/pixel => {nx}x{ny}@{target_apix}Å/pixel")
-    else:
-      if target_apix < apix_orig:
-        get_logger(verbose=verbose).warning(f"WARNING: the input image pixel size ({apix_orig}) is larger than --target_apix2d={target_apix}. Down-scaling skipped")
-    return data
-
   if data is None:
-    data = read_image(imageFile, imageIndex)
+    data = helicon.read_image_2d(imageFile, imageIndex)
 
   if not np.std(data):  # images with const (0) pixel values
-    get_logger(verbose=verbose).warning(f"WARNING: the input image is a blank image")
+    logger.warning(f"WARNING: the input image is a blank image")
     return None
 
   data = prepare_data(data, imageFile, imageIndex, denoise, low_pass, transpose, horizontalize, apix2d_orig)
@@ -304,31 +279,31 @@ def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_
 
   if tube_diameter<0:
     tube_diameter = int(min(ny, estimate_diameter(data))*apix2d_orig * 1.25)
-    get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: estimated tube diameter={tube_diameter}Å")
+    logger.debug(f"Image {imageFile}-{imageIndex}: estimated tube diameter={tube_diameter}Å")
 
   if tube_length<0:
     if tube_diameter > ny*apix2d_orig/2: tube_length = int(nx*apix2d_orig)
     else: tube_length = round(np.sqrt((nx*apix2d_orig)**2/4 - tube_diameter**2/4)*2)
-    get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: estimated tube length={tube_length}Å")
+    logger.debug(f"Image {imageFile}-{imageIndex}: estimated tube length={tube_length}Å")
 
   reconstruct_diameter = tube_diameter if 0<tube_diameter<ny*apix2d_orig else ny*apix2d_orig
   reconstruct_diameter_inner = tube_diameter_inner if 0<tube_diameter_inner<reconstruct_diameter else 0
   if reconstruct_length<rise:
     reconstruct_length = max(min(3 * np.max(rise_range), tube_length), round(np.tan(np.deg2rad(np.max(np.abs(tilt_range))))*tube_diameter*3))
-    get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: reconstruct_length set to {reconstruct_length}Å")
+    logger.debug(f"Image {imageFile}-{imageIndex}: reconstruct_length set to {reconstruct_length}Å")
 
   if target_apix2d <= 0:
     target_apix2d = apix2d_orig
-  get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: target_apix2d set to {target_apix2d}")
+  logger.debug(f"Image {imageFile}-{imageIndex}: target_apix2d set to {target_apix2d}")
 
-  data = down_scale_data(data, target_apix2d, apix2d_orig)
+  data = helicon.down_scale(data, target_apix2d, apix2d_orig)
   ny, nx = data.shape
 
   if thresh_fraction >= 0:
     data_orig = data
     nr = min(ny//2-1, int(np.ceil(reconstruct_diameter/2/target_apix2d)+1))
     data -= np.median(data[(ny//2-nr, ny//2+nr), :])  # set background to 0
-    data = threshold_data(data, thresh_fraction=thresh_fraction)
+    data = helicon.threshold_data(data, thresh_fraction=thresh_fraction)
     data /= np.max(data)
   else:
     data_orig = data
@@ -338,7 +313,7 @@ def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_
     target_apix3d = max(apix2d_orig, round(np.power(vol/(nx*ny), 1/3) + 0.5)) # make the number of 3D voxels < number of data points (i.e. number of 2D pixels of down-scaled image)
   elif target_apix3d == 0:
     target_apix3d = target_apix2d
-  get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: target_apix3d set to {target_apix3d}")
+  logger.debug(f"Image {imageFile}-{imageIndex}: target_apix3d set to {target_apix3d}")
 
   csym_to_enforce = csym
   thresh_fraction = thresh_fraction
@@ -357,7 +332,7 @@ def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_
   else:
     reconstruct_length_3d_pixel = int(reconstruct_length_2d_pixel * target_apix2d/target_apix3d + 0.5)
     reconstruct_length_3d_pixel += reconstruct_length_3d_pixel%2
-    get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: reconstruct_length set to {reconstruct_length_3d_pixel}pixels ({round(reconstruct_length_3d_pixel*target_apix3d)}Å)")
+    logger.debug(f"Image {imageFile}-{imageIndex}: reconstruct_length set to {reconstruct_length_3d_pixel}pixels ({round(reconstruct_length_3d_pixel*target_apix3d)}Å)")
 
   if sym_oversample<=0:
     n_voxels = reconstruct_length_3d_pixel * (reconstruct_diameter_3d_pixel**2-reconstruct_diameter_3d_inner_pixel**2)
@@ -366,21 +341,21 @@ def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_
     elif ratio<100: sym_oversample = max(1, int(round(ratio/10))*10)
     else: sym_oversample = max(1, int(round(ratio/100))*100)
     if return_3d: sym_oversample *= 2
-    get_logger(verbose=verbose).debug(f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}")
+    logger.debug(f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}")
 
-  with Timer(f"lsq_reconstruct: {round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å", verbose=verbose>10):
+  with helicon.Timer(f"lsq_reconstruct: {round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å", verbose=verbose>10):
     (rec3d, rec3d_set_1, rec3d_set_2), score = lsq_reconstruct(projection_image=data, scale2d_to_3d=target_apix2d/target_apix3d, twist_degree=twist, rise_pixel=rise/target_apix3d, csym=csym_to_enforce, tilt_degree=tilt, psi_degree=psi, dy_pixel=dy/target_apix2d, thresh_fraction=thresh_fraction, positive_constraint=positive_constraint, reconstruct_diameter_3d_inner_pixel=reconstruct_diameter_3d_inner_pixel, reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel,reconstruct_diameter_3d_pixel=reconstruct_diameter_3d_pixel, reconstruct_length_2d_pixel=reconstruct_length_2d_pixel, reconstruct_length_3d_pixel=reconstruct_length_3d_pixel, sym_oversample=sym_oversample, interpolation=interpolation, fsc_test=fsc_test, verbose=verbose, algorithm=algorithm)
 
-  with Timer("apply_helical_symmetry", verbose=verbose>10):
+  with helicon.Timer("apply_helical_symmetry", verbose=verbose>10):
     twist_degree = twist if abs(twist)<90 else 180-abs(twist)
     if abs(twist_degree)>1e-2:
       pitch_pixel = int(360/abs(twist_degree) * rise/target_apix2d + 0.5)
     else:
       pitch_pixel = int(np.ceil(2 * rise / target_apix2d))
     new_length = max(reconstruct_length_2d_pixel, int(pitch_pixel*1.2))
-    cpu = available_cpu()
-    rec3d_xform = apply_helical_symmetry(data=rec3d, apix=target_apix3d, twist_degree=twist, rise_angstrom=rise, csym=csym, new_size=(new_length, reconstruct_diameter_2d_pixel, reconstruct_diameter_2d_pixel), new_apix=target_apix2d, cpu=cpu)
-  rec3d_xform_2 = transform_map(rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy_pixel=dy/target_apix2d)
+    cpu = helicon.available_cpu()
+    rec3d_xform = helicon.apply_helical_symmetry(data=rec3d, apix=target_apix3d, twist_degree=twist, rise_angstrom=rise, csym=csym, new_size=(new_length, reconstruct_diameter_2d_pixel, reconstruct_diameter_2d_pixel), new_apix=target_apix2d, cpu=cpu)
+  rec3d_xform_2 = helicon.transform_map(rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy_pixel=dy/target_apix2d)
   rec3d_x_proj = np.sum(rec3d_xform_2, axis=2).T
   rec3d_y_proj = np.sum(rec3d_xform_2, axis=1).T
   rec3d_y_proj_max = rec3d_y_proj.max()
@@ -398,12 +373,12 @@ def process_one_task(ti, ntasks, data, imageFile, imageIndex, twist, rise, rise_
     rec3d_z_sections = (rec3d_z_sections-vmin)*(vmax_target-vmin_target)/(vmax-vmin) + vmin_target
 
   #shape_target = (min(data.shape[0], rec3d_x_proj.shape[0]), min(data.shape[1], rec3d_x_proj.shape[1]))
-  #score *= cosine_similarity(crop_center(data, shape=shape_target), crop_center(rec3d_x_proj, shape=shape_target))
+  #score *= helicon.cosine_similarity(helicon.crop_center(data, shape=shape_target), helicon.crop_center(rec3d_x_proj, shape=shape_target))
 
   nz, ny, nx = rec3d.shape
   if target_apix2d != apix2d_orig: apix_tag=f"apix={apix2d_orig}->{target_apix2d}Å"
   else: apix_tag=f"apix={target_apix2d}Å"
-  get_logger(verbose=verbose).info(f"Task {ti+1}/{ntasks}: {imageFile}-{imageIndex}:\t{apix_tag}\t{data.shape[-1]}x{data.shape[0]}pixels\tpitch={round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å {csym=}{tilt_psi_dy_str(tilt, psi, dy)} => reconstruction size={nx}x{ny}x{nz}voxels voxelsize={round(target_apix3d, 3)}Å length={round(nz*target_apix3d, 1)}Å/{round(nz*target_apix3d/pitch, 2)}pitch/{round(nz*target_apix3d/rise, 2)}rise\t=>\tscore={round(score, 6)}")
+  logger.info(f"Task {ti+1}/{ntasks}: {imageFile}-{imageIndex}:\t{apix_tag}\t{data.shape[-1]}x{data.shape[0]}pixels\tpitch={round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å {csym=}{tilt_psi_dy_str(tilt, psi, dy)} => reconstruction size={nx}x{ny}x{nz}voxels voxelsize={round(target_apix3d, 3)}Å length={round(nz*target_apix3d, 1)}Å/{round(nz*target_apix3d/pitch, 2)}pitch/{round(nz*target_apix3d/rise, 2)}rise\t=>\tscore={round(score, 6)}")
 
   return_data = (rec3d_x_proj, rec3d_y_proj, rec3d_z_sections, (rec3d, rec3d_set_1, rec3d_set_2) if return_3d else None, reconstruct_diameter_2d_pixel, reconstruct_diameter_3d_pixel, reconstruct_length_2d_pixel, reconstruct_length_3d_pixel)
   result = (score, return_data, (data_orig, imageFile, imageIndex, target_apix3d, target_apix2d, twist, rise, csym, tilt, psi, dy))
@@ -416,7 +391,7 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
   rmin = reconstruct_diameter_3d_inner_pixel/2
   rmax = reconstruct_diameter_3d_pixel//2-1
 
-  mask = get_cylindrical_mask(nz=reconstruct_length_3d_pixel, ny=reconstruct_diameter_3d_pixel, nx=reconstruct_diameter_3d_pixel, rmin=rmin, rmax=rmax)
+  mask = helicon.get_cylindrical_mask(nz=reconstruct_length_3d_pixel, ny=reconstruct_diameter_3d_pixel, nx=reconstruct_diameter_3d_pixel, rmin=rmin, rmax=rmax)
   mz, my, mx = mask.shape
   assert mz==reconstruct_length_3d_pixel
 
@@ -424,10 +399,10 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
   n_2d_pixels = reconstruct_diameter_2d_pixel * reconstruct_length_2d_pixel
   max_equations = 2**26   # 64 million
 
-  with Timer(f"build_A_data_matrix - {interpolation}", verbose=verbose>10):
+  with helicon.Timer(f"build_A_data_matrix - {interpolation}", verbose=verbose>10):
     A_data, b_data, b_data_pid = build_A_data_matrix(image=projection_image, scale2d_to_3d=scale2d_to_3d, twist_degree=twist_degree, rise_pixel=rise_pixel, csym=csym, tilt_degree=tilt_degree, psi_degree=psi_degree, dy_pixel=dy_pixel, reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel, reconstruct_length_2d_pixel=reconstruct_length_2d_pixel, reconstruct_diameter_3d_pixel=reconstruct_diameter_3d_pixel, reconstruct_diameter_3d_inner_pixel=reconstruct_diameter_3d_inner_pixel, reconstruct_length_3d_pixel=reconstruct_length_3d_pixel, min_projection_lines=min(max_equations, int(max(n_2d_pixels, n_3d_voxels)*sym_oversample)), interpolation=interpolation, verbose=verbose)
   
-  with Timer(f"build_A_helical_sym_matrix - {interpolation}", verbose=verbose>10):
+  with helicon.Timer(f"build_A_helical_sym_matrix - {interpolation}", verbose=verbose>10):
     A_hsym, b_hsym = build_A_helical_sym_matrix(nz=mz, ny=my, nx=mx, twist_degree=twist_degree, rise_pixel=rise_pixel, csym=csym, rmin=rmin, rmax=rmax, min_sym_pairs=min(max_equations, int(max(n_2d_pixels, n_3d_voxels)*sym_oversample)), interpolation=interpolation, verbose=verbose)
   
   def split_A_b(A, b, b_id, mode):
@@ -492,7 +467,7 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
         # positive constraint - very important when pitch>2*tube_length
         lb = 0.0
         ub = np.max(b_data)
-        get_logger(verbose=verbose).debug(f"Imposing constraint for the reconstruction: lb={round(lb, 6)} ub={round(ub, 6)}")
+        logger.debug(f"Imposing constraint for the reconstruction: lb={round(lb, 6)} ub={round(ub, 6)}")
       else:
         lb = -np.inf
         ub =  np.inf
@@ -506,7 +481,7 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
       from sklearn.linear_model import LinearRegression
       if positive:
         A_train = A_train.toarray()
-        get_logger().warn("WARNING: --algorithm=lreq with positive contraints uses very large amount memory!")
+        logger.warn("WARNING: --algorithm=lreq with positive contraints uses very large amount memory!")
       model = LinearRegression(fit_intercept=True, positive=positive)
     elif algorithm["model"] == "lasso":  # linear least square + L1 regularization 
       # https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.Lasso.html
@@ -537,7 +512,7 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
           model.fit(X=A_train, y=b_train)
           res = model.coef_.astype(np.float32)
     if A_test is not None and b_test is not None:
-      score = cosine_similarity(A_test.dot(res), b_test)
+      score = helicon.cosine_similarity(A_test.dot(res), b_test)
       #score = model.score(X=A_test, y=b_test)
     else:
       score = None
@@ -555,7 +530,7 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
   positive = positive_constraint>0 or (positive_constraint<0 and pitch_pixel>round(reconstruct_length_3d_pixel*2))
   train_fraction = 1.0
 
-  with Timer(f"solve_equations{' Full' if fsc_test>0 else ''}: {n_eqns:,} equations, {n_unknowns:,} unknowns, {sparsity*100:f}% sparsity", verbose=verbose>10):
+  with helicon.Timer(f"solve_equations{' Full' if fsc_test>0 else ''}: {n_eqns:,} equations, {n_unknowns:,} unknowns, {sparsity*100:f}% sparsity", verbose=verbose>10):
     x, score = solve_equations(A_data, b_data, A_hsym, b_hsym, positive=positive, algorithm=algorithm, train_fraction=train_fraction, verbose=2 if verbose>10 else 0)
 
   Abx_data_triplets = [(A_data, b_data, x)]
@@ -576,7 +551,7 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
          n_eqns += pair_A_hsym.shape[0]
          n_nonzeros += pair_A_hsym.count_nonzero()
       sparsity = 1-n_nonzeros/(n_eqns * n_unknowns)
-      with Timer(f"solve_equations {tag}: {n_eqns:,} equations, {n_unknowns:,} unknowns, {sparsity*100:f}% sparsity", verbose=verbose>10):
+      with helicon.Timer(f"solve_equations {tag}: {n_eqns:,} equations, {n_unknowns:,} unknowns, {sparsity*100:f}% sparsity", verbose=verbose>10):
         x, score = solve_equations(pair_A_data, pair_b_data, pair_A_hsym, pair_b_hsym, positive=positive, algorithm=algorithm, train_fraction=train_fraction, verbose=2 if verbose>10 else 0)
         xs.append( x )
         scores.append( score )
@@ -587,9 +562,9 @@ def lsq_reconstruct(projection_image, scale2d_to_3d, twist_degree, rise_pixel, c
     scores = []
     for tmp_A, tmp_b, tmp_x in Abx_data_triplets:
       if thresh_fraction<0:
-        scores.append( cosine_similarity(tmp_A.dot(tmp_x), tmp_b) )
+        scores.append( helicon.cosine_similarity(tmp_A.dot(tmp_x), tmp_b) )
       else:
-        scores.append( cosine_similarity(tmp_A.dot(np.clip(tmp_x, 0, None)), tmp_b) )
+        scores.append( helicon.cosine_similarity(tmp_A.dot(np.clip(tmp_x, 0, None)), tmp_b) )
 
   if len(scores) == 3:
     score = scores[0]/2 + (scores[1] + scores[2])/4
@@ -614,7 +589,7 @@ def build_A_helical_sym_matrix(nz:int, ny:int, nx:int, twist_degree:float, rise_
 
   hcsym_pairs = sorted_hsym_csym_pairs(twist_degree, rise_pixel, csym, nz)
 
-  mask, (Z, Y, X) = get_cylindrical_mask(nz, ny, nx, rmin=rmin, rmax=rmax, return_xyz=True)
+  mask, (Z, Y, X) = helicon.get_cylindrical_mask(nz, ny, nx, rmin=rmin, rmax=rmax, return_xyz=True)
   n_x = np.count_nonzero(mask)
   mask_nonzero_indices_zyx_tuple = np.nonzero(mask)
   mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=int)-1
@@ -844,7 +819,7 @@ def build_A_helical_sym_matrix(nz:int, ny:int, nx:int, twist_degree:float, rise_
         csr_rc_tmp_count += 1
         row_count_tmp += 1
       return csr_row_tmp[:csr_rc_tmp_count], csr_col_tmp[:csr_rc_tmp_count], csr_data_tmp[:csr_rc_tmp_count], row_count_tmp
-  with Timer(f"\tbuild csr matrix - {interpolation}", verbose=verbose>10):
+  with helicon.Timer(f"\tbuild csr matrix - {interpolation}", verbose=verbose>10):
     pair_ids = set([-1])
     row_count = 0
     for pi, p in enumerate(hcsym_pairs):
@@ -889,7 +864,7 @@ def build_A_helical_sym_matrix(nz:int, ny:int, nx:int, twist_degree:float, rise_
 @memory.cache(ignore=['verbose'])
 def build_A_data_matrix(image, scale2d_to_3d, twist_degree, rise_pixel, csym, tilt_degree, psi_degree, dy_pixel, reconstruct_diameter_2d_pixel, reconstruct_length_2d_pixel, reconstruct_diameter_3d_pixel, reconstruct_diameter_3d_inner_pixel, reconstruct_length_3d_pixel, min_projection_lines, interpolation, verbose=0):
 
-  with Timer("back_project_2d_coords_to_3d_coords", verbose=verbose>10):
+  with helicon.Timer("back_project_2d_coords_to_3d_coords", verbose=verbose>10):
     coords_3d, pixel_vals = back_project_2d_coords_to_3d_coords(image=image, scale2d_to_3d=scale2d_to_3d, reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel, reconstruct_length_2d_pixel=reconstruct_length_2d_pixel)
 
   X0, Y0, Z0 = coords_3d # axes order:  z, y, x. helical axis along z
@@ -901,7 +876,7 @@ def build_A_data_matrix(image, scale2d_to_3d, twist_degree, rise_pixel, csym, ti
   nz, ny, nx = X0.shape  # axes order: z, y, x
   if reconstruct_length_3d_pixel<=0: reconstruct_length_3d_pixel=nz
 
-  mask = get_cylindrical_mask(nz=reconstruct_length_3d_pixel, ny=ny, nx=nx, rmin=rmin, rmax=rmax)
+  mask = helicon.get_cylindrical_mask(nz=reconstruct_length_3d_pixel, ny=ny, nx=nx, rmin=rmin, rmax=rmax)
   n_x = np.count_nonzero(mask)
   mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=int)-1
   mask_nonzero_indices_matrix[np.nonzero(mask)] = np.arange(n_x)
@@ -1095,20 +1070,6 @@ def back_project_2d_coords_to_3d_coords(image, scale2d_to_3d, reconstruct_diamet
   assert X2[:, :, 0].shape[::-1] == region_pixel_vals.shape
   return (X2, Y2, Z2), region_pixel_vals
 
-def get_cylindrical_mask(nz, ny, nx, rmin=0, rmax=-1, return_xyz=False):
-  k = np.arange(0, nz, dtype=np.int32)-nz//2
-  j = np.arange(0, ny, dtype=np.int32)-ny//2
-  i = np.arange(0, nx, dtype=np.int32)-nx//2
-  Z, Y, X = np.meshgrid(k, j, i, indexing='ij')
-  if rmax<0: rmax = ny//2-1
-  mask = X*X + Y*Y < rmax*rmax # pixels inside a cylinder. axes order: z, y, x
-  if 0 < rmin < rmax:
-    mask &= X*X + Y*Y >= rmin*rmin
-  if return_xyz:
-    return mask, (Z, Y, X)
-  else:
-    return mask
-
 #@memory.cache
 def simulate_helical_projection(n, twist, rise, csym, helical_diameter, ball_radius, polymer, planarity, ny, nx, apix, tilt=0, rot=0, psi=0, dy=0):
   assert helical_diameter + ball_radius < ny * apix * 0.99
@@ -1282,214 +1243,6 @@ def random_polymer(n_atoms=100, rmin=0, rmax=100, csym=1, planarity=0.9):
 
   return  xyz[: n_good_points*csym, :]
 
-import platform
-@jit(nopython=True, cache=False, nogil=True, parallel=False if platform.system()=="Darwin" else True)
-def apply_helical_symmetry(data, apix, twist_degree, rise_angstrom, csym=1, fraction=1.0, new_size=None, new_apix=None, cpu=1):
-  if new_apix is None: new_apix = apix  
-  nz0, ny0, nx0 = data.shape
-  if new_size != data.shape:
-    nz1, ny1, nx1 = new_size
-    nz2, ny2, nx2 = max(nz0, nz1), max(ny0, ny1), max(nx0, nx1)
-    data_work = np.zeros((nz2, ny2, nx2), dtype=np.float32)
-  else:
-    data_work = np.zeros((nz0, ny0, nx0), dtype=np.float32)
-
-  nz, ny, nx = data_work.shape
-  w = np.zeros((nz, ny, nx), dtype=np.float32)
-
-  hsym_max = max(1, int(nz*new_apix/rise_angstrom))
-  hsyms = range(-hsym_max, hsym_max+1)
-  csyms = range(csym)
-
-  mask = (data!=0)*1
-  z_nonzeros = np.nonzero(mask)[0]
-  z0 = np.min(z_nonzeros)
-  z1 = np.max(z_nonzeros)
-  z0 = max(z0, nz0//2-int(nz0*fraction+0.5)//2)
-  z1 = min(nz0-1, min(z1, nz0//2+int(nz0*fraction+0.5)//2))
-
-  set_num_threads(cpu)
-
-  for hi in hsyms:
-    for k in prange(nz):
-      k2 = ((k-nz//2)*new_apix + hi * rise_angstrom)/apix + nz0//2
-      if k2 < z0 or k2 >= z1: continue
-      k2_floor, k2_ceil = int(np.floor(k2)), int(np.ceil(k2))
-      wk = k2 - k2_floor
-
-      for ci in csyms:
-        rot = np.deg2rad(twist_degree * hi + 360*ci/csym)
-        m = np.array([
-              [ np.cos(rot),  np.sin(rot)],
-              [-np.sin(rot),  np.cos(rot)]
-            ])
-        for j in prange(ny):
-          for i in prange(nx):
-            j2 = (m[0,0]*(j-ny//2) + m[0,1]*(i-nx/2))*new_apix/apix + ny0//2
-            i2 = (m[1,0]*(j-ny//2) + m[1,1]*(i-nx/2))*new_apix/apix + nx0//2
-
-            j2_floor, j2_ceil = int(np.floor(j2)), int(np.ceil(j2))
-            i2_floor, i2_ceil = int(np.floor(i2)), int(np.ceil(i2))
-            if j2_floor<0 or j2_floor>=ny0-1: continue
-            if i2_floor<0 or i2_floor>=nx0-1: continue
-
-            wj = j2 - j2_floor
-            wi = i2 - i2_floor
-
-            data_work[k, j, i] += (
-                (1 - wk) * (1 - wj) * (1 - wi) * data[k2_floor, j2_floor, i2_floor] +
-                (1 - wk) * (1 - wj) * wi * data[k2_floor, j2_floor, i2_ceil] +
-                (1 - wk) * wj * (1 - wi) * data[k2_floor, j2_ceil, i2_floor] +
-                (1 - wk) * wj * wi * data[k2_floor, j2_ceil, i2_ceil] +
-                wk * (1 - wj) * (1 - wi) * data[k2_ceil, j2_floor, i2_floor] +
-                wk * (1 - wj) * wi * data[k2_ceil, j2_floor, i2_ceil] +
-                wk * wj * (1 - wi) * data[k2_ceil, j2_ceil, i2_floor] +
-                wk * wj * wi * data[k2_ceil, j2_ceil, i2_ceil]
-            )
-            w[k, j, i] += 1.0
-  mask = w>0
-  data_work = np.where(mask, data_work / w, data_work)
-  if data_work.shape != new_size:
-    nz1, ny1, nx1 = new_size
-    data_work = data_work[nz//2-nz1//2:nz//2+nz1//2, ny//2-ny1//2:ny//2+ny1//2, nx//2-nx1//2:nx//2+nx1//2]
-  return data_work
-
-def transform_map(data, scale=1.0, tilt=0, psi=0, dy_pixel=0):
-  if scale==1 and tilt==0 and psi==0 and dy_pixel==0: return data
-  from scipy.spatial.transform import Rotation as R
-  from scipy.ndimage import map_coordinates
-  nz, ny, nx = data.shape
-  k = np.arange(0, nz, dtype=np.int32)-nz//2
-  j = np.arange(0, ny, dtype=np.int32)-ny//2
-  i = np.arange(0, nx, dtype=np.int32)-nx//2
-  Z, Y, X = np.meshgrid(k, j, i, indexing='ij')
-  if scale != 1.0:
-    Z = Z*scale
-    Y = Y*scale
-    X = X*scale
-  ZYX = np.vstack((Z.ravel(), Y.ravel(), X.ravel())).transpose()
-  xform = R.from_euler('yz', (tilt, psi), degrees=True)
-  zyx = xform.apply(ZYX, inverse=False)
-  zyx[:,0] += nz//2
-  zyx[:,1] += ny//2 - dy_pixel
-  zyx[:,2] += nx//2
-  ret = map_coordinates(data, zyx.T, order=3)
-  ret = ret.reshape((nz, ny, nx))
-  return ret
-
-def rotate_shift_image(data, angle=0, pre_shift=(0, 0), post_shift=(0, 0), rotation_center=None, order=1):
-    # pre_shift/rotation_center/post_shift: [y, x]
-    if angle==0 and pre_shift==[0,0] and post_shift==[0,0]: return data*1.0
-    ny, nx = data.shape
-    if rotation_center is None:
-        rotation_center = np.array((ny//2, nx//2), dtype=np.float32)
-    ang = np.deg2rad(angle)
-    m = np.array([[np.cos(ang), np.sin(ang)], [-np.sin(ang), np.cos(ang)]], dtype=np.float32)
-    pre_dy, pre_dx = pre_shift    
-    post_dy, post_dx = post_shift
-
-    offset = -np.dot(m, np.array([post_dy, post_dx], dtype=np.float32).T) # post_rotation shift
-    offset += np.array(rotation_center, dtype=np.float32).T - np.dot(m, np.array(rotation_center, dtype=np.float32).T)  # rotation around the specified center
-    offset += -np.array([pre_dy, pre_dx], dtype=np.float32).T     # pre-rotation shift
-
-    from scipy.ndimage import affine_transform
-    ret = affine_transform(data, matrix=m, offset=offset, order=order, mode='constant')
-    return ret
-
-def get_resolution(fsc):
-  from scipy import interpolate
-  f = interpolate.interp1d(fsc[:,0], fsc[:,1], kind="cubic")
-  s = np.linspace(0, fsc[-1,0], num=10*len(fsc)+1, endpoint=True)
-  fsc_tmp = f(s)
-  try:
-    res = 1/s[np.where(fsc_tmp<=0.143)[0][0]]
-  except:
-    res = 1/s[-1]
-  return res
-
-# adapted from https://github.com/tdgrant1/denss/blob/3fbbefea45cb6d615e629e672d65440c46ac83da/saxstats/saxstats.py#L2185
-def calc_fsc(map1, map2, apix):
-  n = map1.shape[0]
-  df = 1.0/(apix*n)
-  qx_ = np.fft.fftfreq(n)*n*df
-  qx, qy, qz = np.meshgrid(qx_,qx_,qx_,indexing='ij')
-  qx_max = np.abs(qx).max()
-  qr = np.sqrt(qx**2+qy**2+qz**2)
-  qmax = np.max(qr)
-  qstep = np.min(qr[qr>0])
-  nbins = int(qmax/qstep)
-  qbins = np.linspace(0,nbins*qstep,nbins+1)
-  qbin_labels = np.searchsorted(qbins, qr, "right")
-  qbin_labels -= 1
-  F1 = np.fft.fftn(map1)
-  F2 = np.fft.fftn(map2)
-  from scipy import ndimage
-  numerator = ndimage.sum(np.real(F1*np.conj(F2)), labels=qbin_labels,
-    index=np.arange(0,qbin_labels.max()+1))
-  term1 = ndimage.sum(np.abs(F1)**2, labels=qbin_labels,
-    index=np.arange(0,qbin_labels.max()+1))
-  term2 = ndimage.sum(np.abs(F2)**2, labels=qbin_labels,
-    index=np.arange(0,qbin_labels.max()+1))
-  denominator = (term1*term2)**0.5
-  FSC = numerator/denominator
-  qidx = np.where(qbins<=qx_max)
-  return  np.vstack((qbins[qidx],FSC[qidx])).T
-
-def cosine_similarity(a, b):
-  norm = np.linalg.norm(a) * np.linalg.norm(b)
-  if norm == 0:
-    return 0
-  else:
-    return np.sum(a*b)/norm
-
-def threshold_data(data, thresh_fraction=-1):
-  if thresh_fraction<0: return data
-  thresh = data.max()*thresh_fraction
-  ret = np.clip(data, thresh, None) - thresh
-  return ret
-
-def crop_center(data, shape):
-  assert data.ndim in [2, 3]
-  if data.shape == shape: return data
-  ny, nx = data.shape[-2:]
-  my, mx = shape[-2:]
-  y0 = max(0, ny//2 - my//2)
-  x0 = max(0, nx//2 - mx//2)
-  if data.ndim == 2:
-    return data[y0:min(ny, y0+my), x0:min(nx, x0+mx)]
-  else:
-    nz = data.shape[0]
-    mz = shape[0]
-    z0 = max(0, nz//2 - mz//2)
-    return data[z0:min(nz, z0+mz), y0:min(ny, y0+my), x0:min(nx, x0+mx)]
-
-def pad_to_size(data, shape):
-  assert data.ndim in [2, 3]
-  if data.shape == shape: return data
-  ny, nx = data.shape[-2:]
-  my, mx = shape[-2:]
-  y_before = max(0, (my-ny)//2)
-  y_after  = max(0, my - y_before - ny)
-  x_before = max(0, (mx-nx)//2)
-  x_after  = max(0, mx - x_before - nx)
-  if data.ndim == 2:
-    ret = np.pad(data, pad_width=((y_before, y_after), (x_before, x_after)), mode='constant')
-  else:
-    nz = data.shape[0]
-    mz = shape[0]
-    z_before = max(0, (mz-nz)//2)
-    z_after  = max(0, mz - z_before - nz)
-    ret = np.pad(data, pad_width=((z_before, z_after), (y_before, y_after), (x_before, x_after)), mode='constant')
-  return ret
-
-def set_to_periodic_range(v, min=-180, max=180):
-    if min <= v <= max: return v
-    from math import fmod
-    tmp = fmod(v-min, max-min)
-    if tmp>=0: tmp+=min
-    else: tmp+=max
-    return tmp
-
 def estimate_diameter(data):
   from scipy.optimize import curve_fit
   y = np.mean(data, axis=1)
@@ -1521,7 +1274,7 @@ def auto_horizontalize(data, n_theta=180):
   y = np.std(sinogram, axis=0)
   theta_best = 90-theta[np.argmax(y)]
 
-  rotated_data = rotate_shift_image(data_work, angle=theta_best, order=3)
+  rotated_data = helicon.rotate_shift_image(data_work, angle=theta_best, order=3)
   # now find best vertical shift
   xproj = np.sum(rotated_data, axis=1)
   xproj_yflip = xproj*1.0
@@ -1532,7 +1285,7 @@ def auto_horizontalize(data, n_theta=180):
   # refine to sub-degree, sub-pixel level
   def score_rotation_shift(x):
     theta, shift_y = x
-    data_tmp = rotate_shift_image(data_work, angle=theta, post_shift=(shift_y, 0))
+    data_tmp = helicon.rotate_shift_image(data_work, angle=theta, post_shift=(shift_y, 0))
     #data_tmp /= np.linalg.norm(data_tmp, axis=0)
     y = np.sum(data_tmp, axis=1)[1:]
     y += y[::-1]
@@ -1541,7 +1294,7 @@ def auto_horizontalize(data, n_theta=180):
   from scipy.optimize import fmin
   res = fmin(score_rotation_shift, x0=(theta_best, shift_best), xtol=1e-2, disp=0)
   theta_best, shift_best = res
-  rotated_shifte_data = rotate_shift_image(data, angle=theta_best, post_shift=(shift_best, 0), order=3)
+  rotated_shifte_data = helicon.rotate_shift_image(data, angle=theta_best, post_shift=(shift_best, 0), order=3)
   return rotated_shifte_data, theta_best, shift_best
 
 def is_vertical(data):
@@ -1573,7 +1326,7 @@ def sorted_hsym_csym_pairs(twist, rise, csym, nz):
   return ret
 
 def saveMaps(results, target_size, target_apix, mapFilePrefix, verbose=0):
-  logger = get_logger(verbose=verbose)
+  logger = logger
   mapFiles = []
   result_groups = itertools.groupby(results, key=lambda x: x[2][1:3]) # group by input (imageFile, imageIndex)
   for group_key, result_group in result_groups:
@@ -1592,11 +1345,11 @@ def saveMaps(results, target_size, target_apix, mapFilePrefix, verbose=0):
             tag += f".{set_tag[rec3d_i]}"
           mapFile = mapFilePrefix_tmp + f"{tag}.mrc"
           mapFiles.append(mapFile)
-          with Timer("Applying helical symmetry ...", verbose=verbose>10):
+          with helicon.Timer("Applying helical symmetry ...", verbose=verbose>10):
             cur_size = rec3d_map.shape[0]
             logger.info(f"Applying helical symmetry to extend the map from the reconstructed length {cur_size*apix3d} Å (={cur_size} pixels * {apix3d} Å/pixel) to {target_size[0] * target_apix} Å (={target_size[0]} pixels * {target_apix} Å/pixel)")
-            cpu = available_cpu()
-            rec3d_map = apply_helical_symmetry(data=rec3d_map, apix=apix3d, twist_degree=twist, rise_angstrom=rise, csym=csym, fraction=1.0, new_size=target_size, new_apix=target_apix, cpu=cpu)
+            cpu = helicon.available_cpu()
+            rec3d_map = helicon.apply_helical_symmetry(data=rec3d_map, apix=apix3d, twist_degree=twist, rise_angstrom=rise, csym=csym, fraction=1.0, new_size=target_size, new_apix=target_apix, cpu=cpu)
           import mrcfile
           with mrcfile.new(str(mapFile), overwrite=True) as mrc:
             mrc.set_data(rec3d_map.astype(np.float32))
@@ -1636,7 +1389,7 @@ def writePdf(results, pdfFilePrefix, top_k=10, use_pitch=None, image_info="", cm
         if fsc_test:
           map1, map2 = rec3d[1:]
           shape = [max(map1.shape) + (1 if max(map1.shape)%2 else 0)]*3
-          fsc = calc_fsc(pad_to_size(map1, shape), pad_to_size(map2, shape), apix3d)
+          fsc = helicon.calc_fsc(helicon.pad_to_size(map1, shape), helicon.pad_to_size(map2, shape), apix3d)
           if len(group_results)>1: tag = f".top-{ri+1}"
           else: tag = ""
           fscFilePrefix = pdfFilePrefix + f".{pathlib.Path(imageFile).stem}-{imageIndex}{tag}.pitch-{round(rise*360/abs(twist),1)}_twist-{round(twist,3)}_rise-{rise}"
@@ -1649,7 +1402,7 @@ def writePdf(results, pdfFilePrefix, top_k=10, use_pitch=None, image_info="", cm
           figsize = 8
           fig = plt.figure(figsize=(figsize, figsize))
           fig.suptitle(fscFilePrefix, fontsize=1.5*round(figsize*72/len(fscFilePrefix)))
-          plt.title(f"Resolution={round(get_resolution(fsc), 2)}Å")
+          plt.title(f"Resolution={round(helicon.get_resolution(fsc), 2)}Å")
           plt.plot(fsc[:,0], fsc[:,1])
           plt.axhline(y=0.143, color='r', linestyle='dashed')
           plt.xlim(0,1/(2*apix3d))
@@ -1687,8 +1440,8 @@ def plotOneResult(rank, score, data, rec3d_y_proj, rec3d_x_proj, rec3d_z_section
 
   ny, nx = data.shape
   nx_pad = max(reconstruct_length_2d_pixel, nx)
-  images = [pad_to_size(crop_center(data, shape=(reconstruct_diameter_2d_pixel, reconstruct_length_2d_pixel)), shape=(reconstruct_diameter_2d_pixel, nx_pad))]
-  images+= [crop_center(pad_to_size(image, shape=(reconstruct_diameter_2d_pixel, nx_pad)), shape=(reconstruct_diameter_2d_pixel, nx_pad)) for image in (rec3d_y_proj, rec3d_x_proj, rec3d_z_sections)]
+  images = [helicon.pad_to_size(helicon.crop_center(data, shape=(reconstruct_diameter_2d_pixel, reconstruct_length_2d_pixel)), shape=(reconstruct_diameter_2d_pixel, nx_pad))]
+  images+= [helicon.crop_center(helicon.pad_to_size(image, shape=(reconstruct_diameter_2d_pixel, nx_pad)), shape=(reconstruct_diameter_2d_pixel, nx_pad)) for image in (rec3d_y_proj, rec3d_x_proj, rec3d_z_sections)]
 
   import matplotlib.pyplot as plt
   import matplotlib.gridspec as gridspec
@@ -1902,7 +1655,7 @@ def writeLstFile(results, top_k, apix2d_orig, lstFilePrefix):
         if ri < n:
           if imageFilePath.exists():
             fp.write(f"{imageIndex-1}\t{str(imageFilePath_final)}\tapix={round(apix2d_orig,3)}\n")
-          images = [ pad_to_size(rec3d_x_proj, data.shape), pad_to_size(rec3d_y_proj, data.shape), pad_to_size(rec3d_z_sections, (data.shape[0], data.shape[0])) ]
+          images = [ helicon.pad_to_size(rec3d_x_proj, data.shape), helicon.pad_to_size(rec3d_y_proj, data.shape), helicon.pad_to_size(rec3d_z_sections, (data.shape[0], data.shape[0])) ]
           for ii, image in enumerate(images):
             tag = ('projection-x', 'projection-y', 'z-central-section')[ii]
             fname = lstFilePrefix + f".{pathlib.Path(imageFile).stem}-{imageIndex}_pitch-{round(rise*360/abs(twist),1)}_twist-{round(twist,3)}_rise-{rise}_csym-{csym}{tilt_psi_dy_str(tilt, psi, dy, sep='_', sep2='-', unit=False)}.{tag}.mrcs"
@@ -1921,23 +1674,6 @@ def tilt_psi_dy_str(tilt, psi, dy, sep=' ', sep2='=', unit=True):
   if psi: tpy_str += f"{sep}psi{sep2}{round(psi, 2)}" + ("°" if unit else "")
   if dy: tpy_str += f"{sep}dy{sep2}{round(dy, 2)}"  + ("Å" if unit else "")
   return tpy_str
-
-def low_high_pass_filter(data, low_pass_fraction=0, high_pass_fraction=0):
-    fft = np.fft.fft2(data)
-    ny, nx = fft.shape
-    Y, X = np.meshgrid(np.arange(ny, dtype=np.float32)-ny//2, np.arange(nx, dtype=np.float32)-nx//2, indexing='ij')
-    Y /= ny//2
-    X /= nx//2
-    if 0<low_pass_fraction<1:
-        f2 = np.log(2)/(low_pass_fraction**2)
-        filter_lp = np.exp(- f2 * (X**2+Y**2))
-        fft *= np.fft.fftshift(filter_lp)
-    if 0<high_pass_fraction<1:
-        f2 = np.log(2)/(high_pass_fraction**2)
-        filter_hp = 1.0 - np.exp(- f2 * (X**2+Y**2))
-        fft *= np.fft.fftshift(filter_hp)
-    ret = np.abs(np.fft.ifft2(fft))
-    return ret
 
 def star_to_dataframe(starFile):
   helicon.import_with_auto_install("gemmi pandas".split())
@@ -1963,7 +1699,7 @@ def star_to_dataframe(starFile):
       fileNameCol = col
       break
   if not fileNameCol:
-    get_logger().error(f"ERROR: cannot find 'rlnImageName' or 'rlnReferenceImage' in the input {starFile}")
+    logger.error(f"ERROR: cannot find 'rlnImageName' or 'rlnReferenceImage' in the input {starFile}")
     sys.exit(-1)
 
   tmp = df[fileNameCol].str.split("@", expand=True)
@@ -1990,119 +1726,16 @@ def star_to_dataframe(starFile):
               mapping[ftmp] = fo.as_posix()
   for f in df["filename"].unique():
       if f not in mapping:
-          get_logger().warning(f"WARNING: {f} is not accessible")
+          logger.warning(f"WARNING: {f} is not accessible")
           mapping[f] = f
   df.loc[:, "filename"] = df.loc[:, "filename"].map(mapping)
   
   return df
-class Timer:
-  def __init__(self, info="Timer", verbose=0):
-    self.info = info
-    self.verbose = verbose
-
-  def __enter__(self):
-    from timeit import default_timer
-    self.start = default_timer()
-    if self.verbose:
-      print(f"{self.info}: started at {datetime.datetime.now()}")
-    return self
-
-  def __exit__(self, *args):
-    from timeit import default_timer
-    self.end = default_timer()
-    self.interval = self.end - self.start
-    if self.verbose:
-      print(f"{self.info}: ended at {datetime.datetime.now()}, duration={self.interval} seconds")
-
-def parse_simulation_options(optstr):
-  ''' parse a=b:c=d,e to {'a':b, 'c':'d,e'} '''
-  name = None
-  op2=optstr.split(":")
-  r2={}
-  for pi, p in enumerate(op2):
-    if p.find("=") == -1:
-      if pi>0:
-        print(f"ERROR in parsing {optstr}. must have the format key=value:key=value")
-      else:
-        name = p
-      continue
-    k, v = p.split("=")
-    if v.lower()=="true": 
-      v=1
-    elif v.lower()=="false":
-      v=0
-    else:
-      try: 
-        v = int(v)
-      except:
-        try: 
-          v = float(v)
-        except:
-          if len(v)>2 and v[0]=='"' and v[-1]=='"' : 
-            v = v[1:-1]
-    r2[k]=v
-  return name, r2
-
-def get_logger(logfile="", verbose=0):
-  try:
-    if get_logger.logger is not None:
-      return get_logger.logger
-  except:
-    get_logger.logger = None
-  
-  import pathlib, logging
-
-  if not logfile:
-    logfile = pathlib.Path(__file__).stem + ".log"
-  logfile_path = pathlib.Path(logfile)
-
-  logfile_path.parent.mkdir(parents=True, exist_ok=True)
-
-  logger = logging.getLogger(logfile)
-  logger.setLevel(logging.DEBUG)
-  fh = logging.FileHandler(logfile_path, mode="at")
-  fh.setLevel(logging.INFO)
-  ch = logging.StreamHandler()
-  if verbose<=0:
-    ch.setLevel(logging.ERROR)
-  elif verbose==1:
-    ch.setLevel(logging.WARNING)
-  elif verbose==2:
-    ch.setLevel(logging.INFO)
-  elif verbose>2:
-    ch.setLevel(logging.DEBUG)
-
-  formatter = logging.Formatter('%(message)s')
-  ch.setFormatter(formatter)
-  formatter = logging.Formatter('%(asctime)s %(message)s')
-  fh.setFormatter(formatter)
-  logger.addHandler(ch)
-  logger.addHandler(fh)
-
-  if logfile_path.stat().st_size>0:
-    logger.info('%s' % ( '#'*128))
-
-  get_logger.logger = logger
-  return logger
-
-def available_cpu() -> int:
-  import os
-  if "SLURM_CPUS_ON_NODE" in os.environ:
-    cpu = int(os.environ["SLURM_CPUS_ON_NODE"])
-  else:
-    import psutil
-    cpu = max(1, int(psutil.cpu_count() * (1 - psutil.cpu_percent()/100)))
-  try:
-    import numba
-    cpu = min(cpu, int(numba.config.NUMBA_NUM_THREADS))
-  except:
-    pass
-  return cpu
 
 helicon.import_with_auto_install("numpy scipy matplotlib mrcfile skimage:scikit-image sklearn:scikit-learn joblib psutil tqdm".split())
 
 def add_args(parser):
-  parser.add_argument('input_file', metavar="<filename>", type=str, nargs='?', help='Input STAR or mrc/mrcs file containing the input 2D class average image(s). default to %(default)s', default="Simulation:n=1:nx=128:ny=96:apix=5:twist=1.0:rise=4.75:csym=2:poylmer=0:rot=30:tilt=0:psi=0:noise=0")
+  parser.add_argument('input_file', metavar="<filename>", type=str, nargs='?', help='Input STAR or mrc/mrcs file containing the input 2D class average image(s). default to %(default)s', default="Simulation:n=1:nx=128:ny=96:apix=5:twist=0.5:rise=4.75:csym=2:poylmer=0:rot=30:tilt=0:psi=0:noise=0")
   parser.add_argument('--output_prefix', metavar="<string>", type=str, nargs="?", help='Output rootname. default to %(default)s', default=f"HELICON/helicon")
   i_parser = parser.add_mutually_exclusive_group(required=False)
   i_parser.add_argument("--i0", type=int, metavar="<n>", nargs="+", help="Which image to process. 0 (not 1) for the first image. EMAN/EMAN2 convention. default to all images", default=[])

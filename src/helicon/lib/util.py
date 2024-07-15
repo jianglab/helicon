@@ -1,4 +1,4 @@
-import sys, os, time, copy
+import sys, os, time
 
 def import_with_auto_install(packages, scope=locals()):
     if isinstance(packages, str): packages=[packages]
@@ -26,23 +26,26 @@ def parse_param_str(param_str):
     ''' parse a=b:c=d,e to {'a':b, 'c':'d,e'} '''
     params = param_str.split(":")
 
-    ret = {}
-    for p in params:
-        try: k,v=p.split("=")
-        except:
-            color_print("ERROR: Command line parameter parsing failed on ", param_str)
-            color_print("must have the form key=value:key=value")
-            return {}
-        if v.lower()=="true" : v=1
-        elif v.lower()=="false" : v=0
-        else:
-            try: v=int(v)
-            except:
-                try: v=float(v)
+    name = None
+    d = {}
+    for pi, p in enumerate(params):
+        try:
+            k,v = p.split("=")
+            if v.lower()=="true" : v=1
+            elif v.lower()=="false" : v=0
+            else:
+                try: v=int(v)
                 except:
-                    if len(v)>2 and v[0]=='"' and v[-1]=='"' : v=v[1:-1]
-        ret[k]=v
-    return ret
+                    try: v=float(v)
+                    except:
+                        if len(v)>2 and v[0]=='"' and v[-1]=='"' : v=v[1:-1]
+            d[k]=v
+        except:
+            if pi == 0:
+                name = p
+            else:
+                color_print(f"ERROR: failed to parse parameter {p}. Ignored")
+    return (name, d)
 
 def color_print(*args, **kargs):
     color = "RED"
@@ -322,7 +325,6 @@ def line_fit_projection(x, y, w=None, ref_i=0, return_xy_fit=False):
     if return_xy_fit: return pos, np.vstack((x2, y2)).T
     else: return pos
 
-
 def set_angle_range(angle, range=[-180, 180]):
     v0, v1 = range[0], range[-1]
     delta = v1 - v0
@@ -337,12 +339,19 @@ def set_angle_range(angle, range=[-180, 180]):
         else: ret = v1 - np.fmod(v0-angle, delta)
     return ret
 
+def set_to_periodic_range(v, min=-180, max=180):
+    if min <= v <= max: return v
+    from math import fmod
+    tmp = fmod(v-min, max-min)
+    if tmp>=0: tmp+=min
+    else: tmp+=max
+    return tmp
 
 def get_logger(logfile="", verbose=0):
     import logging
 
     if not logfile:
-        logfile = os.path.splitext(os.path.basename(__file__))[0] + ".log"
+        logfile = os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".log"
 
     logger = logging.getLogger(logfile)
     logger.setLevel(logging.DEBUG)
@@ -386,16 +395,32 @@ def log_command_line():
   hist.close()
 
 class Timer:
-    def __init__(self, info="Timer", verbose=0):
-        self.info = info
+  def __init__(self, info="Timer", verbose=0):
+    self.info = info
+    self.verbose = verbose
+  def __enter__(self):
+    from timeit import default_timer
+    self.start = default_timer()
+    if self.verbose:
+      print(f"{self.info}: started at {datetime.datetime.now()}")
+    return self
+  def __exit__(self, *args):
+    from timeit import default_timer
+    self.end = default_timer()
+    self.interval = self.end - self.start
+    if self.verbose:
+      print(f"{self.info}: ended at {datetime.datetime.now()}, duration={self.interval} seconds")
+
+class DummyMemory:
+    def __init__(self, location=None, bytes_limit=-1, verbose=0):
+        self.location = location
         self.verbose = verbose
-
-    def __enter__(self):
-        self.start = time.clock()
-        return self
-
-    def __exit__(self, *args):
-        self.end = time.clock()
-        self.interval = self.end - self.start
-        if self.verbose:
-            print("%s: %g seconds" % (self.info, self.interval))
+    def cache(self, func=None, **kwargs):
+        def decorator(f):
+            def wrapper(*args, **kwargs):
+                return f(*args, **kwargs)
+            return wrapper
+        if func is None:
+            return decorator
+        else:
+            return decorator(func)
