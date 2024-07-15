@@ -6,7 +6,7 @@ from importlib import import_module
 from .__version__ import __version__
 
 def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
-    parser = argparse.ArgumentParser(description=doc_str)
+    parser = argparse.ArgumentParser(description=doc_str, allow_abbrev=True)
     parser.add_argument(
         "--version", action="version", version="helicon " + __version__
     )
@@ -28,9 +28,10 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
 
                 this_parser = subparsers.add_parser(
                     module_file[:-3],
+                    help=descr_txt,
                     description=descr_txt,
                     epilog=epilog_txt,
-                    formatter_class=argparse.RawTextHelpFormatter,
+                    allow_abbrev=True
                 )
                 module.add_args(this_parser)
                 this_parser.set_defaults(main_function=module.main, this_parser=this_parser, check_args_function=None)
@@ -45,5 +46,5 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
 def main():
     _get_commands(
         cmd_dir=os.path.join(os.path.dirname(__file__), "commands"),
-        doc_str="helcin commands",
+        doc_str="helicon commands",
     )

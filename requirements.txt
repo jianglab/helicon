@@ -13,4 +13,5 @@ psutil
 scikit-image
 scikit-learn
 scipy
+streamlit<1.36
 tqdm

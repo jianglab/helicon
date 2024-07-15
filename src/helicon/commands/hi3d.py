@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-'''A Web app for Helical indexing using the cylindrical projection of a 3D map'''
+'''A Web app for helical indexing using the cylindrical projection of a 3D map'''
 
 import argparse
 
