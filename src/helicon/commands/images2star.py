@@ -2,7 +2,8 @@
 
 '''A command line tool that analyzes/transforms dataset(s) and saves the dataset in RELION star file'''
 
-import argparse, math, os, sys, types, pathlib
+import argparse, math, os, sys, types
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import helicon
@@ -215,9 +216,9 @@ def main(args):
                 helicon.color_print(f"\tERROR: --recoverFullFilament option requires that {fullStarFile} ({len(data2)}) has the same number or more particles (>={len(data)})")
                 sys.exit(-1)
 
-            folders = [p for p in pathlib.Path(data["rlnImageName"].iloc[0].split("@")[-1]).parents if str(p).find("/job")!=-1]
+            folders = [p for p in Path(data["rlnImageName"].iloc[0].split("@")[-1]).parents if str(p).find("/job")!=-1]
             folder_current = folders[-1]
-            folders = [p for p in pathlib.Path(data2["rlnImageName"].iloc[0].split("@")[-1]).parents if str(p).find("/job")!=-1]
+            folders = [p for p in Path(data2["rlnImageName"].iloc[0].split("@")[-1]).parents if str(p).find("/job")!=-1]
             folder_new = folders[-1]
 
             n0 = len(data)
@@ -468,7 +469,7 @@ def main(args):
 
             sf, param_dict = helicon.parsemodopt(param)
             maxDist = param_dict.get("maxDist", 5)      
-            assert pathlib.Path(sf).exists(), f"ERROR: {sf} does not exist" 
+            assert Path(sf).exists(), f"ERROR: {sf} does not exist" 
             assert maxDist>=0
             
             data_sf = helicon.images2dataframe(sf, alternative_folders=args.folder, ignore_bad_particle_path=args.ignoreBadParticlePath, ignore_bad_micrograph_path=args.ignoreBadMicrographPath, warn_missing_ctf=0, target_convention="relion")
@@ -940,7 +941,7 @@ def main(args):
             # outputFile:rescale2size=<n>:float16=<0|1>
             outputFile, param_dict = helicon.parsemodopt(param)
             if os.path.splitext(outputFile)[1]!=".mrcs":
-                suffix = pathlib.Path(outputFile).suffix
+                suffix = Path(outputFile).suffix
                 helicon.color_print(f"\tERROR: a .mrcs file is expected while you have specified {outputFile}! I will not do anything")
                 continue
             
@@ -1189,7 +1190,7 @@ def main(args):
             gradient_sigma = param_dict.get("gradient_sigma", 0)  # Å. 0 -> auto-decide, <0 -> disable
             min_area = param_dict.get("min_area", 100)  # Å^2
             both_sides = param_dict.get("both_sides", 1)  # 0-remove large value pixels, 1-remove both large and small value pixels
-            outdir = pathlib.Path(param_dict.get("outdir", pathlib.Path(args.output_starFile).stem))
+            outdir = Path(param_dict.get("outdir", Path(args.output_starFile).stem))
             outdir.mkdir(parents=True, exist_ok=True)
             force = param_dict.get("force", 1)
             cpu = param_dict.get("cpu", 1)
@@ -1218,7 +1219,7 @@ def main(args):
             tasks = []
             for mi, (mgraphName, mgraphParticles) in enumerate(mgraphs):
                 pid = mgraphParticles["tmp_mgraph_pid"].astype(int)-1
-                outputFile = pathlib.Path(outdir) / pathlib.Path(mgraphName).name
+                outputFile = Path(outdir) / Path(mgraphName).name
                 if outputFile.exists():
                     if outputFile.samefile(mgraphName):
                         helicon.color_print(f"ERROR: output {outputFile.as_posix()} will overwrite original image")
@@ -1463,7 +1464,50 @@ def main(args):
             data.meta.optics = optics
             if args.verbose>1:
                 print(f"\t{len(ogs)} optics groups -> {len(optics)} optic groups")
+
+        elif option_name == "assignOpticGroupByTime" and param >0:
+            try:
+                optics_orig = data.meta.optics
+            except:
+                optics_orig = None
+            if optics_orig is None:
+                helicon.color_print(f"\tERROR: data_optics block must be available")
+                sys.exit(-1)   
                 
+            required_cols = "rlnOpticsGroup rlnMicrographMovieName".split()
+            missing_cols = [c for c in required_cols if c not in data]
+            if missing_cols:
+                helicon.color_print(f"\tERROR: required attrs {' '.join(missing_cols)} must be available")
+                sys.exit(-1)
+
+            image_name = "rlnMicrographMovieName"
+            movies = data[image_name].unique()
+            from datetime import datetime
+            moive2time = { m: datetime.fromtimestamp(Path(m).resolve().stat().st_mtime).strftime('%Y-%m-%d-%H-%M-%S-%f') for m in movies }
+
+            optics = optics_orig.copy().iloc[0:0]
+                        
+            ogs = data.groupby("rlnOpticsGroup", sort=False)
+            og_count = 0
+            for ogName, ogData in ogs:
+                optics_row_index = optics_orig[optics_orig["rlnOpticsGroup"].astype(str) == str(ogName)].last_valid_index()
+                times = [moive2time[m] for m in ogData[image_name].unique()]
+                time2group = helicon.assign_to_groups(times, n=param)
+                movie2group = {m: time2group[moive2time[m]]+og_count for m in ogData[image_name].unique()}  
+                if args.verbose>10:
+                    print(f"{movie2group=} {len(movie2group)=} {len(set(movie2group.values()))=}")
+                data.loc[ogData.index, "rlnOpticsGroup"] = ogData[image_name].map(movie2group)
+                data.loc[ogData.index, "rlnMovieCollectionTime"] = ogData[image_name].map(moive2time)
+                n = len(data.loc[ogData.index, "rlnOpticsGroup"].unique())
+                new_rows = pd.concat([optics_orig.iloc[[optics_row_index]]] * n, ignore_index=True)
+                new_rows["rlnOpticsGroup"] = np.arange(og_count+1, og_count+1+n, dtype=int)
+                new_rows["rlnOpticsGroupName"] = "opticsGroup" + new_rows["rlnOpticsGroup"].astype(str)
+                optics = pd.concat([optics, new_rows], ignore_index=True)
+                og_count += n
+            data.meta.optics = optics
+            if args.verbose>1:
+                print(f"\t{len(ogs)} optics groups -> {len(optics)} optic groups")                
+
         elif option_name == "assignOpticGroupPerMicrograph" and param:
             try:
                 optics_orig = data.meta.optics
@@ -1835,7 +1879,7 @@ def getPixelSize(data, attrs=["rlnMicrographOriginalPixelSize", "rlnMicrographPi
             if attr in source:
                 if attr in ["rlnImageName", "rlnMicrographName"]:
                     import mrcfile, pathlib
-                    folder = pathlib.Path(data["starFile"].iloc[0])
+                    folder = Path(data["starFile"].iloc[0])
                     if folder.is_symlink(): folder = folder.readlink()
                     folder = folder.resolve().parent 
                     filename = source[attr].iloc[0].split("@")[-1]
@@ -1992,6 +2036,8 @@ def add_args(parser):
     choices = "no auto EPU serialEM".split()
     parser.add_argument("--assignOpticGroupByBeamShift", choices=choices, metavar=f"<{'|'.join(choices)}>",
                         help="assign images to optic groups according to the beam shifts, one group per beam shift position. default to no", default='no')
+    parser.add_argument("--assignOpticGroupByTime", type=int, metavar="<n>",
+                        help="assign images to optic groups according to data collection time, n movies per group. disabled by default", default=-1)
     parser.add_argument("--assignOpticGroupPerMicrograph", type=bool, metavar="<0|1>",
                         help="assign images to optic groups, one group per micrograph. default to no", default=0)
     parser.add_argument("--splitByMicrograph", type=bool, metavar="<0|1>",
@@ -2027,7 +2073,7 @@ def check_args(args, parser):
     args.all_options = [o for o in all_options if o not in "cpu first force ignoreBadParticlePath ignoreBadMicrographPath last folder splitNumSets splitMode tag verbose".split()]
 
 
-    if pathlib.Path(args.output_starFile).suffix not in ".star .cs .csv".split():
+    if Path(args.output_starFile).suffix not in ".star .cs .csv".split():
         helicon.color_print("\tERROR: the output file (%s) must be a .star, .cs, or .csv file" % (args.output_starFile))
         sys.exit(-1)
 

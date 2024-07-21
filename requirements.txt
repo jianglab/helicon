@@ -1,5 +1,6 @@
 bokeh==2.4.3
 colorama
+cryosparc-tools
 gemmi
 joblib
 lazy_import

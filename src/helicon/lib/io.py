@@ -302,12 +302,10 @@ def images2dataframe(inputFiles, csparc_passthrough_files=[], alternative_folder
         for f in inputFiles:
             t = f.split(".")[-1]
             if t == "star": types.add("relion")
-            elif t == "csv": types.add("cryosparc") # v0.x
-            elif t == "cs": types.add("cryosparc2") # v2.x
+            elif t == "cs": types.add("cryosparc") # v2.x
         if len(types)>1:
             if "relion" in types: convention = "relion"
             elif "cryosparc" in types: convention = "cryosparc"
-            elif "cryosparc2" in types: convention = "cryosparc2"
     if convention:  # don't convert convention by default
         for pi, p in enumerate(datalist):
             p = dataframe_convert(p, target=target_convention)
@@ -414,8 +412,9 @@ def dataframe_guess_data_type(data):
     if bytes2str_cols:
         for col in bytes2str_cols:
             data[col] = data[col].str.decode("utf-8")
-    if unknown_type_cols: 
-        data[unknown_type_cols] = data[unknown_type_cols].apply(pd.to_numeric)
+    if unknown_type_cols:
+        pass
+        #data[unknown_type_cols] = data[unknown_type_cols].apply(pd.to_numeric)
 
     try:
         data.meta.optics = dataframe_guess_data_type(data.meta.optics)
@@ -674,7 +673,8 @@ def cs2dataframe(csFile, passthrough_files=[], alternative_folders=[], ignore_ba
         for f in passthrough_files_final:
             cs = np.load(f)
             extra_data.append(pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names))
-        data = pd.concat([data]+extra_data, axis=1)
+        for extra_df in extra_data:
+            data = data.merge(extra_df, on='uid', how='left')
         data = data.loc[:, ~data.columns.duplicated()]
     if "blob/path" not in data and "micrograph_blob/path" not in data:
         color_print(f"ERROR: it appears that you have specified a CryoSPARC v2 passthrough file that does not have particle/micrograph path info. Available parameters are: {data.columns.values}")
@@ -692,7 +692,7 @@ def cs2dataframe(csFile, passthrough_files=[], alternative_folders=[], ignore_ba
         data = data[nans==False]
     data.meta = SimpleNamespace()
     data.meta.source_path = csFile
-    data.meta.convention = "cryosparc2"
+    data.meta.convention = "cryosparc"
     dataframe_normalize_filename(data, alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path)
     return data
 
@@ -1050,6 +1050,11 @@ def dataframe_cryosparc_to_relion(data):
         ret.loc[:, "rlnAnglePsiPrior"] = np.round(-np.rad2deg(data["filament/filament_pose"]), 1)
         ret.loc[:, "rlnAnglePsiFlipRatio"] = 0.5
 
+    # TODO: convert high order aberrations: beam tilt, trifoil, tetrafoil, anisomag: 'ctf/tilt_A', 'ctf/trefoil_A',
+       'ctf/tetra_A', 'ctf/anisomag' 
+    # color_print(data.columns)
+    # 
+
     # 3D variability introduced in v2.9
     import fnmatch
     v3d_cols = [col for col in data.columns if fnmatch.fnmatch(col, 'components_mode_*/value')]
@@ -1059,7 +1064,7 @@ def dataframe_cryosparc_to_relion(data):
         ret[col_name] = data[col]
 
     if len(ret.columns)==0:
-        color_print("ERROR: dataframe_cryosparc2ToRelion(): none of the parameters %s is supported" % (list(data.columns)))
+        color_print("ERROR: dataframe_cryosparc_to_relion(): none of the parameters %s is supported" % (list(data.columns)))
         sys.exit(-1)
 
     ret.meta = SimpleNamespace()
@@ -1092,6 +1097,8 @@ def mrc2mrcs(data):
             name2 = os.path.join(folder, name2)
             mapping[name] = name2
             if not os.path.exists(name2):
+                if os.path.islink(name2):
+                    os.remove(name2)
                 name_abs = os.path.abspath(os.path.normpath(name))
                 os.symlink(name_abs, name2)
         data.loc[:, 'filename'] = data['filename'].map(mapping)

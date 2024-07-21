@@ -252,6 +252,35 @@ def unique(inputList):
             ret.append(v)
     return ret
 
+def assign_to_groups(values, n):
+    '''sort values and assign the values to groups of size n'''
+    # values: a list of int/float values
+    # n: group size
+    # output: a dict that maps value to group ID
+    sorted_values = sorted(values)
+    groups = {}
+    current_group = []
+    group_id = 1
+    
+    for value in sorted_values:
+        if len(current_group) == 0 or value == current_group[-1]:
+            current_group.append(value)
+        elif len(current_group) < n:
+            current_group.append(value)
+        else:
+            for t in current_group:
+                groups[t] = group_id
+            group_id += 1
+            current_group = [value]
+    if current_group:
+        if len(current_group) >= n // 2:
+            for t in current_group:
+                groups[t] = group_id
+        else:
+            for t in current_group:
+                groups[t] = group_id - 1
+    return groups
+
 # flatten multiple level list or tuple
 # taken from http://rightfootin.blogspot.com/2006/09/more-on-python-flatten.html
 def flatten(l, ltypes=(list, tuple)):
@@ -283,13 +312,6 @@ def find_elbow_point(curve):
     distToLine = np.sqrt(np.sum(vecToLine ** 2, axis=1))
     idxOfBestPoint = np.argmax(distToLine)    # should be the last point of 1st segment
     return idxOfBestPoint
-
-def set_to_periodic_range(v, min, max):
-    from math import fmod
-    tmp = fmod(v-min, max-min)
-    if tmp>=0: tmp+=min
-    else: tmp+=max
-    return tmp
 
 def order_by_unique_counts(labels, ignoreNegative=True):   # decreasing order
     if ignoreNegative:
