@@ -48,20 +48,17 @@ def parse_param_str(param_str):
     return (name, d)
 
 def color_print(*args, **kargs):
-    color = "RED"
+    color = "red"
     if "color" in kargs:
-        color = str(kargs["color"]).upper()
+        color = str(kargs["color"]).lower()
         kargs.pop("color")
     end = "\n"
     if "end" in kargs:
         end = kargs["end"]
         kargs.pop("end")
-    from colorama import Fore, Back, Style
-    valid_colors = dict(Fore.__dict__.items())
-    if color not in valid_colors: color = "RED"
-    print(getattr(Fore, color, Fore.RED), end="")
-    print(*args, **kargs, end="")
-    print(Style.RESET_ALL, end=end)
+    from rich.console import Console
+    console = Console()
+    console.print(*args, style=color, end=end, **kargs)
 
 def available_cpu() -> int:
   import os

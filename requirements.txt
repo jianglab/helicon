@@ -1,5 +1,4 @@
 bokeh==2.4.3
-colorama
 cryosparc-tools
 gemmi
 joblib
@@ -11,6 +10,7 @@ numpy
 pandas
 plotly
 psutil
+rich
 scikit-image
 scikit-learn
 scipy

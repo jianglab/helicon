@@ -2052,7 +2052,7 @@ def add_args(parser):
     parser.add_argument("--assignOpticGroupByTime", type=int, metavar="<n>",
                         help="assign images to optic groups according to data collection time, n movies per group. disabled by default", default=-1)
     parser.add_argument("--assignOpticGroupPerMicrograph", type=bool, metavar="<0|1>",
-                        help="assign images to optic groups, one group per micrograph. default to no", default=0)
+                        help="assign images to optic groups, one group per micrograph. default to 0", default=0)
     parser.add_argument("--splitByMicrograph", type=bool, metavar="<0|1>",
                         help="split the output into separate star files, one per micrograph. default to 0", default=0)
     parser.add_argument("--minStack", type=int, metavar="<0|1>",

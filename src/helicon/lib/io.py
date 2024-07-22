@@ -110,6 +110,7 @@ def guess_data_collection_software(filename):
     return format
 
 def verify_data_collection_software(filename, software):
+    import re
     match = re.search(movie_filename_patterns()[software], filename)
     return match
 
