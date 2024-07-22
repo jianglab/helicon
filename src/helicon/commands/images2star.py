@@ -1418,14 +1418,8 @@ def main(args):
                 helicon.color_print(f"\tERROR: required attrs {' '.join(missing_cols)} must be available")
                 sys.exit(-1)
 
-            patterns = dict(EPU=r'FoilHole_\d{8}_Data_\d{8}_(\d{1,3})_\d{8}_', serialEM=r'([XY][\+-]\d[XY][\+-]\d-\d)')
-            import re
             if param == "auto":
-                format = None
-                for p in patterns:
-                    if re.search(patterns[p], data[image_name].iloc[0]) is not None:
-                        format = p
-                        break
+                format = helicon.guess_data_collection_software(filename=data[image_name].iloc[0])
                 if format is None:
                     helicon.color_print(f"\tERROR: cannot detect the format of filename {image_name}: {data[image_name].iloc[0]}")
                     sys.exit(-1)
@@ -1434,7 +1428,7 @@ def main(args):
                         print(f"\tAuto-detect the format as {format} based on {image_name}")
             else:
                 format = param
-                if re.search(patterns[format], data[image_name].iloc[0]) is None:
+                if helicon.verify_data_collection_software(data[image_name].iloc[0], format) is None:
                     helicon.color_print(f"\tERROR: the specified format {format} is inconsistent with filename {image_name}: {data[image_name].iloc[0]}. If you are not sure, specify auto as the format and let me guess for you")
                     sys.exit(-1)
             
@@ -1443,9 +1437,10 @@ def main(args):
             tmp_col = "TEMP_beam_shift_pos"
             ogs = data.groupby("rlnOpticsGroup", sort=False)
             og_count = 0
+            pattern = helicon.movie_filename_patterns()[format]
             for ogName, ogData in ogs:
                 optics_row_index = optics_orig[optics_orig["rlnOpticsGroup"].astype(str) == str(ogName)].last_valid_index()
-                ogData[tmp_col] = ogData.loc[:,image_name].str.extract(patterns[format])
+                ogData[tmp_col] = ogData.loc[:,image_name].str.extract(pattern)
                 if format in ["EPU"]:
                     ogData[tmp_col] = ogData[tmp_col].astype(int)
                 else:
@@ -1474,19 +1469,37 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)   
                 
-            required_cols = "rlnOpticsGroup rlnMicrographMovieName".split()
+            image_name = firstMatchedAtrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
+            if image_name is None:
+                helicon.color_print(f"\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available")
+                sys.exit(-1)
+
+            software = helicon.guess_data_collection_software(filename=data[image_name].iloc[0])
+            if software in ["EPU"]:
+                required_cols = "rlnOpticsGroup".split()
+                if args.verbose>2:
+                    print(f"\tIt appears that you used EPU to collect the movies. Data collection time will be extracted from the file names specified in the {image_name} column")
+            else:
+                required_cols = "rlnOpticsGroup rlnMicrographMovieName".split()
+                image_name = "rlnMicrographMovieName"
+                if args.verbose>2:
+                    helicon.color_print(f"\tData collection time will use the file modification time of the movie files specified in the rlnMicrographMovieName column. Make sure that the file modification times are indeed the movie collection times")
+
             missing_cols = [c for c in required_cols if c not in data]
             if missing_cols:
                 helicon.color_print(f"\tERROR: required attrs {' '.join(missing_cols)} must be available")
                 sys.exit(-1)
 
-            image_name = "rlnMicrographMovieName"
             movies = data[image_name].unique()
+            if software in ["EPU"]:
+                moive2time = { m: helicon.extract_EPU_data_collection_time(m) for m in movies }
+            else:
+                moive2time = { m: Path(m).resolve().stat().st_mtime for m in movies }
             from datetime import datetime
-            moive2time = { m: datetime.fromtimestamp(Path(m).resolve().stat().st_mtime).strftime('%Y-%m-%d-%H-%M-%S-%f') for m in movies }
+            moive2time_str = { m: datetime.fromtimestamp(t).strftime('%Y-%m-%d_%H-%M-%S') for m, t in moive2time.items() }
 
             optics = optics_orig.copy().iloc[0:0]
-                        
+            
             ogs = data.groupby("rlnOpticsGroup", sort=False)
             og_count = 0
             for ogName, ogData in ogs:
@@ -1497,7 +1510,7 @@ def main(args):
                 if args.verbose>10:
                     print(f"{movie2group=} {len(movie2group)=} {len(set(movie2group.values()))=}")
                 data.loc[ogData.index, "rlnOpticsGroup"] = ogData[image_name].map(movie2group)
-                data.loc[ogData.index, "rlnMovieCollectionTime"] = ogData[image_name].map(moive2time)
+                data.loc[ogData.index, "rlnMovieCollectionTime"] = ogData[image_name].map(moive2time_str)
                 n = len(data.loc[ogData.index, "rlnOpticsGroup"].unique())
                 new_rows = pd.concat([optics_orig.iloc[[optics_row_index]]] * n, ignore_index=True)
                 new_rows["rlnOpticsGroup"] = np.arange(og_count+1, og_count+1+n, dtype=int)

@@ -92,6 +92,38 @@ def get_relion_project_folder(starFile):
     if not os.path.exists(os.path.join(proj_folder, "default_pipeline.star")): return None
     return proj_folder
 
+def movie_filename_patterns():
+    d = dict(EPU=r'FoilHole_\d{8}_Data_\d{8}_(\d{1,3})_\d{8}_\d{6}_', serialEM=r'([XY][\+-]\d[XY][\+-]\d-\d)')
+    return d
+
+def guess_data_collection_software(filename):
+    # EPU: FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff")
+    import re
+    format = None
+    patterns = movie_filename_patterns()
+    for p in patterns:
+        if re.search(patterns[p], filename) is not None:
+            format = p
+            break
+    if format is None:
+        helicon.color_print(f"\tWARNING: cannot detect the format of filename: {filename}")
+    return format
+
+def verify_data_collection_software(filename, software):
+    match = re.search(movie_filename_patterns()[software], filename)
+    return match
+
+def extract_EPU_data_collection_time(filename):
+    import re
+    pattern = r'FoilHole_\d{8}_Data_\d{8}_\d{1,3}_(\d{8}_\d{6})_'
+    match = re.search(pattern, filename)
+    if match:
+        from datetime import datetime
+        datetime_str = match.group(1)
+        datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
+        timestamp = datetime_obj.timestamp()
+        return timestamp
+    return 0
 
 def euler_relion2eman(rot, tilt, psi):
     # order of rotation: rot around z, tilt around y, psi around z
@@ -1050,8 +1082,7 @@ def dataframe_cryosparc_to_relion(data):
         ret.loc[:, "rlnAnglePsiPrior"] = np.round(-np.rad2deg(data["filament/filament_pose"]), 1)
         ret.loc[:, "rlnAnglePsiFlipRatio"] = 0.5
 
-    # TODO: convert high order aberrations: beam tilt, trifoil, tetrafoil, anisomag: 'ctf/tilt_A', 'ctf/trefoil_A',
-       'ctf/tetra_A', 'ctf/anisomag' 
+    # TODO: convert high order aberrations: beam tilt, trifoil, tetrafoil, anisomag: 'ctf/tilt_A', 'ctf/trefoil_A', 'ctf/tetra_A', 'ctf/anisomag' 
     # color_print(data.columns)
     # 
 
