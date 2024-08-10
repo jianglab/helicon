@@ -185,6 +185,7 @@ def file_ready(filenames, wait=0, minSize=0):    # wait given seconds and check 
         return 0
 
 def convert_file_path(filenames, to="current", relpath_start=os.curdir):
+    import pandas as pd
     if to == "current": return filenames
     assert(to in "current absolute abs real relative rel shortest".split())
     assert(isinstance(filenames, pd.Series))
