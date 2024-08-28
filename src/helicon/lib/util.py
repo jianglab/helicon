@@ -1,4 +1,4 @@
-import sys, os, time
+import sys, os, time, datetime
 
 def import_with_auto_install(packages, scope=locals()):
     if isinstance(packages, str): packages=[packages]
@@ -296,21 +296,6 @@ def flatten(l, ltypes=(list, tuple)):
         i += 1
     return ltype(l)
 
-# https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve
-def find_elbow_point(curve):
-    nPoints = len(curve)
-    allCoord = np.vstack((range(nPoints), curve)).T
-    firstPoint = allCoord[0]
-    lineVec = allCoord[-1] - allCoord[0]
-    lineVecNorm = lineVec / np.sqrt(np.sum(lineVec ** 2))
-    vecFromFirst = allCoord - firstPoint
-    scalarProduct = np.sum(vecFromFirst * np.tile(lineVecNorm, (nPoints, 1)), axis=1)
-    vecFromFirstParallel = np.outer(scalarProduct, lineVecNorm)
-    vecToLine = vecFromFirst - vecFromFirstParallel
-    distToLine = np.sqrt(np.sum(vecToLine ** 2, axis=1))
-    idxOfBestPoint = np.argmax(distToLine)    # should be the last point of 1st segment
-    return idxOfBestPoint
-
 def order_by_unique_counts(labels, ignoreNegative=True):   # decreasing order
     if ignoreNegative:
         labels_pos = labels[labels>=0]
@@ -325,25 +310,6 @@ def order_by_unique_counts(labels, ignoreNegative=True):   # decreasing order
         mapping = {unique[v]:i for i, v in enumerate(order)}
     ret = [mapping[v] for v in labels]
     return ret
-
-def line_fit_projection(x, y, w=None, ref_i=0, return_xy_fit=False):
-    import numpy as np
-    from scipy import odr
-    data = odr.Data(x, y, wd=w, we=w)
-    odr_obj = odr.ODR(data, odr.unilinear)
-    output = odr_obj.run()
-
-    x2 = x + output.delta
-    y2 = y + output.eps
-
-    v0 = np.array([x2[-1]-x2[0], y2[-1]-y2[0]])
-    v0 = v0/np.linalg.norm(v0, ord=2)
-
-    # signed, projected position on the fitted line
-    pos = (x2-x2[ref_i])*v0[0] + (y2-y2[ref_i])*v0[1]   # dot product
-    
-    if return_xy_fit: return pos, np.vstack((x2, y2)).T
-    else: return pos
 
 def set_angle_range(angle, range=[-180, 180]):
     v0, v1 = range[0], range[-1]
@@ -415,7 +381,7 @@ def log_command_line():
   hist.close()
 
 class Timer:
-  def __init__(self, info="Timer", verbose=0):
+  def __init__(self, info="Timer", verbose=1):
     self.info = info
     self.verbose = verbose
   def __enter__(self):
@@ -432,6 +398,7 @@ class Timer:
       print(f"{self.info}: ended at {datetime.datetime.now()}, duration={self.interval} seconds")
 
 class DummyMemory:
+    """Dummy joblib.Memory"""
     def __init__(self, location=None, bytes_limit=-1, verbose=0):
         self.location = location
         self.verbose = verbose

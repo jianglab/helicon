@@ -258,3 +258,39 @@ def cosine_similarity(a, b):
   else:
     return np.sum(a*b)/norm
 
+# https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve
+def find_elbow_point(curve):
+    import numpy as np
+    nPoints = len(curve)
+    allCoord = np.vstack((range(nPoints), curve)).T
+    firstPoint = allCoord[0]
+    lineVec = allCoord[-1] - allCoord[0]
+    lineVecNorm = lineVec / np.sqrt(np.sum(lineVec ** 2))
+    vecFromFirst = allCoord - firstPoint
+    scalarProduct = np.sum(vecFromFirst * np.tile(lineVecNorm, (nPoints, 1)), axis=1)
+    vecFromFirstParallel = np.outer(scalarProduct, lineVecNorm)
+    vecToLine = vecFromFirst - vecFromFirstParallel
+    distToLine = np.sqrt(np.sum(vecToLine ** 2, axis=1))
+    idxOfBestPoint = np.argmax(distToLine)    # should be the last point of 1st segment
+    return idxOfBestPoint
+
+def line_fit_projection(x, y, w=None, ref_i=0, return_xy_fit=False):
+    import numpy as np
+    from scipy import odr
+    data = odr.Data(x, y, wd=w, we=w)
+    odr_obj = odr.ODR(data, odr.unilinear)
+    output = odr_obj.run()
+
+    x2 = x + output.delta
+    y2 = y + output.eps
+
+    v0 = np.array([x2[-1]-x2[0], y2[-1]-y2[0]])
+    v0 = v0/np.linalg.norm(v0, ord=2)
+
+    # signed, projected position on the fitted line
+    pos = (x2-x2[ref_i])*v0[0] + (y2-y2[ref_i])*v0[1]   # dot product
+    
+    if return_xy_fit: return pos, np.vstack((x2, y2)).T
+    else: return pos
+
+

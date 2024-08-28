@@ -1,4 +1,5 @@
 import os, sys
+from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 import pandas as pd
@@ -8,7 +9,7 @@ from .util import color_print
 
 def get_image_number(imageFile, as2D=False):
     if not os.path.exists(imageFile):
-        color_print("ERROR: cannot find image file %s" % (imageFile))
+        color_print(f"ERROR: cannot find image file {imageFile}")
         sys.exit()
     import mrcfile
     with mrcfile.open(imageFile, header_only=True) as mrc:
@@ -20,7 +21,7 @@ def get_image_number(imageFile, as2D=False):
 
 def get_image_size(imageFile):
     if not os.path.exists(imageFile):
-        color_print("ERROR: cannot find image file %s" % (imageFile))
+        color_print(f"ERROR: cannot find image file {imageFile}")
         sys.exit()
     import mrcfile
     with mrcfile.open(imageFile, header_only=True) as mrc:
@@ -31,7 +32,7 @@ def get_image_size(imageFile):
 
 def read_image_2d(imageFile, i):
     if not os.path.exists(imageFile):
-        color_print("ERROR: cannot find image file %s" % (imageFile))
+        color_print(f"ERROR: cannot find image file {imageFile}")
         sys.exit()
     i = int(i)
     import mrcfile
@@ -40,7 +41,7 @@ def read_image_2d(imageFile, i):
         if 0<=i<nz:
             return mrc.data[i]
         else:
-            color_print("ERROR: the requested image %d is out of the valid range [0, %d) for image file %s" % (i, imgnum, imageFile))
+            color_print(f"ERROR: the requested image {i} is out of the valid range [0, {nz}) for image file {imageFile}")
             sys.exit()
 
 def change_map_axes_order(data, header, new_axes=["x", "y", "z"]):
@@ -116,7 +117,7 @@ def verify_data_collection_software(filename, software):
 
 def extract_EPU_data_collection_time(filename):
     import re
-    pattern = r'FoilHole_\d{8}_Data_\d{8}_\d{1,3}_(\d{8}_\d{6})_'
+    pattern = r'FoilHole_\d{8}_Data_\d{8}_\d{1,3}|\d{8}_(\d{8}_\d{6})_'
     match = re.search(pattern, filename)
     if match:
         from datetime import datetime
@@ -693,8 +694,7 @@ def cs2dataframe(csFile, passthrough_files=[], alternative_folders=[], ignore_ba
         passthrough_files_final = passthrough_files * 1
     else:
         passthrough_files_final = []
-        import pathlib
-        p = pathlib.Path(csFile)
+        p = Path(csFile)
         if p.name.startswith("particles_"):
             ptFile = f"*J[0-9]*_passthrough_{p.name}"  # Select2D
         else:

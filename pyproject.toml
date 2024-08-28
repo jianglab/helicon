@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helicon"
+dynamic = ["version", "dependencies"]
+description = "A collection of tools for cryo-EM 3D reconstruction of helical structures"
+readme = "README.md"
+authors = [
+    {name = "Jiang Lab", email = "jianglab@gmail.com"}
+]
+requires-python = ">=3.12"
+
+[project.urls]
+Homepage = "https://github.com/jianglab/helicon"
+
+[project.scripts]
+helicon = "helicon.helicon:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "helicon.__version__"}
+dependencies = {file = ["requirements.txt"]}

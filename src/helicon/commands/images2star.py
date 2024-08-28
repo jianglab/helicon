@@ -1398,7 +1398,7 @@ def main(args):
                 print("\t%d micrographs found" % (len(data)))
                 
         elif option_name == "assignOpticGroupByBeamShift" and param != 'no':
-            # choices = "no auto EPU serialEM".split()
+            # choices = "no auto EPU serialEM_pncc".split()
             try:
                 optics_orig = data.meta.optics
             except:
@@ -2046,7 +2046,7 @@ def add_args(parser):
     parser.add_argument("--ignoreBadParticlePath", metavar="<0|1|2|3>", type=int, help="ignore bad particle image file path: 1-check but ignore missing files, 2-skip file checking, 3-skip file checking and recursive tracing of lst files. default: 0", default=0)
     parser.add_argument("--ignoreBadMicrographPath", metavar="<0|1>", type=int,
                         help="ignore bad micrograph image file path. default: 1", default=1)
-    choices = "no auto EPU serialEM".split()
+    choices = "no auto EPU serialEM_pncc".split()
     parser.add_argument("--assignOpticGroupByBeamShift", choices=choices, metavar=f"<{'|'.join(choices)}>",
                         help="assign images to optic groups according to the beam shifts, one group per beam shift position. default to no", default='no')
     parser.add_argument("--assignOpticGroupByTime", type=int, metavar="<n>",
