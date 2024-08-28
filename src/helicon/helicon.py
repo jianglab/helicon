@@ -3,12 +3,12 @@
 import argparse
 import os
 from importlib import import_module
-from .__version__ import __version__
+import helicon
 
 def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
     parser = argparse.ArgumentParser(description=doc_str, allow_abbrev=True)
     parser.add_argument(
-        "--version", action="version", version="helicon " + __version__
+        "--version", action="version", version="helicon " + helicon.__version__
     )
 
     subparsers = parser.add_subparsers(title="Choose a command")
