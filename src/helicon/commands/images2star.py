@@ -21,8 +21,8 @@ def main(args):
         optics = None
 
     if args.verbose:
-        image_name = firstMatchedAtrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
-        tmpCol = uniqueAttrName(data, attr_prefix=image_name)
+        image_name = helicon.first_matched_atrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
+        tmpCol = helicon.unique_attr_name(data, attr_prefix=image_name)
         data[tmpCol] = data[image_name].str.split("@", expand=True).iloc[:, -1]
         nMicrographs = len(data[tmpCol].unique())
         apix = getPixelSize(data)
@@ -949,7 +949,7 @@ def main(args):
             images.columns = ['pid', 'filename']
             images.loc[:, "pid"] = images.loc[:, "pid"].astype(int)
             
-            attr = uniqueAttrName(data, attr_prefix="rlnImageNameOrig")
+            attr = helicon.unique_attr_name(data, attr_prefix="rlnImageNameOrig")
             data[attr] = data["rlnImageName"]
 
             nx, ny, _ = helicon.get_image_size(images["filename"].iloc[0])
@@ -1179,7 +1179,7 @@ def main(args):
 
         elif option_name == "maskGold" and param:
             attrs_required =  "rlnImageName rlnMicrographName".split()
-            attrSrc = firstMatchedAtrr(data, attrs_required)
+            attrSrc = helicon.first_matched_atrr(data, attrs_required)
             if attrSrc is None:
                 helicon.color_print(f"ERROR: the input does not have any of the columns: {' '.john(attr_required)}")
                 sys.exit(-1)
@@ -1195,7 +1195,7 @@ def main(args):
             force = param_dict.get("force", 1)
             cpu = param_dict.get("cpu", 1)
 
-            attr = uniqueAttrName(data, attr_prefix=f"{attrSrc}Orig")
+            attr = helicon.unique_attr_name(data, attr_prefix=f"{attrSrc}Orig")
             data.loc[:, attr] = data[attrSrc]
 
             tmp = data[attrSrc].str.split('@', expand=True)
@@ -1407,7 +1407,7 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)   
                 
-            image_name = firstMatchedAtrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
+            image_name = helicon.first_matched_atrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
             if image_name is None:
                 helicon.color_print(f"\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available")
                 sys.exit(-1)
@@ -1469,7 +1469,7 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)   
                 
-            image_name = firstMatchedAtrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
+            image_name = helicon.first_matched_atrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
             if image_name is None:
                 helicon.color_print(f"\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available")
                 sys.exit(-1)
@@ -1530,7 +1530,7 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)   
                 
-            image_name = firstMatchedAtrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
+            image_name = helicon.first_matched_atrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
             if image_name is None:
                 helicon.color_print(f"\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available")
                 sys.exit(-1)
@@ -1578,8 +1578,8 @@ def main(args):
             if param in data:
                 fileAttr = param
             else:
-                fileAttr = firstMatchedAtrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
-            tmpCol = uniqueAttrName(data, attr_prefix=fileAttr)
+                fileAttr = helicon.first_matched_atrr(data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split())
+            tmpCol = helicon.unique_attr_name(data, attr_prefix=fileAttr)
             data.loc[:, tmpCol] = data[fileAttr].str.split("@", expand=True).iloc[:, -1]
             timeCol = f"{fileAttr}CreateTime"
             files = data.groupby(tmpCol, sort=False)
@@ -1917,24 +1917,6 @@ def setPixelSize(data, apix_new, update_defocus=False):
         pass
     if pixelSize_source in data:
         data.loc[:, pixelSize_source] = apix_new
-
-def uniqueAttrName(data, attr_prefix):
-    if attr_prefix not in data:
-        return attr_prefix
-    attr_i = 2
-    attr = f"{attr_prefix}{attr_i}"
-    while attr in data:
-        attr_i += 1
-        attr = f"{attr_prefix}{attr_i}"
-    return attr
-
-def firstMatchedAtrr(data, attrs):
-    ret = None
-    for attr in attrs:
-        if attr in data:
-            ret = attr
-            break
-    return ret
 
 def readCtfparmFile(filename):  # EMAN1 ctfparm.txt format file
     fp = open(filename, "rt")

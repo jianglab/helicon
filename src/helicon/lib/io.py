@@ -94,7 +94,7 @@ def get_relion_project_folder(starFile):
     return proj_folder
 
 def movie_filename_patterns():
-    d = dict(EPU=r'FoilHole_\d{8}_Data_\d{8}_(\d{1,3})_\d{8}_\d{6}_', serialEM=r'([XY][\+-]\d[XY][\+-]\d-\d)')
+    d = dict(EPU=r'FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_', serialEM_pncc=r'([XY][\+-]\d[XY][\+-]\d-\d)')
     return d
 
 def guess_data_collection_software(filename):
@@ -106,8 +106,6 @@ def guess_data_collection_software(filename):
         if re.search(patterns[p], filename) is not None:
             format = p
             break
-    if format is None:
-        helicon.color_print(f"\tWARNING: cannot detect the format of filename: {filename}")
     return format
 
 def verify_data_collection_software(filename, software):
@@ -117,7 +115,7 @@ def verify_data_collection_software(filename, software):
 
 def extract_EPU_data_collection_time(filename):
     import re
-    pattern = r'FoilHole_\d{8}_Data_\d{8}_\d{1,3}|\d{8}_(\d{8}_\d{6})_'
+    pattern = r'FoilHole_\d{7,8}_Data_\d{7,8}_\d{1,3}_(\d{8}_\d{6})_'
     match = re.search(pattern, filename)
     if match:
         from datetime import datetime
@@ -125,7 +123,79 @@ def extract_EPU_data_collection_time(filename):
         datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
         timestamp = datetime_obj.timestamp()
         return timestamp
+    else:
+        print(filename)
+        print(pattern)
+        raise
     return 0
+
+def extract_EPU_beamshift_pos(filename):
+    import re
+    pattern = r'FoilHole_\d{7}_Data_\d{7}_(\d{1,3})_\d{8}_\d{6}_'
+    match = re.search(pattern, filename)
+    if match:
+        return match.group(1)
+    else:
+        print(filename)
+        print(pattern)
+        raise
+    return ""
+
+def extract_serialEM_pncc_beamshift(filename):
+    import re
+    pattern = r'([XY][\+-]\d[XY][\+-]\d-\d)'
+    match = re.search(pattern, filename)
+    if match:
+        return match.group(1)
+    else:
+        print(filename)
+        print(pattern)
+        raise
+    return ""
+
+def EPU_micrograph_path_2_movie_xml_path(micrograph_path, movies_folder):
+    import re
+    pattern = r'(\d{21}_FoilHole_\d{8}_Data_\d{8}_\d{8}_\d{8}_\d{6}_fractions)'
+    match = re.search(pattern, micrograph_path)
+    if match:
+        mid = match.group(1)
+        from pathlib import Path
+        xml_path = (Path(movies_folder) / (mid + ".tiff")).resolve()
+        xml_path = str(xml_path).replace("_fractions.tiff", ".xml")
+        assert Path(xml_path).exists(), f"{xml_path} does not exist"
+        return xml_path
+    else:
+        raise ValueError("ERROR: bad micrograph path: {micrograph_path}")    
+
+def EPU_xml_2_beamshift(xml_file):
+    import xmltodict
+    with open(xml_file, "rb") as fp:
+        xml = xmltodict.parse(fp, dict_constructor=dict)
+    beamshift = xml["MicroscopeImage"]["microscopeData"]["optics"]["BeamShift"]
+    beamshift = (float(beamshift["a:_x"]), float(beamshift["a:_y"]))
+    return beamshift
+
+def assign_beamshifts_to_cluster(beamshifts, min_cluster_size=4, range_n_clusters = range(2, 200), verbose=True):
+    from sklearn.metrics import silhouette_score
+    X = np.array(beamshifts)
+    
+    # Evaluate silhouette scores for different numbers of clusters
+    best_n_clusters = range_n_clusters[0]
+    best_score = -1
+    best_cluster_labels = None
+    for n_clusters in range_n_clusters:
+        clustering_method = helicon.AgglomerativeClusteringWithMinSize(n_clusters=n_clusters, min_cluster_size=min_cluster_size)
+        cluster_labels = clustering_method.fit_predict(X)
+        silhouette_avg = silhouette_score(X, cluster_labels)
+        if silhouette_avg > best_score:
+            best_score = silhouette_avg
+            best_n_clusters = n_clusters
+            best_cluster_labels = cluster_labels
+    if verbose:
+        print(f"The optimal number of clusters is {best_n_clusters} with a silhouette score of {best_score:.2f}")
+    beamshifts_tuples = [tuple(v) for v in beamshifts]
+    data_cluster_dict = {tuple(data_point): cluster_id+1 for data_point, cluster_id in zip(beamshifts_tuples, best_cluster_labels)}
+    return data_cluster_dict
 
 def euler_relion2eman(rot, tilt, psi):
     # order of rotation: rot around z, tilt around y, psi around z
@@ -1138,3 +1208,43 @@ def mrc2mrcs(data):
         data.loc[:, "rlnImageName"] = pid.astype(str) + "@" + data["filename"]
         data.drop(["filename"], axis=1, inplace=True)
     return data
+
+#####################################################################################
+def connect_cryosparc(cryosparc_server_info_file="$HOME/.cryosparc/cryosparc.toml"):
+    from helicon import color_print
+    def print_instructions():
+        info  =  'To connect to CryoSPARC server, please follow these instructions:\n'
+        info += f'1. create a text file {cryosparc_server_info_file}\n'
+        info +=  '2. change its permission to user readable/writable only by running this command:\n'
+        info += f'   chmod 600 {cryosparc_server_info_file}\n'
+        info += f'3. add the following info to {cryosparc_server_info_file}:\n\n'
+        info +=  'license = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"\n'
+        info +=  'host = "xxx.yyy.zzz.edu"\n'
+        info +=  'base_port = 39000\n'
+        info +=  'email = "xxx@yyy.edu"\n'
+        info +=  'password = "yourpassowrd"\n\n'
+        info +=  'Remember to change the placeholder text to your own information\n\n'
+        color_print(info)
+
+    p = Path(os.path.expandvars(cryosparc_server_info_file))
+    if not p.exists():
+        print_instructions()
+        sys.exit(-1)
+    elif oct(p.stat().st_mode)[-3:] != '600':
+        color_print(f"Please run command 'chmod 600 {cryosparc_server_info_file}' to keep your server info secure")
+        sys.exit(-1)
+
+    with open(p, mode='rb') as fp:
+        import tomllib
+        from cryosparc.tools import CryoSPARC
+        info = tomllib.load(fp)
+
+        cs = CryoSPARC(
+            license = info['license'],
+            host = info['host'],
+            base_port = info['base_port'],
+            email = info['email'],
+            password = info['password']
+        )
+        assert cs.test_connection()
+    return cs

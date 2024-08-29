@@ -1,7 +1,7 @@
 """Entry point for helicon"""
 
 import argparse
-import os
+import os, sys
 from importlib import import_module
 import helicon
 
@@ -38,11 +38,19 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
                 if hasattr(module, "check_args"):
                     this_parser.set_defaults(check_args_function=module.check_args)
 
-    args = parser.parse_args()
-    if args.check_args_function is not None:
-        args = args.check_args_function(args, args.this_parser)
-    args.main_function(args)
-
+    try:
+        args = parser.parse_args()
+        if args.check_args_function is not None:
+            args = args.check_args_function(args, args.this_parser)
+        args.main_function(args)
+    except:
+        subparser = sys.argv[1] if len(sys.argv) > 1 else None
+        if subparser and subparser in subparsers.choices:
+            subparsers.choices[subparser].print_help()
+        else:
+            parser.print_help()
+        sys.exit(-1)
+        
 def main():
     _get_commands(
         cmd_dir=os.path.join(os.path.dirname(__file__), "commands"),

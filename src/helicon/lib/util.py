@@ -250,34 +250,60 @@ def unique(inputList):
             ret.append(v)
     return ret
 
-def assign_to_groups(values, n):
-    '''sort values and assign the values to groups of size n'''
-    # values: a list of int/float values
-    # n: group size
-    # output: a dict that maps value to group ID
-    sorted_values = sorted(values)
-    groups = {}
-    current_group = []
-    group_id = 1
+def assign_to_groups(numbers, group_size):
+    '''sort values and assign the values to groups'''
+    # return a dict that maps values to group IDs
+
+    from collections import defaultdict
+    sorted_numbers = sorted(numbers)
     
-    for value in sorted_values:
-        if len(current_group) == 0 or value == current_group[-1]:
-            current_group.append(value)
-        elif len(current_group) < n:
-            current_group.append(value)
+    # Group duplicate values
+    value_groups = defaultdict(list)
+    for i, num in enumerate(sorted_numbers):
+        value_groups[num].append(i)
+    
+    result = {}
+    group_id = 1
+    current_group = []
+    current_group_size = 0
+    
+    # Group the numbers
+    for num, indices in value_groups.items():
+        if current_group_size + len(indices) > group_size:
+            # If adding this set of duplicates exceeds the group size,
+            # finalize the current group and start a new one
+            if current_group:
+                for value in current_group:
+                    result[value] = group_id
+                group_id += 1
+            current_group = [num] * len(indices)
+            current_group_size = len(indices)
         else:
-            for t in current_group:
-                groups[t] = group_id
+            # Add the duplicates to the current group
+            current_group.extend([num] * len(indices))
+            current_group_size += len(indices)
+        
+        # If the group is full, finalize it
+        if current_group_size == group_size:
+            for value in current_group:
+                result[value] = group_id
             group_id += 1
-            current_group = [value]
+            current_group = []
+            current_group_size = 0
+    
+    # Handle the last group
     if current_group:
-        if len(current_group) >= n // 2:
-            for t in current_group:
-                groups[t] = group_id
+        if len(current_group) < group_size // 2 and len(result) > 0:
+            # Merge with the previous group if it's less than half the group size
+            prev_group_id = max(result.values())
+            for value in current_group:
+                result[value] = prev_group_id
         else:
-            for t in current_group:
-                groups[t] = group_id - 1
-    return groups
+            # Add as a new group
+            for value in current_group:
+                result[value] = group_id
+    
+    return result
 
 # flatten multiple level list or tuple
 # taken from http://rightfootin.blogspot.com/2006/09/more-on-python-flatten.html
@@ -366,6 +392,24 @@ def get_logger(logfile="", verbose=0):
     if os.path.getsize(logfile)>0:
         logger.info('%s' % ( '#'*128))
     return logger
+
+def unique_attr_name(data, attr_prefix):
+    if attr_prefix not in data:
+        return attr_prefix
+    attr_i = 2
+    attr = f"{attr_prefix}{attr_i}"
+    while attr in data:
+        attr_i += 1
+        attr = f"{attr_prefix}{attr_i}"
+    return attr
+
+def first_matched_atrr(data, attrs):
+    ret = None
+    for attr in attrs:
+        if attr in data:
+            ret = attr
+            break
+    return ret
 
 def log_command_line():
   try:

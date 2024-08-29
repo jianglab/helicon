@@ -4,13 +4,13 @@
 A collection of tools for cryo-EM 3D reconstruction of helical structures.
 
 ## Installation
-Run the following command in a terminal:  
+Run this command in a terminal:  
 ```
 pip install git+https://github.com/jianglab/helicon
 ```
 
 ## Usage
-Run the follow command in a terminal and follow the help message:
+Run this command in a terminal and follow the help message:
 ```
 helicon --help
 ```
