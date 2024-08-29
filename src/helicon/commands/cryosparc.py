@@ -30,8 +30,7 @@ def main(args):
     if args.verbose>10:
         print(data)
 
-    should_create_new_job = False
-    output_title = f"{args.job_id}"
+    output_title = ""
     output_slots = set()
 
     index_d = {}
@@ -84,7 +83,6 @@ def main(args):
 
             output_slots.add("ctf")
             output_title += f"->{len(group_ids)} beamshift groups"
-            should_create_new_job = True
 
             if args.verbose>1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
@@ -101,14 +99,16 @@ def main(args):
                 
             software = helicon.guess_data_collection_software(data[image_name][0])
             if software is None:
-                helicon.color_print(f"\tWARNING: cannot detect the data collection software using {image_name}: {filename}")
+                helicon.color_print(f"\tWARNING: cannot detect the data collection software using {image_name}: {data[image_name][0]}")
                 sys.exit(-1)
-            elif software not in ["EPU"]:
+            elif software not in ["EPU", "EPU_old"]:
                 helicon.color_print(f"\tWARNING: I can only detect data collection time for EPU-collected data. It appears that you used {software} to collect the data")
                 sys.exit(-1)
 
             if software in ["EPU"]:
                 extractDataCollectionTime = helicon.extract_EPU_data_collection_time
+            elif software in ["EPU_old"]:
+                extractDataCollectionTime = helicon.extract_EPU_old_data_collection_time
 
             micrographs = np.unique(data[image_name])
             micrograph_path_2_time = {m: extractDataCollectionTime(m) for m in micrographs}
@@ -133,7 +133,6 @@ def main(args):
             
             output_slots.add("ctf")
             output_title += f"->{len(group_ids)} time groups"
-            should_create_new_job = True
 
             if args.verbose>1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")             
@@ -153,13 +152,18 @@ def main(args):
             
             output_slots.add("ctf")
             output_title += f"->{len(group_ids)} per-micrograph groups"
-            should_create_new_job = True
 
             if args.verbose>1:
                 group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))               
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")             
     
-    if should_create_new_job:
+    if args.save_local:
+        output_file = f"{args.project_id}_{args.workspace_id}_{args.job_id}" + output_title + ".cs"
+        output_file = '-'.join(output_file.split())
+        data.save(output_file)
+        if args.verbose>1:
+            print(f"The results are saved to {output_file}")
+    else:
         project = cs.find_project(args.project_id)
         new_job_id = project.save_external_result(
             workspace_uid = args.workspace_id,
@@ -168,13 +172,10 @@ def main(args):
             name = "particles",
             slots = list(output_slots),
             passthrough = (job.uid, "particles"),
-            title = output_title
+            title = f"{args.job_id}" + output_title
         )
         if args.verbose>1:
             print(f"The results are saved to the job: {args.project_id}/{args.workspace_id}/{new_job_id}")
-    else:
-        if args.verbose>1:
-            print(f"I have not done anything. Will not save anything to CryoSPARC")
 
 def add_args(parser):
     parser.add_argument("--project_id", type=str, help="input cryosparc project id", required=True)
@@ -188,6 +189,7 @@ def add_args(parser):
                         help="assign images to exposure groups according to data collection time, n movies per group. disabled by default", default=-1)
     parser.add_argument("--assignExposureGroupPerMicrograph", type=bool, metavar="<0|1>",
                         help="assign images to exposure groups, one group per micrograph. default to 0", default=0)
+    parser.add_argument("--save_local", type=bool, metavar="<0|1>", help="save results to a local cs file instead of creating a new external job on the CryoSPARC server. default to 0", default=0)
     parser.add_argument("--verbose", type=int, metavar="<0|1>", help="verbose mode. default to 2", default=3)
     parser.add_argument("--cpu", type=int, metavar="<n>", help="number of cpus to use. default to 1", default=1)
 
@@ -196,7 +198,7 @@ def add_args(parser):
 def check_args(args, parser):
     args.append_options = [a.dest for a in parser._actions if type(a) is argparse._AppendAction]
     all_options = helicon.get_option_list(sys.argv[1:])
-    args.all_options = [o for o in all_options if o not in "cpu job_id project_id verbose workspace_id".split()]
+    args.all_options = [o for o in all_options if o not in "cpu job_id project_id save_local verbose workspace_id".split()]
     
     return args
 

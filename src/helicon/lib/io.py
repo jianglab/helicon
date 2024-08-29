@@ -94,11 +94,13 @@ def get_relion_project_folder(starFile):
     return proj_folder
 
 def movie_filename_patterns():
-    d = dict(EPU=r'FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_', serialEM_pncc=r'([XY][\+-]\d[XY][\+-]\d-\d)')
+    # EPU:
+    # FoilHole_30593197_Data_30537205_30537207_20230430_084907_fractions_patch_aligned_doseweighted.mrc    
+    # FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff
+    d = dict(EPU_old=r'FoilHole_\d{7,8}_Data_\d{7,8}_\d{8}_\d{8}_\d{6}_', EPU=r'FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_', serialEM_pncc=r'([XY][\+-]\d[XY][\+-]\d-\d)')
     return d
 
 def guess_data_collection_software(filename):
-    # EPU: FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff")
     import re
     format = None
     patterns = movie_filename_patterns()
@@ -129,9 +131,25 @@ def extract_EPU_data_collection_time(filename):
         raise
     return 0
 
+def extract_EPU_old_data_collection_time(filename):
+    import re
+    pattern = r'FoilHole_\d{8}_Data_\d{8}_\d{8}_(\d{8}_\d{6})_'
+    match = re.search(pattern, filename)
+    if match:
+        from datetime import datetime
+        datetime_str = match.group(1)
+        datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
+        timestamp = datetime_obj.timestamp()
+        return timestamp
+    else:
+        print(filename)
+        print(pattern)
+        raise
+    return 0
+
 def extract_EPU_beamshift_pos(filename):
     import re
-    pattern = r'FoilHole_\d{7}_Data_\d{7}_(\d{1,3})_\d{8}_\d{6}_'
+    pattern = r'FoilHole_\d{7,8}_Data_\d{7}_(\d{1,3})_\d{8}_\d{6}_'
     match = re.search(pattern, filename)
     if match:
         return match.group(1)

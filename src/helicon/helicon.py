@@ -42,7 +42,6 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
         args = parser.parse_args()
         if args.check_args_function is not None:
             args = args.check_args_function(args, args.this_parser)
-        args.main_function(args)
     except:
         subparser = sys.argv[1] if len(sys.argv) > 1 else None
         if subparser and subparser in subparsers.choices:
@@ -50,6 +49,8 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
         else:
             parser.print_help()
         sys.exit(-1)
+
+    args.main_function(args)
         
 def main():
     _get_commands(
