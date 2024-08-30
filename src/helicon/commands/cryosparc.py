@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 
-'''A command line tool that interacts with a CryoSPARC server and perform image analysis tasks'''
+'''A command line tool that interacts with a CryoSPARC server and performs image analysis tasks'''
 
-import argparse, math, os, sys, types
+import argparse, sys
 from pathlib import Path
 import numpy as np
-import pandas as pd
 import helicon
 
 def main(args):
@@ -56,7 +55,7 @@ def main(args):
                 
             software = helicon.guess_data_collection_software(data[image_name][0])
             if software is None:
-                helicon.color_print(f"\tWARNING: cannot detect the data collection software using {image_name}: {filename}")
+                helicon.color_print(f"\tWARNING: cannot detect the data collection software using {image_name}: {data[image_name][0]}\n\tI only know the filenames by {', '.join(sorted(helicon.movie_filename_patterns().keys()))}")
                 sys.exit(-1)
 
             if software in ["EPU"]:
@@ -87,10 +86,17 @@ def main(args):
             if args.verbose>1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
 
-        elif option_name == "assignExposureGroupByTime" and param > 0:
-            time_group_size =  param
-
+        elif option_name == "assignExposureGroupByTime" and abs(param) > 0:
+            time_group_size = param
+            
             group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+
+            if time_group_size < 0 and len(group_ids_orig) > 1: # combine previous groups (if there are) into a single group first
+                if args.verbose > 1:
+                    print(f"\tCombining {len(group_ids_orig)} exposure groups into 1 group")
+                data["ctf/exp_group_id"] = 1
+                group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+                time_group_size = abs(time_group_size)
                 
             image_name = helicon.first_matched_atrr(data, attrs="location/micrograph_path blob/path".split())
             if image_name is None:
@@ -99,7 +105,7 @@ def main(args):
                 
             software = helicon.guess_data_collection_software(data[image_name][0])
             if software is None:
-                helicon.color_print(f"\tWARNING: cannot detect the data collection software using {image_name}: {data[image_name][0]}")
+                helicon.color_print(f"\tWARNING: cannot detect the data collection software using {image_name}: {data[image_name][0]}\n\tI only know the filenames by {', '.join(sorted(helicon.movie_filename_patterns().keys()))}")
                 sys.exit(-1)
             elif software not in ["EPU", "EPU_old"]:
                 helicon.color_print(f"\tWARNING: I can only detect data collection time for EPU-collected data. It appears that you used {software} to collect the data")
@@ -175,14 +181,13 @@ def main(args):
             title = f"{args.job_id}" + output_title
         )
         if args.verbose>1:
-            print(f"The results are saved to the job: {args.project_id}/{args.workspace_id}/{new_job_id}")
+            print(f"The results are saved to a new CryoSPARC external job: {args.project_id}/{args.workspace_id}/{new_job_id}")
 
 def add_args(parser):
-    parser.add_argument("--project_id", type=str, help="input cryosparc project id", required=True)
-    parser.add_argument("--workspace_id", type=str, help="input cryosparc workspace id", required=True)
-    parser.add_argument("--job_id", type=str, help="input cryosparc job id", required=True)
+    parser.add_argument("--project_id", type=str, metavar="<Pxx>", help="input cryosparc project id", required=True)
+    parser.add_argument("--workspace_id", type=str, metavar="<Wx>", help="input cryosparc workspace id", required=True)
+    parser.add_argument("--job_id", type=str, metavar="<Jxx>", help="input cryosparc job id", required=True)
 
-    choices = "no auto EPU serialEM_pncc".split()
     parser.add_argument("--assignExposureGroupByBeamShift", type=bool, metavar="<0|1>",
                         help="assign images to exposure groups according to the beam shifts, one group per beam shift position. default to 0", default=0)
     parser.add_argument("--assignExposureGroupByTime", type=int, metavar="<n>",
