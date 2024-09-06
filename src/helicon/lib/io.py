@@ -1254,9 +1254,9 @@ def connect_cryosparc(cryosparc_server_info_file="$HOME/.cryosparc/cryosparc.tom
 
     with open(p, mode='rb') as fp:
         import tomllib
-        from cryosparc.tools import CryoSPARC
         info = tomllib.load(fp)
 
+        from cryosparc.tools import CryoSPARC
         cs = CryoSPARC(
             license = info['license'],
             host = info['host'],

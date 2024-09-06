@@ -1,4 +1,5 @@
 import sys, os, time, datetime
+import numpy as np
 
 def import_with_auto_install(packages, scope=locals()):
     if isinstance(packages, str): packages=[packages]
@@ -358,6 +359,24 @@ def set_to_periodic_range(v, min=-180, max=180):
     if tmp>=0: tmp+=min
     else: tmp+=max
     return tmp
+
+def encode_numpy(img, hflip=False, vflip=False):
+    if img.dtype != np.dtype('uint8'):
+        vmin, vmax = img.min(), img.max()
+        tmp = (255*(img-vmin)/(vmax-vmin)).astype(np.uint8)
+    else:
+        tmp = img
+    if hflip:
+        tmp = tmp[:, ::-1]
+    if vflip:
+        tmp = tmp[::-1, :]
+    import io, base64
+    from PIL import Image
+    pil_img = Image.fromarray(tmp)
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format="JPEG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    return f"data:image/jpeg;base64, {encoded}"
 
 def get_logger(logfile="", verbose=0):
     import logging
