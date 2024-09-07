@@ -2,16 +2,20 @@ from shiny import reactive
 from shiny.express import ui, module, render
 
 @module
-def image_select(input, output, session, id="image_selector", label="", images=[], image_labels=[], image_size=128, margin_image=10, margin_box=20):
-    # return indices of selected image in the order of selection
+def image_select(input, output, session, images=[], image_labels=[], image_size=128, gap=0, margin_box=0):
+    import numpy as np
+    from PIL import Image
     images_final = []
     for i, image in enumerate(images):
         if isinstance(image, str):
             tmp = image
+        elif isinstance(image, Image.Image):
+            tmp = encode_PIL_Image(image)
         elif isinstance(image, np.ndarray) and image.ndim == 2:
+            from helicon import encode_numpy, encode_PIL_Image
             tmp = encode_numpy(image)
         else:
-            raise ValueError("image must be an image file or a 2D numpy array")
+            raise ValueError("image must be an image file, a PIL Image, or a 2D numpy array")
         images_final.append(tmp)
 
     assert len(image_labels)==0 or len(image_labels) == len(images)
@@ -21,31 +25,46 @@ def image_select(input, output, session, id="image_selector", label="", images=[
     else:
         image_labels_final = list(range(1, len(images)+1))
 
-    ui.div(
-        ui.input_checkbox_group(
-            id=id,
-            label=label,
-            choices={
-                i+1: ui.img(src=image, alt=f"Image {i+1}", title=str(image_labels_final[i]), style=f"width: {image_size}px; height: {image_size}px; object-fit: cover; margin-bottom: {margin_image}px;")
-                for i, image in enumerate(images_final)
-            },
-            inline=True
-        ),
-        style=f"display: flex; justify-content: space-around; align-items: flex-start; margin-bottom: {margin_box}px"
-    )
-    
-    ordered_selection = reactive.value([])
+    bids = []
 
-    @render.text
-    @reactive.event(input[id])
-    def selected_indices():
-        current = input[id]()
-        if current:
-            previous = ordered_selection()
-            tmp = [i for i in previous if i in current]
-            tmp+= [i for i in current if i not in tmp]
-            ordered_selection.set(tmp)
-        else:
-            ordered_selection.set([])
+    with ui.layout_column_wrap(gap=f"{gap} px"):
+        for i, image in enumerate(images_final):
+            bid = f"image_select_{i+1}"
+            bids.append(bid)
+            ui.input_action_button(
+                id=bid,
+                label=ui.img(
+                    src=image,
+                    alt=f"Image {i+1}",
+                    title=str(image_labels_final[i]),
+                    style=f"width: 100%; height: 100%; object-fit: cover"
+                ),
+                style=f"width: {image_size}px; height: {image_size}px; padding: 0; margin: {margin_box}px;"
+            )
+
+    for bid in bids:
+        bid_js = f"{session.ns}-{bid}"
+        ui.tags.script(f'''
+            document.getElementById("{bid_js}").addEventListener("click", function() {{
+                var button = document.getElementById("{bid_js}");
+                button.style.border = button.style.border === "2px solid blue" ? "2px solid white" : "2px solid blue";
+            }});
+        ''')
+
+    @reactive.Calc
+    def image_buttons_status():
+        return [input[bid]() % 2 == 1 for bid in bids]
     
-    return ordered_selection
+    selection = reactive.value([])
+
+    @reactive.effect
+    def ordered_selection():
+        status = image_buttons_status()
+        current = [i+1 for i, is_selected in enumerate(status) if is_selected]        
+        previous = getattr(ordered_selection, 'previous', [])        
+        result = [i for i in previous if i in current]
+        result += [i for i in current if i not in result]
+        ordered_selection.previous = result
+        selection.set(result)
+        
+    return selection

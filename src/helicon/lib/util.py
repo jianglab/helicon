@@ -370,11 +370,14 @@ def encode_numpy(img, hflip=False, vflip=False):
         tmp = tmp[:, ::-1]
     if vflip:
         tmp = tmp[::-1, :]
-    import io, base64
     from PIL import Image
     pil_img = Image.fromarray(tmp)
+    return encode_PIL_Image(pil_img)
+
+def encode_PIL_Image(img, hflip=False, vflip=False):
+    import io, base64
     buffer = io.BytesIO()
-    pil_img.save(buffer, format="JPEG")
+    img.save(buffer, format="JPEG")
     encoded = base64.b64encode(buffer.getvalue()).decode()
     return f"data:image/jpeg;base64, {encoded}"
 
