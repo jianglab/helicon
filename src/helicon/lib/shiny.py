@@ -33,7 +33,7 @@ def image_select(
         images_final = []
         for i, image in enumerate(images()):
             if isinstance(image, str):
-                tmp = image.copy()
+                tmp = image
             elif isinstance(image, Image.Image):
                 tmp = encode_PIL_Image(image)
             elif isinstance(image, np.ndarray) and image.ndim == 2:
@@ -120,7 +120,7 @@ def image_select(
                 ui.h5(
                     label,
                     style="text-align: center; margin: 0;",
-                    title="Hold the Shift key while clicking to select multiple classes",
+                    title="Hold the Shift key while clicking to select multiple images",
                 ),
                 ui_images,
                 style=f"display: flex; flex-direction: column; gap: {gap}px; margin: 0",

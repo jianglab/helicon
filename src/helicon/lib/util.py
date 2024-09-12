@@ -363,7 +363,10 @@ def set_to_periodic_range(v, min=-180, max=180):
 def encode_numpy(img, hflip=False, vflip=False):
     if img.dtype != np.dtype('uint8'):
         vmin, vmax = img.min(), img.max()
-        tmp = (255*(img-vmin)/(vmax-vmin)).astype(np.uint8)
+        if vmax>vmin:
+            tmp = (255*(img-vmin)/(vmax-vmin)).astype(np.uint8)
+        else:
+            tmp = np.zeros_like(img, dtype=np.uint8)
     else:
         tmp = img
     if hflip:
@@ -446,6 +449,10 @@ def log_command_line():
   hist.write(msg)
   hist.close()
 
+def get_context_function_name():
+    import inspect
+    return inspect.stack()[1].function
+     
 class Timer:
   def __init__(self, info="Timer", verbose=1):
     self.info = info
@@ -477,3 +484,4 @@ class DummyMemory:
             return decorator
         else:
             return decorator(func)
+
