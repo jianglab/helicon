@@ -73,47 +73,6 @@ def get_number_helices_classes(params):
     nHelices = len(list(params.groupby(["rlnMicrographName", "rlnHelicalTubeID"])))
     nClasses = len(params["rlnClassNumber"].unique())
     return  nHelices, nClasses 
-    
-def create_image_figure(image, dx, dy, title="", title_location="above", plot_width=None, plot_height=None, x_axis_label='x', y_axis_label='y', tooltips=None, show_axis=True, show_toolbar=True, crosshair_color="white", aspect_ratio=None):
-    from bokeh.plotting import ColumnDataSource, figure
-    h, w = image.shape
-    if aspect_ratio is None:
-        if plot_width and plot_height:
-            aspect_ratio = plot_width/plot_height
-        else:
-            aspect_ratio = w*dx/(h*dy)
-    tools = 'box_zoom,crosshair,pan,reset,save,wheel_zoom'
-    fig = figure(title_location=title_location, 
-        frame_width=plot_width, frame_height=plot_height, 
-        x_axis_label=x_axis_label, y_axis_label=y_axis_label,
-        x_range=(-w//2*dx, (w//2-1)*dx), y_range=(-h//2*dy, (h//2-1)*dy), 
-        tools=tools, aspect_ratio=aspect_ratio)
-    fig.grid.visible = False
-    if title:
-        fig.title.text=title
-        fig.title.align = "center"
-        fig.title.text_font_size = "18px"
-        fig.title.text_font_style = "normal"
-    if not show_axis: fig.axis.visible = False
-    if not show_toolbar: fig.toolbar_location = None
-
-    source_data = ColumnDataSource(data=dict(image=[image], x=[-w//2*dx], y=[-h//2*dy], dw=[w*dx], dh=[h*dy]))
-    from bokeh.models import LinearColorMapper
-    color_mapper = LinearColorMapper(palette='Greys256')    # Greys256, Viridis256
-    image = fig.image(source=source_data, image='image', color_mapper=color_mapper,
-                x='x', y='y', dw='dw', dh='dh'
-            )
-
-    from bokeh.models.tools import HoverTool, CrosshairTool
-    if not tooltips:
-        tooltips = [("x", "$xÅ"), ('y', '$yÅ'), ('val', '@image')]
-    image_hover = HoverTool(renderers=[image], tooltips=tooltips)
-    fig.add_tools(image_hover)
-    fig.hover[0].attachment="vertical"
-    crosshair = [t for t in fig.tools if isinstance(t, CrosshairTool)]
-    if crosshair: 
-        for ch in crosshair: ch.line_color = crosshair_color
-    return fig
 
 def get_pixel_size(data, attrs=["micrograph_blob/psize_A", "rlnMicrographPixelSize", "rlnMicrographOriginalPixelSize", "blob/psize_A", "rlnImagePixelSize"], return_source=False):
     try:

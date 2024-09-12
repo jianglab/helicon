@@ -8,7 +8,7 @@ def main(args):
     try:
         import pathlib
         app_file = pathlib.Path(__file__).parent / "../web_apps/helicalPitch/app.py"
-        cmd = f"shiny run --reload --launch-browser {app_file}"
+        cmd = f"shiny run --launch-browser --no-dev-mode --port 0 {app_file}"
         import subprocess
         subprocess.call(cmd, shell=True)
     except:

@@ -17,7 +17,7 @@ def display_app_ui(images=reactive.value([]), image_labels=reactive.value([]), d
   
   ui.head_content(ui.tags.title("HelicalPitch"))
 
-  with ui.sidebar(width=421): # 456
+  with ui.sidebar(width=456):
     ui.input_radio_buttons("input_mode_params", "How to obtain the Class2D parameter file:", 
                           choices=["upload", "url"], 
                           selected="url",

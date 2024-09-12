@@ -14,5 +14,7 @@ rich
 scikit-image
 scikit-learn
 scipy
+shiny
+shinywidgets
 streamlit<1.36
 tqdm
