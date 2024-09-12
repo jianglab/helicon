@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
-import pathlib
+import os, pathlib
 
 from joblib import Memory
-memory = Memory(location='/tmp/joblib_cache', verbose=0)
+username = os.getenv('USER')
+memory = Memory(location=f'/tmp/{username}_joblib_cache', verbose=0)
 
 def compute_pair_distances(helices):
     dists_same_class = []
