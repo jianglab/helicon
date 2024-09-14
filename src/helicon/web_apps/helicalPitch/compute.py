@@ -355,6 +355,7 @@ def plot_histogram(data, title, xlabel, ylabel, max_pair_dist=None, bins=50, log
     fig.update_layout(
         title_text=title, 
         title_x=0.5,
+        title_font=dict(size=12),
         hoverlabel=dict(
             bgcolor="white",
             font_size=12

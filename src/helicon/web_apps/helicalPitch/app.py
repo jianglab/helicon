@@ -32,6 +32,13 @@ pair_distances = reactive.value([])
 
 
 ui.head_content(ui.tags.title("HelicalPitch"))
+ui.tags.style( 
+    """
+    * { font-size: 10pt; margin: 0; padding: 0; }
+    input[type="text"].form-control, input[type="number"].form-control, .form-control, .selectize-input, .shiny-input-container, .form-group, .irs, .radio, .radio-inline, .selectize-control, label, .radio label, .radio-inline label, .accordion-button, .accordion-body, .shiny-text-output, .shiny-html-output, .shiny-output-error {font-size: 10pt; margin: 0; padding: 0; }
+    """
+)
+
 
 with ui.sidebar(width=456):
     ui.input_radio_buttons(
@@ -78,7 +85,7 @@ with ui.sidebar(width=456):
             value="https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/768px/run_it020_classes.mrcs",
         )
 
-    with ui.div(style="max-height: 50vh; overflow-y: auto;"):
+    with ui.div(style="max-height: 40vh; overflow-y: auto;"):
         selected_image_indices = helicon.shiny.image_select(
             id="select_classes",
             label="Select classe(s):",
@@ -167,31 +174,34 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
 
                 return fig
 
-            with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
+            with ui.layout_columns(col_widths=[6, 6, 12], style="align-items: flex-end;"):
                 ui.input_numeric(
                     "min_len", "Minimal length (Å)", min=0.0, value=0, step=1.0
-                )
-                ui.input_numeric(
-                    "max_len", "Maximal length (Å)", min=-1, value=-1, step=1.0
-                )
-                ui.input_numeric(
-                    "bins", "Number of histogram bins", min=1, value=100, step=1
-                )
-                ui.input_numeric(
-                    "max_pair_dist",
-                    "Maximal pair distance (Å) to plot",
-                    min=-1,
-                    value=-1,
-                    step=1.0,
                 )
                 ui.input_numeric(
                     "rise",
                     "Helical rise (Å)",
                     min=0.01,
-                    max=100.0,
+                    max=1000.0,
                     value=4.75,
                     step=0.01,
                 )
+                with ui.accordion(id="additional_parameters", open=False):
+                    with ui.accordion_panel(title="Additional parameters:"):
+                        with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
+                            ui.input_numeric(
+                                "max_len", "Maximal length (Å)", min=-1, value=-1, step=1.0
+                            )
+                            ui.input_numeric(
+                                "max_pair_dist",
+                                "Maximal pair distance (Å) to plot",
+                                min=-1,
+                                value=-1,
+                                step=1.0,
+                            )
+                            ui.input_numeric(
+                                "bins", "Number of histogram bins", min=1, value=100, step=1
+                            )
 
                 @reactive.effect
                 @reactive.event(input.min_len)

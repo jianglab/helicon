@@ -117,7 +117,7 @@ def image_select(
 
         if len(label):
             ui_images = ui.div(
-                ui.h5(
+                ui.h6(
                     label,
                     style="text-align: center; margin: 0;",
                     title="Hold the Shift key while clicking to select multiple images",
