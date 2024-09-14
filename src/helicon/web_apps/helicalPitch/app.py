@@ -144,6 +144,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             @render_plotly
             @reactive.event(selected_helices, input.bins)
             def lengths_histogram_display():
+                req(input.bins() is not None and input.bins()>0)
                 helices, lengths, count = selected_helices()
                 data = lengths
                 class_indices = [
@@ -207,11 +208,14 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                     if input.min_len() >= input.max_len():
                         ui.update_numeric("min_len", value=0)
 
-    with ui.card():
+    with ui.card(max_height="90vh"):
 
         @render_plotly
         @reactive.event(pair_distances, input.bins, input.max_pair_dist, input.rise)
         def pair_distances_histogram_display():
+            req(input.bins() is not None and input.bins()>0)
+            req(input.max_pair_dist() is not None)
+            req(input.rise() is not None and input.rise()>0)
             data = pair_distances()
             class_indices = [
                 str(displayed_class_ids()[i] + 1) for i in selected_image_indices()
@@ -425,7 +429,7 @@ def get_selected_helices():
     req(image_size())
     req(len(abundance()))
     class_indices = [displayed_class_ids()[i] for i in selected_image_indices()]
-    helices = compute.select_class(params=params_work(), class_indices=class_indices)
+    helices = compute.select_classes(params=params_work(), class_indices=class_indices)
 
     if len(helices):
         filement_lengths = compute.get_filament_length(

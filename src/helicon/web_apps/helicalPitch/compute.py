@@ -8,18 +8,22 @@ memory = Memory(location=f'/tmp/{username}_joblib_cache', verbose=0)
 
 def compute_pair_distances(helices):
     dists_same_class = []
-    for _, segments in helices:
-        loc_x = segments['rlnCoordinateX'].values.astype(float)
-        loc_y = segments['rlnCoordinateY'].values.astype(float)
-        psi = segments['rlnAnglePsi'].values.astype(float)
+    for _, segments_all_classes in helices:
+        class_ids = np.unique(segments_all_classes['rlnClassNumber'])
+        for ci in class_ids:
+            mask = segments_all_classes['rlnClassNumber'] == ci
+            segments = segments_all_classes.loc[mask,:] 
+            loc_x = segments['rlnCoordinateX'].values.astype(float)
+            loc_y = segments['rlnCoordinateY'].values.astype(float)
+            psi = segments['rlnAnglePsi'].values.astype(float)
 
-        # Calculate pairwise distances only for segments with the same polarity
-        mask = np.abs((psi[:, None] - psi + 180) % 360 - 180) < 90
-        dx = loc_x[:, None] - loc_x
-        dy = loc_y[:, None] - loc_y
-        distances = np.sqrt(dx**2 + dy**2)
-        distances = distances[mask]
-        dists_same_class.extend(distances[distances > 0])  # Exclude zero distances (self-distances)
+            # Calculate pairwise distances only for segments with the same polarity
+            mask = np.abs((psi[:, None] - psi + 180) % 360 - 180) < 90
+            dx = loc_x[:, None] - loc_x
+            dy = loc_y[:, None] - loc_y
+            distances = np.sqrt(dx**2 + dy**2)
+            distances = distances[mask]
+            dists_same_class.extend(distances[distances > 0])  # Exclude zero distances (self-distances)
     if not dists_same_class:
         return None
     else:
@@ -47,7 +51,7 @@ def get_filament_length(helices, particle_box_length):
         filement_lengths.append(length)
     return filement_lengths
 
-def select_class(params, class_indices):
+def select_classes(params, class_indices):
     class_indices_tmp = np.array(class_indices) + 1
     mask = params["rlnClassNumber"].astype(int).isin(class_indices_tmp)
     particles = params.loc[mask, :]
@@ -330,14 +334,14 @@ def plot_histogram(data, title, xlabel, ylabel, max_pair_dist=None, bins=50, log
         y=hist,
         name='Histogram',
         marker_color='blue',
-        hoverinfo='none'
+        hoverinfo='none',
     )
     
     fig.add_trace(histogram)
         
     hover_text = []
     for i, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
-        hover_info = f"{xlabel}: {center[i]:.2f} ({left:.2f}-{right:.2f})<br>{ylabel}: {hist_linear[i]}"
+        hover_info = f"{xlabel}: {center[i]:.0f} ({left:.0f}-{right:.0f})<br>{ylabel}: {hist_linear[i]}"
         if show_pitch_twist:
             rise = show_pitch_twist["rise"]
             csyms = show_pitch_twist["csyms"]
