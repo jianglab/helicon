@@ -146,21 +146,6 @@ def get_class2d_from_file(classFile):
         data = mrc.data
     return data, round(apix, 4)
 
-def get_class2d_params_from_uploaded_file(fileobj, fileobj_cs_pass_through=None):
-    import os, tempfile
-    orignal_filename = fileobj.name
-    suffix = os.path.splitext(orignal_filename)[-1]
-    with tempfile.NamedTemporaryFile(suffix=suffix) as temp:
-        temp.write(fileobj.read())
-        if fileobj_cs_pass_through is None:
-            return get_class2d_params_from_file(temp.name)
-        else:
-            orignal_filename_cs_pass_through = fileobj_cs_pass_through.name
-            suffix = os.path.splitext(orignal_filename_cs_pass_through)[-1]
-            with tempfile.NamedTemporaryFile(suffix=suffix) as temp_cs_pass_through:
-                temp_cs_pass_through.write(fileobj_cs_pass_through.read())
-                return get_class2d_params_from_file(temp.name, temp_cs_pass_through.name)
-
 @memory.cache
 def get_class2d_params_from_url(url, url_cs_pass_through=None):
     url_final = get_direct_url(url)    # convert cloud drive indirect url to direct url
@@ -178,6 +163,7 @@ def get_class2d_params_from_url(url, url_cs_pass_through=None):
     return data    
 
 def get_class2d_params_from_file(params_file, cryosparc_pass_through_file=None):
+    print(params_file)
     if params_file.endswith(".star"):
         params = star_to_dataframe(params_file)
     elif params_file.endswith(".cs"):

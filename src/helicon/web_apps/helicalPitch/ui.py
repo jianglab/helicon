@@ -25,7 +25,7 @@ def display_app_ui(images=reactive.value([]), image_labels=reactive.value([]), d
                           )
     with ui.panel_conditional("input.input_mode_params === 'upload'"):
       ui.input_file("upload_params", "Upload the class2d parameters in a RELION star or cryoSPARC cs file", 
-                  accept=['.star', '.cs'])
+                  accept=['.star', '.cs'], placeholder="star or cs file")
     
     with ui.panel_conditional("input.input_mode_params === 'url'"):
       ui.input_text("url_params", "Download URL for a RELION star or cryoSPARC cs file", 
@@ -38,7 +38,7 @@ def display_app_ui(images=reactive.value([]), image_labels=reactive.value([]), d
                           )
     with ui.panel_conditional("input.input_mode_classes === 'upload'"):
       ui.input_file("upload_classes", "Upload the class averages in MRC format (.mrcs, .mrc)", 
-                  accept=['.mrcs', '.mrc'])
+                  accept=['.mrcs', '.mrc'], placeholder="mrcs or mrc file")
     
     with ui.panel_conditional("input.input_mode_classes === 'url'"):
       ui.input_text("url_classes", "Download URL for a RELION or cryoSPARC Class2D output mrc(s) file", 
@@ -79,13 +79,14 @@ def display_app_ui(images=reactive.value([]), image_labels=reactive.value([]), d
           @render_plotly
           @reactive.event(selected_helix_lengths)
           def lengths_histogram_display():
+            data = selected_helix_lengths()
             class_indices = [str(displayed_class_ids()[i]+1) for i in selected_classes()]
-            log_y = True
             title = f"Filament Lengths: Class {' '.join(class_indices)}"
             xlabel = "Filament Legnth (Å)"
             ylabel = "# of Filaments"
+            log_y = True
             nbins = 50 #input.bins()
-            fig = compute.plot_histogram(data=selected_helix_lengths(), title=title, xlabel=xlabel, ylabel=ylabel, bins=nbins, log_y=log_y)
+            fig = compute.plot_histogram(data=data, title=title, xlabel=xlabel, ylabel=ylabel, bins=nbins, log_y=log_y)
         
             return fig
 
@@ -101,6 +102,7 @@ def display_app_ui(images=reactive.value([]), image_labels=reactive.value([]), d
       @render_plotly
       @reactive.event(pair_distances)
       def pair_distances_histogram_display():
+        data = pair_distances()
         class_indices = [str(displayed_class_ids()[i]+1) for i in selected_classes()]
         rise = 4.75 #input.rise()
         log_y = True
@@ -108,8 +110,9 @@ def display_app_ui(images=reactive.value([]), image_labels=reactive.value([]), d
         xlabel = "Pair Distance (Å)"
         ylabel = "# of Pairs"
         nbins = 100 #input.bins()
+        max_pair_dist = -1 #input.max_pair_dist()
         
-        fig = compute.plot_histogram(data=pair_distances(), title=title, xlabel=xlabel, ylabel=ylabel, max_pair_dist=None, bins=nbins, log_y=log_y, show_pitch_twist=dict(rise=rise, csyms=(1,2,3,4)), multi_crosshair=True)
+        fig = compute.plot_histogram(data=data, title=title, xlabel=xlabel, ylabel=ylabel, max_pair_dist=max_pair_dist, bins=nbins, log_y=log_y, show_pitch_twist=dict(rise=rise, csyms=(1,2,3,4)), multi_crosshair=True)
 
         return fig
       

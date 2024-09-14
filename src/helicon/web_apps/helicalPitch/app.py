@@ -28,14 +28,50 @@ pair_distances = reactive.value([])
 selected_classes = ui_app.display_app_ui(images=displayed_class_images, image_labels=displayed_class_labels, displayed_class_ids=displayed_class_ids, selected_helix_lengths=selected_helix_lengths, pair_distances=pair_distances)
 
 @reactive.effect
-@reactive.event(input.url_classes)
-def get_class2d_from_url():
-  req(len(input.url_classes())>0)
-  url = input.url_classes()
-  data, apix = compute.get_class2d_from_url(url)
+@reactive.event(input.upload_classes)
+def get_class2d_from_upload():
+  req(input.input_mode_classes()=="upload")
+  fileinfo = input.upload_classes()
+  class_file = fileinfo[0]['datapath']
+  try:
+    data, apix = compute.get_class2d_from_file(class_file)
+    nx = data.shape[-1]
+  except:
+    data, apix = None, 0
+    nx = 0
+    m = ui.modal(
+      f"failed to read the uploaded 2D class average images from {fileinfo[0]['name']}",
+      title="File upload error",
+      easy_close=True,
+      footer=None,
+    )
+    ui.modal_show(m)
   data_all.set(data)
   apix_class.set(apix)
-  image_size.set(data.shape[-1])
+  image_size.set(nx)
+
+@reactive.effect
+@reactive.event(input.url_classes)
+def get_class2d_from_url():
+  req(input.input_mode_classes()=="url")
+  req(len(input.url_classes())>0)
+  url = input.url_classes()
+  try:
+    data, apix = compute.get_class2d_from_url(url)
+    nx = data.shape[-1]
+  except:
+    data, apix = None, 0
+    nx = 0
+    m = ui.modal(
+      f"failed to download 2D class average images from {input.url_classes()}",
+      title="File download error",
+      easy_close=True,
+      footer=None,
+    )
+    ui.modal_show(m)
+  data_all.set(data)
+  apix_class.set(apix)
+  image_size.set(nx)
  
 @reactive.effect
 @reactive.event(params_orig, data_all, input.ignore_blank, input.sort_abundance)
@@ -69,15 +105,60 @@ def get_displayed_class_images():
   displayed_class_images.set(images)
 
 @reactive.effect
-@reactive.event(input.url_params)
-def get_params_from_url():
-  url = input.url_params()
-  tmp_params = compute.get_class2d_params_from_url(url)
+@reactive.event(input.upload_params)
+def get_params_from_upload():
+  req(input.input_mode_params()=="upload")
+  fileinfo = input.upload_params()
+  param_file = fileinfo[0]['datapath']
+  if len(fileinfo)==2:
+    cs_pass_through_file = fileinfo[1]['datapath']
+    assert cs_pass_through_file.endswith(".cs")
+  else:
+    cs_pass_through_file = None
+  try:
+    tmp_params = compute.get_class2d_params_from_file(param_file, cs_pass_through_file)
+  except:
+    tmp_params = None
   params_orig.set(tmp_params)
 
-  apix = compute.get_pixel_size(params_orig(), attrs=["blob/psize_A", "rlnImagePixelSize"])
-  if apix:
-    ui.update_numeric("apix_particle", value=apix)
+  if params_orig() is not None:
+    apix = compute.get_pixel_size(params_orig(), attrs=["blob/psize_A", "rlnImagePixelSize"])
+    if apix:
+      ui.update_numeric("apix_particle", value=apix)
+  else:
+    ui.update_numeric("apix_particle", value=0)
+    m = ui.modal(
+      f"failed to parse the upload class2D parameters from {fileinfo[0]['name']}",
+      title="File upload error",
+      easy_close=True,
+      footer=None,
+    )
+    ui.modal_show(m)
+
+@reactive.effect
+@reactive.event(input.url_params)
+def get_params_from_url():
+  req(input.input_mode_params()=="url")
+  url = input.url_params()
+  try:
+    tmp_params = compute.get_class2d_params_from_url(url)
+  except:
+    tmp_params = None
+  params_orig.set(tmp_params)
+
+  if params_orig() is not None:
+    apix = compute.get_pixel_size(params_orig(), attrs=["blob/psize_A", "rlnImagePixelSize"])
+    if apix:
+      ui.update_numeric("apix_particle", value=apix)
+  else:
+    ui.update_numeric("apix_particle", value=0)
+    m = ui.modal(
+      f"failed to download class2D parameters from {input.url_params()}",
+      title="File download error",
+      easy_close=True,
+      footer=None,
+    )
+    ui.modal_show(m)
 
 @reactive.effect
 @reactive.event(params_orig)
