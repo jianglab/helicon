@@ -14,6 +14,7 @@ apix_micrograph = reactive.value(0)
 apix_particle = reactive.value(0)
 
 data_all = reactive.value(None)
+abundance = reactive.value([])
 apix_class = reactive.value(0)
 image_size = reactive.value(0)
 
@@ -25,8 +26,7 @@ selected_image_indices = reactive.value([])
 selected_images = reactive.value([])
 selected_image_labels = reactive.value([])
 
-selected_helices = reactive.value([])
-selected_helix_lengths = reactive.value([])
+selected_helices = reactive.value(([],[],0))
 retained_helices_by_length = reactive.value([])
 pair_distances = reactive.value([])
 
@@ -142,14 +142,15 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
         with ui.layout_columns(col_widths=[12, 12], style="align-items: flex-end;"):
 
             @render_plotly
-            @reactive.event(selected_helix_lengths, input.bins)
+            @reactive.event(selected_helices, input.bins)
             def lengths_histogram_display():
-                data = selected_helix_lengths()
+                helices, lengths, count = selected_helices()
+                data = lengths
                 class_indices = [
                     str(displayed_class_ids()[i] + 1)
                     for i in selected_image_indices()
                 ]
-                title = f"Filament Lengths: Class {' '.join(class_indices)}"
+                title = f"Filament Lengths: Class {' '.join(class_indices)}<br>{len(helices):,} filaments | {count:,} segments"
                 xlabel = "Filament Legnth (Å)"
                 ylabel = "# of Filaments"
                 log_y = True
@@ -302,13 +303,14 @@ def get_displayed_class_images():
     data = data_all()
     n = len(data)
     images = [data[i] for i in range(n)]
+    image_size.set(max(images[0].shape))
 
     df = params_orig()
-    abundance = compute.get_class_abundance(df, n)
+    abundance.set( compute.get_class_abundance(df, n) )
 
     display_seq_all = np.arange(n, dtype=int)
     if input.sort_abundance():
-        display_seq_all = np.argsort(abundance)[::-1]
+        display_seq_all = np.argsort(abundance())[::-1]
 
     if input.ignore_blank():
         included = []
@@ -319,12 +321,11 @@ def get_displayed_class_images():
         images = [images[i] for i in included]
     else:
         included = display_seq_all
-    image_labels = [f"{i+1}: {abundance[i]:,d}" for i in included]
+    image_labels = [f"{i+1}: {abundance()[i]:,d}" for i in included]
 
     displayed_class_ids.set(included)
     displayed_class_labels.set(image_labels)
     displayed_class_images.set(images)
-    image_size.set(max(images[0].shape))
 
 
 @reactive.effect
@@ -420,37 +421,36 @@ def update_particle_locations():
 @reactive.event(selected_image_indices, params_work)
 def get_selected_helices():
     req(params_work() is not None)
-    class_indices = [displayed_class_ids()[i] for i in selected_image_indices()]
-    helices = compute.select_class(params=params_work(), class_indices=class_indices)
-    selected_helices.set(helices)
-
-
-@reactive.effect
-@reactive.event(selected_helices)
-def get_selected_helix_lengths():
     req(input.apix_particle())
     req(image_size())
-    if len(selected_helices()):
+    req(len(abundance()))
+    class_indices = [displayed_class_ids()[i] for i in selected_image_indices()]
+    helices = compute.select_class(params=params_work(), class_indices=class_indices)
+
+    if len(helices):
         filement_lengths = compute.get_filament_length(
-            helices=selected_helices(),
+            helices=helices,
             particle_box_length=input.apix_particle() * image_size(),
         )
-        selected_helix_lengths.set(filement_lengths)
+        segments_count = np.sum([abundance()[i] for i in class_indices])
     else:
-        selected_helix_lengths.set([])
+        filement_lengths = []
+        segments_count = 0
 
+    selected_helices.set((helices, filement_lengths, segments_count))
 
 @reactive.effect
 @reactive.event(selected_helices, input.min_len, input.max_len)
 def select_helices_by_length():
-    if len(selected_helices()) == 0:
+    helices, filement_lengths, segments_count = selected_helices()
+    if len(helices) == 0:
         retained_helices_by_length.set([])
     elif input.min_len() == 0 and input.max_len() <= 0:
-        retained_helices_by_length.set(selected_helices())
+        retained_helices_by_length.set(helices)
     else:
         helices_retained, n_ptcls = compute.select_helices_by_length(
-            helices=selected_helices(),
-            lengths=selected_helix_lengths(),
+            helices=helices,
+            lengths=filement_lengths,
             min_len=input.min_len(),
             max_len=input.max_len(),
         )
