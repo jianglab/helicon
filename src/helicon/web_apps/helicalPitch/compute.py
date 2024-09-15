@@ -353,9 +353,11 @@ def plot_histogram(data, title, xlabel, ylabel, max_pair_dist=None, bins=50, log
     fig.data[0].text = hover_text
     fig.data[0].hoverinfo = 'text' 
     fig.update_layout(
-        title_text=title, 
+        title_text=title,
         title_x=0.5,
         title_font=dict(size=12),
+        xaxis_title=xlabel, 
+        yaxis_title=ylabel,
         hoverlabel=dict(
             bgcolor="white",
             font_size=12

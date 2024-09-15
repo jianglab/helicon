@@ -163,9 +163,34 @@ def main(args):
                 group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))               
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")             
     
-    if args.save_local:
+        elif option_name == "splitByMicrograph" and param:
+            col_mid = 'location/micrograph_uid'
+            mids = np.unique(data[col_mid])
+            masks = [data[col_mid] == mid for mid in mids]
+            counts = [np.sum(m) for m in masks]  
+            group1, group2 = helicon.split_array(counts)
+
+            col_split = 'alignments3D/split'
+            if col_split not in data:
+                data.add_fields([col_split], ['u4'])
+
+            for gi, g in enumerate([group1, group2]):
+                for mid_index in g:
+                    data[col_split][masks[mid_index]] = gi
+            
+            output_slots.add("alignments3D")
+            output_title += f"->per-micrograph split"
+
+            if args.verbose>1:
+                print(f"\twhole  dataset: {len(mids)} micrographs, {len(data)} particles")             
+                print(f"\thalf dataset 1: {len(group1)} micrographs, {np.sum(data[col_split]==0)} particles")             
+                print(f"\thalf dataset 2: {len(group2)} micrographs, {np.sum(data[col_split]==1)} particles")             
+
+    if args.save_local :
         output_file = f"{args.project_id}_{args.workspace_id}_{args.job_id}" + output_title + ".cs"
         output_file = '-'.join(output_file.split())
+        output_file = output_file.replace(" ", "-")
+        output_file = output_file.replace("->", "_")
         data.save(output_file)
         if args.verbose>1:
             print(f"The results are saved to {output_file}")
@@ -194,7 +219,9 @@ def add_args(parser):
                         help="assign images to exposure groups according to data collection time, n movies per group. disabled by default", default=-1)
     parser.add_argument("--assignExposureGroupPerMicrograph", type=bool, metavar="<0|1>",
                         help="assign images to exposure groups, one group per micrograph. default to 0", default=0)
-    parser.add_argument("--save_local", type=bool, metavar="<0|1>", help="save results to a local cs file instead of creating a new external job on the CryoSPARC server. default to 0", default=0)
+    parser.add_argument("--splitByMicrograph", type=bool, metavar="<0|1>",
+                        help="split the dataset by micrograph. default to 0", default=0)
+    parser.add_argument("--save_local", type=int, metavar="<0|1>", help="save results to a local cs file instead of creating a new external job on the CryoSPARC server. default to 0", default=0)
     parser.add_argument("--verbose", type=int, metavar="<0|1>", help="verbose mode. default to 2", default=3)
     parser.add_argument("--cpu", type=int, metavar="<n>", help="number of cpus to use. default to 1", default=1)
 

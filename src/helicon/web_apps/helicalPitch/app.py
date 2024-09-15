@@ -158,7 +158,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                     str(displayed_class_ids()[i] + 1)
                     for i in selected_image_indices()
                 ]
-                title = f"Filament Lengths: Class {' '.join(class_indices)}<br>{len(helices):,} filaments | {count:,} segments"
+                title = f"Filament Lengths: Class {' '.join(class_indices)}<br><i>{len(helices):,} filaments | {count:,} segments</i>"
                 xlabel = "Filament Legnth (Å)"
                 ylabel = "# of Filaments"
                 log_y = True
@@ -232,7 +232,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             ]
             rise = input.rise()
             log_y = True
-            title = f"Pair Distances: Class {' '.join(class_indices)}"
+            title = f"Pair Distances: Class {' '.join(class_indices)}<br><i>{len(pair_distances()):,} segment pairs"
             xlabel = "Pair Distance (Å)"
             ylabel = "# of Pairs"
             nbins = input.bins()
@@ -253,7 +253,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             return fig
 
         ui.markdown(
-            "**How to interpretate the histogram:** an informative histogram should have clear peaks with equal spacing. If so, hover your mouse pointer to the first major peak off the origin to align the vertial lines well with the peaks. Once you have decided on the line postion, read the hover text which shows the twist values assuming the pair-distance is the helical pitch (adjusted for the cyclic symmetries around the helical axis). You need to decide which cyclic symmetry and the corresponding twist should be used.  \nIf the histogram does not show clear peaks, it indicates that the Class2D quality is bad. You might consider changing the 'Minimal length (Å)' from 0 to a larger value (for example, 1000 Å) to improve the peaks in the histogram. If that does not help, you might consider redoing the Class2D task with longer extracted segments (>0.5x helical pitch) from longer filaments (> 1x pitch)"
+            "**How to interpretate the histogram:** an informative histogram should have clear peaks with equal spacing. If so, hover your mouse pointer to the first major peak off the origin to align the vertial lines well with the peaks. Once you have decided on the line postion, read the hover text which shows the twist values assuming the pair-distance is the helical pitch (adjusted for the cyclic symmetries around the helical axis). You need to decide which cyclic symmetry and the corresponding twist should be used.  \n&nbsp;&nbsp;&nbsp;&nbsp;If the histogram does not show clear peaks, it indicates that the Class2D quality is bad. You might consider changing the 'Minimal length (Å)' from 0 to a larger value (for example, 1000 Å) to improve the peaks in the histogram. If that does not help, you might consider redoing the Class2D task with longer extracted segments (>0.5x helical pitch) from longer filaments (> 1x pitch)."
         )
 
     ui.markdown(

@@ -1,4 +1,4 @@
-import sys, os, time, datetime
+import sys, os, time, datetime, random
 import numpy as np
 
 def import_with_auto_install(packages, scope=locals()):
@@ -337,6 +337,48 @@ def order_by_unique_counts(labels, ignoreNegative=True):   # decreasing order
         mapping = {unique[v]:i for i, v in enumerate(order)}
     ret = [mapping[v] for v in labels]
     return ret
+
+def split_array(arr):
+    '''Split an unordered array into two groups but minimize the difference of the group sums. Return the group indices'''
+    total_sum = sum(arr)
+    target_sum = total_sum // 2
+    n = len(arr)
+
+    # Create a 2D DP table
+    dp = [[False for _ in range(target_sum + 1)] for _ in range(n + 1)]
+    
+    # Initialize the first column
+    for i in range(n + 1):
+        dp[i][0] = True
+    
+    # Fill the DP table
+    for i in range(1, n + 1):
+        for j in range(1, target_sum + 1):
+            if arr[i-1] <= j:
+                dp[i][j] = dp[i-1][j] or dp[i-1][j-arr[i-1]]
+            else:
+                dp[i][j] = dp[i-1][j]
+    
+    # Find the largest sum <= target_sum that can be achieved
+    achieved_sum = 0
+    for j in range(target_sum, -1, -1):
+        if dp[n][j]:
+            achieved_sum = j
+            break
+    
+    # Backtrack to find the elements in the first group
+    group1 = []
+    i, j = n, achieved_sum
+    while i > 0 and j > 0:
+        if not dp[i-1][j]:
+            group1.append(i-1)
+            j -= arr[i-1]
+        i -= 1
+    
+    # The second group consists of all elements not in the first group
+    group2 = [i for i in range(n) if i not in group1]
+    
+    return group1, group2
 
 def set_angle_range(angle, range=[-180, 180]):
     v0, v1 = range[0], range[-1]
