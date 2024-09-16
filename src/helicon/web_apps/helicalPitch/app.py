@@ -38,7 +38,7 @@ ui.tags.style(
     input[type="text"].form-control, input[type="number"].form-control, .form-control, .selectize-input, .shiny-input-container, .form-group, .irs, .radio, .radio-inline, .selectize-control, label, .radio label, .radio-inline label, .accordion-button, .accordion-body, .shiny-text-output, .shiny-html-output, .shiny-output-error {font-size: 10pt; margin: 0; padding: 0; }
     """
 )
-
+helicon.shiny.google_analytics(id="G-998MGRETTF")
 
 with ui.sidebar(width=456):
     ui.input_radio_buttons(
@@ -84,6 +84,8 @@ with ui.sidebar(width=456):
             "Download URL for a RELION or cryoSPARC Class2D output mrc(s) file",
             value="https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/768px/run_it020_classes.mrcs",
         )
+        
+    ui.input_task_button("run", label="Run")
 
     with ui.div(style="max-height: 40vh; overflow-y: auto;"):
         selected_image_indices = helicon.shiny.image_select(
@@ -103,10 +105,6 @@ with ui.sidebar(width=456):
             selected_image_labels.set(
                 [displayed_class_labels()[i] for i in selected_image_indices()]
             )
-
-    with ui.layout_columns(col_widths=[6, 6]):
-        ui.input_checkbox("ignore_blank", "Ignore blank classes", value=True)
-        ui.input_checkbox("sort_abundance", "Sort the classes by abundance", value=True)
 
     with ui.layout_columns(col_widths=[6, 6], style="align-items: flex-end;"):
         ui.input_numeric(
@@ -189,6 +187,13 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                 with ui.accordion(id="additional_parameters", open=False):
                     with ui.accordion_panel(title="Additional parameters:"):
                         with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
+                            ui.input_checkbox(
+                                "ignore_blank", "Ignore blank classes", 
+                                value=True
+                            )
+                            ui.input_checkbox(
+                                "sort_abundance", "Sort the classes by abundance",    value=True
+                            )
                             ui.input_numeric(
                                 "max_len", "Maximal length (Å)", min=-1, value=-1, step=1.0
                             )
@@ -262,7 +267,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
 
 
 @reactive.effect
-@reactive.event(input.upload_classes)
+@reactive.event(input.run)
 def get_class2d_from_upload():
     req(input.input_mode_classes() == "upload")
     fileinfo = input.upload_classes()
@@ -286,7 +291,7 @@ def get_class2d_from_upload():
 
 
 @reactive.effect
-@reactive.event(input.url_classes)
+@reactive.event(input.run)
 def get_class2d_from_url():
     req(input.input_mode_classes() == "url")
     req(len(input.url_classes()) > 0)
@@ -319,8 +324,18 @@ def get_displayed_class_images():
     images = [data[i] for i in range(n)]
     image_size.set(max(images[0].shape))
 
-    df = params_orig()
-    abundance.set( compute.get_class_abundance(df, n) )
+    try:
+      df = params_orig()
+      abundance.set( compute.get_class_abundance(df, n) )
+    except:
+        m = ui.modal(
+            f"Failed to get class abundance from the provided Class2D parameter and  image files. Make sure that the two files are for the same Class2D job",
+            title="Information error",
+            easy_close=True,
+            footer=None,
+        )
+        ui.modal_show(m)
+        return None
 
     display_seq_all = np.arange(n, dtype=int)
     if input.sort_abundance():
@@ -343,7 +358,7 @@ def get_displayed_class_images():
 
 
 @reactive.effect
-@reactive.event(input.upload_params)
+@reactive.event(input.run)
 def get_params_from_upload():
     req(input.input_mode_params() == "upload")
     fileinfo = input.upload_params()
@@ -379,7 +394,7 @@ def get_params_from_upload():
 
 
 @reactive.effect
-@reactive.event(input.url_params)
+@reactive.event(input.run)
 def get_params_from_url():
     req(input.input_mode_params() == "url")
     url = input.url_params()

@@ -167,7 +167,6 @@ def get_class2d_params_from_url(url, url_cs_pass_through=None):
     return data    
 
 def get_class2d_params_from_file(params_file, cryosparc_pass_through_file=None):
-    print(params_file)
     if params_file.endswith(".star"):
         params = star_to_dataframe(params_file)
     elif params_file.endswith(".cs"):
@@ -341,7 +340,7 @@ def plot_histogram(data, title, xlabel, ylabel, max_pair_dist=None, bins=50, log
         
     hover_text = []
     for i, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
-        hover_info = f"{xlabel}: {center[i]:.0f} ({left:.0f}-{right:.0f})<br>{ylabel}: {hist_linear[i]}"
+        hover_info = f"{xlabel.replace(" (Å)", "")}: {center[i]:.0f} ({left:.0f}-{right:.0f})Å<br>{ylabel}: {hist_linear[i]}"
         if show_pitch_twist:
             rise = show_pitch_twist["rise"]
             csyms = show_pitch_twist["csyms"]

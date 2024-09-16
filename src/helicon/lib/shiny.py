@@ -1,5 +1,5 @@
 from shiny import reactive
-from shiny.express import ui, module, render
+from shiny.express import ui, module, render, expressify
 
 
 @module
@@ -103,7 +103,7 @@ def image_select(
                             this.setAttribute('click_count', count);
                             //Shiny.setInputValue(bid, count, {{priority: 'deferred'}});
                             Shiny.setInputValue(bid + '_click', info, {{priority: 'deferred'}});
-                            console.log("click", bid, parseInt(this.getAttribute('click_count')), info);
+                            //console.log("click", bid, parseInt(this.getAttribute('click_count')), info);
                         """,
             )
 
@@ -179,3 +179,20 @@ def image_select(
         return None
     else:
         return selection
+
+
+@expressify
+def google_analytics(id):
+    ui.head_content(
+        ui.HTML(
+            f"""
+            <script async src="https://www.googletagmanager.com/gtag/js?id={id}"></script>
+            <script>
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){{dataLayer.push(arguments);}}
+            gtag('js', new Date());
+            gtag('config', '{id}');
+            </script>
+            """
+        )
+    )

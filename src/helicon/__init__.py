@@ -1,4 +1,4 @@
-__version__ = "2024.7"
+__version__ = "2024.09"
 
 from .lib.io import *
 from .lib.util import *
