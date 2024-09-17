@@ -317,7 +317,7 @@ def plot_histogram(data, title, xlabel, ylabel, max_pair_dist=None, bins=50, log
     import plotly.graph_objects as go
 
     if max_pair_dist is not None and max_pair_dist > 0:
-        data = data[data <= max_pair_dist]
+        data = [d for d in data if d <= max_pair_dist]
     
     hist, edges = np.histogram(data, bins=bins)
     hist_linear = hist
@@ -357,6 +357,7 @@ def plot_histogram(data, title, xlabel, ylabel, max_pair_dist=None, bins=50, log
         title_font=dict(size=12),
         xaxis_title=xlabel, 
         yaxis_title=ylabel,
+        hovermode="closest",
         hoverlabel=dict(
             bgcolor="white",
             font_size=12

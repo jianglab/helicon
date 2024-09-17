@@ -195,6 +195,9 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                                 "sort_abundance", "Sort the classes by abundance",    value=True
                             )
                             ui.input_numeric(
+                                "auto_min_len", "Auto-set minimal filament length to this percentile of the lengths", min=0, max=100, value=95, step=1.0
+                            )
+                            ui.input_numeric(
                                 "max_len", "Maximal length (Å)", min=-1, value=-1, step=1.0
                             )
                             ui.input_numeric(
@@ -327,7 +330,8 @@ def get_displayed_class_images():
     try:
       df = params_orig()
       abundance.set( compute.get_class_abundance(df, n) )
-    except:
+    except Exception:
+        print(Exception)
         m = ui.modal(
             f"Failed to get class abundance from the provided Class2D parameter and  image files. Make sure that the two files are for the same Class2D job",
             title="Information error",
@@ -468,9 +472,21 @@ def get_selected_helices():
 
     selected_helices.set((helices, filement_lengths, segments_count))
 
+
+@reactive.effect
+@reactive.event(selected_helices, input.auto_min_len)
+def auto_set_filament_min_len():
+  req(len(selected_helices()[0])>0)
+  req(input.auto_min_len() is not None and 0<=input.auto_min_len()<100)
+  if selected_helices()[-1]>0 and 0<=input.auto_min_len()<100:
+    helices, filament_lengths, segments_count = selected_helices()
+    min_len = round(np.percentile(filament_lengths, input.auto_min_len()))
+    ui.update_numeric("min_len", value=min_len)  
+
 @reactive.effect
 @reactive.event(selected_helices, input.min_len, input.max_len)
 def select_helices_by_length():
+    req(len(selected_helices()[0])>0)
     helices, filement_lengths, segments_count = selected_helices()
     if len(helices) == 0:
         retained_helices_by_length.set([])
