@@ -22,6 +22,7 @@ displayed_class_ids = reactive.value([])
 displayed_class_images = reactive.value([])
 displayed_class_labels = reactive.value([])
 
+min_len = reactive.value(0)
 selected_image_indices = reactive.value([])
 selected_images = reactive.value([])
 selected_image_labels = reactive.value([])
@@ -192,10 +193,10 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                                 value=True
                             )
                             ui.input_checkbox(
-                                "sort_abundance", "Sort the classes by abundance",    value=True
+                                "sort_abundance", "Sort the classes by abundance", value=True
                             )
-                            ui.input_numeric(
-                                "auto_min_len", "Auto-set minimal filament length to this percentile of the lengths", min=0, max=100, value=95, step=1.0
+                            ui.input_checkbox(
+                                "auto_min_len", "Auto-set minimal filament length", value=True
                             )
                             ui.input_numeric(
                                 "max_len", "Maximal length (Å)", min=-1, value=-1, step=1.0
@@ -231,16 +232,18 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
         @render_plotly
         @reactive.event(pair_distances, input.bins, input.max_pair_dist, input.rise)
         def pair_distances_histogram_display():
+            req(len(pair_distances())>0)
             req(input.bins() is not None and input.bins()>0)
             req(input.max_pair_dist() is not None)
             req(input.rise() is not None and input.rise()>0)
             data = pair_distances()
+            segment_count = np.sum([len(h) for hi, h in retained_helices_by_length()])
             class_indices = [
                 str(displayed_class_ids()[i] + 1) for i in selected_image_indices()
             ]
             rise = input.rise()
             log_y = True
-            title = f"Pair Distances: Class {' '.join(class_indices)}<br><i>{len(pair_distances()):,} segment pairs"
+            title = f"Pair Distances: Class {' '.join(class_indices)}<br><i>{len(retained_helices_by_length())} filaments | {segment_count:,} segments | {len(pair_distances()):,} segment pairs"
             xlabel = "Pair Distance (Å)"
             ylabel = "# of Pairs"
             nbins = input.bins()
@@ -472,35 +475,42 @@ def get_selected_helices():
 
     selected_helices.set((helices, filement_lengths, segments_count))
 
+@reactive.effect
+@reactive.event(input.min_len)
+def get_filament_min_len():
+    min_len.set(input.min_len())
 
 @reactive.effect
 @reactive.event(selected_helices, input.auto_min_len)
 def auto_set_filament_min_len():
+  req(input.auto_min_len() is True)
   req(len(selected_helices()[0])>0)
-  req(input.auto_min_len() is not None and 0<=input.auto_min_len()<100)
-  if selected_helices()[-1]>0 and 0<=input.auto_min_len()<100:
-    helices, filament_lengths, segments_count = selected_helices()
-    min_len = round(np.percentile(filament_lengths, input.auto_min_len()))
-    ui.update_numeric("min_len", value=min_len)  
+  helices, filament_lengths, segments_count = selected_helices()
+  helices_retained, indices_retained, n_ptcls, n_pairs = compute.select_helices_by_pair_counts(
+                helices=helices,
+                lengths=filament_lengths,
+                target_total_count=1500
+            )
+  min_len_tmp = np.floor(np.min([filament_lengths[i] for i in indices_retained]))
+  ui.update_numeric("min_len", value=min_len_tmp)  
 
 @reactive.effect
-@reactive.event(selected_helices, input.min_len, input.max_len)
+@reactive.event(selected_helices, min_len, input.max_len)
 def select_helices_by_length():
     req(len(selected_helices()[0])>0)
-    helices, filement_lengths, segments_count = selected_helices()
+    helices, filement_lengths, _ = selected_helices()
     if len(helices) == 0:
         retained_helices_by_length.set([])
-    elif input.min_len() == 0 and input.max_len() <= 0:
+    elif min_len() == 0 and input.max_len() <= 0:
         retained_helices_by_length.set(helices)
     else:
         helices_retained, n_ptcls = compute.select_helices_by_length(
             helices=helices,
             lengths=filement_lengths,
-            min_len=input.min_len(),
+            min_len=min_len(),
             max_len=input.max_len(),
         )
         retained_helices_by_length.set(helices_retained)
-
 
 @reactive.effect
 @reactive.event(retained_helices_by_length)
