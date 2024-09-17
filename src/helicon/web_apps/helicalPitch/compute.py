@@ -17,17 +17,38 @@ def compute_pair_distances(helices):
             loc_y = segments['rlnCoordinateY'].values.astype(float)
             psi = segments['rlnAnglePsi'].values.astype(float)
 
-            # Calculate pairwise distances only for segments with the same polarity
-            mask = np.abs((psi[:, None] - psi + 180) % 360 - 180) < 90
             dx = loc_x[:, None] - loc_x
             dy = loc_y[:, None] - loc_y
             distances = np.sqrt(dx**2 + dy**2)
+            distances = np.triu(distances)
+
+            # Calculate pairwise distances only for segments with the same polarity
+            mask = np.abs((psi[:, None] - psi + 180) % 360 - 180) < 90
             distances = distances[mask]
             dists_same_class.extend(distances[distances > 0])  # Exclude zero distances (self-distances)
     if not dists_same_class:
         return None
     else:
         return np.sort(dists_same_class)
+
+def select_helices_by_pair_counts(helices, lengths, target_total_count=1000):
+    '''select helices with most segments'''
+    segment_counts = [len(g) for gi, g in helices]
+    sorted_indices = (np.argsort(lengths))[::-1]
+    helices_retained = []
+    indices_retained = []
+    n_ptcls = 0
+    n_pairs = 0
+    for i in sorted_indices:
+        count = segment_counts[i]
+        n_ptcls += count
+        n_pairs += count*(count+1)/2
+        helices_retained.append(helices[i])
+        indices_retained.append(i)
+        if n_pairs>target_total_count:
+            break
+        
+    return helices_retained, indices_retained, n_ptcls, n_pairs
 
 def select_helices_by_length(helices, lengths, min_len, max_len):
     min_len = 0 if min_len is None else min_len
