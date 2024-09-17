@@ -193,11 +193,14 @@ def star_to_dataframe(starFile):
     else:
         optics = None
 
+    attrs_to_keep = "rlnImageName rlnMicrographName rlnImagePixelSize rlnCoordinateX rlnCoordinateY rlnHelicalTrackLengthAngst rlnHelicalTubeID rlnClassNumber rlnOriginX rlnOriginY rlnAnglePsi".split()
     data = pd.DataFrame()
     for item in star[-1]:
         for tag in item.loop.tags:
             value = star[-1].find_loop(tag)
-            data[tag.strip('_')] = np.array(value)
+            tag = tag.strip('_')
+            if tag in attrs_to_keep:
+                data[tag] = np.array(value)
     
     if optics is not None:
         data.attrs["optics"] = optics
