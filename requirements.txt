@@ -14,5 +14,5 @@ rich
 scikit-image
 scikit-learn
 scipy
-streamlit<1.36
+streamlit==1.38.0
 tqdm
