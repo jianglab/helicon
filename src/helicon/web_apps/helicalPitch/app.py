@@ -98,15 +98,6 @@ with ui.sidebar(width=456):
             auto_select_first=True,
         )
 
-        @reactive.effect
-        def _():
-            selected_images.set(
-                [displayed_class_images()[i] for i in selected_image_indices()]
-            )
-            selected_image_labels.set(
-                [displayed_class_labels()[i] for i in selected_image_indices()]
-            )
-
     with ui.layout_columns(col_widths=[6, 6], style="align-items: flex-end;"):
         ui.input_numeric(
             "apix_particle",
@@ -319,7 +310,6 @@ def get_class2d_from_url():
     apix_class.set(apix)
     image_size.set(nx)
 
-
 @reactive.effect
 @reactive.event(params_orig, data_all, input.ignore_blank, input.sort_abundance)
 def get_displayed_class_images():
@@ -486,13 +476,8 @@ def auto_set_filament_min_len():
   req(input.auto_min_len() is True)
   req(len(selected_helices()[0])>0)
   helices, filament_lengths, segments_count = selected_helices()
-  helices_retained, indices_retained, n_ptcls, n_pairs = compute.select_helices_by_pair_counts(
-                helices=helices,
-                lengths=filament_lengths,
-                target_total_count=1500
-            )
-  min_len_tmp = np.floor(np.min([filament_lengths[i] for i in indices_retained]))
-  ui.update_numeric("min_len", value=min_len_tmp)  
+  _, min_len_tmp = compute.compute_pair_distances(helices=helices, lengths=filament_lengths, target_total_count=1000)
+  ui.update_numeric("min_len", value=np.floor(min_len_tmp))
 
 @reactive.effect
 @reactive.event(selected_helices, min_len, input.max_len)
@@ -516,7 +501,7 @@ def select_helices_by_length():
 @reactive.event(retained_helices_by_length)
 def get_pair_lengths():
     if len(retained_helices_by_length()):
-        dists = compute.compute_pair_distances(helices=retained_helices_by_length())
+        dists, _ = compute.compute_pair_distances(helices=retained_helices_by_length())
         pair_distances.set(dists)
     else:
         pair_distances.set([])

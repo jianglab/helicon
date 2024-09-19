@@ -6,9 +6,15 @@ from joblib import Memory
 username = os.getenv('USER')
 memory = Memory(location=f'/tmp/{username}_joblib_cache', verbose=0)
 
-def compute_pair_distances(helices):
+def compute_pair_distances(helices, lengths=None, target_total_count=-1):
+    if lengths is not None:
+        sorted_indices = (np.argsort(lengths))[::-1]
+    else:
+        sorted_indices = range(len(helices))
+    min_len = 0
     dists_same_class = []
-    for _, segments_all_classes in helices:
+    for i in sorted_indices:
+        _, segments_all_classes = helices[i]
         class_ids = np.unique(segments_all_classes['rlnClassNumber'])
         for ci in class_ids:
             mask = segments_all_classes['rlnClassNumber'] == ci
@@ -26,29 +32,13 @@ def compute_pair_distances(helices):
             mask = np.abs((psi[:, None] - psi + 180) % 360 - 180) < 90
             distances = distances[mask]
             dists_same_class.extend(distances[distances > 0])  # Exclude zero distances (self-distances)
-    if not dists_same_class:
-        return None
-    else:
-        return np.sort(dists_same_class)
-
-def select_helices_by_pair_counts(helices, lengths, target_total_count=1000):
-    '''select helices with most segments'''
-    segment_counts = [len(g) for gi, g in helices]
-    sorted_indices = (np.argsort(lengths))[::-1]
-    helices_retained = []
-    indices_retained = []
-    n_ptcls = 0
-    n_pairs = 0
-    for i in sorted_indices:
-        count = segment_counts[i]
-        n_ptcls += count
-        n_pairs += count*(count+1)/2
-        helices_retained.append(helices[i])
-        indices_retained.append(i)
-        if n_pairs>target_total_count:
+        if lengths is not None and target_total_count>0 and len(dists_same_class)>target_total_count:
+            min_len = lengths[i]
             break
-        
-    return helices_retained, indices_retained, n_ptcls, n_pairs
+    if not dists_same_class:
+        return [], 0
+    else:
+        return np.sort(dists_same_class), min_len
 
 def select_helices_by_length(helices, lengths, min_len, max_len):
     min_len = 0 if min_len is None else min_len
