@@ -232,7 +232,6 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
         @render_plotly
         @reactive.event(pair_distances, input.bins, input.max_pair_dist, input.rise)
         def pair_distances_histogram_display():
-            req(len(pair_distances())>0)
             req(input.bins() is not None and input.bins()>0)
             req(input.max_pair_dist() is not None)
             req(input.rise() is not None and input.rise()>0)
@@ -267,16 +266,23 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             "**How to interpretate the histogram:** an informative histogram should have clear peaks with equal spacing. If so, hover your mouse pointer to the first major peak off the origin to align the vertial lines well with the peaks. Once you have decided on the line postion, read the hover text which shows the twist values assuming the pair-distance is the helical pitch (adjusted for the cyclic symmetries around the helical axis). You need to decide which cyclic symmetry and the corresponding twist should be used.  \n&nbsp;&nbsp;&nbsp;&nbsp;If the histogram does not show clear peaks, it indicates that the Class2D quality is bad. You might consider changing the 'Minimal length (Å)' from 0 to a larger value (for example, 1000 Å) to improve the peaks in the histogram. If that does not help, you might consider redoing the Class2D task with longer extracted segments (>0.5x helical pitch) from longer filaments (> 1x pitch)."
         )
         
-        @render.download(label="Download selected helices", filename="helices.star")
-        def download_retained_helices():
-            req(retained_helices_by_length())
-            indices = np.concatenate([h.index for hi, h in retained_helices_by_length()])
-            params_to_save = params_orig().iloc[indices]
-            import io
-            output = io.StringIO()
-            helicon.dataframe2star(params_to_save, output)
-            output.seek(0)
-            yield output.read()
+        @render.ui
+        def _():
+            if len(pair_distances())>0:                
+                download_ui = render.download(label="Download selected helices", filename="helices.star")
+                @download_ui
+                def download_retained_helices():
+                    req(retained_helices_by_length())
+                    indices = np.concatenate([h.index for hi, h in retained_helices_by_length()])
+                    params_to_save = params_orig().iloc[indices]
+                    import io
+                    output = io.StringIO()
+                    helicon.dataframe2star(params_to_save, output)
+                    output.seek(0)
+                    yield output.read()
+                return download_ui
+            else:
+                return None
 
     ui.markdown(
         "*Developed by the [Jiang Lab@Purdue University](https://jiang.bio.purdue.edu/HelicalPitch). Report problems to [HelicalPitch@GitHub](https://github.com/jianglab/HelicalPitch/issues)*"
@@ -496,15 +502,11 @@ def get_filament_min_len():
 @reactive.event(selected_helices, input.auto_min_len)
 def auto_set_filament_min_len():
   req(input.auto_min_len() is True)
-  req(len(selected_helices()[0])>0)
   helices, filament_lengths, segments_count = selected_helices()
   _, min_len_tmp = compute.compute_pair_distances(helices=helices, lengths=filament_lengths, target_total_count=1000)
   ui.update_numeric("min_len", value=np.floor(min_len_tmp))
 
-@reactive.effect
-@reactive.event(selected_helices, min_len, input.max_len)
-def select_helices_by_length():
-    req(len(selected_helices()[0])>0)
+def __select_helices_by_length():
     helices, filement_lengths, _ = selected_helices()
     if len(helices) == 0:
         retained_helices_by_length.set([])
@@ -518,6 +520,18 @@ def select_helices_by_length():
             max_len=input.max_len(),
         )
         retained_helices_by_length.set(helices_retained)
+
+@reactive.effect
+@reactive.event(min_len, input.max_len)
+def select_helices_by_length_with_auto_min_len():
+    req(input.auto_min_len())
+    __select_helices_by_length()
+
+@reactive.effect
+@reactive.event(selected_helices, min_len, input.max_len)
+def select_helices_by_length_without_auto_min_len():
+    req(not input.auto_min_len())
+    __select_helices_by_length()
     
 @reactive.effect
 @reactive.event(retained_helices_by_length)
@@ -527,3 +541,4 @@ def get_pair_lengths():
         pair_distances.set(dists)
     else:
         pair_distances.set([])
+
