@@ -6,6 +6,8 @@ import argparse, math, os, sys, types
 from pathlib import Path
 import numpy as np
 import pandas as pd
+pd.options.mode.copy_on_write = True
+
 import helicon
 
 def main(args):
@@ -16,7 +18,7 @@ def main(args):
     data = helicon.images2dataframe(args.input_imageFiles, csparc_passthrough_files=args.csparcPassthroughFiles, alternative_folders=args.folder, ignore_bad_particle_path=args.ignoreBadParticlePath, ignore_bad_micrograph_path=args.ignoreBadMicrographPath, warn_missing_ctf=1, target_convention="relion")
 
     try:
-        optics = data.meta.optics
+        optics = data.attrs["optics"]
     except:
         optics = None
 
@@ -576,7 +578,7 @@ def main(args):
                 var, val = param[2*i: 2*(i+1)]
                 if var in helicon.Relion_OpticsGroup_Parameters:
                     try:
-                        data.meta.optics.loc[:, var] = helicon.guess_data_type(val)(val)
+                        data.attrs["optics"].loc[:, var] = helicon.guess_data_type(val)(val)
                     except:
                         data.loc[:, var] = helicon.guess_data_type(val)(val)
                 else:
@@ -607,7 +609,7 @@ def main(args):
                 data2.loc[:, var] += idMax
             data = pd.concat((data1, data2), axis=0)
             try:
-                data.meta = data1.meta
+                data.attrs = data1.attrs
             except:
                 pass
             index_d[option_name] += 1
@@ -809,23 +811,23 @@ def main(args):
             if args.verbose>1:
                 print(("\tRead in %d particles from %s" % (len(data2), targetStarFile)))            
             
-            common_optics_groups = set(optics['rlnOpticsGroup'].values)&set(data2.meta.optics['rlnOpticsGroup'].values)
+            common_optics_groups = set(optics['rlnOpticsGroup'].values)&set(data2.attrs["optics"]['rlnOpticsGroup'].values)
             if common_optics_groups:
                 # copy 'rlnBeamTiltX', 'rlnBeamTiltY', 'rlnOddZernike', 'rlnEvenZernike' from the same optics group
                 ctf_parms_candidate = ['rlnBeamTiltX', 'rlnBeamTiltY', 'rlnOddZernike', 'rlnEvenZernike']
                 ctf_parms = []            
                 for key in ctf_parms_candidate:
-                    if key in data2.meta.optics:
+                    if key in data2.attrs["optics"]:
                         ctf_parms.append(key)
                         if key not in optics:
                             optics.loc[:, key] = 0  
                 if ctf_parms:
-                    #for optics_group in data2.meta.optics.loc[:,'rlnOpticsGroup']:
+                    #for optics_group in data2.attrs["optics"].loc[:,'rlnOpticsGroup']:
                     #    if optics_group in optics['rlnOpticsGroup'].values:
-                    #        optics.loc[optics['rlnOpticsGroup']==optics_group,ctf_parms]=data2.meta.optics.loc[data.meta.optics['rlnOpticsGroup']==optics_group,ctf_parms].values
+                    #        optics.loc[optics['rlnOpticsGroup']==optics_group,ctf_parms]=data2.attrs["optics"].loc[data.attrs["optics"]['rlnOpticsGroup']==optics_group,ctf_parms].values
                     for optics_group in common_optics_groups:
-                        optics.loc[optics['rlnOpticsGroup']==optics_group,ctf_parms]=data2.meta.optics.loc[data.meta.optics['rlnOpticsGroup']==optics_group,ctf_parms].values
-                    data.meta.optics = optics
+                        optics.loc[optics['rlnOpticsGroup']==optics_group,ctf_parms]=data2.attrs["optics"].loc[data.attrs["optics"]['rlnOpticsGroup']==optics_group,ctf_parms].values
+                    data.attrs["optics"] = optics
             
             # copy from the same micrograph (average for particles in the same micrograph)      
             ctf_parms = ["rlnDefocusU", "rlnDefocusV", "rlnDefocusAngle","rlnCtfBfactor","rlnCtfScalefactor","rlnPhaseShift"]
@@ -1340,7 +1342,7 @@ def main(args):
 
             apix_micrograph = 0
             try:
-                optics = data.meta.optics
+                optics = data.attrs["optics"]
                 for attr in ["rlnMicrographPixelSize", "rlnMicrographOriginalPixelSize"]:
                     if attr in optics:
                         apix_micrograph = optics[attr].iloc[0]
@@ -1400,7 +1402,7 @@ def main(args):
         elif option_name == "assignOpticGroupByBeamShift" and param != 'no':
             # choices = "no auto EPU serialEM_pncc".split()
             try:
-                optics_orig = data.meta.optics
+                optics_orig = data.attrs["optics"]
             except:
                 optics_orig = None
             if optics_orig is None:
@@ -1456,13 +1458,13 @@ def main(args):
                 new_rows["rlnOpticsGroupName"] = "opticsGroup" + new_rows["rlnOpticsGroup"].astype(str)
                 optics = pd.concat([optics, new_rows], ignore_index=True)
                 og_count += n
-            data.meta.optics = optics
+            data.attrs["optics"] = optics
             if args.verbose>1:
                 print(f"\t{len(ogs)} optics groups -> {len(optics)} optic groups")
 
         elif option_name == "assignOpticGroupByTime" and param >0:
             try:
-                optics_orig = data.meta.optics
+                optics_orig = data.attrs["optics"]
             except:
                 optics_orig = None
             if optics_orig is None:
@@ -1517,13 +1519,13 @@ def main(args):
                 new_rows["rlnOpticsGroupName"] = "opticsGroup" + new_rows["rlnOpticsGroup"].astype(str)
                 optics = pd.concat([optics, new_rows], ignore_index=True)
                 og_count += n
-            data.meta.optics = optics
+            data.attrs["optics"] = optics
             if args.verbose>1:
                 print(f"\t{len(ogs)} optics groups -> {len(optics)} optic groups")                
 
         elif option_name == "assignOpticGroupPerMicrograph" and param:
             try:
-                optics_orig = data.meta.optics
+                optics_orig = data.attrs["optics"]
             except:
                 optics_orig = None
             if optics_orig is None:
@@ -1551,10 +1553,10 @@ def main(args):
                 new_row = optics_orig.copy().iloc[0]
                 optics.loc[gi, "rlnOpticsGroup"] = gi+1
                 optics.loc[gi, "rlnOpticsGroupName"] = f"opticsGroup{gi+1}"
-            data.meta.optics = optics
+            data.attrs["optics"] = optics
             data.drop(tmp_col, axis=1, inplace=True)
             if args.verbose>1:
-                print(f"\t{len(mgraphs)} micrographs -> {len(data.meta.optics)} optic groups")
+                print(f"\t{len(mgraphs)} micrographs -> {len(data.attrs["optics"])} optic groups")
             
         elif option_name == "splitByMicrograph" and param:
             if "rlnMicrographName" in data:
@@ -1629,8 +1631,7 @@ def main(args):
             data_subset = data_subset.sort_values(['rlnImageName'], ascending=True)
             data_subset['rlnRandomSubset'] = si+1
             data_subset.reset_index(drop=True, inplace=True)
-            data_subset.meta = types.SimpleNamespace()
-            data_subset.meta.optics = optics
+            data_subset.attrs["optics"] = optics
             helicon.dataframe2file(data_subset, imageSubSetFileName)
             if args.verbose:
                 print("\tSubset %d/%d: %d images saved to %s" % (si + 1, args.splitNumSets, len(data_subset), imageSubSetFileName))
@@ -1840,7 +1841,7 @@ def reset_inter_segment_distance(data, new_inter_segment_distance, apix_microgra
     data2.drop(["risd_filename", "risd_pid"], inplace=True, axis=1)
 
     try:
-        data2.meta = data.meta
+        data2.attrs = data.attrs
     except:
         pass
 
@@ -1882,7 +1883,7 @@ def estimate_helicalTube_length(data, inter_segment_distance=-1, verbose=0):
 
 def getPixelSize(data, attrs=["rlnMicrographOriginalPixelSize", "rlnMicrographPixelSize", "rlnImagePixelSize", "rlnImageName", "rlnMicrographName"], return_pixelSize_source=False):
     try:
-        sources = [ data.meta.optics ]
+        sources = [ data.attrs["optics"] ]
     except:
         sources = []
     sources += [data]
@@ -1912,7 +1913,7 @@ def setPixelSize(data, apix_new, update_defocus=False):
             if attr in data:
                 data.loc[:, attr] = data.loc[:, attr].astype(float) * ((apix_new/apix_old)**2)
     try:
-        data.meta.optics.loc[:, pixelSize_source] = apix_new
+        data.attrs["optics"].loc[:, pixelSize_source] = apix_new
     except:
         pass
     if pixelSize_source in data:

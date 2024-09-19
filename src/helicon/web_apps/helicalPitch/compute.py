@@ -187,8 +187,6 @@ def get_class2d_params_from_file(params_file, cryosparc_pass_through_file=None):
     missing_attrs = [attr for attr in required_attrs if attr not in params]
     if missing_attrs:
         raise ValueError(f"ERROR: parameters {missing_attrs} are not available")
-    distseg = estimate_inter_segment_distance(params)
-    params["segmentid"] = assign_segment_id(params, distseg)
     return params
 
 def star_to_dataframe(starFile):
@@ -204,19 +202,18 @@ def star_to_dataframe(starFile):
     else:
         optics = None
 
-    attrs_to_keep = "rlnImageName rlnMicrographName rlnImagePixelSize rlnCoordinateX rlnCoordinateY rlnHelicalTrackLengthAngst rlnHelicalTubeID rlnClassNumber rlnOriginX rlnOriginY rlnAnglePsi".split()
     data = pd.DataFrame()
     for item in star[-1]:
         for tag in item.loop.tags:
             value = star[-1].find_loop(tag)
             tag = tag.strip('_')
-            if tag in attrs_to_keep:
-                data[tag] = np.array(value)
+            data[tag] = np.array(value)
     
     if optics is not None:
         data.attrs["optics"] = optics
 
-    data["starFile"] = starFile
+    data.attrs["starFile"] = starFile
+
     return data
 
 def cs_to_dataframe(cs_file, cs_pass_through_file):

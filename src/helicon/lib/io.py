@@ -1,9 +1,8 @@
 import os, sys
 from pathlib import Path
-from types import SimpleNamespace
 import numpy as np
 import pandas as pd
-pd.DataFrame._metadata += ["meta"]
+pd.options.mode.copy_on_write = True
 
 from .util import color_print
 
@@ -412,7 +411,7 @@ def images2dataframe(inputFiles, csparc_passthrough_files=[], alternative_folder
         p = image2dataframe(inputFile, csparc_passthrough_files, alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path, warn_missing_ctf)
         datalist.append(p)
         try:
-            if p.meta.optics is not None: opticslist.append(p.meta.optics)
+            if p.attrs["optics"] is not None: opticslist.append(p.attrs["optics"])
         except:
             pass
 
@@ -438,10 +437,9 @@ def images2dataframe(inputFiles, csparc_passthrough_files=[], alternative_folder
         optics = pd.concat(opticslist, sort=False)
     else:
         optics = None
-    data.meta = SimpleNamespace()
-    data.meta.optics = optics
-    data.meta.convention = target_convention
-    data.meta.source_path = inputFiles
+    data.attrs["optics"] = optics
+    data.attrs["convention"] = target_convention
+    data.attrs["source_path"] = inputFiles
     data.reset_index(drop=True, inplace=True)  # important to do this
     return data
 
@@ -473,11 +471,7 @@ def image2dataframe(inputFile, csparc_passthrough_files=[], alternative_folders=
             data.append(d)
         p = pd.DataFrame(data)
         p.convention = "relion"
-    try:
-        p.meta
-    except:
-        p.meta = SimpleNamespace()
-    p.meta.source_path = inputFile
+    p.attrs["source_path"] = inputFile
     return p
 
 def dataframe2file(data, outputFile):
@@ -539,7 +533,7 @@ def dataframe_guess_data_type(data):
         #data[unknown_type_cols] = data[unknown_type_cols].apply(pd.to_numeric)
 
     try:
-        data.meta.optics = dataframe_guess_data_type(data.meta.optics)
+        data.attrs["optics"] = dataframe_guess_data_type(data.attrs["optics"])
     except:
         pass
 
@@ -549,9 +543,9 @@ def star_dissolve_opticsgroup(data):
     '''copy parameters from optics block to the main data block. 
        useful for converting a new star file for Relion v3+ to older star file format
     '''
-    assert data.meta.convention == "relion", f"star_dissolve_opticsgroup: requires data in relion convention. current convention is {data.meta.convention}"
+    assert data.attrs["convention"] == "relion", f"star_dissolve_opticsgroup: requires data in relion convention. current convention is {data.attrs["convention"]}"
     try:
-        optics = data.meta.optics
+        optics = data.attrs["optics"]
         optics.loc[:, "rlnOpticsGroup"] = optics.loc[:, "rlnOpticsGroup"].astype(str)
     except:
         optics = None
@@ -576,24 +570,24 @@ def star_dissolve_opticsgroup(data):
                 data.loc[ptcl_indices, "rlnMagnification"] = optics.loc[og_index, "rlnMagnification"]
             if "rlnDetectorPixelSize" in optics:
                 data.loc[ptcl_indices, "rlnDetectorPixelSize"] = optics.loc[og_index, "rlnDetectorPixelSize"]
-    data.meta.optics = None
+    data.attrs["optics"] = None
 
 # all relion variables are defined here:
 # https://github.com/3dem/relion/blob/600499f35c721e2009135ee027078e69414f7edb/src/metadata_label.h
 Relion_OpticsGroup_Parameters = "rlnOpticsGroup rlnOpticsGroupName rlnMtfFileName rlnVoltage rlnSphericalAberration rlnAmplitudeContrast rlnMagnification rlnDetectorPixelSize rlnMicrographOriginalPixelSize rlnMicrographPixelSize rlnMicrographBinning rlnImagePixelSize rlnImageSize rlnImageDimensionality rlnBeamTiltX rlnBeamTiltY rlnOddZernike rlnEvenZernike".split()
 
 def star_build_opticsgroup(data):
-    assert data.meta.convention == "relion", f"star_build_opticsgroup: requires data in relion convention. current convention is {data.meta.convention}"
+    assert data.attrs["convention"] == "relion", f"star_build_opticsgroup: requires data in relion convention. current convention is {data.attrs["convention"]}"
 
     def remove_invalid_opticsgroup_parameters(data):
         try:
             badVars = []
-            if data.meta.optics is not None:
-                badVars = [v for v in data.meta.optics if v not in Relion_OpticsGroup_Parameters]
+            if data.attrs["optics"] is not None:
+                badVars = [v for v in data.attrs["optics"] if v not in Relion_OpticsGroup_Parameters]
             if "rlnImageName" not in data:
-                badVars += [v for v in "rlnImagePixelSize rlnImageSize".split() if v in data.meta.optics]
+                badVars += [v for v in "rlnImagePixelSize rlnImageSize".split() if v in data.attrs["optics"]]
             if badVars:
-                data.meta.optics.drop(badVars, axis=1, inplace=True)
+                data.attrs["optics"].drop(badVars, axis=1, inplace=True)
         except:
             pass
 
@@ -605,8 +599,8 @@ def star_build_opticsgroup(data):
         #    requiredVars += "rlnMicrographPixelSize".split()
         missingVars = []
         try:
-            if data.meta.optics is not None:
-                missingVars = [v for v in requiredVars if v not in data.meta.optics]
+            if data.attrs["optics"] is not None:
+                missingVars = [v for v in requiredVars if v not in data.attrs["optics"]]
             else:
                 missingVars = requiredVars
         except:
@@ -633,11 +627,11 @@ def star_build_opticsgroup(data):
             ogp_list.append(d)
             data.loc[gdata.index, "rlnOpticsGroup"] = int(gi + 1)
         optics = pd.DataFrame(ogp_list)
-        data.meta.optics = optics
+        data.attrs["optics"] = optics
         data.drop(columns=vars, inplace=True)
 
     try:
-        optics = data.meta.optics
+        optics = data.attrs["optics"]
         if "rlnImageSize" in missingVars and "rlnImageSize" not in optics:
             var = None 
             if "rlnImageName" in data: var = "rlnImageName"
@@ -703,10 +697,9 @@ def star2dataframe(starFile, alternative_folders=[], ignore_bad_particle_path=0,
             with pd.option_context('display.max_colwidth', -1):
                 color_print("\n", data[nans==True] )
         data = data[nans==False]
-    data.meta = SimpleNamespace()
-    data.meta.optics = optics
-    data.meta.source_path = starFile
-    data.meta.convention = "relion"
+    data.attrs["optics"] = optics
+    data.attrs["source_path"] = starFile
+    data.attrs["convention"] = "relion"
     dataframe_normalize_filename(data, alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path)
     return data
 
@@ -740,10 +733,13 @@ def dataframe2star(data, starFile, format="v3"):
 
     data2 = dataframe_guess_data_type(data2)
 
-    fp = open(starFile, "wt")
+    if hasattr(starFile, 'read') and callable(starFile.read):
+        fp = starFile
+    else:
+        fp = open(starFile, "wt")
 
     try:
-        optics = data2.meta.optics
+        optics = data2.attrs["optics"]
         if len(optics)>0:
             fp.write("\n# version 30001\n")
             fp.write("\ndata_optics\n\nloop_ \n")
@@ -811,9 +807,8 @@ def cs2dataframe(csFile, passthrough_files=[], alternative_folders=[], ignore_ba
         color_print("    Corrupted particle indices:\n%s" % (nans.to_numpy().nonzero()[0]))
         color_print("    Sample of a corrupted particle info:\n%s" % (data.iloc[nans.to_numpy().nonzero()[0][0], :]))
         data = data[nans==False]
-    data.meta = SimpleNamespace()
-    data.meta.source_path = csFile
-    data.meta.convention = "cryosparc"
+    data.attrs["source_path"] = csFile
+    data.attrs["convention"] = "cryosparc"
     dataframe_normalize_filename(data, alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path)
     return data
 
@@ -895,9 +890,8 @@ def cistem2dataframe(dbFile, alternative_folders=[], ignore_bad_particle_path=0,
                     data_cistem[key] = np.rad2deg(data_cistem[key].astype(float)).round(1)
                 data[value] = data_cistem[key]
 
-    data.meta = SimpleNamespace()
-    data.meta.source_path = dbFile
-    data.meta.convention = "relion"
+    data.attrs["source_path"] = dbFile
+    data.attrs["convention"] = "relion"
     dataframe_normalize_filename(data, alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path)
 
     return data
@@ -992,13 +986,13 @@ def dataframe_normalize_filename(data, alternative_folders=[], ignore_bad_partic
     if len(attrs):
         for attr, ignore_bad_path in attrs:
             filenames = data[attr].unique()
-            buildFileNameCache(filenames, data.meta.source_path, alternative_folders, ignore_bad_path=ignore_bad_path)
+            buildFileNameCache(filenames, data.attrs["source_path"], alternative_folders, ignore_bad_path=ignore_bad_path)
             data[attr] = data[attr].map(cache)
     if len(attrs_with_at):
         for attr, ignore_bad_path in attrs_with_at:
             tmp = data[attr].str.split("@", expand=True)
             indices, filenames = tmp.iloc[:, 0], tmp.iloc[:, -1]
-            buildFileNameCache(filenames.unique(), data.meta.source_path, alternative_folders, ignore_bad_path=ignore_bad_path)
+            buildFileNameCache(filenames.unique(), data.attrs["source_path"], alternative_folders, ignore_bad_path=ignore_bad_path)
             data[attr] = indices + "@" + filenames.map(cache)
 
     return data
@@ -1029,7 +1023,7 @@ def eman_astigmatism_to_relion(defocus, dfdiff, dfang):
 
 def get_dataframe_convention(data):
     try:
-        c = data.meta.convention        # test if the convention is set
+        c = data.attrs["convention"]        # test if the convention is set
         assert(c is not None and len(c)>0 )
     except:    # let's guess the convention if it is not set yet
         if any(k in data for k in "rlnImageName rlnMicrographName rlnMicrographMovieName rlnVoltage".split()):
@@ -1042,22 +1036,18 @@ def get_dataframe_convention(data):
     return c
 
 def dataframe_convert(data, target="relion"):
-    try:
-        data.meta
-    except:
-        data.meta = SimpleNamespace()
 
-    data.meta.convention = get_dataframe_convention(data)
+    data.attrs["convention"] = get_dataframe_convention(data)
 
-    if data.meta.convention == target: return data
+    if data.attrs["convention"] == target: return data
 
-    msg = f"ERROR: dataframe_convert(): unavailable conversion of convention from {data.meta.convention} to {target}"
-    if data.meta.convention == "relion":
+    msg = f"ERROR: dataframe_convert(): unavailable conversion of convention from {data.attrs["convention"]} to {target}"
+    if data.attrs["convention"] == "relion":
         if target == "cryosparc":
             return dataframe_relion_to_cryosparc(data)
         else:
             raise AttributeError(msg)
-    elif data.meta.convention == "cryosparc":
+    elif data.attrs["convention"] == "cryosparc":
         if target == "relion":
             return dataframe_cryosparc_to_relion(data)
         else:
@@ -1066,13 +1056,13 @@ def dataframe_convert(data, target="relion"):
         raise AttributeError(msg)
 
 def dataframe_cryosparc_to_relion(data):
-    data.meta.convention = get_dataframe_convention(data)
+    data.attrs["convention"] = get_dataframe_convention(data)
 
-    if data.meta.convention == "relion":
+    if data.attrs["convention"] == "relion":
         return data
 
-    if data.meta.convention != "cryosparc":
-        msg = "ERROR: dataframe_cryosparc_to_relion(): input dataframe is in %s instead of the required cryosparc convention" % (data.meta.convention)
+    if data.attrs["convention"] != "cryosparc":
+        msg = "ERROR: dataframe_cryosparc_to_relion(): input dataframe is in %s instead of the required cryosparc convention" % (data.attrs["convention"])
         raise AttributeError(msg)
 
     ret = pd.DataFrame()
@@ -1187,12 +1177,11 @@ def dataframe_cryosparc_to_relion(data):
         color_print("ERROR: dataframe_cryosparc_to_relion(): none of the parameters %s is supported" % (list(data.columns)))
         sys.exit(-1)
 
-    ret.meta = SimpleNamespace()
     try:
-        ret.meta.source_path = data.meta.source_path
+        ret.attrs["source_path"] = data.attrs["source_path"]
     except:
-        ret.meta.source_path = None
-    ret.meta.convention = "relion"
+        ret.attrs["source_path"] = None
+    ret.attrs["convention"] = "relion"
 
     return ret
 

@@ -98,6 +98,15 @@ with ui.sidebar(width=456):
             auto_select_first=True,
         )
 
+        @reactive.effect
+        def _():
+            selected_images.set(
+                [displayed_class_images()[i] for i in selected_image_indices()]
+            )
+            selected_image_labels.set(
+                [displayed_class_labels()[i] for i in selected_image_indices()]
+            )
+
     with ui.layout_columns(col_widths=[6, 6], style="align-items: flex-end;"):
         ui.input_numeric(
             "apix_particle",
@@ -257,6 +266,17 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
         ui.markdown(
             "**How to interpretate the histogram:** an informative histogram should have clear peaks with equal spacing. If so, hover your mouse pointer to the first major peak off the origin to align the vertial lines well with the peaks. Once you have decided on the line postion, read the hover text which shows the twist values assuming the pair-distance is the helical pitch (adjusted for the cyclic symmetries around the helical axis). You need to decide which cyclic symmetry and the corresponding twist should be used.  \n&nbsp;&nbsp;&nbsp;&nbsp;If the histogram does not show clear peaks, it indicates that the Class2D quality is bad. You might consider changing the 'Minimal length (Å)' from 0 to a larger value (for example, 1000 Å) to improve the peaks in the histogram. If that does not help, you might consider redoing the Class2D task with longer extracted segments (>0.5x helical pitch) from longer filaments (> 1x pitch)."
         )
+        
+        @render.download(label="Download selected helices", filename="helices.star")
+        def download_retained_helices():
+            req(retained_helices_by_length())
+            indices = np.concatenate([h.index for hi, h in retained_helices_by_length()])
+            params_to_save = params_orig().iloc[indices]
+            import io
+            output = io.StringIO()
+            helicon.dataframe2star(params_to_save, output)
+            output.seek(0)
+            yield output.read()
 
     ui.markdown(
         "*Developed by the [Jiang Lab@Purdue University](https://jiang.bio.purdue.edu/HelicalPitch). Report problems to [HelicalPitch@GitHub](https://github.com/jianglab/HelicalPitch/issues)*"
@@ -311,9 +331,9 @@ def get_class2d_from_url():
     image_size.set(nx)
 
 @reactive.effect
-@reactive.event(params_orig, data_all, input.ignore_blank, input.sort_abundance)
+@reactive.event(params_work, data_all, input.ignore_blank, input.sort_abundance)
 def get_displayed_class_images():
-    req(params_orig() is not None)
+    req(params_work() is not None)
     req(data_all() is not None)
     data = data_all()
     n = len(data)
@@ -321,7 +341,7 @@ def get_displayed_class_images():
     image_size.set(max(images[0].shape))
 
     try:
-      df = params_orig()
+      df = params_work()
       abundance.set( compute.get_class_abundance(df, n) )
     except Exception:
         print(Exception)
@@ -352,7 +372,6 @@ def get_displayed_class_images():
     displayed_class_ids.set(included)
     displayed_class_labels.set(image_labels)
     displayed_class_images.set(images)
-
 
 @reactive.effect
 @reactive.event(input.run)
@@ -389,7 +408,6 @@ def get_params_from_upload():
         )
         ui.modal_show(m)
 
-
 @reactive.effect
 @reactive.event(input.run)
 def get_params_from_url():
@@ -417,10 +435,10 @@ def get_params_from_url():
         )
         ui.modal_show(m)
 
-
 @reactive.effect
 @reactive.event(params_orig)
 def get_apix_micrograph_auto():
+    req(params_orig() is not None)
     apix = compute.get_pixel_size(params_orig(), return_source=True)
     if apix is None:
         apix = input.apix_particle()
@@ -437,11 +455,15 @@ def get_apix_micrograph_auto():
 def update_particle_locations():
     req(params_orig() is not None)
     req(input.apix_micrograph())
+    cols_to_keep = "rlnImageName rlnMicrographName rlnImagePixelSize rlnCoordinateX rlnCoordinateY rlnHelicalTrackLengthAngst rlnHelicalTubeID rlnClassNumber rlnOriginX rlnOriginY rlnAnglePsi".split()
+    cols = [col for col in cols_to_keep if col in params_orig()]
+    tmp = params_orig().loc[:, cols]
+    distseg = compute.estimate_inter_segment_distance(tmp)
+    tmp["segmentid"] = compute.assign_segment_id(tmp, distseg)
     tmp = compute.update_particle_locations(
-        params=params_orig(), apix_micrograph=input.apix_micrograph()
+        params=tmp, apix_micrograph=input.apix_micrograph()
     )
     params_work.set(tmp)
-
 
 @reactive.effect
 @reactive.event(selected_image_indices, params_work)
@@ -496,7 +518,7 @@ def select_helices_by_length():
             max_len=input.max_len(),
         )
         retained_helices_by_length.set(helices_retained)
-
+    
 @reactive.effect
 @reactive.event(retained_helices_by_length)
 def get_pair_lengths():
