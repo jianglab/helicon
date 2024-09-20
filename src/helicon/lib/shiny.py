@@ -196,3 +196,37 @@ def google_analytics(id):
             """
         )
     )
+
+@expressify
+def set_input_text_numeric_update_on_enter_key():
+    js_code = """
+        var customInputBinding = new Shiny.InputBinding();
+        $.extend(customInputBinding, {
+            find: function(scope) {
+                return $(scope).find('input[type="text"]:not([readonly]):not([disabled]), input[type="number"]:not([readonly]):not([disabled])');
+            },
+            getValue: function(el) {
+                if ($(el).attr('type') === 'number') {
+                    return parseFloat($(el).val());
+                } else {
+                    return $(el).val();
+                }
+            },
+            setValue: function(el, value) {
+                $(el).val(value);
+            },
+            subscribe: function(el, callback) {
+                $(el).on('keydown', function(event) {
+                    if (event.key === 'Enter') {
+                        callback();
+                    }
+                });
+            },
+            unsubscribe: function(el) {
+                $(el).off('keydown');
+            }
+        });
+
+        Shiny.inputBindings.register(customInputBinding);
+    """
+    ui.head_content(ui.HTML(f"<script>{js_code}</script>")) 

@@ -27,19 +27,26 @@ selected_image_indices = reactive.value([])
 selected_images = reactive.value([])
 selected_image_labels = reactive.value([])
 
-selected_helices = reactive.value(([],[],0))
+selected_helices = reactive.value(([], [], 0))
 retained_helices_by_length = reactive.value([])
-pair_distances = reactive.value([])
+pair_distances = reactive.value([]) 
 
 
 ui.head_content(ui.tags.title("HelicalPitch"))
-ui.tags.style( 
+helicon.shiny.google_analytics(id="G-998MGRETTF")
+ui.tags.style(
     """
     * { font-size: 10pt; margin: 0; padding: 0; }
     input[type="text"].form-control, input[type="number"].form-control, .form-control, .selectize-input, .shiny-input-container, .form-group, .irs, .radio, .radio-inline, .selectize-control, label, .radio label, .radio-inline label, .accordion-button, .accordion-body, .shiny-text-output, .shiny-html-output, .shiny-output-error {font-size: 10pt; margin: 0; padding: 0; }
     """
 )
-helicon.shiny.google_analytics(id="G-998MGRETTF")
+urls = {
+    "empiar-10940_job010": (
+        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_data.star",
+        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
+    )
+}
+url_key = "empiar-10940_job010"
 
 with ui.sidebar(width=456):
     ui.input_radio_buttons(
@@ -61,8 +68,9 @@ with ui.sidebar(width=456):
         ui.input_text(
             "url_params",
             "Download URL for a RELION star or cryoSPARC cs file",
-            value="https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/768px/run_it020_data.star",
+            value=urls[url_key][0],
         )
+        # https://stackoverflow.com/questions/31415301/shiny-responds-to-enter
 
     ui.input_radio_buttons(
         "input_mode_classes",
@@ -83,9 +91,9 @@ with ui.sidebar(width=456):
         ui.input_text(
             "url_classes",
             "Download URL for a RELION or cryoSPARC Class2D output mrc(s) file",
-            value="https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/768px/run_it020_classes.mrcs",
+            value=urls[url_key][1],
         )
-        
+
     ui.input_task_button("run", label="Run")
 
     with ui.div(style="max-height: 40vh; overflow-y: auto;"):
@@ -150,12 +158,11 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             @render_plotly
             @reactive.event(selected_helices, input.bins)
             def lengths_histogram_display():
-                req(input.bins() is not None and input.bins()>0)
+                req(input.bins() is not None and input.bins() > 0)
                 helices, lengths, count = selected_helices()
                 data = lengths
                 class_indices = [
-                    str(displayed_class_ids()[i] + 1)
-                    for i in selected_image_indices()
+                    str(displayed_class_ids()[i] + 1) for i in selected_image_indices()
                 ]
                 title = f"Filament Lengths: Class {' '.join(class_indices)}<br><i>{len(helices):,} filaments | {count:,} segments</i>"
                 xlabel = "Filament Legnth (Å)"
@@ -173,7 +180,9 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
 
                 return fig
 
-            with ui.layout_columns(col_widths=[6, 6, 12], style="align-items: flex-end;"):
+            with ui.layout_columns(
+                col_widths=[6, 6, 12], style="align-items: flex-end;"
+            ):
                 ui.input_numeric(
                     "min_len", "Minimal length (Å)", min=0.0, value=0, step=1.0
                 )
@@ -187,19 +196,28 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                 )
                 with ui.accordion(id="additional_parameters", open=False):
                     with ui.accordion_panel(title="Additional parameters:"):
-                        with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
+                        with ui.layout_columns(
+                            col_widths=6, style="align-items: flex-end;"
+                        ):
                             ui.input_checkbox(
-                                "ignore_blank", "Ignore blank classes", 
-                                value=True
+                                "ignore_blank", "Ignore blank classes", value=True
                             )
                             ui.input_checkbox(
-                                "sort_abundance", "Sort the classes by abundance", value=True
+                                "sort_abundance",
+                                "Sort the classes by abundance",
+                                value=True,
                             )
                             ui.input_checkbox(
-                                "auto_min_len", "Auto-set minimal filament length", value=True
+                                "auto_min_len",
+                                "Auto-set minimal filament length",
+                                value=True,
                             )
                             ui.input_numeric(
-                                "max_len", "Maximal length (Å)", min=-1, value=-1, step=1.0
+                                "max_len",
+                                "Maximal length (Å)",
+                                min=-1,
+                                value=-1,
+                                step=1.0,
                             )
                             ui.input_numeric(
                                 "max_pair_dist",
@@ -209,7 +227,11 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                                 step=1.0,
                             )
                             ui.input_numeric(
-                                "bins", "Number of histogram bins", min=1, value=100, step=1
+                                "bins",
+                                "Number of histogram bins",
+                                min=1,
+                                value=100,
+                                step=1,
                             )
 
                 @reactive.effect
@@ -232,9 +254,9 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
         @render_plotly
         @reactive.event(pair_distances, input.bins, input.max_pair_dist, input.rise)
         def pair_distances_histogram_display():
-            req(input.bins() is not None and input.bins()>0)
+            req(input.bins() is not None and input.bins() > 0)
             req(input.max_pair_dist() is not None)
-            req(input.rise() is not None and input.rise()>0)
+            req(input.rise() is not None and input.rise() > 0)
             data = pair_distances()
             segment_count = np.sum([len(h) for hi, h in retained_helices_by_length()])
             class_indices = [
@@ -265,21 +287,28 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
         ui.markdown(
             "**How to interpretate the histogram:** an informative histogram should have clear peaks with equal spacing. If so, hover your mouse pointer to the first major peak off the origin to align the vertial lines well with the peaks. Once you have decided on the line postion, read the hover text which shows the twist values assuming the pair-distance is the helical pitch (adjusted for the cyclic symmetries around the helical axis). You need to decide which cyclic symmetry and the corresponding twist should be used.  \n&nbsp;&nbsp;&nbsp;&nbsp;If the histogram does not show clear peaks, it indicates that the Class2D quality is bad. You might consider changing the 'Minimal length (Å)' from 0 to a larger value (for example, 1000 Å) to improve the peaks in the histogram. If that does not help, you might consider redoing the Class2D task with longer extracted segments (>0.5x helical pitch) from longer filaments (> 1x pitch)."
         )
-        
+
         @render.ui
         def _():
-            if len(pair_distances())>0:                
-                download_ui = render.download(label="Download selected helices", filename="helices.star")
+            if len(pair_distances()) > 0:
+                download_ui = render.download(
+                    label="Download selected helices", filename="helices.star"
+                )
+
                 @download_ui
                 def download_retained_helices():
                     req(retained_helices_by_length())
-                    indices = np.concatenate([h.index for hi, h in retained_helices_by_length()])
+                    indices = np.concatenate(
+                        [h.index for hi, h in retained_helices_by_length()]
+                    )
                     params_to_save = params_orig().iloc[indices]
                     import io
+
                     output = io.StringIO()
                     helicon.dataframe2star(params_to_save, output)
                     output.seek(0)
                     yield output.read()
+
                 return download_ui
             else:
                 return None
@@ -336,6 +365,7 @@ def get_class2d_from_url():
     apix_class.set(apix)
     image_size.set(nx)
 
+
 @reactive.effect
 @reactive.event(params_work, data_all, input.ignore_blank, input.sort_abundance)
 def get_displayed_class_images():
@@ -347,8 +377,8 @@ def get_displayed_class_images():
     image_size.set(max(images[0].shape))
 
     try:
-      df = params_work()
-      abundance.set( compute.get_class_abundance(df, n) )
+        df = params_work()
+        abundance.set(compute.get_class_abundance(df, n))
     except Exception:
         print(Exception)
         m = ui.modal(
@@ -378,6 +408,7 @@ def get_displayed_class_images():
     displayed_class_ids.set(included)
     displayed_class_labels.set(image_labels)
     displayed_class_images.set(images)
+
 
 @reactive.effect
 @reactive.event(input.run)
@@ -414,6 +445,7 @@ def get_params_from_upload():
         )
         ui.modal_show(m)
 
+
 @reactive.effect
 @reactive.event(input.run)
 def get_params_from_url():
@@ -440,6 +472,7 @@ def get_params_from_url():
             footer=None,
         )
         ui.modal_show(m)
+
 
 @reactive.effect
 @reactive.event(params_orig)
@@ -471,6 +504,7 @@ def update_particle_locations():
     )
     params_work.set(tmp)
 
+
 @reactive.effect
 @reactive.event(selected_image_indices, params_work)
 def get_selected_helices():
@@ -493,18 +527,23 @@ def get_selected_helices():
 
     selected_helices.set((helices, filement_lengths, segments_count))
 
+
 @reactive.effect
 @reactive.event(input.min_len)
 def get_filament_min_len():
     min_len.set(input.min_len())
 
+
 @reactive.effect
 @reactive.event(selected_helices, input.auto_min_len)
 def auto_set_filament_min_len():
-  req(input.auto_min_len() is True)
-  helices, filament_lengths, segments_count = selected_helices()
-  _, min_len_tmp = compute.compute_pair_distances(helices=helices, lengths=filament_lengths, target_total_count=1000)
-  ui.update_numeric("min_len", value=np.floor(min_len_tmp))
+    req(input.auto_min_len() is True)
+    helices, filament_lengths, segments_count = selected_helices()
+    _, min_len_tmp = compute.compute_pair_distances(
+        helices=helices, lengths=filament_lengths, target_total_count=1000
+    )
+    ui.update_numeric("min_len", value=np.floor(min_len_tmp))
+
 
 def __select_helices_by_length():
     helices, filement_lengths, _ = selected_helices()
@@ -521,18 +560,21 @@ def __select_helices_by_length():
         )
         retained_helices_by_length.set(helices_retained)
 
+
 @reactive.effect
 @reactive.event(min_len, input.max_len)
 def select_helices_by_length_with_auto_min_len():
     req(input.auto_min_len())
     __select_helices_by_length()
 
+
 @reactive.effect
 @reactive.event(selected_helices, min_len, input.max_len)
 def select_helices_by_length_without_auto_min_len():
     req(not input.auto_min_len())
     __select_helices_by_length()
-    
+
+
 @reactive.effect
 @reactive.event(retained_helices_by_length)
 def get_pair_lengths():
@@ -541,4 +583,3 @@ def get_pair_lengths():
         pair_distances.set(dists)
     else:
         pair_distances.set([])
-
