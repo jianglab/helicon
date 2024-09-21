@@ -21,6 +21,7 @@ def image_select(
     from PIL import Image
     from helicon import encode_numpy, encode_PIL_Image
 
+    selection_return = reactive.value(None)
     selection = reactive.value([])
     initial_selection = reactive.value([])
     bids_react = reactive.value([])
@@ -175,10 +176,16 @@ def image_select(
 
         return scripts
 
+    @reactive.effect
+    @reactive.event(selection)
+    def _():
+        if selection() != selection_return():
+            selection_return.set(selection())
+
     if disable_selection:
         return None
     else:
-        return selection
+        return selection_return
 
 
 @expressify
