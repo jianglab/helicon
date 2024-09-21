@@ -1,15 +1,16 @@
 import numpy as np
-import helicon
-import compute
 
 from shiny import reactive, req
 from shiny.express import input, ui, render
 from shinywidgets import render_plotly
 
+import helicon
+import compute
+
 params_orig = reactive.value(None)
 params_work = reactive.value(None)
 apix_micrograph_auto = reactive.value(0)
-apix_micrograph_auto_source = reactive.value(None)
+apix_micrograph_auto_source = reactive.value("")
 apix_micrograph = reactive.value(0)
 apix_particle = reactive.value(0)
 
@@ -22,14 +23,13 @@ displayed_class_ids = reactive.value([])
 displayed_class_images = reactive.value([])
 displayed_class_labels = reactive.value([])
 
-min_len = reactive.value(0)
 selected_image_indices = reactive.value([])
 selected_images = reactive.value([])
 selected_image_labels = reactive.value([])
 
 selected_helices = reactive.value(([], [], 0))
 retained_helices_by_length = reactive.value([])
-pair_distances = reactive.value([]) 
+pair_distances = reactive.value([])
 
 
 ui.head_content(ui.tags.title("HelicalPitch"))
@@ -70,7 +70,6 @@ with ui.sidebar(width=456):
             "Download URL for a RELION star or cryoSPARC cs file",
             value=urls[url_key][0],
         )
-        # https://stackoverflow.com/questions/31415301/shiny-responds-to-enter
 
     ui.input_radio_buttons(
         "input_mode_classes",
@@ -107,7 +106,8 @@ with ui.sidebar(width=456):
         )
 
         @reactive.effect
-        def _():
+        @reactive.event(selected_image_indices)
+        def update_selected_images():
             selected_images.set(
                 [displayed_class_images()[i] for i in selected_image_indices()]
             )
@@ -134,8 +134,18 @@ with ui.sidebar(width=456):
         )
 
     @render.ui
+    @reactive.event(apix_micrograph_auto_source)
     def display_warning_apix_micrograph():
-        msg = "Please carefully verify the pixel size of the micrographs used for particle picking/extraction."
+        msg = f"Please carefully verify the pixel size of the micrographs used for particle picking/extraction."
+        if apix_micrograph_auto_source():
+            msg += f" The default value was read from **{apix_micrograph_auto_source()}** in your parameter file."
+        if apix_micrograph_auto_source() == "rlnMicrographOriginalPixelSize":
+            msg += f" If you binned the movie averages during motion correction, you should change the value to **{apix_micrograph_auto()} x bin_factor**."
+        elif apix_micrograph_auto_source() == "rlnMicrographPixelSize":
+            msg += f" It should be fine to use it as is."
+        elif apix_micrograph_auto_source() == "rlnImagePixelSize":
+            msg += f"  This is the pixel size of the extracted particle images. If you have down-scaled the particle images during particle extraction, you should change the value to **{apix_micrograph_auto()} / downscale_factor**."
+
         return ui.markdown(f"<span style='color: red;'>{msg}</span>")
 
 
@@ -144,14 +154,15 @@ ui.h1(title)
 
 with ui.layout_columns(col_widths=(5, 7, 12)):
     with ui.card():
-        helicon.shiny.image_select(
-            id="display_selected_image",
-            label="Selected classe(s):",
-            images=selected_images,
-            image_labels=selected_image_labels,
-            image_size=image_size,
-            disable_selection=True,
-        )
+        with ui.div(style="max-height: 40vh; overflow-y: auto;"):
+            helicon.shiny.image_select(
+                id="display_selected_image",
+                label="Selected classe(s):",
+                images=selected_images,
+                image_labels=selected_image_labels,
+                image_size=image_size,
+                disable_selection=True,
+            )
 
         with ui.layout_columns(col_widths=[12, 12], style="align-items: flex-end;"):
 
@@ -259,8 +270,18 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             req(input.rise() is not None and input.rise() > 0)
             data = pair_distances()
             segment_count = np.sum([len(h) for hi, h in retained_helices_by_length()])
+            if len(retained_helices_by_length()):
+                class_indices = np.unique(
+                    np.concatenate(
+                        [h["rlnClassNumber"] for hi, h in retained_helices_by_length()]
+                    )
+                ).astype(int)
+            else:
+                class_indices = []
             class_indices = [
-                str(displayed_class_ids()[i] + 1) for i in selected_image_indices()
+                str(displayed_class_ids()[i] + 1)
+                for i in selected_image_indices()
+                if (displayed_class_ids()[i] + 1) in class_indices
             ]
             rise = input.rise()
             log_y = True
@@ -505,6 +526,9 @@ def update_particle_locations():
     params_work.set(tmp)
 
 
+selected_helices_min_len = reactive.value(([[], [], 0], 0))
+
+
 @reactive.effect
 @reactive.event(selected_image_indices, params_work)
 def get_selected_helices():
@@ -514,6 +538,14 @@ def get_selected_helices():
     req(len(abundance()))
     class_indices = [displayed_class_ids()[i] for i in selected_image_indices()]
     helices = compute.select_classes(params=params_work(), class_indices=class_indices)
+    if len(helices):
+        class_indices2 = (
+            np.unique(
+                np.concatenate([h["rlnClassNumber"] for hi, h in helices])
+            ).astype(int)
+            - 1
+        )
+        assert set(class_indices) == set(class_indices2)
 
     if len(helices):
         filement_lengths = compute.get_filament_length(
@@ -526,53 +558,52 @@ def get_selected_helices():
         segments_count = 0
 
     selected_helices.set((helices, filement_lengths, segments_count))
+    if not input.auto_min_len():
+        selected_helices_min_len.set((selected_helices(), input.min_len()))
 
 
 @reactive.effect
-@reactive.event(input.min_len)
-def get_filament_min_len():
-    min_len.set(input.min_len())
-
-
-@reactive.effect
-@reactive.event(selected_helices, input.auto_min_len)
+@reactive.event(selected_helices)
 def auto_set_filament_min_len():
     req(input.auto_min_len() is True)
     helices, filament_lengths, segments_count = selected_helices()
     _, min_len_tmp = compute.compute_pair_distances(
         helices=helices, lengths=filament_lengths, target_total_count=1000
     )
-    ui.update_numeric("min_len", value=np.floor(min_len_tmp))
+    min_len_tmp = np.floor(min_len_tmp)
+    ui.update_numeric("min_len", value=min_len_tmp)
+    selected_helices_min_len.set((selected_helices(), min_len_tmp))
 
 
-def __select_helices_by_length():
-    helices, filement_lengths, _ = selected_helices()
+@reactive.effect
+@reactive.event(input.min_len)
+def update_selected_helices_min_len():
+    selected_helices_min_len.set((selected_helices(), input.min_len()))
+
+
+@reactive.effect
+@reactive.event(selected_helices_min_len, input.max_len)
+def select_helices_by_length():
+    previous = getattr(select_helices_by_length, "previous", ([], 0))
+    selected_image_indices_previous, min_len_previous = previous
+    (helices, filement_lengths, _), min_len = selected_helices_min_len()
+    req(
+        set(selected_image_indices_previous) != set(selected_image_indices())
+        or min_len_previous != min_len
+    )
     if len(helices) == 0:
         retained_helices_by_length.set([])
-    elif min_len() == 0 and input.max_len() <= 0:
+    elif min_len == 0 and input.max_len() <= 0:
         retained_helices_by_length.set(helices)
     else:
         helices_retained, n_ptcls = compute.select_helices_by_length(
             helices=helices,
             lengths=filement_lengths,
-            min_len=min_len(),
+            min_len=min_len,
             max_len=input.max_len(),
         )
         retained_helices_by_length.set(helices_retained)
-
-
-@reactive.effect
-@reactive.event(min_len, input.max_len)
-def select_helices_by_length_with_auto_min_len():
-    req(input.auto_min_len())
-    __select_helices_by_length()
-
-
-@reactive.effect
-@reactive.event(selected_helices, min_len, input.max_len)
-def select_helices_by_length_without_auto_min_len():
-    req(not input.auto_min_len())
-    __select_helices_by_length()
+    select_helices_by_length.previous = (selected_image_indices(), min_len)
 
 
 @reactive.effect

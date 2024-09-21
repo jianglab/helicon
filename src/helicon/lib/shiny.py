@@ -204,6 +204,7 @@ def google_analytics(id):
         )
     )
 
+
 @expressify
 def set_input_text_numeric_update_on_enter_key():
     js_code = """
@@ -236,4 +237,4 @@ def set_input_text_numeric_update_on_enter_key():
 
         Shiny.inputBindings.register(customInputBinding);
     """
-    ui.head_content(ui.HTML(f"<script>{js_code}</script>")) 
+    ui.head_content(ui.HTML(f"<script>{js_code}</script>"))
