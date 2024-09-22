@@ -170,6 +170,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             @reactive.event(selected_helices, input.bins)
             def lengths_histogram_display():
                 req(input.bins() is not None and input.bins() > 0)
+                fig = getattr(lengths_histogram_display, "fig", None)
                 helices, lengths, count = selected_helices()
                 data = lengths
                 class_indices = [
@@ -187,7 +188,9 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                     ylabel=ylabel,
                     bins=nbins,
                     log_y=log_y,
+                    fig=fig
                 )
+                lengths_histogram_display.fig = fig
 
                 return fig
 
@@ -268,6 +271,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
             req(input.bins() is not None and input.bins() > 0)
             req(input.max_pair_dist() is not None)
             req(input.rise() is not None and input.rise() > 0)
+            fig = getattr(pair_distances_histogram_display, "fig", None)
             data = pair_distances()
             segment_count = np.sum([len(h) for hi, h in retained_helices_by_length()])
             if len(retained_helices_by_length()):
@@ -301,7 +305,9 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                 log_y=log_y,
                 show_pitch_twist=dict(rise=rise, csyms=(1, 2, 3, 4)),
                 multi_crosshair=True,
+                fig = fig
             )
+            pair_distances_histogram_display.fig = fig
 
             return fig
 

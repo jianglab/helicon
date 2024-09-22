@@ -440,6 +440,7 @@ def plot_histogram(
     log_y=True,
     show_pitch_twist={},
     multi_crosshair=False,
+    fig = None
 ):
     import plotly.graph_objects as go
 
@@ -453,18 +454,6 @@ def plot_histogram(
 
     center = (edges[:-1] + edges[1:]) / 2
 
-    fig = go.FigureWidget()
-
-    histogram = go.Bar(
-        x=center,
-        y=hist,
-        name="Histogram",
-        marker_color="blue",
-        hoverinfo="none",
-    )
-
-    fig.add_trace(histogram)
-
     hover_text = []
     for i, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
         hover_info = f"{xlabel.replace(" (Å)", "")}: {center[i]:.0f} ({left:.0f}-{right:.0f})Å<br>{ylabel}: {hist_linear[i]}"
@@ -476,43 +465,61 @@ def plot_histogram(
                 hover_info += f"<br>Twist for C{csym}: {twist:.2f}°"
         hover_text.append(hover_info)
 
-    fig.data[0].text = hover_text
-    fig.data[0].hoverinfo = "text"
-    fig.update_layout(
-        title_text=title,
-        title_x=0.5,
-        title_font=dict(size=12),
-        xaxis_title=xlabel,
-        yaxis_title=ylabel,
-        hovermode="closest",
-        hoverlabel=dict(bgcolor="white", font_size=12),
-        autosize=False,
-        template="plotly_white",
-    )
+    if fig:
+        fig.data[0].x = center
+        fig.data[0].y = hist
+        fig.data[0].text = hover_text
+        fig.layout.title.text = title
+    else:
+        fig = go.FigureWidget()
 
-    if multi_crosshair:
-        for i in range(20):
-            fig.add_vline(
-                x=0,
-                line_width=3 if i == 0 else 2,
-                line_dash="solid" if i == 0 else "dash",
-                line_color="green",
-                visible=False,
-            )
+        histogram = go.Bar(
+            x=center,
+            y=hist,
+            name="Histogram",
+            marker_color="blue",
+            hoverinfo="none",
+        )
 
-        def update_vline(trace, points, state):
-            if points.point_inds:
-                hover_x = points.xs[0]
-                with fig.batch_update():
-                    for i, vline in enumerate(fig.layout.shapes):
-                        x = hover_x * (i + 1)
-                        vline.x0 = x
-                        vline.x1 = x
-                        if x <= fig.data[0].x.max():
-                            vline.visible = True
-                        else:
-                            vline.visible = False
+        fig.add_trace(histogram)
 
-        fig.data[0].on_hover(update_vline)
+        fig.data[0].text = hover_text
+        fig.data[0].hoverinfo = "text"
+        fig.update_layout(
+            title_text=title,
+            title_x=0.5,
+            title_font=dict(size=12),
+            xaxis_title=xlabel,
+            yaxis_title=ylabel,
+            hovermode="closest",
+            hoverlabel=dict(bgcolor="white", font_size=12),
+            autosize=False,
+            template="plotly_white",
+        )
+
+        if multi_crosshair:
+            for i in range(20):
+                fig.add_vline(
+                    x=0,
+                    line_width=3 if i == 0 else 2,
+                    line_dash="solid" if i == 0 else "dash",
+                    line_color="green",
+                    visible=False,
+                )
+
+            def update_vline(trace, points, state):
+                if points.point_inds:
+                    hover_x = points.xs[0]
+                    with fig.batch_update():
+                        for i, vline in enumerate(fig.layout.shapes):
+                            x = hover_x * (i + 1)
+                            vline.x0 = x
+                            vline.x1 = x
+                            if x <= fig.data[0].x.max():
+                                vline.visible = True
+                            else:
+                                vline.visible = False
+
+            fig.data[0].on_hover(update_vline)
 
     return fig
