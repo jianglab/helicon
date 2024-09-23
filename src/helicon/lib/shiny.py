@@ -238,3 +238,27 @@ def set_input_text_numeric_update_on_enter_key():
         Shiny.inputBindings.register(customInputBinding);
     """
     ui.head_content(ui.HTML(f"<script>{js_code}</script>"))
+
+def get_client_url(input):
+    d = input._map
+    url = f"{d['.clientdata_url_protocol']()}//{d['.clientdata_url_hostname']()}:{d['.clientdata_url_port']()}{d['.clientdata_url_pathname']()}{d['.clientdata_url_search']()}"
+    return url
+
+def get_client_url_query_params(input):
+    d = input._map
+    qs = d['.clientdata_url_search']().strip("?")
+    import urllib.parse
+    parsed_qs = urllib.parse.parse_qs(qs)
+    return parsed_qs
+
+def set_client_url_query_params(query_params):
+    import urllib.parse
+    encoded_query_params = urllib.parse.urlencode(query_params, doseq=True)
+    script = ui.tags.script(
+            f"""
+                var url = new URL(window.location.href);
+                url.search = '{encoded_query_params}';
+                window.history.pushState(null, '', url.toString());
+            """
+    )
+    return script
