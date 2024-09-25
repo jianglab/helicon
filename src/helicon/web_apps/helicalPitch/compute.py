@@ -486,15 +486,15 @@ def plot_histogram(
         fig.data[0].text = hover_text
         fig.data[0].hoverinfo = "text"
         fig.update_layout(
+            template="plotly_white",
             title_text=title,
             title_x=0.5,
             title_font=dict(size=12),
             xaxis_title=xlabel,
             yaxis_title=ylabel,
+            autosize=True,
             hovermode="closest",
             hoverlabel=dict(bgcolor="white", font_size=12),
-            autosize=False,
-            template="plotly_white",
         )
 
         if multi_crosshair:

@@ -11,8 +11,6 @@ params_orig = reactive.value(None)
 params_work = reactive.value(None)
 apix_micrograph_auto = reactive.value(0)
 apix_micrograph_auto_source = reactive.value("")
-apix_micrograph = reactive.value(0)
-apix_particle = reactive.value(0)
 
 data_all = reactive.value(None)
 abundance = reactive.value([])
@@ -48,7 +46,7 @@ urls = {
 }
 url_key = "empiar-10940_job010"
 
-with ui.sidebar(width=456):
+with ui.sidebar(width=540):
     ui.input_radio_buttons(
         "input_mode_params",
         "How to obtain the Class2D parameter file:",
@@ -121,7 +119,7 @@ with ui.sidebar(width=456):
             "Pixel size of particles (Å/pixel)",
             min=0.1,
             max=100.0,
-            value=None,
+            value=0,
             step=0.001,
         )
         ui.input_numeric(
@@ -129,16 +127,16 @@ with ui.sidebar(width=456):
             "Pixel size of micrographs for particle extraction (Å/pixel)",
             min=0.1,
             max=100.0,
-            value=None,
+            value=0,
             step=0.001,
         )
 
     @render.ui
     @reactive.event(apix_micrograph_auto_source)
     def display_warning_apix_micrograph():
-        msg = f"Please carefully verify the pixel size of the micrographs used for particle picking/extraction."
+        msg = ""
         if apix_micrograph_auto_source():
-            msg += f" The default value was read from **{apix_micrograph_auto_source()}** in your parameter file."
+            msg += f"Please carefully verify the pixel size of the micrographs used for particle picking/extraction. The default value was read from **{apix_micrograph_auto_source()}** in your parameter file."
         if apix_micrograph_auto_source() == "rlnMicrographOriginalPixelSize":
             msg += f" If you binned the movie averages during motion correction, you should change the value to **{apix_micrograph_auto()} x bin_factor**."
         elif apix_micrograph_auto_source() == "rlnMicrographPixelSize":
@@ -225,6 +223,11 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                                 "auto_min_len",
                                 "Auto-set minimal filament length",
                                 value=True,
+                            )
+                            ui.input_checkbox(
+                                "show_sharable_url",
+                                "Show sharable URL",
+                                value=False,
                             )
                             ui.input_numeric(
                                 "max_len",
@@ -620,3 +623,56 @@ def get_pair_lengths():
         pair_distances.set(dists)
     else:
         pair_distances.set([])
+
+
+float_vars = dict(apix_micrograph=0, apix_particle=0, max_len=-1, max_pair_dist=-1, min_len=0, rise=4.75)
+int_vars = dict(auto_min_len=1, bins=100, ignore_blank=1, show_sharable_url=0, sort_abundance=1)
+str_vars = dict(input_mode_params="url", url_params=urls[url_key][0], url_classes=urls[url_key][1])
+reactive_vars = dict(selected_image_indices=[1])
+
+
+connection_made = reactive.Value(False)
+
+@render.ui
+@reactive.event(lambda: not connection_made())
+def on_connect():
+    d = helicon.shiny.get_client_url_query_params(input=input, keep_list=True)
+    for k, v in d.items():
+        if k in float_vars:
+            v = list(map(float, v))
+            if v[0] != float_vars[k]:
+                if k in input:
+                    ui.update_numeric(k, value=v[0])                    
+        elif k in int_vars:
+            v = list(map(int, v))
+            if v[0] != int_vars[k]:
+                if k in input:
+                    ui.update_numeric(k, value=v[0])
+        elif k in str_vars:
+            if k in input:
+                ui.update_text(k, value=v[0])
+    if "url_params" in d and "url_classes" in d:
+        script =  ui.tags.script(
+                        f"""document.getElementById('run').click();"""
+                )
+        return script
+    else:
+        return None
+
+@render.ui
+@reactive.event(pair_distances, input.show_sharable_url)
+def update_browser_url():
+    if input.show_sharable_url():
+        d = {}
+        d.update({k:float(input[k]()) for k in float_vars if float_vars[k] != float(input[k]())})
+        d.update({k:int(input[k]()) for k in int_vars if int_vars[k] != int(input[k]())})
+        d.update({k:input[k]() for k in str_vars if str_vars[k] != input[k]()})
+        if input.input_mode_params() == "url":
+            d["url_params"] = input["url_params"]()
+        if input.input_mode_classes() == "url":
+            d["url_classes"] = input["url_classes"]()
+        d = {k: v for k, v in sorted(d.items(), key=lambda item: item[0])}
+    else:
+        d = {}
+    script = helicon.shiny.set_client_url_query_params(query_params=d)
+    return script

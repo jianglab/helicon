@@ -244,11 +244,15 @@ def get_client_url(input):
     url = f"{d['.clientdata_url_protocol']()}//{d['.clientdata_url_hostname']()}:{d['.clientdata_url_port']()}{d['.clientdata_url_pathname']()}{d['.clientdata_url_search']()}"
     return url
 
-def get_client_url_query_params(input):
+def get_client_url_query_params(input, keep_list=True):
     d = input._map
     qs = d['.clientdata_url_search']().strip("?")
     import urllib.parse
     parsed_qs = urllib.parse.parse_qs(qs)
+    if not keep_list:
+        for k, v in parsed_qs.items():
+            if isinstance(v, list) and len(v)==1:
+                parsed_qs[k] = v[0]
     return parsed_qs
 
 def set_client_url_query_params(query_params):
