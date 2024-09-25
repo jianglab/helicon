@@ -1,4 +1,4 @@
-from shiny import reactive
+from shiny import reactive, req
 from shiny.express import ui, module, render, expressify
 
 
@@ -12,7 +12,7 @@ def image_select(
     display_image_labels=True,
     image_labels=reactive.value([]),
     image_size=reactive.value(128),
-    auto_select_first=False,
+    initial_selected_indices=reactive.value([]),
     disable_selection=False,
     image_border=2,
     gap=0,
@@ -128,26 +128,28 @@ def image_select(
             )
 
         bids_react.set(bids)
-        initial_selection.set([0] * len(bids))
+        initial_selection.set([0] * len(images()))
 
-        if not disable_selection and auto_select_first:
+        if not disable_selection and len(initial_selected_indices())>0:
             tmp = initial_selection()
-            tmp[0] = 1
+            for i in initial_selected_indices():
+                tmp[i] = 1
             initial_selection.set(tmp)
 
             click_scripts = []
-            click_scripts.append(
-                ui.tags.script(
-                    f"""
-                    var bid = '{session.ns}-{bids[0]}';
-                    document.getElementById(bid).click(); 
-                """
+            for i in initial_selected_indices():
+                click_scripts.append(
+                    ui.tags.script(
+                        f"""
+                        var bid = '{session.ns}-{bids[i]}';
+                        document.getElementById(bid).click(); 
+                    """
+                    )
                 )
-            )
             return (ui_images, click_scripts)
         else:
             return ui_images
-
+    
     @render.ui
     def ordered_selection():
         status = [

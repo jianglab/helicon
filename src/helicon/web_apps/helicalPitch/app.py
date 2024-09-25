@@ -21,6 +21,7 @@ displayed_class_ids = reactive.value([])
 displayed_class_images = reactive.value([])
 displayed_class_labels = reactive.value([])
 
+initial_selected_image_indices = reactive.value([0])
 selected_image_indices = reactive.value([])
 selected_images = reactive.value([])
 selected_image_labels = reactive.value([])
@@ -100,7 +101,7 @@ with ui.sidebar(width=540):
             images=displayed_class_images,
             image_labels=displayed_class_labels,
             image_size=reactive.value(128),
-            auto_select_first=True,
+            initial_selected_indices=initial_selected_image_indices
         )
 
         @reactive.effect
@@ -625,17 +626,18 @@ def get_pair_lengths():
         pair_distances.set([])
 
 
-float_vars = dict(apix_micrograph=0, apix_particle=0, max_len=-1, max_pair_dist=-1, min_len=0, rise=4.75)
+float_vars = dict(apix_micrograph=0.824, apix_particle=4.944, max_len=-1, max_pair_dist=-1, min_len=0, rise=4.75)
 int_vars = dict(auto_min_len=1, bins=100, ignore_blank=1, show_sharable_url=0, sort_abundance=1)
-str_vars = dict(input_mode_params="url", url_params=urls[url_key][0], url_classes=urls[url_key][1])
-reactive_vars = dict(selected_image_indices=[1])
-
+str_vars = dict(input_mode_classes="url", input_mode_params="url", url_params=urls[url_key][0], url_classes=urls[url_key][1])
+all_input_vars = list(float_vars.keys()) + list(int_vars.keys()) + list(str_vars.keys())
+reactive_vars_in = dict(preselect=(initial_selected_image_indices, int))
+reactive_vars_out = dict(selected_image_indices=(selected_image_indices, [0], "preselect"))
 
 connection_made = reactive.Value(False)
 
-@render.ui
+@reactive.effect
 @reactive.event(lambda: not connection_made())
-def on_connect():
+def apply_initial_params_from_browser_url():
     d = helicon.shiny.get_client_url_query_params(input=input, keep_list=True)
     for k, v in d.items():
         if k in float_vars:
@@ -651,27 +653,26 @@ def on_connect():
         elif k in str_vars:
             if k in input:
                 ui.update_text(k, value=v[0])
-    if "url_params" in d and "url_classes" in d:
+        elif k in reactive_vars_in:
+            var, val_type = reactive_vars_in[k]
+            v = list(map(val_type, v))
+            var.set(v)
+    if input.input_mode_params() == "url" and input.input_mode_classes() == "url":
         script =  ui.tags.script(
-                        f"""document.getElementById('run').click();"""
-                )
-        return script
-    else:
-        return None
+                f"""document.getElementById('run').click();"""
+            )
+        ui.insert_ui(ui=script, selector='body', where='afterEnd')
 
 @render.ui
-@reactive.event(pair_distances, input.show_sharable_url)
+@reactive.event(*([input[k] for k in all_input_vars]+[v[0] for v in reactive_vars_out.values()]))
 def update_browser_url():
     if input.show_sharable_url():
         d = {}
         d.update({k:float(input[k]()) for k in float_vars if float_vars[k] != float(input[k]())})
         d.update({k:int(input[k]()) for k in int_vars if int_vars[k] != int(input[k]())})
         d.update({k:input[k]() for k in str_vars if str_vars[k] != input[k]()})
-        if input.input_mode_params() == "url":
-            d["url_params"] = input["url_params"]()
-        if input.input_mode_classes() == "url":
-            d["url_classes"] = input["url_classes"]()
-        d = {k: v for k, v in sorted(d.items(), key=lambda item: item[0])}
+        d.update({var_url:var() for k, (var, val, var_url) in reactive_vars_out.items() if val != var()})
+        d = {k: d[k] for k in sorted(d.keys())}
     else:
         d = {}
     script = helicon.shiny.set_client_url_query_params(query_params=d)
