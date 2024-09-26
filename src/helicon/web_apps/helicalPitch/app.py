@@ -35,8 +35,7 @@ ui.head_content(ui.tags.title("HelicalPitch"))
 helicon.shiny.google_analytics(id="G-998MGRETTF")
 ui.tags.style(
     """
-    * { font-size: 10pt; margin: 0; padding: 0; }
-    input[type="text"].form-control, input[type="number"].form-control, .form-control, .selectize-input, .shiny-input-container, .form-group, .irs, .radio, .radio-inline, .selectize-control, label, .radio label, .radio-inline label, .accordion-button, .accordion-body, .shiny-text-output, .shiny-html-output, .shiny-output-error {font-size: 10pt; margin: 0; padding: 0; }
+    * { font-size: 10pt; padding:0; border: 0; margin: 0; }
     """
 )
 urls = {
@@ -47,7 +46,7 @@ urls = {
 }
 url_key = "empiar-10940_job010"
 
-with ui.sidebar(width=540):
+with ui.sidebar(width="33vw"):
     ui.input_radio_buttons(
         "input_mode_params",
         "How to obtain the Class2D parameter file:",
