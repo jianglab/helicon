@@ -630,8 +630,8 @@ float_vars = dict(apix_micrograph=0.824, apix_particle=4.944, max_len=-1, max_pa
 int_vars = dict(auto_min_len=1, bins=100, ignore_blank=1, show_sharable_url=0, sort_abundance=1)
 str_vars = dict(input_mode_classes="url", input_mode_params="url", url_params=urls[url_key][0], url_classes=urls[url_key][1])
 all_input_vars = list(float_vars.keys()) + list(int_vars.keys()) + list(str_vars.keys())
-reactive_vars_in = dict(preselect=(initial_selected_image_indices, int))
-reactive_vars_out = dict(selected_image_indices=(selected_image_indices, [0], "preselect"))
+reactive_vars_in = dict(select=(initial_selected_image_indices, int))
+reactive_vars_out = dict(selected_image_indices=(selected_image_indices, [0], "select"))
 
 connection_made = reactive.Value(False)
 

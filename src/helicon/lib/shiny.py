@@ -141,9 +141,16 @@ def image_select(
                 click_scripts.append(
                     ui.tags.script(
                         f"""
-                        var bid = '{session.ns}-{bids[i]}';
-                        document.getElementById(bid).click(); 
-                    """
+                            var bid = '{session.ns}-{bids[i]}';
+                            var element = document.getElementById(bid);
+                            var event = new MouseEvent('click', {{
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                shiftKey: true
+                            }});
+                            element.dispatchEvent(event);
+                        """
                     )
                 )
             return (ui_images, click_scripts)
