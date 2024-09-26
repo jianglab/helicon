@@ -440,7 +440,7 @@ def plot_histogram(
     log_y=True,
     show_pitch_twist={},
     multi_crosshair=False,
-    fig = None
+    fig=None,
 ):
     import plotly.graph_objects as go
 

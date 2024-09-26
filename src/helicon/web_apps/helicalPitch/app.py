@@ -100,7 +100,7 @@ with ui.sidebar(width="33vw"):
             images=displayed_class_images,
             image_labels=displayed_class_labels,
             image_size=reactive.value(128),
-            initial_selected_indices=initial_selected_image_indices
+            initial_selected_indices=initial_selected_image_indices,
         )
 
         @reactive.effect
@@ -186,7 +186,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                     ylabel=ylabel,
                     bins=nbins,
                     log_y=log_y,
-                    fig=fig
+                    fig=fig,
                 )
                 lengths_histogram_display.fig = fig
 
@@ -308,7 +308,7 @@ with ui.layout_columns(col_widths=(5, 7, 12)):
                 log_y=log_y,
                 show_pitch_twist=dict(rise=rise, csyms=(1, 2, 3, 4)),
                 multi_crosshair=True,
-                fig = fig
+                fig=fig,
             )
             pair_distances_histogram_display.fig = fig
 
@@ -625,14 +625,29 @@ def get_pair_lengths():
         pair_distances.set([])
 
 
-float_vars = dict(apix_micrograph=0.824, apix_particle=4.944, max_len=-1, max_pair_dist=-1, min_len=0, rise=4.75)
-int_vars = dict(auto_min_len=1, bins=100, ignore_blank=1, show_sharable_url=0, sort_abundance=1)
-str_vars = dict(input_mode_classes="url", input_mode_params="url", url_params=urls[url_key][0], url_classes=urls[url_key][1])
+float_vars = dict(
+    apix_micrograph=0.824,
+    apix_particle=4.944,
+    max_len=-1,
+    max_pair_dist=-1,
+    min_len=0,
+    rise=4.75,
+)
+int_vars = dict(
+    auto_min_len=1, bins=100, ignore_blank=1, show_sharable_url=0, sort_abundance=1
+)
+str_vars = dict(
+    input_mode_classes="url",
+    input_mode_params="url",
+    url_params=urls[url_key][0],
+    url_classes=urls[url_key][1],
+)
 all_input_vars = list(float_vars.keys()) + list(int_vars.keys()) + list(str_vars.keys())
 reactive_vars_in = dict(select=(initial_selected_image_indices, int))
 reactive_vars_out = dict(selected_image_indices=(selected_image_indices, [0], "select"))
 
 connection_made = reactive.Value(False)
+
 
 @reactive.effect
 @reactive.event(lambda: not connection_made())
@@ -643,7 +658,7 @@ def apply_initial_params_from_browser_url():
             v = list(map(float, v))
             if v[0] != float_vars[k]:
                 if k in input:
-                    ui.update_numeric(k, value=v[0])                    
+                    ui.update_numeric(k, value=v[0])
         elif k in int_vars:
             v = list(map(int, v))
             if v[0] != int_vars[k]:
@@ -657,20 +672,35 @@ def apply_initial_params_from_browser_url():
             v = list(map(val_type, v))
             var.set(v)
     if input.input_mode_params() == "url" and input.input_mode_classes() == "url":
-        script =  ui.tags.script(
-                f"""document.getElementById('run').click();"""
-            )
-        ui.insert_ui(ui=script, selector='body', where='afterEnd')
+        script = ui.tags.script(f"""document.getElementById('run').click();""")
+        ui.insert_ui(ui=script, selector="body", where="afterEnd")
+
 
 @render.ui
-@reactive.event(*([input[k] for k in all_input_vars]+[v[0] for v in reactive_vars_out.values()]))
+@reactive.event(
+    *([input[k] for k in all_input_vars] + [v[0] for v in reactive_vars_out.values()])
+)
 def update_browser_url():
     if input.show_sharable_url():
         d = {}
-        d.update({k:float(input[k]()) for k in float_vars if float_vars[k] != float(input[k]())})
-        d.update({k:int(input[k]()) for k in int_vars if int_vars[k] != int(input[k]())})
-        d.update({k:input[k]() for k in str_vars if str_vars[k] != input[k]()})
-        d.update({var_url:var() for k, (var, val, var_url) in reactive_vars_out.items() if val != var()})
+        d.update(
+            {
+                k: float(input[k]())
+                for k in float_vars
+                if float_vars[k] != float(input[k]())
+            }
+        )
+        d.update(
+            {k: int(input[k]()) for k in int_vars if int_vars[k] != int(input[k]())}
+        )
+        d.update({k: input[k]() for k in str_vars if str_vars[k] != input[k]()})
+        d.update(
+            {
+                var_url: var()
+                for k, (var, val, var_url) in reactive_vars_out.items()
+                if val != var()
+            }
+        )
         d = {k: d[k] for k in sorted(d.keys())}
     else:
         d = {}
