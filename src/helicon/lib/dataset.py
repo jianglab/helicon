@@ -1,0 +1,190 @@
+import os
+from pathlib import Path
+import pandas as pd
+from persist_cache import cache
+import helicon
+
+
+class EMDB:
+    def __init__(self, cache_dir=None):
+        self.emd_ids = []
+        self.meta = None
+
+        self.cache_dir = Path(cache_dir) if cache_dir else helicon.cache_dir / "emdb"
+        if not self.cache_dir.exists():
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.local_emdb_mirror = (
+            Path(os.getenv("EMDB_MIRROR_DIR"))
+            if "EMDB_MIRROR_DIR" in os.environ
+            else None
+        )
+        if self.local_emdb_mirror is not None:
+            if not (
+                self.local_emdb_mirror.exists() and self.local_emdb_mirror.is_dir()
+            ):
+                self.local_emdb_mirror = None
+
+        self.update_emd_entries()
+
+    def update_emd_entries(
+        self,
+        fields=[
+            "emdb_id",
+            "title",
+            "structure_determination_method",
+            "resolution",
+            "image_reconstruction_helical_delta_z_value",
+            "image_reconstruction_helical_delta_phi_value",
+            "image_reconstruction_helical_axial_symmetry_details",
+        ],
+    ):
+        @cache(
+            name="emdb_entries", dir=str(self.cache_dir), expiry=7 * 24 * 60 * 60
+        )  # 7 days
+        def cached_update_emd_entries(fields):
+            url = f'https://www.ebi.ac.uk/emdb/api/search/current_status:"REL"?rows=1000000&wt=csv&download=true&fl={",".join(fields)}'
+            entries = pd.read_csv(url)
+            entries["emd_id"] = (
+                entries["emdb_id"].str.split("-", expand=True).iloc[:, 1]
+            )
+            entries = entries.rename(
+                columns={
+                    "structure_determination_method": "method",
+                    "image_reconstruction_helical_delta_z_value": "rise",
+                    "image_reconstruction_helical_delta_phi_value": "twist",
+                    "image_reconstruction_helical_axial_symmetry_details": "csym",
+                }
+            )
+            return entries
+
+        try:
+            entries = cached_update_emd_entries(fields=fields)
+            self.meta = entries
+            self.emd_ids = list(entries["emd_id"])
+        except Exception as e:
+            helicon.color_print(e)
+            helicon.color_print("WARNING: failed to obtain the list of EMDB entries")
+
+    def get_emdb_map_url(self, emd_id: str):
+        if not isinstance(emd_id, str):
+            emd_id = str(emd_id)
+        emd_id = emd_id.split(sep="-")[-1]
+        # server = "https://files.wwpdb.org/pub"    # Rutgers University, USA
+        server = "https://ftp.ebi.ac.uk/pub/databases"  # European Bioinformatics Institute, England
+        # server = "http://ftp.pdbj.org/pub" # Osaka University, Japan
+        url = f"{server}/emdb/structures/EMD-{emd_id}/map/emd_{emd_id}.map.gz"
+        return url
+
+    def get_emdb_map_file(self, emd_id: str):
+        if not isinstance(emd_id, str):
+            emd_id = str(emd_id)
+        emd_id = emd_id.split(sep="-")[-1]
+        map_file = self.cache_dir / f"emd_{emd_id}.map.gz"
+        if map_file.exists():
+            return map_file
+        if self.local_emdb_mirror:
+            map_file_mirror = (
+                self.local_emdb_mirror
+                / f"structures/EMD-{emd_id}/map/emd_{emd_id}.map.gz"
+            )
+            if map_file_mirror.exists() and map_file_mirror.getsize():
+                map_file.symlink_to(map_file_mirror)
+                return map_file
+        url = self.get_emdb_map_url(emd_id)
+        map_file = helicon.download_url(url, target_file_name=str(map_file))
+        return Path(map_file)
+
+    def download_all_map_files(self, verbose=0):
+        for i, emd_id in enumerate(self.emd_ids):
+            if verbose:
+                print(
+                    f"Downloading {i+1}/{len(self)}: {self.get_emdb_map_url(emd_id=emd_id)}"
+                )
+            self.get_emdb_map_file(emd_id)
+
+    def read_emdb_map(self, emd_id: str):
+        map_file = self.get_emdb_map_file(emd_id=emd_id)
+        import mrcfile
+
+        with mrcfile.open(map_file) as mrc:
+            data = mrc.data
+            apix = float(mrc.voxel_size.x)
+        return data, apix
+
+    def get_emdb_xml_url(self, emd_id: str):
+        if not isinstance(emd_id, str):
+            emd_id = str(emd_id)
+        emd_id = emd_id.split(sep="-")[-1]
+        # server = "https://files.wwpdb.org/pub"    # Rutgers University, USA
+        server = "https://ftp.ebi.ac.uk/pub/databases"  # European Bioinformatics Institute, England
+        # server = "http://ftp.pdbj.org/pub" # Osaka University, Japan
+        url = f"{server}/emdb/structures/EMD-{emd_id}/header/emd-{emd_id}.xml"
+        return url
+
+    def get_emdb_xml_file(self, emd_id: str):
+        if not isinstance(emd_id, str):
+            emd_id = str(emd_id)
+        emd_id = emd_id.split(sep="-")[-1]
+        xml_file = self.cache_dir / f"emd_{emd_id}.xml"
+        if xml_file.exists():
+            return xml_file
+        if self.local_emdb_mirror:
+            xml_file_mirror = (
+                self.local_emdb_mirror
+                / f"structures/EMD-{emd_id}/header/emd-{emd_id}.xml"
+            )
+            if xml_file_mirror.exists() and xml_file_mirror.getsize():
+                xml_file.symlink_to(xml_file_mirror)
+                return xml_file
+        url = self.get_emdb_xml_url(emd_id)
+        xml_file = helicon.download_url(url, target_file_name=str(xml_file))
+        return Path(xml_file)
+
+    def download_all_xml_files(self, verbose=0):
+        for i, emd_id in enumerate(self.emd_ids):
+            if verbose:
+                print(
+                    f"Downloading {i+1}/{len(self)}: {self.get_emdb_xml_url(emd_id=emd_id)}"
+                )
+            self.get_emdb_xml_file(emd_id)
+
+    def read_emdb_xml(self, emd_id: str):
+        xml_file = self.get_emdb_xml_file(emd_id=emd_id)
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+
+        class DotDict(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        data = DotDict()
+
+        def parse_element(element, data):
+            for child in element:
+                if len(child) == 0:
+                    data[child.tag] = child.text
+                else:
+                    data[child.tag] = DotDict()
+                    parse_element(child, data[child.tag])
+
+        parse_element(root, data)
+        return data
+
+    def __len__(self):
+        return len(self.emd_ids)
+
+    def __getitem__(self, i):
+        return self.read_emdb_map(self.emd_ids[i])
+
+    def __call__(self, emd_id: str):
+        return self.read_emdb_map(emd_id=emd_id)
+
+    def __iter__(self):
+        for emd_id in self.emd_ids:
+            yield self.read_emdb_map(emd_id)

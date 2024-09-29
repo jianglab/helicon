@@ -131,29 +131,46 @@ def which(program, useCurrentDir=0):
     return location
 
 
-def download_url(url, unTar=1, removeTarFile=1):
-    import urllib2, shutil
+def download_url(url, target_file_name="", un_tar=0, remove_tarfile=0):
+    import urllib.request, shutil, subprocess, os, time
 
-    r = urllib2.urlopen(urllib2.Request(url))
-    fname = url.split("/")[-1]
-    with open(fname, "wb") as f:
+    r = urllib.request.urlopen(url)
+    if not target_file_name:
+        target_file_name = url.split("/")[-1]
+    with open(target_file_name, "wb") as f:
         shutil.copyfileobj(r, f)
     r.close()
 
-    if unTar:
+    file_info = r.info()
+    if "Last-Modified" in file_info:
+        last_modified = file_info["Last-Modified"]
+        timestamp = time.mktime(
+            time.strptime(last_modified, "%a, %d %b %Y %H:%M:%S %Z")
+        )
+        os.utime(target_file_name, (timestamp, timestamp))
+
+    final_target_file_name = target_file_name
+
+    if un_tar:
         cmd = []
-        if fname.endswith(".tar.gz") or fname.endswith(".tgz"):
-            cmd = ["tar", "-xzvf", fname]
-        elif fname.endswith(".tar.bz2") or fname.endswith(".tbz"):
-            cmd = ["tar", "-xjvf", fname]
-        elif fname.endswith(".tar"):
-            cmd = ["tar", "-xvf", fname]
-        elif fname.endswith(".zip"):
-            cmd = ["unzip", "-xzvf", fname]
+        if target_file_name.endswith(".tar.gz") or target_file_name.endswith(".tgz"):
+            cmd = ["tar", "-xzvf", target_file_name]
+            final_target_file_name = target_file_name.replace(".tar.gz", "")
+        elif target_file_name.endswith(".tar.bz2") or target_file_name.endswith(".tbz"):
+            cmd = ["tar", "-xjvf", target_file_name]
+            final_target_file_name = target_file_name.replace(".tar.bz2", "")
+        elif target_file_name.endswith(".tar"):
+            cmd = ["tar", "-xvf", target_file_name]
+            final_target_file_name = target_file_name.replace(".tar", "")
+        elif target_file_name.endswith(".zip"):
+            cmd = ["unzip", "-xzvf", target_file_name]
+            final_target_file_name = target_file_name.replace(".zip", "")
         if cmd:
             subprocess.call(cmd)
-    if removeTarFile:
-        os.remove(fname)
+
+        if remove_tarfile:
+            os.remove(target_file_name)
+    return final_target_file_name
 
 
 def get_terminal_size():
