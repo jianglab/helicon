@@ -214,39 +214,72 @@ def google_analytics(id):
     )
 
 
-@expressify
-def set_input_text_numeric_update_on_enter_key():
-    js_code = """
-        var customInputBinding = new Shiny.InputBinding();
-        $.extend(customInputBinding, {
-            find: function(scope) {
-                return $(scope).find('input[type="text"]:not([readonly]):not([disabled]), input[type="number"]:not([readonly]):not([disabled])');
-            },
-            getValue: function(el) {
-                if ($(el).attr('type') === 'number') {
-                    return parseFloat($(el).val());
-                } else {
-                    return $(el).val();
-                }
-            },
-            setValue: function(el, value) {
-                $(el).val(value);
-            },
-            subscribe: function(el, callback) {
-                $(el).on('keydown', function(event) {
-                    if (event.key === 'Enter') {
-                        callback();
-                    }
-                });
-            },
-            unsubscribe: function(el) {
-                $(el).off('keydown');
-            }
-        });
+def set_input_text_numeric_update_on_change():
+    if (
+        getattr(set_input_text_numeric_update_on_change, "original_update_text", None)
+        is None
+    ):
+        original_update_text = ui.update_text
 
-        Shiny.inputBindings.register(customInputBinding);
-    """
-    ui.head_content(ui.HTML(f"<script>{js_code}</script>"))
+        def patched_update_text(input_id, *args):
+            original_update_text(input_id, *args)
+            ui.insert_ui(
+                ui.tags.script(
+                    f"""
+                    var inputElement = document.getElementById('{input_id}');
+                    var event = new Event('change', {{ bubbles: true }});
+                    inputElement.dispatchEvent(event);
+                """
+                ),
+                selector="body",
+                where="beforeBegin",
+            )
+
+        ui.update_text = patched_update_text
+        set_input_text_numeric_update_on_change.original_update_text = (
+            original_update_text
+        )
+
+    if (
+        getattr(
+            set_input_text_numeric_update_on_change, "original_update_numeric", None
+        )
+        is None
+    ):
+        original_update_numeric = ui.update_numeric
+
+        def patched_update_numeric(input_id, *args, **kwargs):
+            original_update_numeric(input_id, *args, **kwargs)
+            ui.insert_ui(
+                ui.tags.script(
+                    f"""
+                    var inputElement = document.getElementById('{input_id}');
+                    var event = new Event('change', {{ bubbles: true }});
+                    inputElement.dispatchEvent(event);
+                """
+                ),
+                selector="body",
+                where="beforeBegin",
+            )
+
+        ui.update_numeric = patched_update_numeric
+        set_input_text_numeric_update_on_change.original_update_numeric = (
+            original_update_numeric
+        )
+
+    ui.insert_ui(
+        ui.tags.script(
+            """
+          document.querySelectorAll('.shiny-input-text, .shiny-input-number').forEach(function(input) {
+              input.addEventListener('change', function(event) {
+                  Shiny.setInputValue(input.id + '_changed', this.value);
+              });
+          });
+        """
+        ),
+        selector="body",
+        where="beforeBegin",
+    )
 
 
 def get_client_url(input):
