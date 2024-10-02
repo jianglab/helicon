@@ -60,7 +60,7 @@ def main(args):
                 )
                 if dist_seg_sigma > dist_seg_median:
                     helicon.color_print(
-                        f"It appears that the filaments are badly fragmented, probably from Select2D/Select3D jobs. You can avoid filament fragmentation by runing the following command:\nimages2star.py <input.star> <output.star> --recoverFullFilaments minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]\nafter each Select2D/Select3D job"
+                        f"It appears that the filaments are badly fragmented, probably from Select2D/Select3D jobs. You can avoid filament fragmentation by runing the following command:\nhelicon images2star <input.star> <output.star> --recoverFullFilaments minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]\nafter each Select2D/Select3D job"
                     )
         elif (
             "rlnMicrographMovieName" in data
@@ -2202,7 +2202,7 @@ def main(args):
                 else:
                     if args.verbose > 1:
                         print(
-                            f"\tAuto-detect the format as {format} based on {image_name}"
+                            f"\tAuto-detect the format as {format} based on {image_name}: {data[image_name].iloc[0]}"
                         )
             else:
                 format = param
@@ -2216,6 +2216,12 @@ def main(args):
                         f"\tERROR: the specified format {format} is inconsistent with filename {image_name}: {data[image_name].iloc[0]}. If you are not sure, specify auto as the format and let me guess for you"
                     )
                     sys.exit(-1)
+
+            if format == "EPU_old":
+                helicon.color_print(
+                    f"\tERROR: the old EPU data are not supported as the associated xml files are required to obtain the beam shifts."
+                )
+                sys.exit(-1)
 
             optics = optics_orig.copy().iloc[0:0]
 
