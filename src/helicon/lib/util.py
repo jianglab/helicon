@@ -58,6 +58,62 @@ def parse_param_str(param_str):
                 color_print(f"ERROR: failed to parse parameter {p}. Ignored")
     return (name, d)
 
+# from eman2_jspr
+def parsemodopt(optstr=None):
+	"""This is used so the user can provide the name of a comparator, processor, etc. with options
+	in a convenient form. It will parse "dot:normalize=1:negative=0" and return
+	("dot",{"normalize":1,"negative":0})"""
+
+	if optstr is None or len(optstr)==0 : return (None,{})
+	if optstr.lower()=="none" : return None					# special case doesn't return a tuple
+
+	op2=optstr.split(":")
+	if len(op2)==1 or op2[1]=="" : return (op2[0],{})		# name with no options
+
+	r2={}
+	for p in op2[1:]:
+		try: k,v=p.split("=")
+		except:
+			print("ERROR: Command line parameter parsing failed on ",optstr)
+			print("must have the form name:key=value:key=value")
+			return(None,None)
+
+#		v=v.replace("bdb%","bdb:")
+		if v.lower()=="true" : v=1
+		elif v.lower()=="false" : v=0
+		else:
+			try: v=int(v)
+			except:
+				try: v=float(v)
+				except:
+					if len(v)>2 and v[0]=='"' and v[-1]=='"' : v=v[1:-1]
+		r2[k]=v
+
+	return (op2[0],r2)
+
+# from eman2_jspr
+def parsemodopt2(optstr):
+    ''' parse a=b:c=d,e to {'a':b, 'c':'d,e'} '''
+    op2=optstr.split(":")
+
+    r2={}
+    for p in op2:
+        try: k,v=p.split("=")
+        except:
+            color_print("ERROR: Command line parameter parsing failed on ", optstr)
+            color_print("must have the form key=value:key=value")
+            return {}
+        if v.lower()=="true" : v=1
+        elif v.lower()=="false" : v=0
+        else:
+            try: v=int(v)
+            except:
+                try: v=float(v)
+                except:
+                    if len(v)>2 and v[0]=='"' and v[-1]=='"' : v=v[1:-1]
+        r2[k]=v
+    return r2
+
 
 def color_print(*args, **kargs):
     color = "red"

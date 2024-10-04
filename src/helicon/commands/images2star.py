@@ -701,6 +701,63 @@ def main(args):
                     sys.exit(-1)
             index_d[option_name] += 1
 
+        elif option_name == "selectCommonHelices" and len(param) > 0:
+            # starfile:col1=<name>:col2=<name>:pattern=<str>
+            sf, _ = helicon.parsemodopt(param)
+            assert "rlnMicrographName" in data
+            assert "rlnHelicalTubeID" in data
+            if not os.path.exists(sf):
+                helicon.color_print(
+                    "\tERROR: option --selectCommonHelices %s has specified a non-existent file %s"
+                    % (args.selectCommonHelices, sf)
+                )
+                sys.exit(-1)
+            data_sf = helicon.images2dataframe(
+                sf,
+                alternative_folders=args.folder,
+                ignore_bad_particle_path=args.ignoreBadParticlePath,
+                ignore_bad_micrograph_path=args.ignoreBadMicrographPath,
+                warn_missing_ctf=0,
+                target_convention="relion",
+            )
+            if args.verbose > 1:
+                print("\t%d images found in %s" % (len(data_sf), sf))
+            assert "rlnMicrographName" in data_sf
+            assert "rlnHelicalTubeID" in data_sf
+            
+            #import tqdm
+            #idx=[row in set(zip(data_sf["rlnMicrographName"],data["rlnHelicalTubeID"])) for row in tqdm.tqdm(list(zip(data["rlnMicrographName"],data["rlnHelicalTubeID"])))]
+            #data2=data[idx]
+            common_cols=["rlnMicrographName","rlnHelicalTubeID"]
+            data2=data.merge(data_sf[common_cols],on=common_cols,how='inner',suffixes=['','_dup'])
+            data2=data2[data.columns].drop_duplicates()
+            
+            data2.reset_index(drop=True, inplace=True)
+            data2.attrs["optics"] = optics
+            
+            if len(data2):
+                if args.verbose > 1:
+                    print(f"\t{len(data2)}/{len(data)} images retained")
+                data = data2
+            else:
+                inputFileStr = (
+                    args.input_imageFiles
+                    if len(args.input_imageFiles) > 1
+                    else args.input_imageFiles[0]
+                )
+                helicon.color_print(
+                    (
+                        "\tERROR: no common image found. Check if the files %s and %s include particles in the same folder"
+                        % (inputFileStr, sf)
+                    )
+                )
+                data_ci = data.columns.get_loc("rlnMicrographName")
+                data_sf_ci = data_sf.columns.get_loc("rlnMicrographName")
+                print(("\t%s %s: %s" % (inputFileStr, "rlnMicrographName", data.iat[0, data_ci])))
+                print(("\t%s %s: %s" % (sf, "rlnMicrographName", data_sf.iat[0, data_sf_ci])))
+                sys.exit(-1)
+            index_d[option_name] += 1
+
         elif option_name in ["selectByParticleLocation"] and len(param) > 0:
             # starfile:maxDist=<pixel>
             required_attrs = "rlnMicrographName rlnCoordinateX rlnCoordinateY".split()
@@ -3027,6 +3084,14 @@ def add_args(parser):
         metavar="starFile[:col1=<name>:col2=<name>:pattern=<str>]",
         action="append",
         help='select images in the specified file (example: x.star:col1=rlnImageName:col2=rlnImageOriginalName:pattern=".*(16jul.*-a).*"). disabled by default',
+        default=[],
+    )
+    parser.add_argument(
+        "--selectCommonHelices",
+        type=str,
+        metavar="starFile",
+        action="append",
+        help='select helices in the specified file (example: x.star) based on rlnMicrographName and rlnHelicalTubeID. disabled by default',
         default=[],
     )
     parser.add_argument(
