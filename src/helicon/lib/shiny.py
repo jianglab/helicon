@@ -313,3 +313,37 @@ def set_client_url_query_params(query_params):
             """
     )
     return script
+
+
+@expressify
+def setup_ajdustable_sidebar():
+    return [
+        ui.div(
+            id="handle",
+            style="position: absolute; top:0; bottom: 0; left: 33vw; width: 2px; cursor: ew-resize; background: #ddd;",
+        ),
+        ui.tags.script(
+            """
+                    const handle = document.getElementById('handle');
+                    const sidebar = document.querySelector('.bslib-sidebar-layout');
+                    console.log(sidebar);
+                    console.log(handle);
+                    
+                    handle.addEventListener('mousedown', (e) => {
+                        console.log(e);
+                        const moveHandler = (e) => {
+                            var percent = e.clientX * 100 / document.body.clientWidth;
+                            percent = Math.min(Math.max(10, percent), 90) + 'vw';
+                            handle.style.left = percent;
+                            sidebar.style.setProperty('--_sidebar-width', percent);
+                        };
+                        const upHandler = () => {
+                            document.removeEventListener('mousemove', moveHandler);
+                            document.removeEventListener('mouseup', upHandler);
+                        };
+                        document.addEventListener('mousemove', moveHandler);
+                        document.addEventListener('mouseup', upHandler);
+                    });
+                """
+        ),
+    ]

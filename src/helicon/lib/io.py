@@ -241,6 +241,7 @@ def assign_beamshifts_to_cluster(
     beamshifts, min_cluster_size=4, range_n_clusters=range(2, 200), verbose=True
 ):
     from sklearn.metrics import silhouette_score
+    from .analysis import AgglomerativeClusteringWithMinSize
 
     X = np.array(beamshifts)
 
@@ -249,7 +250,7 @@ def assign_beamshifts_to_cluster(
     best_score = -1
     best_cluster_labels = None
     for n_clusters in range_n_clusters:
-        clustering_method = helicon.AgglomerativeClusteringWithMinSize(
+        clustering_method = AgglomerativeClusteringWithMinSize(
             n_clusters=n_clusters, min_cluster_size=min_cluster_size
         )
         cluster_labels = clustering_method.fit_predict(X)
@@ -1701,8 +1702,6 @@ def mrc2mrcs(data):
 
 #####################################################################################
 def connect_cryosparc(cryosparc_server_info_file="$HOME/.cryosparc/cryosparc.toml"):
-    from helicon import color_print
-
     def print_instructions():
         info = "To connect to CryoSPARC server, please follow these instructions:\n"
         info += f"1. create a text file {cryosparc_server_info_file}\n"
