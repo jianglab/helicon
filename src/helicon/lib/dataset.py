@@ -61,15 +61,17 @@ class EMDB:
         try:
             entries = cached_update_emd_entries(fields=fields)
             self.meta = entries
-            self.emd_ids = list(entries["emd_id"])
+            self.emd_ids = sorted(entries["emd_id"])
         except Exception as e:
             helicon.color_print(e)
             helicon.color_print("WARNING: failed to obtain the list of EMDB entries")
 
     def get_emdb_map_url(self, emd_id: str):
+        emd_id_input = emd_id
         if not isinstance(emd_id, str):
             emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1]
+        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
+        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
         # server = "https://files.wwpdb.org/pub"    # Rutgers University, USA
         server = "https://ftp.ebi.ac.uk/pub/databases"  # European Bioinformatics Institute, England
         # server = "http://ftp.pdbj.org/pub" # Osaka University, Japan
@@ -77,9 +79,11 @@ class EMDB:
         return url
 
     def get_emdb_map_file(self, emd_id: str):
+        emd_id_input = emd_id
         if not isinstance(emd_id, str):
             emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1]
+        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
+        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
         map_file = self.cache_dir / f"emd_{emd_id}.map.gz"
         if map_file.exists():
             return map_file
@@ -88,8 +92,12 @@ class EMDB:
                 self.local_emdb_mirror
                 / f"structures/EMD-{emd_id}/map/emd_{emd_id}.map.gz"
             )
-            if map_file_mirror.exists() and map_file_mirror.getsize():
+            if map_file_mirror.exists() and map_file_mirror.stat().st_size:
                 map_file.symlink_to(map_file_mirror)
+                map_file_mtime = map_file.stat().st_mtime
+                os.utime(
+                    map_file, (map_file_mtime, map_file_mtime), follow_symlinks=False
+                )
                 return map_file
         url = self.get_emdb_map_url(emd_id)
         map_file = helicon.download_url(url, target_file_name=str(map_file))
@@ -113,9 +121,11 @@ class EMDB:
         return data, apix
 
     def get_emdb_xml_url(self, emd_id: str):
+        emd_id_input = emd_id
         if not isinstance(emd_id, str):
             emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1]
+        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
+        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
         # server = "https://files.wwpdb.org/pub"    # Rutgers University, USA
         server = "https://ftp.ebi.ac.uk/pub/databases"  # European Bioinformatics Institute, England
         # server = "http://ftp.pdbj.org/pub" # Osaka University, Japan
@@ -123,9 +133,11 @@ class EMDB:
         return url
 
     def get_emdb_xml_file(self, emd_id: str):
+        emd_id_input = emd_id
         if not isinstance(emd_id, str):
             emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1]
+        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
+        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
         xml_file = self.cache_dir / f"emd_{emd_id}.xml"
         if xml_file.exists():
             return xml_file
@@ -134,8 +146,12 @@ class EMDB:
                 self.local_emdb_mirror
                 / f"structures/EMD-{emd_id}/header/emd-{emd_id}.xml"
             )
-            if xml_file_mirror.exists() and xml_file_mirror.getsize():
+            if xml_file_mirror.exists() and xml_file_mirror.stat().st_size:
                 xml_file.symlink_to(xml_file_mirror)
+                xml_file_mtime = xml_file.stat().st_mtime
+                os.utime(
+                    xml_file, (xml_file_mtime, xml_file_mtime), follow_symlinks=False
+                )
                 return xml_file
         url = self.get_emdb_xml_url(emd_id)
         xml_file = helicon.download_url(url, target_file_name=str(xml_file))
@@ -180,6 +196,9 @@ class EMDB:
         return len(self.emd_ids)
 
     def __getitem__(self, i):
+        assert (
+            0 <= i < len(self.emd_ids)
+        ), f"ERROR: i must be in range [0, {len(self.emd_ids)}). You have specifed {i=}"
         return self.read_emdb_map(self.emd_ids[i])
 
     def __call__(self, emd_id: str):

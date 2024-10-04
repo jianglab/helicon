@@ -4,13 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "helicon"
-dynamic = ["version", "dependencies"]
-description = "A collection of tools for cryo-EM 3D reconstruction of helical structures"
-readme = "README.md"
+description = "A collection of tools for cryo-EM analysis of helical structures"
 authors = [
-    {name = "Jiang Lab", email = "jianglab@gmail.com"}
+    {name = "Wen Jiang", email = "wjiang@gmail.com"}
 ]
+readme = "README.md"
 requires-python = ">=3.12"
+dynamic = ["version", "dependencies"]
+keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Development Status :: 2 - Pre-Alpha",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Structural Biology",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 
 [project.urls]
 Homepage = "https://github.com/jianglab/helicon"

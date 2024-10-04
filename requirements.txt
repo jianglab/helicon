@@ -8,6 +8,7 @@ mrcfile
 numba
 numpy
 pandas
+persist_cache
 plotly
 psutil
 rich
