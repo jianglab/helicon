@@ -13,23 +13,18 @@ def image_select(
     image_labels=reactive.value([]),
     image_size=reactive.value(128),
     initial_selected_indices=reactive.value([]),
-    disable_selection=False,
+    enable_selection=True,
     image_border=2,
     gap=0,
 ):
-    import numpy as np
-    from PIL import Image
-    from helicon import encode_numpy, encode_PIL_Image
-
-    selection_return = reactive.value(None)
-    selection = reactive.value([])
-    initial_selection = reactive.value([])
-    bids_react = reactive.value([])
-
     @render.ui
     def display_images():
         if images() is None or len(images()) == 0:
             return None
+
+        import numpy as np
+        from PIL import Image
+        from helicon import encode_numpy, encode_PIL_Image
 
         images_final = []
         for i, image in enumerate(images()):
@@ -54,9 +49,9 @@ def image_select(
 
         assert image_size() >= 32
 
-        bids = [f"image_select_{i+1}" for i in range(len(images_final))]
+        bids = [f"{session.ns}_image_select_{i+1}" for i in range(len(images_final))]
 
-        def create_image_button(i, image, label, bid):
+        def create_image_button(i, image, label, bid, enable_selection=True):
             img = ui.img(
                 src=image,
                 alt=f"Image {i+1}",
@@ -64,9 +59,8 @@ def image_select(
                 style=f"object-fit: contain; max-width: {image_size()-image_border*2}px; max-height: {image_size()-image_border*2}px; border: {image_border}px solid transparent;",
             )
 
-            return ui.input_action_button(
-                id=bid,
-                label=(
+            return ui.div(
+                (
                     ui.div(
                         img,
                         ui.p(
@@ -78,39 +72,79 @@ def image_select(
                     if display_image_labels
                     else img
                 ),
-                disabled=disable_selection,
+                id=bid,
                 style=f"padding: 0px; border: 0px; margin: 0px; background-color: transparent;",
-                onmouseover=f"if (this.querySelector('img').style.border !== '{image_border}px solid red') {{this.querySelector('img').style.border='{image_border}px solid blue'; this.querySelector('p').style.color='blue';}}",
-                onmouseout=f"if (this.querySelector('img').style.border !== '{image_border}px solid red') {{this.querySelector('img').style.border='{image_border}px solid transparent';  this.querySelector('p').style.color='white';}}",
-                onclick=f"""var bid = '{session.ns}-{bid}';
-                            var count0 = parseInt(this.getAttribute('click_count')) || 0;
-                            count = count0 + 1
-                            var info = {{
-                                count: count,
-                                selected: (count)%2,
-                                ctrlKey: event.ctrlKey,
-                                shiftKey: event.shiftKey,
-                                altKey: event.altKey,
-                                metaKey: event.metaKey
-                            }};
-
+                onmouseover=(
+                    f"if (this.querySelector('img').style.border !== '{image_border}px solid red') {{this.querySelector('img').style.border='{image_border}px solid blue'; this.querySelector('p').style.color='blue';}}"
+                    if enable_selection
+                    else None
+                ),
+                onmouseout=(
+                    f"if (this.querySelector('img').style.border !== '{image_border}px solid red') {{this.querySelector('img').style.border='{image_border}px solid transparent';  this.querySelector('p').style.color='white';}}"
+                    if enable_selection
+                    else None
+                ),
+                onclick=(
+                    f"""var bid = '{session.ns}-{bid}';
+                            var selected;
+                            if (event.shiftKey) {{
+                                selected = this.getAttribute('selected') === 'true';
+                                selected = !selected;
+                            }} else {{
+                                selected = true;
+                            }}
+                            this.setAttribute('selected', selected);
                             var img  = this.querySelector("img");
                             var text = this.querySelector("p");
-                            img.style.border = count%2 ? "{image_border}px solid red" : "{image_border}px solid transparent";
+                            img.style.border = selected ? "{image_border}px solid red" : "{image_border}px solid transparent";
                             if (text) {{
-                                text.style.color = count%2 ? "red" : "white";
+                                text.style.color = selected ? "red" : "white";
                             }}
 
-                            this.setAttribute('click_count', count);
-                            //Shiny.setInputValue(bid, count, {{priority: 'deferred'}});
-                            Shiny.setInputValue(bid + '_click', info, {{priority: 'deferred'}});
-                            //console.log("click", bid, parseInt(this.getAttribute('click_count')), info);
-                        """,
+                            if (!event.shiftKey) {{
+                                var images = this.parentElement.children;
+                                for (var i = 0; i < images.length; i++) {{
+                                    if (images[i] === this) continue;
+                                    images[i].setAttribute('selected', false);
+                                    var img  = images[i].querySelector("img");
+                                    var text = images[i].querySelector("p");
+                                    img.style.border = "{image_border}px solid transparent";
+                                    if (text) {{
+                                        text.style.color = "white";
+                                    }}
+                                }}
+                            }}
+
+                            var selected_prev = this.parentElement.getAttribute('selected');
+                            if (selected_prev === null) selected_prev = [];
+                            for (var i = 0; i < selected_prev.length; i++) {{
+                                selected_prev[i] = parseInt(selected_prev[i]);
+                            }}
+                            var selected_new = [];
+                            for (var i = 0; i < selected_prev.length; i++) {{
+                                if (this.parentElement.children[selected_prev[i]] && this.parentElement.children[selected_prev[i]].getAttribute('selected') === 'true') {{
+                                    selected_new.push(parseInt(selected_prev[i]));
+                                }}
+                            }}
+                            for (var i = 0; i < this.parentElement.children.length; i++) {{
+                                if (this.parentElement.children[i] === this && this.getAttribute('selected') === 'true') {{
+                                    selected_new.push(i);
+                                }}
+                            }}
+                            this.parentElement.setAttribute('selected', selected_new);
+
+                            Shiny.setInputValue('{session.ns}', selected_new, {{priority: 'deferred'}});
+                        """
+                    if enable_selection
+                    else None
+                ),
             )
 
         ui_images = ui.div(
             *[
-                create_image_button(i, image, image_labels_final[i], bid)
+                create_image_button(
+                    i, image, image_labels_final[i], bid, enable_selection
+                )
                 for i, (image, bid) in enumerate(zip(images_final, bids))
             ],
             style=f"display: flex; flex-flow: row wrap; justify-content: center; justify-items: center; align-items: center; gap: {gap}px {gap}px; margin: 0 0 {image_border}px 0",
@@ -127,21 +161,13 @@ def image_select(
                 style=f"display: flex; flex-direction: column; gap: {gap}px; margin: 0",
             )
 
-        bids_react.set(bids)
-        initial_selection.set([0] * len(images()))
-
-        if not disable_selection and len(initial_selected_indices()) > 0:
-            tmp = initial_selection()
-            for i in initial_selected_indices():
-                tmp[i] = 1
-            initial_selection.set(tmp)
-
+        if enable_selection and len(initial_selected_indices()) > 0:
             click_scripts = []
             for i in initial_selected_indices():
                 click_scripts.append(
                     ui.tags.script(
                         f"""
-                            var bid = '{session.ns}-{bids[i]}';
+                            var bid = '{bids[i]}';
                             var element = document.getElementById(bid);
                             var event = new MouseEvent('click', {{
                                 bubbles: true,
@@ -156,45 +182,6 @@ def image_select(
             return (ui_images, click_scripts)
         else:
             return ui_images
-
-    @render.ui
-    def ordered_selection():
-        status = [
-            (input[bid]() + initial_selection()[i]) % 2 == 1
-            for i, bid in enumerate(bids_react())
-        ]
-        current = [i for i, is_selected in enumerate(status) if is_selected]
-        previous = getattr(ordered_selection, "previous", [])
-        result = [i for i in previous if i in current]
-        result += [i for i in current if i not in result]
-        scripts = None
-        if len(result) > 1:
-            shiftKey = input[f"{bids_react()[result[-1]]}_click"]()["shiftKey"]
-            if not shiftKey:
-                scripts = []
-                for i in result[:-1]:
-                    bid = f"{session.ns}-{bids_react()[i]}"
-                    script = ui.tags.script(
-                        f"""document.getElementById('{bid}').click();"""
-                    )
-                    scripts.append(script)
-                result = [result[-1]]
-
-        ordered_selection.previous = result
-        selection.set(result)
-
-        return scripts
-
-    @reactive.effect
-    @reactive.event(selection)
-    def _():
-        if selection() != selection_return():
-            selection_return.set(selection())
-
-    if disable_selection:
-        return None
-    else:
-        return selection_return
 
 
 @expressify
@@ -326,11 +313,8 @@ def setup_ajdustable_sidebar():
             """
                     const handle = document.getElementById('handle');
                     const sidebar = document.querySelector('.bslib-sidebar-layout');
-                    console.log(sidebar);
-                    console.log(handle);
                     
                     handle.addEventListener('mousedown', (e) => {
-                        console.log(e);
                         const moveHandler = (e) => {
                             var percent = e.clientX * 100 / document.body.clientWidth;
                             percent = Math.min(Math.max(10, percent), 90) + 'vw';
