@@ -103,7 +103,7 @@ def image_select(
                             text.style.color = selected ? "red" : "white";
                         }}
 
-                        var allow_multiple_selection = {'true' if allow_multiple_selection else 'false'} === 'true'? true : false;
+                        var allow_multiple_selection = {1 if allow_multiple_selection else 0};
 
                         if (!allow_multiple_selection || !event.shiftKey) {{
                             var images = this.parentElement.children;
