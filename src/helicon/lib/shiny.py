@@ -14,6 +14,7 @@ def image_select(
     image_size=reactive.value(128),
     initial_selected_indices=reactive.value([]),
     enable_selection=True,
+    allow_multiple_selection=True,
     image_border=2,
     gap=0,
 ):
@@ -49,9 +50,11 @@ def image_select(
 
         assert image_size() >= 32
 
-        bids = [f"{session.ns}_image_select_{i+1}" for i in range(len(images_final))]
+        bids = [f"{session.ns}_image_{i+1}" for i in range(len(images_final))]
 
-        def create_image_button(i, image, label, bid, enable_selection=True):
+        def create_image_button(
+            i, image, label, bid, enable_selection=True, allow_multiple_selection=True
+        ):
             img = ui.img(
                 src=image,
                 alt=f"Image {i+1}",
@@ -85,56 +88,57 @@ def image_select(
                     else None
                 ),
                 onclick=(
-                    f"""var bid = '{session.ns}-{bid}';
-                            var selected;
-                            if (event.shiftKey) {{
-                                selected = this.getAttribute('selected') === 'true';
-                                selected = !selected;
-                            }} else {{
-                                selected = true;
-                            }}
-                            this.setAttribute('selected', selected);
-                            var img  = this.querySelector("img");
-                            var text = this.querySelector("p");
-                            img.style.border = selected ? "{image_border}px solid red" : "{image_border}px solid transparent";
-                            if (text) {{
-                                text.style.color = selected ? "red" : "white";
-                            }}
+                    f"""var selected;
+                        if (event.shiftKey) {{
+                            selected = this.getAttribute('selected') === 'true';
+                            selected = !selected;
+                        }} else {{
+                            selected = true;
+                        }}
+                        this.setAttribute('selected', selected);
+                        var img  = this.querySelector("img");
+                        var text = this.querySelector("p");
+                        img.style.border = selected ? "{image_border}px solid red" : "{image_border}px solid transparent";
+                        if (text) {{
+                            text.style.color = selected ? "red" : "white";
+                        }}
 
-                            if (!event.shiftKey) {{
-                                var images = this.parentElement.children;
-                                for (var i = 0; i < images.length; i++) {{
-                                    if (images[i] === this) continue;
-                                    images[i].setAttribute('selected', false);
-                                    var img  = images[i].querySelector("img");
-                                    var text = images[i].querySelector("p");
-                                    img.style.border = "{image_border}px solid transparent";
-                                    if (text) {{
-                                        text.style.color = "white";
-                                    }}
+                        var allow_multiple_selection = {'true' if allow_multiple_selection else 'false'} === 'true'? true : false;
+
+                        if (!allow_multiple_selection || !event.shiftKey) {{
+                            var images = this.parentElement.children;
+                            for (var i = 0; i < images.length; i++) {{
+                                if (images[i] === this) continue;
+                                images[i].setAttribute('selected', false);
+                                var img  = images[i].querySelector("img");
+                                var text = images[i].querySelector("p");
+                                img.style.border = "{image_border}px solid transparent";
+                                if (text) {{
+                                    text.style.color = "white";
                                 }}
                             }}
+                        }}
 
-                            var selected_prev = this.parentElement.getAttribute('selected');
-                            if (selected_prev === null) selected_prev = [];
-                            for (var i = 0; i < selected_prev.length; i++) {{
-                                selected_prev[i] = parseInt(selected_prev[i]);
+                        var selected_prev = this.parentElement.getAttribute('selected');
+                        if (selected_prev === null) selected_prev = [];
+                        for (var i = 0; i < selected_prev.length; i++) {{
+                            selected_prev[i] = parseInt(selected_prev[i]);
+                        }}
+                        var selected_new = [];
+                        for (var i = 0; i < selected_prev.length; i++) {{
+                            if (this.parentElement.children[selected_prev[i]] && this.parentElement.children[selected_prev[i]].getAttribute('selected') === 'true') {{
+                                selected_new.push(parseInt(selected_prev[i]));
                             }}
-                            var selected_new = [];
-                            for (var i = 0; i < selected_prev.length; i++) {{
-                                if (this.parentElement.children[selected_prev[i]] && this.parentElement.children[selected_prev[i]].getAttribute('selected') === 'true') {{
-                                    selected_new.push(parseInt(selected_prev[i]));
-                                }}
+                        }}
+                        for (var i = 0; i < this.parentElement.children.length; i++) {{
+                            if (this.parentElement.children[i] === this && this.getAttribute('selected') === 'true') {{
+                                selected_new.push(i);
                             }}
-                            for (var i = 0; i < this.parentElement.children.length; i++) {{
-                                if (this.parentElement.children[i] === this && this.getAttribute('selected') === 'true') {{
-                                    selected_new.push(i);
-                                }}
-                            }}
-                            this.parentElement.setAttribute('selected', selected_new);
+                        }}
+                        this.parentElement.setAttribute('selected', selected_new);
 
-                            Shiny.setInputValue('{session.ns}', selected_new, {{priority: 'deferred'}});
-                        """
+                        Shiny.setInputValue('{session.ns}', selected_new, {{priority: 'deferred'}});
+                    """
                     if enable_selection
                     else None
                 ),
@@ -143,7 +147,12 @@ def image_select(
         ui_images = ui.div(
             *[
                 create_image_button(
-                    i, image, image_labels_final[i], bid, enable_selection
+                    i,
+                    image,
+                    image_labels_final[i],
+                    bid,
+                    enable_selection,
+                    allow_multiple_selection,
                 )
                 for i, (image, bid) in enumerate(zip(images_final, bids))
             ],
