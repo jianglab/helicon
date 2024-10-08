@@ -320,23 +320,30 @@ def setup_ajdustable_sidebar():
         ),
         ui.tags.script(
             """
-                    const handle = document.getElementById('handle');
-                    const sidebar = document.querySelector('.bslib-sidebar-layout');
-                    
-                    handle.addEventListener('mousedown', (e) => {
-                        const moveHandler = (e) => {
-                            var percent = e.clientX * 100 / document.body.clientWidth;
-                            percent = Math.min(Math.max(10, percent), 90) + 'vw';
-                            handle.style.left = percent;
-                            sidebar.style.setProperty('--_sidebar-width', percent);
-                        };
-                        const upHandler = () => {
-                            document.removeEventListener('mousemove', moveHandler);
-                            document.removeEventListener('mouseup', upHandler);
-                        };
-                        document.addEventListener('mousemove', moveHandler);
-                        document.addEventListener('mouseup', upHandler);
+                const handle = document.getElementById('handle');
+                const sidebar = document.querySelector('.bslib-sidebar-layout');
+
+                handle.addEventListener('mousedown', (e) => {
+                    const moveHandler = (e) => {
+                        var percent = e.clientX * 100 / document.body.clientWidth;
+                        percent = Math.min(Math.max(10, percent), 90) + 'vw';
+                        handle.style.left = percent;
+                        sidebar.style.setProperty('--_sidebar-width', percent);
+                    };
+                    const upHandler = () => {
+                        document.removeEventListener('mousemove', moveHandler);
+                        document.removeEventListener('mouseup', upHandler);
+                    };
+                    document.addEventListener('mousemove', moveHandler);
+                    document.addEventListener('mouseup', upHandler);
+                });
+                
+                window.addEventListener('load', () => {
+                    const collapse_toggle = sidebar.querySelector('.collapse-toggle');
+                    collapse_toggle.addEventListener('click', (e) => {
+                        handle.style.display = handle.style.display === 'none' ? 'block' : 'none';
                     });
-                """
+                });
+            """
         ),
     ]
