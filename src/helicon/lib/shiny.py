@@ -126,12 +126,12 @@ def image_select(
                         }}
                         var selected_new = [];
                         for (var i = 0; i < selected_prev.length; i++) {{
-                            if (this.parentElement.children[selected_prev[i]] && this.parentElement.children[selected_prev[i]].getAttribute('selected') === 'true') {{
+                            if (this.parentElement.children[selected_prev[i]] && this.parentElement.children[selected_prev[i]].getAttribute('selected') === 'true' && !selected_new.includes(parseInt(selected_prev[i]))) {{
                                 selected_new.push(parseInt(selected_prev[i]));
                             }}
                         }}
                         for (var i = 0; i < this.parentElement.children.length; i++) {{
-                            if (this.parentElement.children[i] === this && this.getAttribute('selected') === 'true') {{
+                            if (this.parentElement.children[i] === this && this.getAttribute('selected') === 'true' && !selected_new.includes(i)) {{
                                 selected_new.push(i);
                             }}
                         }}
