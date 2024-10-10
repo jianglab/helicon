@@ -237,6 +237,12 @@ def threshold_data(data, thresh_fraction=-1):
     return ret
 
 
+def crop_center_z(data, n):
+    assert data.ndim in [3]
+    nz = data.shape[0]
+    return data[nz // 2 - n // 2 : nz // 2 + n // 2 + n, :, :]
+
+
 def crop_center(data, shape):
     assert data.ndim in [2, 3]
     if data.shape == shape:

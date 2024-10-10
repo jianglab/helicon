@@ -9,7 +9,7 @@ authors = [
     {name = "Wen Jiang", email = "wjiang@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dynamic = ["version", "dependencies"]
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
