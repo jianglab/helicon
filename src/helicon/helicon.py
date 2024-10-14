@@ -5,6 +5,9 @@ import os, sys
 from importlib import import_module
 import helicon
 
+shiny_commands = ["helicalPitch"]
+streamlit_commands = ["helicalLattice", "hi3d", "hill", "procart"]
+
 
 def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
     parser = argparse.ArgumentParser(description=doc_str, allow_abbrev=True)
@@ -19,8 +22,14 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
     module_files = sorted(os.listdir(cmd_dir))
     for module_file in module_files:
         if module_file != "__init__.py" and module_file[-3:] == ".py":
-            module_name = ".".join(["helicon", dir_lbl, module_file[:-3]])
-            module = import_module(module_name)
+            module_name = module_file[:-3]
+            if module_name in shiny_commands and not helicon.has_shiny():
+                continue
+            elif module_name in streamlit_commands and not helicon.has_streamlit():
+                continue
+
+            module_name_full = ".".join(["helicon", dir_lbl, module_name])
+            module = import_module(module_name_full)
 
             if hasattr(module, "add_args"):
                 parsed_doc = module.__doc__.split("\n") if module.__doc__ else list()

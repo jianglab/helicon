@@ -1,12 +1,12 @@
 
 # Helicon
 
-A collection of tools for cryo-EM 3D reconstruction of helical structures.
+A collection of tools for cryo-EM analysis of helical structures.
 
 ## Installation
 Run this command in a terminal:  
 ```
-pip install git+https://github.com/jianglab/helicon
+pip install "helicon[all] @ git+https://github.com/jianglab/helicon"
 ```
 
 ## Usage
@@ -16,4 +16,4 @@ helicon --help
 ```
 
 ## Disclaimer
-Helicon is at a very early stage of development, and we are releasing it to promote open science. However, it might be very unstable/buggy, and the support will be very limited. Use it at your own risk.
+Helicon is at a very early stage of development, and we are releasing it to promote open science. However, it might be very unstable/buggy, and the support will be very limited.

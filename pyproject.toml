@@ -9,8 +9,10 @@ authors = [
     {name = "Wen Jiang", email = "wjiang@gmail.com"}
 ]
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
-dynamic = ["version", "dependencies"]
+dynamic = ["version"]
+dependencies = ['cryosparc-tools', 'gemmi', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas', 'persist_cache', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'tqdm']
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -20,14 +22,20 @@ classifiers = [
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Structural Biology",
-    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Image Processing"
 ]
 
 [project.urls]
-Homepage = "https://github.com/jianglab/helicon"
+homepage = "https://github.com/jianglab/helicon"
 
 [project.scripts]
 helicon = "helicon.helicon:main"
+
+[project.optional-dependencies]
+shiny = ['joblib', 'mrcfile', 'numpy', 'pandas', 'plotly', 'requests', 'shiny', 'shinywidgets', 'starfile']
+streamlit = ['atomium', 'bokeh==2.4.3', 'kneebow', 'mrcfile', 'numba', 'numpy', 'pandas', 'plotly', 'psutil',
+ 'qrcode', 'scikit-image', 'scikit-learn', 'scipy', 'shapely', 'st-clickable-images', 'streamlit','streamlit-drawable-canvas', 'trackpy', 'uptime', 'xmltodict']
+ all = ["shiny", "streamlit"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -37,4 +45,3 @@ where = ["src"]
 
 [tool.setuptools.dynamic]
 version = {attr = "helicon.__version__"}
-dependencies = {file = ["requirements.txt"]}

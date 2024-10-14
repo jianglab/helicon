@@ -13,4 +13,8 @@ from .lib.io import *
 from .lib.util import *
 from .lib.analysis import *
 from .lib import dataset
-from .lib import shiny
+
+try:
+    from .lib import shiny
+except:
+    pass
