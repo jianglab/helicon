@@ -192,6 +192,19 @@ class EMDB:
         parse_element(root, data)
         return data
 
+    def helical_structure_ids(self):
+        ids = self.meta.loc[self.meta["method"] == "helical", "emd_id"]
+        return list(ids)
+
+    def amyloid_atlas_ids(self):
+        df = get_amyloid_atlas()
+        ids = [
+            id
+            for id in df["emd_id"].str.split("-", expand=True).iloc[:, 1]
+            if id in self.emd_ids
+        ]
+        return ids
+
     def __len__(self):
         return len(self.emd_ids)
 
@@ -207,3 +220,50 @@ class EMDB:
     def __iter__(self):
         for emd_id in self.emd_ids:
             yield self.read_emdb_map(emd_id)
+
+
+################################################################################
+
+
+@cache(name="pdb_id_2_emd_id", dir=str(helicon.cache_dir / "emdb"))
+def pdb_id_2_emd_id(pdb_id):
+    import requests
+
+    url = f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}"
+    response = requests.get(url).json()
+    emd_id = list(response["rcsb_entry_container_identifiers"]["emdb_ids"])[0]
+    print(f"{pdb_id=} -> {emd_id=}")
+    return emd_id
+
+
+@cache(
+    name="get_amyloid_atlas",
+    dir=str(helicon.cache_dir / "emdb"),
+    expiry=30 * 24 * 60 * 60,
+)  # 30 days
+def get_amyloid_atlas():
+    url = "https://people.mbi.ucla.edu/sawaya/amyloidatlas/"
+    replaced_pdb_ids = {"7z40": "8ade"}
+
+    df = pd.read_html(url, header=0, flavor="html5lib")[0]
+
+    mask = df["PDB ID"].isin(replaced_pdb_ids)
+    df.loc[mask, "PDB ID"] = df.loc[mask, "PDB ID"].str.lower().map(replaced_pdb_ids)
+
+    df = df[df["Method"].str.lower() == "cryoem"].copy()
+    df["emd_id"] = df["PDB ID"].apply(pdb_id_2_emd_id)
+
+    df["sample"] = df["Protein"] + " - " + df["Fibril Origins"]
+    cols = dict(
+        emd_id="emd_id",
+        resolution="Resol- ution (Å)",
+        pdb_id="PDB ID",
+        sample="sample",
+        others=["Residues Ordered", "Reference"],
+    )
+    df = df[helicon.flatten(cols.values())]
+    df = df.rename(columns={cols[k]: k for k in cols if k != "others"})
+    df = df.drop_duplicates(subset=["emd_id", "pdb_id"])
+    df = df.reset_index()
+
+    return df

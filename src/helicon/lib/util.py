@@ -467,6 +467,8 @@ def assign_to_groups(numbers, group_size):
 # taken from http://rightfootin.blogspot.com/2006/09/more-on-python-flatten.html
 def flatten(l, ltypes=(list, tuple)):
     ltype = type(l)
+    if ltype not in ltypes:
+        ltype = list
     l = list(l)
     i = 0
     while i < len(l):
