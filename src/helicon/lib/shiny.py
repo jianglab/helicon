@@ -5,7 +5,7 @@ from shiny.express import ui, module, render, expressify
 
 def image_gallery(
     id,
-    label="",
+    label=reactive.value(""),
     images=reactive.value([]),
     display_image_labels=True,
     image_labels=reactive.value([]),
@@ -156,10 +156,10 @@ def image_gallery(
         style=f"display: flex; flex-flow: row wrap; justify-content: {justification}; justify-items: center; align-items: center; gap: {gap}px {gap}px; margin: 0 0 {image_border}px 0",
     )
 
-    if len(label):
+    if len(label()):
         ui_images = ui.div(
             ui.h6(
-                label,
+                label(),
                 style=f"text-align: {justification}; margin: 0;",
                 title="Hold the Shift key while clicking to select multiple images",
             ),

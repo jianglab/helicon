@@ -9,9 +9,12 @@ cache_dir = (
     else Path("~/.cache/helicon").expanduser()
 )
 
-from .lib.io import *
-from .lib.util import *
 from .lib.analysis import *
+from .lib.filters import *
+from .lib.io import *
+from .lib.transforms import *
+from .lib.util import *
+
 from .lib import dataset
 
 try:
