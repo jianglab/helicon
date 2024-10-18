@@ -34,6 +34,7 @@ class EMDB:
             "title",
             "structure_determination_method",
             "resolution",
+            "fitted_pdbs",
             "image_reconstruction_helical_delta_z_value",
             "image_reconstruction_helical_delta_phi_value",
             "image_reconstruction_helical_axial_symmetry_details",
@@ -51,6 +52,7 @@ class EMDB:
             entries = entries.rename(
                 columns={
                     "structure_determination_method": "method",
+                    "fitted_pdbs": "pdb",
                     "image_reconstruction_helical_delta_z_value": "rise",
                     "image_reconstruction_helical_delta_phi_value": "twist",
                     "image_reconstruction_helical_axial_symmetry_details": "csym",
@@ -60,8 +62,8 @@ class EMDB:
 
         try:
             entries = cached_update_emd_entries(fields=fields)
-            self.meta = entries
-            self.emd_ids = sorted(entries["emd_id"])
+            self.meta = entries.sort_values(by="emd_id", key=lambda x: x.astype(int))
+            self.emd_ids = list(entries["emd_id"])
         except Exception as e:
             helicon.color_print(e)
             helicon.color_print("WARNING: failed to obtain the list of EMDB entries")
@@ -118,6 +120,9 @@ class EMDB:
         with mrcfile.open(map_file) as mrc:
             data = mrc.data
             apix = float(mrc.voxel_size.x)
+            data, _ = helicon.change_map_axes_order(
+                data, mrc.header, new_axes=["x", "y", "z"]
+            )
         return data, apix
 
     def get_emdb_xml_url(self, emd_id: str):
@@ -200,7 +205,7 @@ class EMDB:
         df = get_amyloid_atlas()
         ids = [
             id
-            for id in df["emd_id"].str.split("-", expand=True).iloc[:, 1]
+            for id in df["emd_id"].str.split("-", expand=True).iloc[:, -1]
             if id in self.emd_ids
         ]
         return ids
@@ -225,17 +230,6 @@ class EMDB:
 ################################################################################
 
 
-@cache(name="pdb_id_2_emd_id", dir=str(helicon.cache_dir / "emdb"))
-def pdb_id_2_emd_id(pdb_id):
-    import requests
-
-    url = f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}"
-    response = requests.get(url).json()
-    emd_id = list(response["rcsb_entry_container_identifiers"]["emdb_ids"])[0]
-    print(f"{pdb_id=} -> {emd_id=}")
-    return emd_id
-
-
 @cache(
     name="get_amyloid_atlas",
     dir=str(helicon.cache_dir / "emdb"),
@@ -251,7 +245,14 @@ def get_amyloid_atlas():
     df.loc[mask, "PDB ID"] = df.loc[mask, "PDB ID"].str.lower().map(replaced_pdb_ids)
 
     df = df[df["Method"].str.lower() == "cryoem"].copy()
-    df["emd_id"] = df["PDB ID"].apply(pdb_id_2_emd_id)
+
+    emdb = EMDB()
+    pdb2emd_mapping = {}
+    for index, row in emdb.meta.iterrows():
+        for pdb_id in str(row["pdb"]).lower().split(","):
+            if pdb_id:
+                pdb2emd_mapping[pdb_id] = row["emd_id"]
+    df["emd_id"] = df["PDB ID"].map(pdb2emd_mapping)
 
     df["sample"] = df["Protein"] + " - " + df["Fibril Origins"]
     cols = dict(
