@@ -12,6 +12,7 @@ def image_gallery(
     image_size=reactive.value(128),
     image_border=2,
     gap=0,
+    justification="center",
     enable_selection=False,
     allow_multiple_selection=False,
     initial_selected_indices=reactive.value([]),
@@ -55,7 +56,7 @@ def image_gallery(
             src=image,
             alt=f"Image {i+1}",
             title=str(label),
-            style=f"object-fit: contain; max-width: {image_size()-image_border*2}px; max-height: {image_size()-image_border*2}px; border: {image_border}px solid transparent;",
+            style=f"object-fit: contain; height: {image_size()}px; border: {image_border}px solid transparent;",
         )
 
         return ui.div(
@@ -152,14 +153,14 @@ def image_gallery(
             )
             for i, (image, bid) in enumerate(zip(images_final, bids))
         ],
-        style=f"display: flex; flex-flow: row wrap; justify-content: center; justify-items: center; align-items: center; gap: {gap}px {gap}px; margin: 0 0 {image_border}px 0",
+        style=f"display: flex; flex-flow: row wrap; justify-content: {justification}; justify-items: center; align-items: center; gap: {gap}px {gap}px; margin: 0 0 {image_border}px 0",
     )
 
     if len(label):
         ui_images = ui.div(
             ui.h6(
                 label,
-                style="text-align: center; margin: 0;",
+                style=f"text-align: {justification}; margin: 0;",
                 title="Hold the Shift key while clicking to select multiple images",
             ),
             ui_images,
@@ -201,6 +202,7 @@ def image_select(
     image_size=reactive.value(128),
     image_border=2,
     gap=0,
+    justification="center",
     enable_selection=True,
     allow_multiple_selection=True,
     initial_selected_indices=reactive.value([]),
@@ -219,6 +221,7 @@ def image_select(
             allow_multiple_selection=allow_multiple_selection,
             image_border=image_border,
             gap=gap,
+            justification=justification,
         )
 
 
