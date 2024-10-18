@@ -181,6 +181,113 @@ def rotate_shift_image(
     return ret
 
 
+def calculate_structural_factor(data, apix, return_fft=False):
+    """
+    Calculate the 1D structural factor, which is the rotational average of the FFT amplitude squared.
+
+    Parameters:
+    data (np.ndarray): Input 2D or 3D data array.
+
+    Returns:
+    qbins (np.ndarray): Binned q values.
+    structural_factor (np.ndarray): Rotational average of the FFT amplitude squared.
+    """
+
+    if data.ndim == 2:
+        ny, nx = data.shape
+        qy, qx = np.meshgrid(np.fft.fftfreq(ny), np.fft.fftfreq(nx), indexing="ij")
+        F = np.fft.fft2(data)
+    elif data.ndim == 3:
+        nz, ny, nx = data.shape
+        qz, qy, qx = np.meshgrid(
+            np.fft.fftfreq(nz), np.fft.fftfreq(ny), np.fft.fftfreq(nx), indexing="ij"
+        )
+        F = np.fft.fftn(data)
+    else:
+        raise ValueError("Input data must be a 2D or 3D array.")
+
+    amplitude_squared = np.abs(F) ** 2
+
+    if data.ndim == 2:
+        qr = np.sqrt(qx**2 + qy**2) / apix
+    else:
+        qr = np.sqrt(qx**2 + qy**2 + qz**2) / apix
+
+    qmax = np.max(qr)
+    qstep = np.min(qr[qr > 0])
+    nbins = int(qmax / qstep) // 2 * 2
+
+    qbins = np.linspace(0, nbins * qstep, nbins)
+    qbin_labels = np.searchsorted(qbins, qr, "right") - 1
+
+    structural_factor = np.zeros(nbins)
+    for i in range(nbins):
+        structural_factor[i] = np.sum(amplitude_squared[qbin_labels == i])
+
+    if return_fft:
+        return qbins, structural_factor, F
+    else:
+        return qbins, structural_factor
+
+
+def scale_structural_factors(data, apix, data_target, apix_target):
+    """
+    Scale the structural factors of the data array to match those of the target data array.
+
+    Parameters:
+    data (np.ndarray): The first input data array (2D or 3D) whose structural factors are used as a reference.
+    apix (float): The pixel size of the first input data array.
+    data_target (np.ndarray): The second input data array (2D or 3D) whose structural factors will be scaled.
+    apix_target (float): The pixel size of the target data array.
+
+    Returns:
+    np.ndarray: The modified data after scaling the structural factors of the target array
+    """
+
+    qbins_target, structural_factor_target = calculate_structural_factor(
+        data_target, apix_target, return_fft=False
+    )
+    qbins, structural_factor, fft = calculate_structural_factor(
+        data, apix, return_fft=True
+    )
+
+    from scipy import interpolate
+
+    interp_func = interpolate.interp1d(
+        qbins_target, structural_factor_target, bounds_error=False, fill_value=0
+    )
+    structural_factor_target_interp = interp_func(qbins)
+
+    ratio = np.sqrt(structural_factor_target_interp / structural_factor)
+
+    amplitude2 = np.abs(fft)
+
+    if data.ndim == 2:
+        ny, nx = data.shape
+        qy, qx = np.meshgrid(np.fft.fftfreq(ny), np.fft.fftfreq(nx), indexing="ij")
+        qr = np.sqrt(qx**2 + qy**2) / apix
+    elif data.ndim == 3:
+        nz, ny, nx = data.shape
+        qz, qy, qx = np.meshgrid(
+            np.fft.fftfreq(nz), np.fft.fftfreq(ny), np.fft.fftfreq(nx), indexing="ij"
+        )
+        qr = np.sqrt(qx**2 + qy**2 + qz**2) / apix
+    else:
+        raise ValueError("Input data must be a 2D or 3D array.")
+
+    interp_func = interpolate.interp1d(qbins, ratio, bounds_error=False, fill_value=0)
+    ratio_interp = interp_func(qr)
+
+    modified_amplitude = amplitude2 * ratio_interp
+
+    phase2 = np.angle(fft)
+    modified_fft = modified_amplitude * np.exp(1j * phase2)
+
+    modified_data = np.fft.ifftn(modified_fft)
+
+    return np.real(modified_data)
+
+
 def get_resolution(fsc):
     from scipy import interpolate
 
