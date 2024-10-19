@@ -132,24 +132,43 @@ def threshold_data(data, thresh_fraction=-1):
 
 
 def low_high_pass_filter(data, low_pass_fraction=0, high_pass_fraction=0):
-    fft = np.fft.fft2(data)
-    ny, nx = fft.shape
-    Y, X = np.meshgrid(
-        np.arange(ny, dtype=np.float32) - ny // 2,
-        np.arange(nx, dtype=np.float32) - nx // 2,
-        indexing="ij",
-    )
-    Y /= ny // 2
-    X /= nx // 2
+    if data.ndim not in [2, 3]:
+        raise ValueError("Input data must be a 2D or 3D array.")
+
+    if data.ndim == 2:
+        fft = np.fft.fft2(data)
+        ny, nx = fft.shape
+        Y, X = np.meshgrid(
+            np.arange(ny, dtype=np.float32) - ny // 2,
+            np.arange(nx, dtype=np.float32) - nx // 2,
+            indexing="ij",
+        )
+        Y /= ny // 2
+        X /= nx // 2
+        R2 = X**2 + Y**2
+    else:  # 3D case
+        fft = np.fft.fftn(data)
+        nz, ny, nx = fft.shape
+        Z, Y, X = np.meshgrid(
+            np.arange(nz, dtype=np.float32) - nz // 2,
+            np.arange(ny, dtype=np.float32) - ny // 2,
+            np.arange(nx, dtype=np.float32) - nx // 2,
+            indexing="ij",
+        )
+        Z /= nz // 2
+        Y /= ny // 2
+        X /= nx // 2
+        R2 = X**2 + Y**2 + Z**2
+
     if 0 < low_pass_fraction < 1:
         f2 = np.log(2) / (low_pass_fraction**2)
-        filter_lp = np.exp(-f2 * (X**2 + Y**2))
+        filter_lp = np.exp(-f2 * R2)
         fft *= np.fft.fftshift(filter_lp)
     if 0 < high_pass_fraction < 1:
         f2 = np.log(2) / (high_pass_fraction**2)
-        filter_hp = 1.0 - np.exp(-f2 * (X**2 + Y**2))
+        filter_hp = 1.0 - np.exp(-f2 * R2)
         fft *= np.fft.fftshift(filter_hp)
-    ret = np.abs(np.fft.ifft2(fft))
+    ret = np.abs(np.fft.ifftn(fft))
     return ret
 
 
