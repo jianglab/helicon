@@ -118,6 +118,7 @@ def image_gallery(
 
                     var selected_prev = this.parentElement.getAttribute('selected');
                     if (selected_prev === null) selected_prev = [];
+                    else  selected_prev = selected_prev.split(',');
                     for (var i = 0; i < selected_prev.length; i++) {{
                         selected_prev[i] = parseInt(selected_prev[i]);
                     }}
@@ -344,11 +345,11 @@ def set_client_url_query_params(query_params):
 
 
 @expressify
-def setup_ajdustable_sidebar():
+def setup_ajdustable_sidebar(width="33vw"):
     return [
         ui.div(
             id="handle",
-            style="position: absolute; top:0; bottom: 0; left: 33vw; width: 2px; cursor: ew-resize; background: #ddd;",
+            style=f"position: absolute; top:0; bottom: 0; left: {width}; width: 2px; cursor: ew-resize; background: #ddd;",
         ),
         ui.tags.script(
             """
