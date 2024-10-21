@@ -10,8 +10,9 @@ cache_dir = (
 )
 if not os.access(cache_dir, os.W_OK):
     import tempfile
+    import getpass
 
-    cache_dir = Path(tempfile.gettempdir()) / Path(os.getlogin()) / "helicon_cache"
+    cache_dir = Path(tempfile.gettempdir()) / getpass.getuser() / "helicon_cache"
 if not cache_dir.exists():
     cache_dir.mkdir(parents=True, exist_ok=True)
 
