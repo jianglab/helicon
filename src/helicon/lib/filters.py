@@ -123,6 +123,22 @@ def match_structural_factors(data, apix, data_target, apix_target):
     return set_structural_factors(data, apix, target_bins, target_structural_factors)
 
 
+def normalize_min_max(data, min=0, max=1):
+    data_min = data.min()
+    data_max = data.max()
+    if data_max == data_min:
+        return data
+    return (max - min) * (data - data_min) / (data_max - data_min)
+
+
+def normalize_mean_std(data, mean=0, std=1):
+    data_std = data.std()
+    if data_std == 0:
+        return data
+    data_mean = data.mean()
+    return (data - data_mean) / data_std
+
+
 def threshold_data(data, thresh_fraction=-1):
     if thresh_fraction < 0:
         return data
