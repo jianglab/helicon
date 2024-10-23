@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import pandas as pd
-from persist_cache import cache
 import helicon
 
 
@@ -40,9 +39,7 @@ class EMDB:
             "image_reconstruction_helical_axial_symmetry_details",
         ],
     ):
-        @cache(
-            name="emdb_entries", dir=str(self.cache_dir), expiry=7 * 24 * 60 * 60
-        )  # 7 days
+        @helicon.cache(cache_dir=str(self.cache_dir), expires_after=7)  # 7 days
         def cached_update_emd_entries(fields):
             url = f'https://www.ebi.ac.uk/emdb/api/search/current_status:"REL"?rows=1000000&wt=csv&download=true&fl={",".join(fields)}'
             entries = pd.read_csv(url)
@@ -230,11 +227,7 @@ class EMDB:
 ################################################################################
 
 
-@cache(
-    name="get_amyloid_atlas",
-    dir=str(helicon.cache_dir / "emdb"),
-    expiry=30 * 24 * 60 * 60,
-)  # 30 days
+@helicon.cache(cache_dir=str(helicon.cache_dir / "emdb"), expires_after=30)  # 30 days
 def get_amyloid_atlas():
     url = "https://people.mbi.ucla.edu/sawaya/amyloidatlas/"
     replaced_pdb_ids = {"7z40": "8ade"}
@@ -247,6 +240,8 @@ def get_amyloid_atlas():
     df = df[df["Method"].str.lower() == "cryoem"].copy()
 
     emdb = EMDB()
+    assert emdb.meta is not None, f"Failed to get the list of EMDB entries"
+
     pdb2emd_mapping = {}
     for index, row in emdb.meta.iterrows():
         for pdb_id in str(row["pdb"]).lower().split(","):

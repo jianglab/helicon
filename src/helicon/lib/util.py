@@ -1,4 +1,4 @@
-import sys, os, time, datetime, random
+import sys, os, time, datetime
 import numpy as np
 
 
@@ -720,3 +720,66 @@ class DummyMemory:
             return decorator
         else:
             return decorator(func)
+
+
+def cache(expires_after=datetime.timedelta(weeks=1), cache_dir=None, verbose=2):
+    """
+    A decorator that caches function results for a specified time period using joblib.Memory.
+    After the period expires, the cache is invalidated and the function is recomputed.
+    If 'expires_after' is None, the cache will not expire.
+
+    Parameters:
+        expires_after (timedelta or None): Time period to keep cache valid (default: 1 week)
+                                    If None, cache doesn't expire.
+        cache_dir (str): Directory to store the cache files
+        verbose (int): Verbosity level for joblib.Memory
+
+    Examples:
+        @cache(expires_after=timedelta(days=3))  # Cache for 3 days
+        @cache(expires_after=timedelta(hours=12))  # Cache for 12 hours
+        @cache(expires_after=timedelta(weeks=2))  # Cache for 2 weeks
+        @cache(expires_after=None)  # Cache indefinitely
+    """
+
+    import joblib
+    import functools
+
+    if isinstance(expires_after, (int, float)):
+        # If expires_after is provided as number, assume it's days
+        expires_after = datetime.timedelta(days=expires_after)
+    elif expires_after is not None and not isinstance(
+        expires_after, datetime.timedelta
+    ):
+        raise TypeError(
+            "'expires_after' must be a timedelta object, a number of days, or None"
+        )
+
+    cache_validation_callback = joblib.memory.expires_after(
+        seconds=expires_after.total_seconds()
+    )
+
+    if cache_dir is None:
+        import helicon
+
+        cache_dir = helicon.cache_dir
+
+    memory = joblib.Memory(cache_dir, verbose=verbose)
+
+    def decorator(func):
+        cached_func = memory.cache(
+            func, cache_validation_callback=cache_validation_callback
+        )
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return cached_func(*args, **kwargs)
+
+        wrapper.clear_cache = lambda: memory.clear()
+        wrapper.get_cache_info = lambda: {
+            "cache_dir": cache_dir,
+            "cache_period": expires_after,
+            "function_name": func.__name__,
+        }
+        return wrapper
+
+    return decorator
