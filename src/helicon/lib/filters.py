@@ -207,3 +207,35 @@ def down_scale(data, target_apix, apix_orig):
                 f"WARNING: the input image pixel size ({apix_orig}) is larger than --target_apix2d={target_apix}. Down-scaling skipped"
             )
     return data
+
+
+def generate_tapering_filter(image_size, fraction_start=[0.8, 0.8], fraction_slope=0.1):
+    ny, nx = image_size
+    fy, fx = fraction_start
+    if not (0 < fy < 1 or 0 < fx < 1):
+        return np.ones((ny, nx))
+    Y, X = np.meshgrid(
+        np.arange(0, ny, dtype=np.float32) - ny // 2,
+        np.arange(0, nx, dtype=np.float32) - nx // 2,
+        indexing="ij",
+    )
+    filter = np.ones_like(Y)
+    if 0 < fy < 1:
+        Y = np.abs(Y / (ny // 2))
+        inner = Y < fy
+        outer = Y > fy + fraction_slope
+        Y = (Y - fy) / fraction_slope
+        Y = (1.0 + np.cos(Y * np.pi)) / 2.0
+        Y[inner] = 1
+        Y[outer] = 0
+        filter *= Y
+    if 0 < fx < 1:
+        X = np.abs(X / (nx // 2))
+        inner = X < fx
+        outer = X > fx + fraction_slope
+        X = (X - fx) / fraction_slope
+        X = (1.0 + np.cos(X * np.pi)) / 2.0
+        X[inner] = 1
+        X[outer] = 0
+        filter *= X
+    return filter

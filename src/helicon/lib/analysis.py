@@ -53,12 +53,120 @@ def get_cylindrical_mask(nz, ny, nx, rmin=0, rmax=-1, return_xyz=False):
         return mask
 
 
+def cross_correlation_coefficient(a, b):
+    mean_a = np.mean(a)
+    mean_b = np.mean(b)
+    norm = np.sqrt(np.sum((a - mean_a) ** 2) * np.sum((b - mean_b) ** 2))
+    if norm == 0:
+        return 0
+    else:
+        return np.sum((a - mean_a) * (b - mean_b)) / norm
+
+
 def cosine_similarity(a, b):
     norm = np.linalg.norm(a) * np.linalg.norm(b)
     if norm == 0:
         return 0
     else:
         return np.sum(a * b) / norm
+
+
+def align_images(
+    image_moving,
+    image_ref,
+    angle_range=30,
+    check_polarity=True,
+    check_flip=True,
+    return_aligned_moving_image=False,
+):
+    if check_flip:
+        result = align_images(
+            image_moving=image_moving,
+            image_ref=image_ref,
+            check_flip=False,
+            return_aligned_moving_image=return_aligned_moving_image,
+        )
+
+        image_moving_flip = image_moving[::-1, :]
+        result_flip = align_images(
+            image_moving=image_moving_flip,
+            image_ref=image_ref,
+            check_flip=False,
+            return_aligned_moving_image=return_aligned_moving_image,
+        )
+        if result_flip[2] > result[2]:
+            return (True, *result_flip)
+        else:
+            return (False, *result)
+
+    import numpy as np
+    from skimage.registration import phase_cross_correlation
+    from skimage.transform import warp_polar, rotate
+    from scipy.ndimage import shift
+    from skimage.metrics import structural_similarity as ssim
+
+    tapering_filter_moving = helicon.generate_tapering_filter(
+        image_size=image_moving.shape, fraction_start=[0.8, 0.8]
+    )
+    tapering_filter_ref = helicon.generate_tapering_filter(
+        image_size=image_ref.shape, fraction_start=[0.8, 0.8]
+    )
+    image_moving_work = tapering_filter_moving * image_moving
+    image_ref_work = helicon.threshold_data(
+        tapering_filter_ref * image_ref, thresh_fraction=0.0
+    )
+    padded_image_moving = helicon.pad_to_size(image_moving_work, image_ref_work.shape)
+
+    from scipy.optimize import minimize_scalar
+    from skimage.transform import rotate
+
+    best = [1e10, 0, 0, None]
+
+    def rotation_score(angle):
+        rotated_padded_image_moving = rotate(padded_image_moving, angle)
+        shift_cartesian, error, diffphase = phase_cross_correlation(
+            reference_image=image_ref_work,
+            moving_image=rotated_padded_image_moving,
+            disambiguate=True,
+        )
+        shifted_rotated_padded_image_moving = shift(
+            rotated_padded_image_moving, shift=shift_cartesian
+        )
+        score = -cross_correlation_coefficient(
+            image_ref_work, shifted_rotated_padded_image_moving
+        )
+        if score < best[0]:
+            best[0] = score
+            best[1] = angle
+            best[2] = shift_cartesian
+            best[3] = shifted_rotated_padded_image_moving
+        return score
+
+    minimize_scalar(
+        rotation_score, bounds=(-angle_range, angle_range), method="bounded"
+    )
+    if check_polarity:
+        minimize_scalar(
+            rotation_score,
+            bounds=(180 - angle_range, 180 + angle_range),
+            method="bounded",
+        )
+    (
+        similarity_score,
+        rotation_angle_degree,
+        shift_cartesian,
+        shifted_rotated_padded_image_moving,
+    ) = best
+
+    if return_aligned_moving_image:
+        return (
+            rotation_angle_degree,
+            shift_cartesian,
+            -similarity_score,
+            shifted_rotated_padded_image_moving,
+        )
+    else:
+        return rotation_angle_degree, shift_cartesian, -similarity_score
 
 
 # https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve
