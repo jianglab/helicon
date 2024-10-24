@@ -52,12 +52,14 @@ def apply_helical_symmetry(
     hsyms = range(-hsym_max, hsym_max + 1)
     csyms = range(csym)
 
-    mask = (data != 0) * 1
-    z_nonzeros = np.nonzero(mask)[0]
-    z0 = np.min(z_nonzeros)
-    z1 = np.max(z_nonzeros)
-    z0 = max(z0, nz0 // 2 - int(nz0 * fraction + 0.5) // 2)
-    z1 = min(nz0 - 1, min(z1, nz0 // 2 + int(nz0 * fraction + 0.5) // 2))
+    profile_z = np.sum(np.sum(data, axis=-1), axis=-1)
+    threshold = 0.01 * np.max(profile_z)
+    non_zero_indices = np.where(profile_z > threshold)[0]
+    z0 = non_zero_indices[0]
+    z1 = non_zero_indices[-1]
+    zmid = (z0 + z1) // 2 + (z0 + z1) % 2
+    z0 = max(z0, zmid - int(nz0 * fraction + 0.5) // 2)
+    z1 = min(z1, zmid + int(nz0 * fraction + 0.5) // 2)
 
     set_num_threads(cpu)
 
