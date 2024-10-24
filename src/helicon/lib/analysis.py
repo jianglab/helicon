@@ -111,7 +111,9 @@ def align_images(
     tapering_filter_ref = helicon.generate_tapering_filter(
         image_size=image_ref.shape, fraction_start=[0.8, 0.8]
     )
-    image_moving_work = tapering_filter_moving * image_moving
+    image_moving_work = helicon.threshold_data(
+        tapering_filter_moving * image_moving, thresh_fraction=0.0
+    )
     image_ref_work = helicon.threshold_data(
         tapering_filter_ref * image_ref, thresh_fraction=0.0
     )
@@ -152,21 +154,34 @@ def align_images(
             method="bounded",
         )
     (
-        similarity_score,
+        _,
         rotation_angle_degree,
         shift_cartesian,
         shifted_rotated_padded_image_moving,
     ) = best
 
+    mask = shifted_rotated_padded_image_moving > 0.1 * np.max(
+        shifted_rotated_padded_image_moving
+    )
+    similarity_score = cross_correlation_coefficient(
+        shifted_rotated_padded_image_moving[mask], image_ref_work[mask]
+    )
+
+    padded_image_moving = helicon.pad_to_size(image_moving, image_ref_work.shape)
+    rotated_padded_image_moving = rotate(padded_image_moving, rotation_angle_degree)
+    shifted_rotated_padded_image_moving = shift(
+        rotated_padded_image_moving, shift=shift_cartesian
+    )
+
     if return_aligned_moving_image:
         return (
             rotation_angle_degree,
             shift_cartesian,
-            -similarity_score,
+            similarity_score,
             shifted_rotated_padded_image_moving,
         )
     else:
-        return rotation_angle_degree, shift_cartesian, -similarity_score
+        return rotation_angle_degree, shift_cartesian, similarity_score
 
 
 # https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve
