@@ -39,28 +39,8 @@ class EMDB:
             "image_reconstruction_helical_axial_symmetry_details",
         ],
     ):
-        @helicon.cache(
-            cache_dir=str(self.cache_dir), expires_after=7, verbose=0
-        )  # 7 days
-        def cached_update_emd_entries(fields):
-            url = f'https://www.ebi.ac.uk/emdb/api/search/current_status:"REL"?rows=1000000&wt=csv&download=true&fl={",".join(fields)}'
-            entries = pd.read_csv(url)
-            entries["emd_id"] = (
-                entries["emdb_id"].str.split("-", expand=True).iloc[:, 1]
-            )
-            entries = entries.rename(
-                columns={
-                    "structure_determination_method": "method",
-                    "fitted_pdbs": "pdb",
-                    "image_reconstruction_helical_delta_z_value": "rise",
-                    "image_reconstruction_helical_delta_phi_value": "twist",
-                    "image_reconstruction_helical_axial_symmetry_details": "csym",
-                }
-            )
-            return entries
-
         try:
-            entries = cached_update_emd_entries(fields=fields)
+            entries = get_emd_entries(fields=fields)
             self.meta = entries.sort_values(by="emd_id", key=lambda x: x.astype(int))
             self.emd_ids = list(entries["emd_id"])
         except Exception as e:
@@ -227,6 +207,23 @@ class EMDB:
 
 
 ################################################################################
+
+
+@helicon.cache(cache_dir=str(helicon.cache_dir), expires_after=7, verbose=0)  # 7 days
+def get_emd_entries(fields):
+    url = f'https://www.ebi.ac.uk/emdb/api/search/current_status:"REL"?rows=1000000&wt=csv&download=true&fl={",".join(fields)}'
+    entries = pd.read_csv(url)
+    entries["emd_id"] = entries["emdb_id"].str.split("-", expand=True).iloc[:, 1]
+    entries = entries.rename(
+        columns={
+            "structure_determination_method": "method",
+            "fitted_pdbs": "pdb",
+            "image_reconstruction_helical_delta_z_value": "rise",
+            "image_reconstruction_helical_delta_phi_value": "twist",
+            "image_reconstruction_helical_axial_symmetry_details": "csym",
+        }
+    )
+    return entries
 
 
 @helicon.cache(
