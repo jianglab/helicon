@@ -39,7 +39,9 @@ class EMDB:
             "image_reconstruction_helical_axial_symmetry_details",
         ],
     ):
-        @helicon.cache(cache_dir=str(self.cache_dir), expires_after=7)  # 7 days
+        @helicon.cache(
+            cache_dir=str(self.cache_dir), expires_after=7, verbose=0
+        )  # 7 days
         def cached_update_emd_entries(fields):
             url = f'https://www.ebi.ac.uk/emdb/api/search/current_status:"REL"?rows=1000000&wt=csv&download=true&fl={",".join(fields)}'
             entries = pd.read_csv(url)
@@ -227,9 +229,10 @@ class EMDB:
 ################################################################################
 
 
-@helicon.cache(cache_dir=str(helicon.cache_dir / "emdb"), expires_after=30)  # 30 days
-def get_amyloid_atlas():
-    url = "https://people.mbi.ucla.edu/sawaya/amyloidatlas/"
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "emdb"), expires_after=30, verbose=0
+)  # 30 days
+def get_amyloid_atlas(url="https://people.mbi.ucla.edu/sawaya/amyloidatlas"):
     replaced_pdb_ids = {"7z40": "8ade"}
 
     df = pd.read_html(url, header=0, flavor="html5lib")[0]

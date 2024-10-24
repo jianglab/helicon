@@ -722,7 +722,7 @@ class DummyMemory:
             return decorator(func)
 
 
-def cache(expires_after=datetime.timedelta(weeks=1), cache_dir=None, verbose=2):
+def cache(expires_after=datetime.timedelta(weeks=1), cache_dir=None, verbose=0):
     """
     A decorator that caches function results for a specified time period using joblib.Memory.
     After the period expires, the cache is invalidated and the function is recomputed.
