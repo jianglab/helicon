@@ -101,9 +101,8 @@ def align_images(
 
     import numpy as np
     from skimage.registration import phase_cross_correlation
-    from skimage.transform import warp_polar, rotate
+    from skimage.transform import rotate
     from scipy.ndimage import shift
-    from skimage.metrics import structural_similarity as ssim
 
     tapering_filter_moving = helicon.generate_tapering_filter(
         image_size=image_moving.shape, fraction_start=[0.8, 0.8]
@@ -112,7 +111,7 @@ def align_images(
         image_size=image_ref.shape, fraction_start=[0.8, 0.8]
     )
     image_moving_work = helicon.threshold_data(
-        tapering_filter_moving * image_moving, thresh_fraction=0.0
+        tapering_filter_moving * image_moving, thresh_fraction=-1.0
     )
     image_ref_work = helicon.threshold_data(
         tapering_filter_ref * image_ref, thresh_fraction=0.0

@@ -5,6 +5,13 @@ import helicon
 
 
 class EMDB:
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(EMDB, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self, cache_dir=None):
         self.emd_ids = []
         self.meta = None
