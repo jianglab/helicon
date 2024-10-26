@@ -154,34 +154,69 @@ def transform_map(data, scale=1.0, tilt=0, psi=0, dy_pixel=0):
     return ret
 
 
-def rotate_shift_image(
-    data, angle=0, pre_shift=(0, 0), post_shift=(0, 0), rotation_center=None, order=1
+def transform_image(
+    image,
+    scale=1.0,
+    rotation=0,
+    pre_translation=(0, 0),
+    post_translation=(0, 0),
+    mode="constant",
 ):
-    # pre_shift/rotation_center/post_shift: [y, x]
-    if angle == 0 and pre_shift == [0, 0] and post_shift == [0, 0]:
-        return data * 1.0
-    ny, nx = data.shape
-    if rotation_center is None:
-        rotation_center = np.array((ny // 2, nx // 2), dtype=np.float32)
-    ang = np.deg2rad(angle)
-    m = np.array(
-        [[np.cos(ang), np.sin(ang)], [-np.sin(ang), np.cos(ang)]], dtype=np.float32
-    )
-    pre_dy, pre_dx = pre_shift
-    post_dy, post_dx = post_shift
+    """
+    Apply affine transformation with the image center as the reference point,
+    with options for translation before and after the center-based transformation.
 
-    offset = -np.dot(
-        m, np.array([post_dy, post_dx], dtype=np.float32).T
-    )  # post_rotation shift
-    offset += np.array(rotation_center, dtype=np.float32).T - np.dot(
-        m, np.array(rotation_center, dtype=np.float32).T
-    )  # rotation around the specified center
-    offset += -np.array([pre_dy, pre_dx], dtype=np.float32).T  # pre-rotation shift
+    Parameters:
+    -----------
+    image : ndarray
+        Input image. Dimension 0 - y, 1 - x
+    scale : float or tuple
+        Scale factor. If float, same scale is applied to both axes.
+        If tuple (sy, sx), different scales for each axis.
+    rotation : float
+        Rotation angle in degrees
+    pre_translation : tuple
+        (y, x) translation vector to apply BEFORE rotation/scaling
+    post_translation : tuple
+        (y, x) translation vector to apply AFTER rotation/scaling
+    mode : str
+        choice: constant, edge, symmetric, eflect, wrap
+        Points outside the boundaries of the input are filled according to the given mode.
+        Modes match the behaviour of numpy.pad.
 
-    from scipy.ndimage import affine_transform
+    Returns:
+    --------
+    transform : AffineTransform
+        The transformation object that can be used with skimage.transform.warp
 
-    ret = affine_transform(data, matrix=m, offset=offset, order=order, mode="constant")
-    return ret
+    The transformation sequence is:
+    1. Apply pre_translation
+    2. Move to center
+    3. Apply rotation and scaling
+    4. Move back from center
+    5. Apply post_translation
+    """
+
+    from skimage.transform import AffineTransform, warp
+
+    center = np.array((image.shape[1], image.shape[0])) / 2.0
+
+    if isinstance(scale, (int, float)):
+        scale = (float(scale), float(scale))
+
+    pre_trans = AffineTransform(translation=pre_translation[::-1])
+    to_center = AffineTransform(translation=-center)
+    from_center = AffineTransform(translation=center)
+    post_trans = AffineTransform(translation=post_translation[::-1])
+
+    rotation_rad = np.deg2rad(rotation)
+    center_transform = AffineTransform(scale=scale[::-1], rotation=rotation_rad)
+
+    # Combine transformations in order:
+    # pre_translation -> to_center -> rotation/scale -> from_center -> post_translation
+    xform = pre_trans + to_center + center_transform + from_center + post_trans
+    transformed = warp(image, xform.inverse, mode=mode)
+    return transformed
 
 
 def crop_center_z(data, n):

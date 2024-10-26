@@ -74,15 +74,22 @@ def cosine_similarity(a, b):
 def align_images(
     image_moving,
     image_ref,
-    angle_range=30,
+    scale_range,
+    angle_range,
     check_polarity=True,
     check_flip=True,
     return_aligned_moving_image=False,
 ):
+    assert (
+        0 <= scale_range < 1
+    ), f"align_images(): {scale_range=} is out of valid range [0, 1)"
+
     if check_flip:
         result = align_images(
             image_moving=image_moving,
             image_ref=image_ref,
+            scale_range=scale_range,
+            angle_range=angle_range,
             check_flip=False,
             return_aligned_moving_image=return_aligned_moving_image,
         )
@@ -91,96 +98,144 @@ def align_images(
         result_flip = align_images(
             image_moving=image_moving_flip,
             image_ref=image_ref,
+            scale_range=scale_range,
+            angle_range=angle_range,
             check_flip=False,
             return_aligned_moving_image=return_aligned_moving_image,
         )
-        if result_flip[2] > result[2]:
+        if result_flip[3] > result[3]:
             return (True, *result_flip)
         else:
             return (False, *result)
 
-    import numpy as np
     from skimage.registration import phase_cross_correlation
-    from skimage.transform import rotate
-    from scipy.ndimage import shift
 
     tapering_filter_moving = helicon.generate_tapering_filter(
         image_size=image_moving.shape, fraction_start=[0.8, 0.8]
     )
-    tapering_filter_ref = helicon.generate_tapering_filter(
-        image_size=image_ref.shape, fraction_start=[0.8, 0.8]
-    )
     image_moving_work = helicon.threshold_data(
         tapering_filter_moving * image_moving, thresh_fraction=-1.0
+    )
+    padded_image_moving = helicon.pad_to_size(image_moving_work, image_ref.shape)
+
+    tapering_filter_ref = helicon.generate_tapering_filter(
+        image_size=image_ref.shape, fraction_start=[0.8, 0.8]
     )
     image_ref_work = helicon.threshold_data(
         tapering_filter_ref * image_ref, thresh_fraction=0.0
     )
-    padded_image_moving = helicon.pad_to_size(image_moving_work, image_ref_work.shape)
+    mask_image_ref_work = image_ref_work > 0
 
-    from scipy.optimize import minimize_scalar
-    from skimage.transform import rotate
+    best = [1e10, 1, 0, 0, None]
 
-    best = [1e10, 0, 0, None]
+    def scale_rotation_score(x):
+        if isinstance(x, np.ndarray):
+            scale, angle = x
+        else:
+            scale = 1.0
+            angle = x
 
-    def rotation_score(angle):
-        rotated_padded_image_moving = rotate(padded_image_moving, angle)
+        rotated_scaled_padded_image_moving = helicon.transform_image(
+            image=padded_image_moving, scale=scale, rotation=angle, mode="constant"
+        )
+        mask_rotated_scaled_padded_image_moving = rotated_scaled_padded_image_moving > 0
+
         shift_cartesian, error, diffphase = phase_cross_correlation(
             reference_image=image_ref_work,
-            moving_image=rotated_padded_image_moving,
+            moving_image=rotated_scaled_padded_image_moving,
+            reference_mask=mask_image_ref_work,
+            moving_mask=mask_rotated_scaled_padded_image_moving,
             disambiguate=True,
+            normalization=None,
         )
-        shifted_rotated_padded_image_moving = shift(
-            rotated_padded_image_moving, shift=shift_cartesian
+        shifted_rotated_scaled_padded_image_moving = helicon.transform_image(
+            image=padded_image_moving,
+            scale=scale,
+            rotation=angle,
+            post_translation=shift_cartesian,
+            mode="constant",
         )
         score = -cross_correlation_coefficient(
-            image_ref_work, shifted_rotated_padded_image_moving
+            image_ref_work, shifted_rotated_scaled_padded_image_moving
         )
         if score < best[0]:
             best[0] = score
-            best[1] = angle
-            best[2] = shift_cartesian
-            best[3] = shifted_rotated_padded_image_moving
+            best[1] = scale
+            best[2] = angle
+            best[3] = shift_cartesian
+            best[4] = shifted_rotated_scaled_padded_image_moving
         return score
 
-    minimize_scalar(
-        rotation_score, bounds=(-angle_range, angle_range), method="bounded"
-    )
-    if check_polarity:
-        minimize_scalar(
-            rotation_score,
-            bounds=(180 - angle_range, 180 + angle_range),
-            method="bounded",
+    if scale_range > 0:
+        from scipy.optimize import minimize
+
+        result = minimize(
+            scale_rotation_score,
+            x0=[1, 0],
+            bounds=[(1 - scale_range, 1 + scale_range), (-angle_range, angle_range)],
+            method="Nelder-Mead",
+            options=dict(xatol=0.001),
         )
+        if check_polarity:
+            result = minimize(
+                scale_rotation_score,
+                x0=[1, 0],
+                bounds=[
+                    (1 - scale_range, 1 + scale_range),
+                    (180 - angle_range, 180 + angle_range),
+                ],
+                method="Nelder-Mead",
+                options=dict(xatol=0.001),
+            )
+    elif angle_range > 0:
+        from scipy.optimize import minimize_scalar
+
+        minimize_scalar(
+            scale_rotation_score, bounds=(-angle_range, angle_range), method="bounded"
+        )
+        if check_polarity:
+            minimize_scalar(
+                scale_rotation_score,
+                bounds=(180 - angle_range, 180 + angle_range),
+                method="bounded",
+            )
+
     (
         _,
+        scale,
         rotation_angle_degree,
         shift_cartesian,
-        shifted_rotated_padded_image_moving,
+        shifted_rotated_scaled_padded_image_moving,
     ) = best
 
-    mask = shifted_rotated_padded_image_moving > 0.1 * np.max(
-        shifted_rotated_padded_image_moving
+    if shifted_rotated_scaled_padded_image_moving is None:
+        shifted_rotated_scaled_padded_image_moving = padded_image_moving
+
+    mask = shifted_rotated_scaled_padded_image_moving > 0.1 * np.max(
+        shifted_rotated_scaled_padded_image_moving
     )
     similarity_score = cross_correlation_coefficient(
-        shifted_rotated_padded_image_moving[mask], image_ref_work[mask]
+        shifted_rotated_scaled_padded_image_moving[mask], image_ref_work[mask]
     )
 
-    padded_image_moving = helicon.pad_to_size(image_moving, image_ref_work.shape)
-    rotated_padded_image_moving = rotate(padded_image_moving, rotation_angle_degree)
-    shifted_rotated_padded_image_moving = shift(
-        rotated_padded_image_moving, shift=shift_cartesian
+    shifted_rotated_scaled_padded_image_moving = helicon.transform_image(
+        image=padded_image_moving,
+        scale=scale,
+        rotation=rotation_angle_degree,
+        post_translation=shift_cartesian,
+        mode="constant",
     )
 
     if return_aligned_moving_image:
         return (
+            scale,
             rotation_angle_degree,
             shift_cartesian,
             similarity_score,
-            shifted_rotated_padded_image_moving,
+            shifted_rotated_scaled_padded_image_moving,
         )
     else:
-        return rotation_angle_degree, shift_cartesian, similarity_score
+        return scale, rotation_angle_degree, shift_cartesian, similarity_score
 
 
 # https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve
