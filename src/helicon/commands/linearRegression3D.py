@@ -333,6 +333,7 @@ def main(args):
             target_apix=apix,
             mapFilePrefix=args.output_prefix,
             verbose=args.verbose,
+            logger=logger,
         )
         if len(mapFiles) > 1:
             s = "\n" + "\n".join(mapFiles)
@@ -2191,7 +2192,7 @@ def sorted_hsym_csym_pairs(twist, rise, csym, nz):
     return ret
 
 
-def saveMaps(results, target_size, target_apix, mapFilePrefix, verbose=0):
+def saveMaps(results, target_size, target_apix, mapFilePrefix, verbose=0, logger=None):
     logger = logger
     mapFiles = []
     result_groups = itertools.groupby(

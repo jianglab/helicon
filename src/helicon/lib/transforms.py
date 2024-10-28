@@ -218,6 +218,34 @@ def transform_image(
     transformed = warp(image, xform.inverse, mode=mode)
     return transformed
 
+def rotate_shift_image(
+    data, angle=0, pre_shift=(0, 0), post_shift=(0, 0), rotation_center=None, order=1):
+
+    # pre_shift/rotation_center/post_shift: [y, x]
+    if angle == 0 and pre_shift == [0, 0] and post_shift == [0, 0]:
+        return data * 1.0
+    ny, nx = data.shape
+    if rotation_center is None:
+        rotation_center = np.array((ny // 2, nx // 2), dtype=np.float32)
+    ang = np.deg2rad(angle)
+    m = np.array(
+        [[np.cos(ang), np.sin(ang)], [-np.sin(ang), np.cos(ang)]], dtype=np.float32
+    )
+    pre_dy, pre_dx = pre_shift
+    post_dy, post_dx = post_shift
+
+    offset = -np.dot(
+        m, np.array([post_dy, post_dx], dtype=np.float32).T
+    )  # post_rotation shift
+    offset += np.array(rotation_center, dtype=np.float32).T - np.dot(
+        m, np.array(rotation_center, dtype=np.float32).T
+    )  # rotation around the specified center
+    offset += -np.array([pre_dy, pre_dx], dtype=np.float32).T  # pre-rotation shift
+
+    from scipy.ndimage import affine_transform
+
+    ret = affine_transform(data, matrix=m, offset=offset, order=order, mode="constant")
+    return ret
 
 def crop_center_z(data, n):
     assert data.ndim in [3]
