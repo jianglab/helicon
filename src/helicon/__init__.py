@@ -1,20 +1,8 @@
 __version__ = "2024.09"
 
-import os
-from pathlib import Path
+from .lib.util import setup_cache_dir
 
-cache_dir = (
-    Path(os.getenv("HELION_CACHE_DIR"))
-    if "HELION_CACHE_DIR" in os.environ
-    else Path.home() / ".cache" / "helicon"
-)
-if not os.access(cache_dir, os.W_OK):
-    import tempfile
-    import getpass
-
-    cache_dir = Path(tempfile.gettempdir()) / getpass.getuser() / "helicon_cache"
-if not cache_dir.exists():
-    cache_dir.mkdir(parents=True, exist_ok=True)
+cache_dir = setup_cache_dir()
 
 from .lib.analysis import *
 from .lib.filters import *

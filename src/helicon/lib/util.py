@@ -1,5 +1,25 @@
 import sys, os, time, datetime
+from pathlib import Path
 import numpy as np
+
+
+def setup_cache_dir():
+    import getpass, tempfile
+
+    if "HELION_CACHE_DIR" in os.environ:
+        cache_dir = Path(os.getenv("HELION_CACHE_DIR"))
+    elif Path("/fast-scratch").exists():
+        cache_dir = Path("/fast-scratch") / getpass.getuser() / "helicon_cache"
+    else:
+        cache_dir = Path.home() / ".cache" / "helicon"
+
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except:
+        cache_dir = Path(tempfile.gettempdir()) / getpass.getuser() / "helicon_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    return cache_dir
 
 
 def import_with_auto_install(packages, scope=locals()):
