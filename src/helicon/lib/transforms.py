@@ -157,10 +157,12 @@ def transform_map(data, scale=1.0, tilt=0, psi=0, dy_pixel=0):
 def transform_image(
     image,
     scale=1.0,
-    rotation=0,
-    pre_translation=(0, 0),
-    post_translation=(0, 0),
+    rotation=0.0,
+    rotation_center=None,
+    pre_translation=(0.0, 0.0),
+    post_translation=(0.0, 0.0),
     mode="constant",
+    order=1,
 ):
     """
     Apply affine transformation with the image center as the reference point,
@@ -175,6 +177,8 @@ def transform_image(
         If tuple (sy, sx), different scales for each axis.
     rotation : float
         Rotation angle in degrees
+    rotation_center : None or tuple
+        (y, x) rotate around this position. default to image center (ny//2, nx//2)
     pre_translation : tuple
         (y, x) translation vector to apply BEFORE rotation/scaling
     post_translation : tuple
@@ -183,6 +187,8 @@ def transform_image(
         choice: constant, edge, symmetric, eflect, wrap
         Points outside the boundaries of the input are filled according to the given mode.
         Modes match the behaviour of numpy.pad.
+    order : int
+        The order of the spline interpolation, default is 1. The order has to be in the range 0-5.
 
     Returns:
     --------
@@ -191,22 +197,25 @@ def transform_image(
 
     The transformation sequence is:
     1. Apply pre_translation
-    2. Move to center
+    2. Move to rotation_center
     3. Apply rotation and scaling
-    4. Move back from center
+    4. Move back from rotation_center
     5. Apply post_translation
     """
 
     from skimage.transform import AffineTransform, warp
 
-    center = np.array((image.shape[1], image.shape[0])) / 2.0
+    if rotation_center is None:
+        rotation_center = np.array((image.shape[0], image.shape[1])) / 2.0
+    elif not isinstance(rotation_center, np.ndarray):
+        rotation_center = np.array(rotation_center)
 
     if isinstance(scale, (int, float)):
-        scale = (float(scale), float(scale))
+        scale = np.array((scale, scale))
 
     pre_trans = AffineTransform(translation=pre_translation[::-1])
-    to_center = AffineTransform(translation=-center)
-    from_center = AffineTransform(translation=center)
+    to_center = AffineTransform(translation=-rotation_center[::-1])
+    from_center = AffineTransform(translation=rotation_center[::-1])
     post_trans = AffineTransform(translation=post_translation[::-1])
 
     rotation_rad = np.deg2rad(rotation)
@@ -215,7 +224,7 @@ def transform_image(
     # Combine transformations in order:
     # pre_translation -> to_center -> rotation/scale -> from_center -> post_translation
     xform = pre_trans + to_center + center_transform + from_center + post_trans
-    transformed = warp(image, xform.inverse, mode=mode)
+    transformed = warp(image, xform.inverse, mode=mode, order=order)
     return transformed
 
 
