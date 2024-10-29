@@ -218,8 +218,10 @@ def transform_image(
     transformed = warp(image, xform.inverse, mode=mode)
     return transformed
 
+
 def rotate_shift_image(
-    data, angle=0, pre_shift=(0, 0), post_shift=(0, 0), rotation_center=None, order=1):
+    data, angle=0, pre_shift=(0, 0), post_shift=(0, 0), rotation_center=None, order=1
+):
 
     # pre_shift/rotation_center/post_shift: [y, x]
     if angle == 0 and pre_shift == [0, 0] and post_shift == [0, 0]:
@@ -247,26 +249,39 @@ def rotate_shift_image(
     ret = affine_transform(data, matrix=m, offset=offset, order=order, mode="constant")
     return ret
 
+
 def crop_center_z(data, n):
     assert data.ndim in [3]
     nz = data.shape[0]
     return data[nz // 2 - n // 2 : nz // 2 + n // 2 + n, :, :]
 
 
-def crop_center(data, shape):
+def crop_center(data, shape, center_offset=None):
     assert data.ndim in [2, 3]
+    assert center_offset is None or len(center_offset) in [2, 3]
+    assert data.ndim == len(shape)
     if data.shape == shape:
         return data
-    ny, nx = data.shape[-2:]
-    my, mx = shape[-2:]
-    y0 = max(0, ny // 2 - my // 2)
-    x0 = max(0, nx // 2 - mx // 2)
     if data.ndim == 2:
+        ny, nx = data.shape
+        my, mx = shape[-2:]
+        if center_offset is not None:
+            dy, dx = center_offset
+        else:
+            dy, dx = 0, 0
+        y0 = max(0, ny // 2 + dy - my // 2)
+        x0 = max(0, nx // 2 + dx - mx // 2)
         return data[y0 : min(ny, y0 + my), x0 : min(nx, x0 + mx)]
     else:
-        nz = data.shape[0]
-        mz = shape[0]
-        z0 = max(0, nz // 2 - mz // 2)
+        nz, ny, nx = data.shape
+        mz, my, mx = shape
+        if center_offset is not None:
+            dz, dy, dx = center_offset
+        else:
+            dz, dy, dx = 0, 0
+        z0 = max(0, nz // 2 + dz - mz // 2)
+        y0 = max(0, ny // 2 + dy - my // 2)
+        x0 = max(0, nx // 2 + dx - mx // 2)
         return data[z0 : min(nz, z0 + mz), y0 : min(ny, y0 + my), x0 : min(nx, x0 + mx)]
 
 
