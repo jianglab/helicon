@@ -147,7 +147,9 @@ def threshold_data(data, thresh_fraction=-1):
     return ret
 
 
-def low_high_pass_filter(data, low_pass_fraction=0, high_pass_fraction=0):
+def low_high_pass_filter(
+    data: np.ndarray, low_pass_fraction: float = 0, high_pass_fraction: float = 0
+):
     if data.ndim not in [2, 3]:
         raise ValueError("Input data must be a 2D or 3D array.")
 

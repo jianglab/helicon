@@ -5,7 +5,7 @@ import os, sys
 from importlib import import_module
 import helicon
 
-shiny_commands = ["helicalPitch", "helicalProjection"]
+shiny_commands = ["helicalPitch", "helicalProjection", "whereIsMyClass"]
 streamlit_commands = ["helicalLattice", "hi3d", "hill", "procart"]
 
 
