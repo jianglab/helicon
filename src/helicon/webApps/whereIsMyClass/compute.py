@@ -1,12 +1,13 @@
-import numpy as np
-import pandas as pd
 import pathlib
 
-from shiny import reactive
-from shiny.express import ui, render
-
+import numpy as np
+import pandas as pd
+import plotly
 import plotly.graph_objects as go
-import plotly.colors
+
+import mrcfile
+
+import helicon
 
 
 def get_project_root_dir(param_file):
@@ -20,18 +21,16 @@ def get_project_root_dir(param_file):
 
 
 def get_micrograph(filename, target_apix, low_pass_angstrom, high_pass_angstrom):
-    import mrcfile
+    from skimage.transform import resize_local_mean
 
     with mrcfile.open(filename) as mrc:
         apix = round(float(mrc.voxel_size.x), 4)
         data = mrc.data.squeeze()
     ny, nx = data.shape
-    from skimage.transform import resize_local_mean
 
     new_ny = int(ny * apix / target_apix + 0.5) // 2 * 2
     new_nx = int(nx * apix / target_apix + 0.5) // 2 * 2
     data = resize_local_mean(image=data, output_shape=(new_ny, new_nx))
-    import helicon
 
     if low_pass_angstrom > 0 or high_pass_angstrom > 0:
         low_pass_fraction = (
@@ -83,7 +82,6 @@ def get_class_abundance(params, nClass):
 
 
 def get_class2d_from_file(classFile):
-    import mrcfile
 
     with mrcfile.open(classFile) as mrc:
         apix = float(mrc.voxel_size.x)
@@ -176,11 +174,7 @@ def cs_to_dataframe(cs_file):
     return ret
 
 
-def plot_micrograph(
-    micrograph, title, apix, plot_height, plot_width  # np array of shape (ny, nx)
-):
-    import plotly.graph_objects as go
-    import numpy as np
+def plot_micrograph(micrograph, title, apix, plot_height, plot_width):
 
     fig = go.FigureWidget()
 
@@ -188,6 +182,7 @@ def plot_micrograph(
 
     fig.add_trace(
         go.Heatmap(
+            name="image",
             z=micrograph,
             x=np.arange(w) * apix,
             y=np.arange(h) * apix,
@@ -206,15 +201,17 @@ def plot_micrograph(
     layout_params = {
         "title": {
             "text": title,
-            "x": 0.5,  # Center the title
+            "x": 0.5,
+            "y": 0.95,
             "xanchor": "center",
-            "font": {"size": 18},
+            "font": {"size": 14},
         },
-        "xaxis": {"visible": False, "range": [0, (w - 1) * apix]},
+        "xaxis": {"visible": False, "range": [0, w * apix]},
         "yaxis": {
             "visible": False,
-            "range": [0, (h - 1) * apix],
+            "range": [0, h * apix],
             "scaleanchor": "x",
+            "autorange": "reversed",
         },
         "plot_bgcolor": "white",
         "showlegend": False,
@@ -249,12 +246,10 @@ def mark_classes_on_helices(
 ):
     assert fig is not None
 
-    fig.data = fig.data[:1]
+    fig.data = [d for d in fig.data if not d.name.startswith("class_")]
 
     if helices is None or len(helices) == 0:
         return
-
-    import plotly.graph_objects as go
 
     color_palette = plotly.colors.qualitative.Plotly
     marker_symbols = [
@@ -283,6 +278,7 @@ def mark_classes_on_helices(
         y = xy["y"]
         new_traces.append(
             go.Scatter(
+                name=f"class_{class_id}",
                 x=x,
                 y=y,
                 mode="markers",
@@ -297,3 +293,31 @@ def mark_classes_on_helices(
         )
 
     fig.add_traces(new_traces)
+
+
+def draw_distance_measurement(
+    fig,  # plotly figure
+    first_point,
+    second_point,
+):
+    assert fig is not None
+    if first_point is not None and second_point is not None:
+        x = [first_point[0], second_point[0]]
+        y = [first_point[1], second_point[1]]
+        dist = np.hypot(x[1] - x[0], y[1] - y[0])
+        line = go.Scatter(
+            name="distance_line",
+            x=x,
+            y=y,
+            mode="lines",
+            line=dict(color="white", dash="dot"),
+            hovertemplate=f"{dist:.1f} Å<extra></extra>",
+        )
+        other_traces = [d for d in fig.data if d.name != "distance_line"]
+        with fig.batch_update():
+            fig.data = other_traces
+            fig.add_trace(line)
+    else:
+        other_traces = [d for d in fig.data if d.name != "distance_line"]
+        if len(other_traces) < len(fig.data):
+            fig.data = other_traces
