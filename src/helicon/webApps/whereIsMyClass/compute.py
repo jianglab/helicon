@@ -94,6 +94,10 @@ def get_class2d_params_from_file(params_file):
         params = star_to_dataframe(params_file)
     elif params_file.endswith(".cs"):
         params = cs_to_dataframe(params_file)
+    else:
+        raise ValueError(
+            f"ERROR: {params_file} is not a valid Class2D parameter file. Only star or cs files are supported"
+        )
     required_attrs = np.unique(
         "rlnImageName rlnHelicalTubeID rlnHelicalTrackLengthAngst rlnClassNumber rlnCoordinateX rlnCoordinateY".split()
     )
@@ -174,7 +178,7 @@ def cs_to_dataframe(cs_file):
     return ret
 
 
-def plot_micrograph(micrograph, title, apix, plot_height, plot_width):
+def plot_micrograph(micrograph, title, apix, plot_height=None, plot_width=None):
 
     fig = go.FigureWidget()
 
