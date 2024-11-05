@@ -9,6 +9,7 @@ def image_gallery(
     images=reactive.value([]),
     display_image_labels=True,
     image_labels=reactive.value([]),
+    image_links=reactive.value([]),
     image_size=reactive.value(128),
     image_border=2,
     gap=0,
@@ -23,6 +24,11 @@ def image_gallery(
     import numpy as np
     from PIL import Image
     from helicon import encode_numpy, encode_PIL_Image
+
+    if enable_selection and len(image_links()):
+        raise ValueError(
+            f"image_gallery(): only allows either enable_selection or image_labels but not both"
+        )
 
     images_final = []
     for i, image in enumerate(images()):
@@ -45,12 +51,17 @@ def image_gallery(
     else:
         image_labels_final = list(range(1, len(images_final) + 1))
 
+    if len(image_links()):
+        image_links_final = image_links()
+    else:
+        image_links_final = [""] * len(images_final)
+
     assert image_size() >= 32
 
     bids = [f"{id}_image_{i+1}" for i in range(len(images_final))]
 
     def create_image_button(
-        i, image, label, bid, enable_selection=True, allow_multiple_selection=True
+        i, image, label, link, bid, enable_selection=True, allow_multiple_selection=True
     ):
         img = ui.img(
             src=image,
@@ -58,6 +69,8 @@ def image_gallery(
             title=str(label),
             style=f"object-fit: contain; height: {image_size()}px; border: {image_border}px solid transparent;",
         )
+        if link:
+            img = ui.a(img, href=link, target="_blank")
 
         return ui.div(
             (
@@ -85,35 +98,51 @@ def image_gallery(
                 else None
             ),
             onclick=(
-                f"""var selected;
-                    if (event.shiftKey) {{
+                f"""var allow_multiple_selection = {1 if allow_multiple_selection else 0};
+                    if (allow_multiple_selection && event.altKey) {{
                         selected = this.getAttribute('selected') === 'true';
                         selected = !selected;
-                    }} else {{
-                        selected = true;
-                    }}
-                    this.setAttribute('selected', selected);
-                    var img  = this.querySelector("img");
-                    var text = this.querySelector("p");
-                    img.style.border = selected ? "{image_border}px solid red" : "{image_border}px solid transparent";
-                    if (text) {{
-                        text.style.color = selected ? "red" : "white";
-                    }}
-
-                    var allow_multiple_selection = {1 if allow_multiple_selection else 0};
-
-                    if (!allow_multiple_selection || !event.shiftKey) {{
                         var images = this.parentElement.children;
                         for (var i = 0; i < images.length; i++) {{
-                            if (images[i] === this) continue;
-                            images[i].setAttribute('selected', false);
+                            images[i].setAttribute('selected', selected);
                             var img  = images[i].querySelector("img");
                             var text = images[i].querySelector("p");
-                            img.style.border = "{image_border}px solid transparent";
+                            img.style.border = selected ? "{image_border}px solid red" : "{image_border}px solid transparent";
                             if (text) {{
-                                text.style.color = "white";
+                                text.style.color = selected ? "red" : "white";
                             }}
+                        }}                    
+                    }}
+                    else {{
+                        var selected;
+                        if (event.shiftKey) {{
+                            selected = this.getAttribute('selected') === 'true';
+                            selected = !selected;
+                        }} else {{
+                            selected = true;
                         }}
+                        this.setAttribute('selected', selected);
+                        var img  = this.querySelector("img");
+                        var text = this.querySelector("p");
+                        img.style.border = selected ? "{image_border}px solid red" : "{image_border}px solid transparent";
+                        if (text) {{
+                            text.style.color = selected ? "red" : "white";
+                        }}
+
+
+                        if (!allow_multiple_selection || !event.shiftKey) {{
+                            var images = this.parentElement.children;
+                            for (var i = 0; i < images.length; i++) {{
+                                if (images[i] === this) continue;
+                                images[i].setAttribute('selected', false);
+                                var img  = images[i].querySelector("img");
+                                var text = images[i].querySelector("p");
+                                img.style.border = "{image_border}px solid transparent";
+                                if (text) {{
+                                    text.style.color = "white";
+                                }}
+                            }}
+                        }}                    
                     }}
 
                     var selected_prev = this.parentElement.getAttribute('selected');
@@ -129,7 +158,7 @@ def image_gallery(
                         }}
                     }}
                     for (var i = 0; i < this.parentElement.children.length; i++) {{
-                        if (this.parentElement.children[i] === this && this.getAttribute('selected') === 'true' && !selected_new.includes(i)) {{
+                        if (this.parentElement.children[i].getAttribute('selected') === 'true' && !selected_new.includes(i)) {{
                             selected_new.push(i);
                         }}
                     }}
@@ -148,6 +177,7 @@ def image_gallery(
                 i,
                 image,
                 image_labels_final[i],
+                image_links_final[i],
                 bid,
                 enable_selection,
                 allow_multiple_selection,
@@ -162,7 +192,7 @@ def image_gallery(
             ui.h6(
                 label(),
                 style=f"text-align: {justification}; margin: 0;",
-                title="Hold the Shift key while clicking to select multiple images",
+                title="Hold the Shift key while clicking to select multiple images; Hold the Alt/Option key while clicking to select/unselect all images",
             ),
             ui_images,
             style=f"display: flex; flex-direction: column; gap: {gap}px; margin: 0",
@@ -200,6 +230,7 @@ def image_select(
     images=reactive.value([]),
     display_image_labels=True,
     image_labels=reactive.value([]),
+    image_links=reactive.value([]),
     image_size=reactive.value(128),
     image_border=2,
     gap=0,
@@ -216,6 +247,7 @@ def image_select(
             images=images,
             display_image_labels=display_image_labels,
             image_labels=image_labels,
+            image_links=image_links,
             image_size=image_size,
             initial_selected_indices=initial_selected_indices,
             enable_selection=enable_selection,
