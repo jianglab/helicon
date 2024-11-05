@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""A command line tool for helical indexing and 3D reconstruction from a single 2D image"""
+"""A command line tool for de novo helical indexing and 3D reconstruction from a single 2D image"""
 
 import itertools, os, sys, pathlib, datetime
 import numpy as np
@@ -91,6 +91,7 @@ def main(args):
                     )
                     if imageFile.exists():
                         imageFile.symlink_to(imageFileOrig)
+
                 import mrcfile
 
                 with mrcfile.open(imageFile, header_only=True) as mrc:
@@ -109,6 +110,7 @@ def main(args):
                 )
                 if not input_file.exists():
                     input_file.symlink_to(input_fileOrig)
+
             import mrcfile
 
             with mrcfile.open(input_file, header_only=True) as mrc:
@@ -462,17 +464,19 @@ def process_one_task(
         if transpose > 0 or (transpose < 0 and is_vertical(data)):
             data = data.T
         if horizontalize:
-            data, theta_best, shift_best = auto_horizontalize(data, n_theta=180)
+            data, theta_best, shift_best = auto_horizontalize(data, refine=True)
             logger.debug(
                 f"Image {imageFile}-{imageIndex}: rotation={round(theta_best, 2)}° shift={round(shift_best*apix, 1)}Å"
             )
         return data
 
     if data is None:
-        data = helicon.read_image_2d(imageFile, imageIndex)
+        data = helicon.read_image_2d(imageFile, imageIndex - 1)
 
     if not np.std(data):  # images with const (0) pixel values
-        logger.warning(f"WARNING: the input image is a blank image")
+        logger.warning(
+            f"WARNING: the input image {imageFile}:{imageIndex} is a blank image"
+        )
         return None
 
     data = prepare_data(
@@ -488,7 +492,10 @@ def process_one_task(
     ny, nx = data.shape
 
     if tube_diameter < 0:
-        tube_diameter = int(min(ny, estimate_diameter(data)) * apix2d_orig * 1.25)
+        rotation, shift_y, diameter = helicon.estimate_helix_rotation_center_diameter(
+            data
+        )
+        tube_diameter = int(min(ny, diameter) * apix2d_orig * 2.5)
         logger.debug(
             f"Image {imageFile}-{imageIndex}: estimated tube diameter={tube_diameter}Å"
         )
@@ -2109,51 +2116,37 @@ def estimate_diameter(data):
 
 
 # @memory.cache
-def auto_horizontalize(data, n_theta=180):
+def auto_horizontalize(data, refine=False):
     from skimage.transform import radon
     from scipy.interpolate import interp1d
     from scipy.signal import correlate
 
     data_work = np.clip(data, 0, None)
 
-    theta = np.linspace(start=0.0, stop=180.0, num=n_theta, endpoint=False)
-    import warnings
+    theta, shift_y, diameter = helicon.estimate_helix_rotation_center_diameter(data)
 
-    with warnings.catch_warnings():  # ignore outside of circle warnings
-        warnings.simplefilter("ignore")
-        sinogram = radon(data_work, theta=theta)
-    sinogram += sinogram[::-1, :]
-    y = np.std(sinogram, axis=0)
-    theta_best = 90 - theta[np.argmax(y)]
+    if refine:  # refine to sub-degree, sub-pixel level
 
-    rotated_data = helicon.rotate_shift_image(data_work, angle=theta_best, order=3)
-    # now find best vertical shift
-    xproj = np.sum(rotated_data, axis=1)
-    xproj_yflip = xproj * 1.0
-    xproj_yflip[1:] = xproj[1:][::-1]
-    corr = correlate(xproj, xproj_yflip, mode="same")
-    shift_best = -(np.argmax(corr) - len(corr) // 2) / 2
+        def score_rotation_shift(x):
+            theta, shift_y = x
+            data_tmp = helicon.rotate_shift_image(
+                data_work, angle=theta, post_shift=(shift_y, 0)
+            )
+            # data_tmp /= np.linalg.norm(data_tmp, axis=0)
+            y = np.sum(data_tmp, axis=1)[1:]
+            y += y[::-1]
+            score = -np.std(y)
+            return score
 
-    # refine to sub-degree, sub-pixel level
-    def score_rotation_shift(x):
-        theta, shift_y = x
-        data_tmp = helicon.rotate_shift_image(
-            data_work, angle=theta, post_shift=(shift_y, 0)
-        )
-        # data_tmp /= np.linalg.norm(data_tmp, axis=0)
-        y = np.sum(data_tmp, axis=1)[1:]
-        y += y[::-1]
-        score = -np.std(y)
-        return score
+        from scipy.optimize import fmin
 
-    from scipy.optimize import fmin
+        res = fmin(score_rotation_shift, x0=(theta, shift_y), xtol=1e-2, disp=0)
+        theta, shift_y = res
 
-    res = fmin(score_rotation_shift, x0=(theta_best, shift_best), xtol=1e-2, disp=0)
-    theta_best, shift_best = res
-    rotated_shifte_data = helicon.rotate_shift_image(
-        data, angle=theta_best, post_shift=(shift_best, 0), order=3
+    rotated_shifted_data = helicon.rotate_shift_image(
+        data, angle=theta, post_shift=(shift_y, 0), order=3
     )
-    return rotated_shifte_data, theta_best, shift_best
+    return rotated_shifted_data, theta, shift_y
 
 
 def is_vertical(data):
@@ -2814,24 +2807,8 @@ def tilt_psi_dy_str(tilt, psi, dy, sep=" ", sep2="=", unit=True):
 
 
 def star_to_dataframe(starFile):
-    helicon.import_with_auto_install("gemmi pandas".split())
-    import pandas as pd
-    from gemmi import cif
+    df = helicon.star2dataframe(starFile=starFile)
 
-    star = cif.read_file(starFile)
-    if len(star) == 2:
-        optics = pd.DataFrame()
-        for item in star[0]:
-            for tag in item.loop.tags:
-                value = star[0].find_loop(tag)
-                optics[tag.strip("_")] = np.array(value)
-    else:
-        optics = None
-    df = pd.DataFrame()
-    for item in star[-1]:
-        for tag in item.loop.tags:
-            value = star[-1].find_loop(tag)
-            df[tag.strip("_")] = np.array(value)
     fileNameCol = ""
     for col in ["rlnImageName", "rlnReferenceImage"]:
         if col in df:

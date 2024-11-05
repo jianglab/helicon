@@ -724,17 +724,19 @@ def main(args):
                 print("\t%d images found in %s" % (len(data_sf), sf))
             assert "rlnMicrographName" in data_sf
             assert "rlnHelicalTubeID" in data_sf
-            
-            #import tqdm
-            #idx=[row in set(zip(data_sf["rlnMicrographName"],data["rlnHelicalTubeID"])) for row in tqdm.tqdm(list(zip(data["rlnMicrographName"],data["rlnHelicalTubeID"])))]
-            #data2=data[idx]
-            common_cols=["rlnMicrographName","rlnHelicalTubeID"]
-            data2=data.merge(data_sf[common_cols],on=common_cols,how='inner',suffixes=['','_dup'])
-            data2=data2[data.columns].drop_duplicates()
-            
+
+            # import tqdm
+            # idx=[row in set(zip(data_sf["rlnMicrographName"],data["rlnHelicalTubeID"])) for row in tqdm.tqdm(list(zip(data["rlnMicrographName"],data["rlnHelicalTubeID"])))]
+            # data2=data[idx]
+            common_cols = ["rlnMicrographName", "rlnHelicalTubeID"]
+            data2 = data.merge(
+                data_sf[common_cols], on=common_cols, how="inner", suffixes=["", "_dup"]
+            )
+            data2 = data2[data.columns].drop_duplicates()
+
             data2.reset_index(drop=True, inplace=True)
             data2.attrs["optics"] = optics
-            
+
             if len(data2):
                 if args.verbose > 1:
                     print(f"\t{len(data2)}/{len(data)} images retained")
@@ -753,8 +755,18 @@ def main(args):
                 )
                 data_ci = data.columns.get_loc("rlnMicrographName")
                 data_sf_ci = data_sf.columns.get_loc("rlnMicrographName")
-                print(("\t%s %s: %s" % (inputFileStr, "rlnMicrographName", data.iat[0, data_ci])))
-                print(("\t%s %s: %s" % (sf, "rlnMicrographName", data_sf.iat[0, data_sf_ci])))
+                print(
+                    (
+                        "\t%s %s: %s"
+                        % (inputFileStr, "rlnMicrographName", data.iat[0, data_ci])
+                    )
+                )
+                print(
+                    (
+                        "\t%s %s: %s"
+                        % (sf, "rlnMicrographName", data_sf.iat[0, data_sf_ci])
+                    )
+                )
                 sys.exit(-1)
             index_d[option_name] += 1
 
@@ -2885,27 +2897,37 @@ def getPixelSize(
     except:
         sources = []
     sources += [data]
+    apix = None
     for source in sources:
         if source is None:
             continue
         for attr in attrs:
             if attr in source:
                 if attr in ["rlnImageName", "rlnMicrographName"]:
-                    import mrcfile, pathlib
+                    import mrcfile
 
-                    folder = Path(data["starFile"].iloc[0])
+                    if isinstance(data.attrs["source_path"], list):
+                        folder = Path(data.attrs["source_path"][0])
+                    else:
+                        folder = Path(data.attrs["source_path"])
                     if folder.is_symlink():
                         folder = folder.readlink()
                     folder = folder.resolve().parent
                     filename = source[attr].iloc[0].split("@")[-1]
                     filename = str((folder / "../.." / filename).resolve())
-                    with mrcfile.open(filename, header_only=True) as mrc:
-                        apix = float(mrc.voxel_size.x)
+                    try:
+                        with mrcfile.open(filename, header_only=True) as mrc:
+                            apix = float(mrc.voxel_size.x)
+                    except:
+                        pass
                 else:
                     apix = float(source[attr].iloc[0])
-                if return_pixelSize_source:
-                    return apix, attr
-                return apix
+                if apix is not None:
+                    if return_pixelSize_source:
+                        return apix, attr
+                    return apix
+    if return_pixelSize_source:
+        return None, None
     return None
 
 
@@ -3097,7 +3119,7 @@ def add_args(parser):
         type=str,
         metavar="starFile",
         action="append",
-        help='select helices in the specified file (example: x.star) based on rlnMicrographName and rlnHelicalTubeID. disabled by default',
+        help="select helices in the specified file (example: x.star) based on rlnMicrographName and rlnHelicalTubeID. disabled by default",
         default=[],
     )
     parser.add_argument(

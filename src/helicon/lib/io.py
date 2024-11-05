@@ -954,23 +954,20 @@ def star2dataframe(
     ignore_bad_particle_path=0,
     ignore_bad_micrograph_path=1,
 ):
-    from gemmi import cif
+    import starfile
 
-    star = cif.read_file(starFile)
-    if len(star) == 2:
-        optics = pd.DataFrame()
-        for item in star[0]:
-            for tag in item.loop.tags:
-                value = star[0].find_loop(tag)
-                optics[tag.strip("_")] = np.array(value)
-    else:
-        optics = None
+    data = None
+    d = starfile.read(starFile, always_dict=True)
+    for k in d:
+        if k in ["movies", "micrographs", "particles"]:
+            data = d[k]
+            break
+    assert (
+        data is not None
+    ), f"ERROR: {starFile} does not have a required data block (movies, micrographs, or particles)"
 
-    data = pd.DataFrame()
-    for item in star[-1]:
-        for tag in item.loop.tags:
-            value = star[-1].find_loop(tag)
-            data[tag.strip("_")] = np.array(value)
+    if "optics" in d:
+        data.attrs["optics"] = d["optics"]
 
     data = dataframe_guess_data_type(data)
     nans = data.isnull().any(axis=1)
@@ -986,12 +983,13 @@ def star2dataframe(
             with pd.option_context("display.max_colwidth", -1):
                 color_print("\n", data[nans == True])
         data = data[nans == False]
-    data.attrs["optics"] = optics
+
     data.attrs["source_path"] = starFile
     data.attrs["convention"] = "relion"
     dataframe_normalize_filename(
         data, alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path
     )
+
     return data
 
 

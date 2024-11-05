@@ -240,6 +240,49 @@ def which(program, useCurrentDir=0):
     return location
 
 
+def get_direct_url(url):
+    import re
+
+    if url.startswith("https://drive.google.com/file/d/"):
+        hash = url.split("/")[5]
+        return f"https://drive.google.com/uc?export=download&id={hash}"
+    elif url.startswith("https://app.box.com/s/"):
+        hash = url.split("/")[-1]
+        return f"https://app.box.com/shared/static/{hash}"
+    elif url.startswith("https://www.dropbox.com"):
+        if url.find("dl=1") != -1:
+            return url
+        elif url.find("dl=0") != -1:
+            return url.replace("dl=0", "dl=1")
+        else:
+            return url + "?dl=1"
+    elif url.find("sharepoint.com") != -1 and url.find("guestaccess.aspx") != -1:
+        return url.replace("guestaccess.aspx", "download.aspx")
+    elif url.startswith("https://1drv.ms"):
+        import base64
+
+        data_bytes64 = base64.b64encode(bytes(url, "utf-8"))
+        data_bytes64_String = (
+            data_bytes64.decode("utf-8").replace("/", "_").replace("+", "-").rstrip("=")
+        )
+        return (
+            f"https://api.onedrive.com/v1.0/shares/u!{data_bytes64_String}/root/content"
+        )
+    else:
+        return url
+
+
+def get_file_size(url):
+    import requests
+
+    response = requests.head(url)
+    if "Content-Length" in response.headers:
+        file_size = int(response.headers["Content-Length"])
+        return file_size
+    else:
+        return None
+
+
 def download_url(url, target_file_name="", un_tar=0, remove_tarfile=0):
     import urllib.request, shutil, subprocess, os, time
 

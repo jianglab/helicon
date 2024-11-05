@@ -37,6 +37,43 @@ def calc_fsc(map1, map2, apix):
     return np.vstack((qbins[qidx], FSC[qidx])).T
 
 
+def estimate_helix_rotation_center_diameter(data):
+    """
+    Returns:
+        rotation (float): The rotation (degrees) needed to rotate the helix to horizontal direction.
+        shift_y (float): The post-rotation vertical shift (pixels) needed to shift the helix to the box center in vertical direction.
+        diameter (int): The estimated diameter (pixels) of the helix.
+    """
+    from skimage.filters import threshold_otsu
+    from skimage.measure import label, regionprops
+    from skimage.morphology import closing
+    import helicon
+
+    thresh = threshold_otsu(data)
+    bw = closing(data > thresh)
+    label_image = label(bw)
+    props = regionprops(label_image=label_image, intensity_image=data)
+    props.sort(key=lambda x: x.area, reverse=True)
+    angle = (
+        np.rad2deg(props[0].orientation) + 90
+    )  # relative to +x axis, counter-clockwise
+    if abs(angle) > 90:
+        angle -= 180
+    rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
+
+    data_rotated = helicon.transform_image(image=data.copy(), rotation=rotation)
+    bw = closing(data_rotated > thresh)
+    label_image = label(bw)
+    props = regionprops(label_image=label_image, intensity_image=data_rotated)
+    props.sort(key=lambda x: x.area, reverse=True)
+    minr, minc, maxr, maxc = props[0].bbox
+    diameter = maxr - minr + 1
+    center = props[0].centroid
+    shift_y = center[0] - data.shape[0] // 2
+
+    return rotation, shift_y, diameter
+
+
 def get_cylindrical_mask(nz, ny, nx, rmin=0, rmax=-1, return_xyz=False):
     k = np.arange(0, nz, dtype=np.int32) - nz // 2
     j = np.arange(0, ny, dtype=np.int32) - ny // 2
