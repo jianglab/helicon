@@ -224,6 +224,7 @@ def transform_image(
     # Combine transformations in order:
     # pre_translation -> to_center -> rotation/scale -> from_center -> post_translation
     xform = pre_trans + to_center + center_transform + from_center + post_trans
+    image.flags.writeable = True
     transformed = warp(image, xform.inverse, mode=mode, order=order)
     return transformed
 
