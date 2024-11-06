@@ -44,13 +44,12 @@ def estimate_helix_rotation_center_diameter(data):
         shift_y (float): The post-rotation vertical shift (pixels) needed to shift the helix to the box center in vertical direction.
         diameter (int): The estimated diameter (pixels) of the helix.
     """
-    from skimage.filters import threshold_otsu
     from skimage.measure import label, regionprops
     from skimage.morphology import closing
     import helicon
 
-    thresh = threshold_otsu(data)
-    bw = closing(data > thresh)
+    thresh = np.max(data) * 0.2
+    bw = closing(data > thresh, mode="ignore")
     label_image = label(bw)
     props = regionprops(label_image=label_image, intensity_image=data)
     props.sort(key=lambda x: x.area, reverse=True)
@@ -61,8 +60,8 @@ def estimate_helix_rotation_center_diameter(data):
         angle -= 180
     rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
 
-    data_rotated = helicon.transform_image(image=data.copy(), rotation=rotation)
-    bw = closing(data_rotated > thresh)
+    data_rotated = helicon.transform_image(image=data, rotation=rotation)
+    bw = closing(data_rotated > thresh, mode="ignore")
     label_image = label(bw)
     props = regionprops(label_image=label_image, intensity_image=data_rotated)
     props.sort(key=lambda x: x.area, reverse=True)

@@ -139,6 +139,14 @@ def normalize_mean_std(data, mean=0, std=1):
     return (data - data_mean) / data_std
 
 
+def normalize_percentile(data, percentile=(0, 100)):
+    p0, p1 = percentile
+    vmin, vmax = sorted(np.percentile(data, (p0, p1)))
+    if vmax == vmin:
+        return data
+    return (data - vmin) / (vmax - vmin)
+
+
 def threshold_data(data, thresh_fraction=-1):
     if thresh_fraction < 0:
         return data

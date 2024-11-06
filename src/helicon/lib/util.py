@@ -283,46 +283,24 @@ def get_file_size(url):
         return None
 
 
-def download_url(url, target_file_name="", un_tar=0, remove_tarfile=0):
-    import urllib.request, shutil, subprocess, os, time
+def download_file_from_url(url):
+    import tempfile
+    import requests
+    import os
 
-    r = urllib.request.urlopen(url)
-    if not target_file_name:
-        target_file_name = url.split("/")[-1]
-    with open(target_file_name, "wb") as f:
-        shutil.copyfileobj(r, f)
-    r.close()
-
-    file_info = r.info()
-    if "Last-Modified" in file_info:
-        last_modified = file_info["Last-Modified"]
-        timestamp = time.mktime(
-            time.strptime(last_modified, "%a, %d %b %Y %H:%M:%S %Z")
-        )
-        os.utime(target_file_name, (timestamp, timestamp))
-
-    final_target_file_name = target_file_name
-
-    if un_tar:
-        cmd = []
-        if target_file_name.endswith(".tar.gz") or target_file_name.endswith(".tgz"):
-            cmd = ["tar", "-xzvf", target_file_name]
-            final_target_file_name = target_file_name.replace(".tar.gz", "")
-        elif target_file_name.endswith(".tar.bz2") or target_file_name.endswith(".tbz"):
-            cmd = ["tar", "-xjvf", target_file_name]
-            final_target_file_name = target_file_name.replace(".tar.bz2", "")
-        elif target_file_name.endswith(".tar"):
-            cmd = ["tar", "-xvf", target_file_name]
-            final_target_file_name = target_file_name.replace(".tar", "")
-        elif target_file_name.endswith(".zip"):
-            cmd = ["unzip", "-xzvf", target_file_name]
-            final_target_file_name = target_file_name.replace(".zip", "")
-        if cmd:
-            subprocess.call(cmd)
-
-        if remove_tarfile:
-            os.remove(target_file_name)
-    return final_target_file_name
+    if Path(url).is_file():
+        return open(url, "rb")
+    try:
+        local_filename = url.split("/")[-1]
+        suffix = "." + local_filename
+        fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
+        with requests.get(url) as r:
+            r.raise_for_status()  # Check for request success
+            fileobj.write(r.content)
+        return fileobj
+    except requests.exceptions.RequestException as e:
+        print(e)
+        return None
 
 
 def get_terminal_size():
@@ -396,10 +374,9 @@ def convert_file_path(filenames, to="current", relpath_start=os.curdir):
     assert isinstance(filenames, pd.Series)
     names = filenames.unique()
     mapping = {}
-    import pathlib
 
     for name in names:
-        p = pathlib.Path(name)
+        p = Path(name)
         p_abs = p.resolve()
         if to in ["real", "absolute", "abs"]:
             name2 = p_abs.as_posix()
@@ -412,10 +389,7 @@ def convert_file_path(filenames, to="current", relpath_start=os.curdir):
                     name2 = p_abs.as_posix()
                 else:
                     name2 = name2_rel
-        if not (
-            pathlib.Path(name2).exists()
-            or (pathlib.Path(relpath_start) / pathlib.Path(name2)).exists()
-        ):
+        if not (Path(name2).exists() or (Path(relpath_start) / Path(name2)).exists()):
             name2 = name
         mapping[name] = name2
     ret = filenames.map(mapping)

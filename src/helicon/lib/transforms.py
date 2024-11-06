@@ -319,3 +319,70 @@ def pad_to_size(data, shape):
             mode="constant",
         )
     return ret
+
+
+def fft_rescale(image, apix=1.0, cutoff_res=None, output_size=None):
+    if cutoff_res:
+        cutoff_res_y, cutoff_res_x = cutoff_res
+    else:
+        cutoff_res_y, cutoff_res_x = 2 * apix, 2 * apix
+    if output_size:
+        ony, onx = output_size
+    else:
+        ony, onx = image.shape
+    freq_y = np.fft.fftfreq(ony) * 2 * apix / cutoff_res_y
+    freq_x = np.fft.fftfreq(onx) * 2 * apix / cutoff_res_x
+    Y, X = np.meshgrid(freq_y, freq_x, indexing="ij")
+    Y = (2 * np.pi * Y).flatten(order="C")
+    X = (2 * np.pi * X).flatten(order="C")
+
+    from finufft import nufft2d2
+
+    fft = nufft2d2(x=Y, y=X, f=image.astype(np.complex128), eps=1e-6)
+    fft = fft.reshape((ony, onx))
+
+    # phase shifts for real-space shifts by half of the image box in both directions
+    phase_shift = np.ones(fft.shape)
+    phase_shift[1::2, :] *= -1
+    phase_shift[:, 1::2] *= -1
+    fft *= phase_shift
+    # now fft has the same layout and phase origin (i.e. np.fft.ifft2(fft) would obtain original image)
+    return fft
+
+
+def compute_power_spectra(
+    data,
+    apix,
+    cutoff_res=None,
+    output_size=None,
+    log=True,
+    low_pass_fraction=0,
+    high_pass_fraction=0,
+):
+    fft = fft_rescale(data, apix=apix, cutoff_res=cutoff_res, output_size=output_size)
+    fft = np.fft.fftshift(fft)  # shift fourier origin from corner to center
+
+    if log:
+        pwr = np.log1p(np.abs(fft))
+    else:
+        pwr = np.abs(fft)
+    if 0 < low_pass_fraction < 1 or 0 < high_pass_fraction < 1:
+        pwr = helicon.low_high_pass_filter(
+            pwr,
+            low_pass_fraction=low_pass_fraction,
+            high_pass_fraction=high_pass_fraction,
+        )
+    pwr = helicon.normalize_(pwr, percentile=(0, 100))
+
+    phase = np.angle(fft, deg=False)
+    return pwr, phase
+
+
+def compute_phase_difference_across_meridian(phase):
+    # https://numpy.org/doc/stable/reference/generated/numpy.fft.fftfreq.html
+    phase_diff = phase * 0
+    phase_diff[..., 1:] = phase[..., 1:] - phase[..., 1:][..., ::-1]
+    phase_diff = np.rad2deg(
+        np.arccos(np.cos(phase_diff))
+    )  # set the range to [0, 180]. 0 -> even order, 180 - odd order
+    return phase_diff
