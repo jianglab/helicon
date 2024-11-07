@@ -55,11 +55,14 @@ with ui.sidebar(
     with ui.navset_pill(id="tab"):
         with ui.nav_panel("Input Class2D file"):
             with ui.div(id="input_files", style="flex-shrink: 0;"):
-                ui.input_text(
-                    "filepath_params",
-                    "File path for a RELION star or cryoSPARC cs file on the server",
-                    value="",
-                    placeholder="<paste the full path of your Class2D star/cs file here>",
+                helicon.shiny.file_selection_ui(
+                    id="filepath_params",
+                    label="Choose a RELION star or cryoSPARC cs file on the server",
+                    value=None,
+                    width="100%",
+                ),
+                filepath_params = helicon.shiny.file_selection_server(
+                    id="filepath_params", file_types=["_data.star", ".cs"]
                 )
 
                 ui.input_task_button("run", label="Run", style="width: 100%;")
@@ -255,8 +258,9 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
 
 
 @reactive.effect
+@reactive.event(input.run)
 def get_params_from_file():
-    filepath = input.filepath_params()
+    filepath = filepath_params()
     req(len(filepath))
     req(pathlib.Path(filepath).exists())
 

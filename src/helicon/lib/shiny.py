@@ -1,3 +1,6 @@
+from typing import Optional
+from pathlib import Path
+
 import shiny
 from shiny import reactive
 from shiny.express import ui, module, render, expressify
@@ -256,6 +259,150 @@ def image_select(
             gap=gap,
             justification=justification,
         )
+
+
+# server-side file selection
+@shiny.module.ui
+def file_selection_ui(label="Select a file", value=None, width="100%"):
+    return shiny.ui.div(
+        shiny.ui.input_text(
+            "selected_file_path", label=label, value=value, width="100%"
+        ),
+        shiny.ui.accordion(
+            shiny.ui.accordion_panel(
+                "",
+                shiny.ui.input_text(
+                    "current_directory",
+                    label="Current directory",
+                    value=str(Path(value).parent) if value else str(Path.cwd()),
+                    width="100%",
+                ),
+                shiny.ui.layout_column_wrap(
+                    shiny.ui.input_select(
+                        "file",
+                        "Select a file",
+                        choices=[Path(value).name] if value else [],
+                        selected=Path(value).name if value else None,
+                        width="100%",
+                    ),
+                    shiny.ui.input_select(
+                        "sub_directory",
+                        "Go to a sub-directory",
+                        choices=[],
+                        width="100%",
+                    ),
+                    width=6,
+                ),
+                style="padding: 10px;",
+            ),
+            id="accordion_file_selection",
+            open=False,
+            style="border: 1px solid #ccc;",
+        ),
+        style=f"margin: 0; margin-bottom: 10px; padding: 0; width: {width};",
+    )
+
+
+@shiny.module.server
+def file_selection_server(
+    input,
+    output,
+    session,
+    file_types: Optional[str | list[str]] = None,
+    ignore_hidden_files=True,
+):
+    if file_types is None:
+        file_types = []
+    elif isinstance(file_types, str):
+        file_types = [file_types]
+
+    @reactive.effect
+    @reactive.event(input.current_directory)
+    def update_sub_directories():
+        p = Path(input.current_directory())
+        shiny.req(p.exists())
+        try:
+            directories = [d.name for d in sorted(p.iterdir()) if d.is_dir()]
+            if ignore_hidden_files:
+                directories = [d for d in directories if d[0] != "."]
+            directories = [".", ".."] + directories
+            ui.update_select("sub_directory", choices=directories)
+        except Exception as e:
+            import traceback
+
+            print(traceback.format_exc())
+            m = ui.modal(
+                f"{input.current_directory()}: failed to list sub-directories.",
+                title="Folder access error",
+                easy_close=True,
+                footer=None,
+            )
+            ui.modal_show(m)
+
+    @reactive.effect
+    @reactive.event(input.sub_directory)
+    def goto_sub_directories():
+        shiny.req(len(input.sub_directory()))
+        sub_dir = Path(input.current_directory()) / input.sub_directory()
+        ui.update_text("current_directory", value=str(sub_dir.resolve()))
+
+    @reactive.effect
+    @reactive.event(input.current_directory)
+    def update_files():
+        p = Path(input.current_directory())
+        shiny.req(p.exists())
+        try:
+            files = [f.name for f in sorted(p.iterdir(), reverse=True) if f.is_file()]
+            if ignore_hidden_files:
+                files = [f for f in files if f[0] != "."]
+            if file_types:
+                files_final = []
+                for f in files:
+                    for ft in file_types:
+                        if f.endswith(ft):
+                            files_final.append(f)
+                            continue
+            else:
+                files_final = files
+
+            selected = None
+            same_folder = Path(input.selected_file_path()).parent.samefile(
+                Path(input.current_directory())
+            )
+            if len(files_final):
+                if input.file() and same_folder and input.file() in files_final:
+                    selected = input.file()
+                else:
+                    selected = files_final[0]
+            ui.update_select("file", choices=files_final, selected=selected)
+        except Exception as e:
+            import traceback
+
+            print(traceback.format_exc())
+            m = ui.modal(
+                f"{str(input.current_directory())}: failed to list files.",
+                title="Folder access error",
+                easy_close=True,
+                footer=None,
+            )
+            ui.modal_show(m)
+
+    @reactive.effect
+    @reactive.event(input.parent_button)
+    def go_to_parent_folder():
+        parent_directory = Path(input.current_directory()).parent
+        if parent_directory.exists():
+            ui.update_text("current_directory", value=str(parent_directory))
+
+    @reactive.effect
+    @reactive.event(input.file)
+    def _():
+        ui.update_text(
+            "selected_file_path",
+            value=str(Path(input.current_directory()) / input.file()),
+        )
+
+    return input.selected_file_path
 
 
 @expressify
