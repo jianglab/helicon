@@ -3,7 +3,7 @@ import numpy as np
 
 from shiny import reactive, req
 from shiny.express import input, ui, render
-from shinywidgets import render_plotly
+from shinywidgets import render_plotly, render_widget
 
 import helicon
 
@@ -55,17 +55,23 @@ with ui.sidebar(
     with ui.navset_pill(id="tab"):
         with ui.nav_panel("Input Class2D file"):
             with ui.div(id="input_files", style="flex-shrink: 0;"):
-                helicon.shiny.file_selection_ui(
-                    id="filepath_params",
-                    label="Choose a RELION star or cryoSPARC cs file on the server",
-                    value=None,
-                    width="100%",
-                ),
-                filepath_params = helicon.shiny.file_selection_server(
-                    id="filepath_params", file_types=["_data.star", ".cs"]
-                )
 
-                ui.input_task_button("run", label="Run", style="width: 100%;")
+                @render_widget
+                def filepath_params():
+                    from ipyfilechooser import FileChooser
+
+                    fc = FileChooser(
+                        path=".",
+                        select_desc="Browse",
+                        show_hidden=False,
+                        filter_pattern=["*_data.star", "*.cs"],
+                        title="Select a RELION star or cryoSPARC cs file on the server",
+                    )
+                    return fc
+
+                ui.input_task_button(
+                    "run", label="Run", style="width: 100%; margin-top: 5px;"
+                )
 
             with ui.div(id="class-selection", style="flex-grow: 1; overflow-y: auto;"):
                 helicon.shiny.image_select(
@@ -260,8 +266,8 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
 @reactive.effect
 @reactive.event(input.run)
 def get_params_from_file():
-    filepath = filepath_params()
-    req(len(filepath))
+    filepath = filepath_params.widget.value
+    req(filepath is not None and len(filepath))
     req(pathlib.Path(filepath).exists())
 
     project_root_dir.set(compute.get_project_root_dir(filepath))
