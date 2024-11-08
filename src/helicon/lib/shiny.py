@@ -265,41 +265,39 @@ def image_select(
 @shiny.module.ui
 def file_selection_ui(label="Select a file", value=None, width="100%"):
     return shiny.ui.div(
-        shiny.ui.input_text(
-            "selected_file_path", label=label, value=value, width="100%"
-        ),
-        shiny.ui.accordion(
-            shiny.ui.accordion_panel(
-                "",
-                shiny.ui.input_text(
-                    "current_directory",
-                    label="Current directory",
-                    value=str(Path(value).parent) if value else str(Path.cwd()),
+        shiny.ui.popover(
+            shiny.ui.input_action_button(
+                "browse", label="Browse", style="height: 30px; --bs-btn-padding-y: 0"
+            ),
+            shiny.ui.input_text(
+                "current_directory",
+                label="Current directory",
+                value=str(Path(value).parent) if value else str(Path.cwd()),
+                width="100%",
+            ),
+            shiny.ui.layout_column_wrap(
+                shiny.ui.input_select(
+                    "sub_directory",
+                    "Go to a sub-directory",
+                    choices=[],
                     width="100%",
                 ),
-                shiny.ui.layout_column_wrap(
-                    shiny.ui.input_select(
-                        "file",
-                        "Select a file",
-                        choices=[Path(value).name] if value else [],
-                        selected=Path(value).name if value else None,
-                        width="100%",
-                    ),
-                    shiny.ui.input_select(
-                        "sub_directory",
-                        "Go to a sub-directory",
-                        choices=[],
-                        width="100%",
-                    ),
-                    width=6,
+                shiny.ui.input_select(
+                    "file",
+                    "Select a file",
+                    choices=[Path(value).name] if value else [],
+                    selected=Path(value).name if value else None,
+                    width="100%",
                 ),
-                style="padding: 10px;",
+                title="Select a file",
+                width="100%",
             ),
-            id="accordion_file_selection",
-            open=False,
-            style="border: 1px solid #ccc;",
+            width="100%",
         ),
-        style=f"margin: 0; margin-bottom: 10px; padding: 0; width: {width};",
+        shiny.ui.input_text(
+            "selected_file_path", label=None, value=value, width="100%"
+        ),
+        style=f"display: flex; flex-flow: row; align-items: stretch; gap: 2px; margin: 0; padding: 0; width: {width};",
     )
 
 

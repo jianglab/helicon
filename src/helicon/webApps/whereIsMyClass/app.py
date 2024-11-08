@@ -371,7 +371,15 @@ def get_selected_helices():
 
     helix = helices_selected.iloc[0]
     micrograph = project_root_dir() / helix["rlnMicrographName"]
-    assert micrograph.exists()
+    if not micrograph.exists():
+        m = ui.modal(
+            f"{str(micrograph)} is not available",
+            title="ERROR: micrograph not available",
+            easy_close=True,
+            footer=None,
+        )
+        ui.modal_show(m)
+        return
 
     displayed_micrograph_filename.set(micrograph)
 
