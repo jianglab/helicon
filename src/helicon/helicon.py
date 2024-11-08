@@ -60,8 +60,7 @@ def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
         subparser = sys.argv[1] if len(sys.argv) > 1 else None
         if subparser and subparser in subparsers.choices:
             subparsers.choices[subparser].print_help()
-        else:
-            parser.print_help()
+
         sys.exit(-1)
 
     args.main_function(args)

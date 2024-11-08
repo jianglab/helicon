@@ -12,7 +12,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html,numba]', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
+dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
     "Programming Language :: Python :: 3",
