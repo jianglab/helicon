@@ -14,9 +14,15 @@ def main(args):
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
 
-    cs = helicon.connect_cryosparc()
-    job = cs.find_job(args.project_id, args.job_id)
-    data_orig = job.load_output("particles")
+    if args.csFile:
+        from cryosparc.dataset import Dataset
+
+        data_orig = Dataset.load(args.csFile)
+    else:
+        cs = helicon.connect_cryosparc()
+        job = cs.find_job(args.projectID, args.jobID)
+        data_orig = job.load_output("particles")
+
     data = data_orig.copy()
 
     if args.verbose > 1:
@@ -30,9 +36,14 @@ def main(args):
             sys.exit(-1)
         micrographs = np.unique(data[image_name])
         if args.verbose > 1:
-            print(
-                f"{args.project_id}/{args.workspace_id}/{args.job_id}: {len(data)} particles from {len(micrographs)} micrographs"
-            )
+            if args.csFile:
+                print(
+                    f"{args.csFile}: {len(data)} particles from {len(micrographs)} micrographs"
+                )
+            else:
+                print(
+                    f"{args.projectID}/{args.workspaceID}/{args.jobID}: {len(data)} particles from {len(micrographs)} micrographs"
+                )
 
     if args.verbose > 10:
         print(data)
@@ -209,11 +220,78 @@ def main(args):
                 mask = np.where(data[image_name] == m)
                 data["ctf/exp_group_id"][mask] = mi + 1
 
+            group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+
             output_slots.add("ctf")
             output_title += f"->{len(group_ids)} per-micrograph groups"
 
             if args.verbose > 1:
-                group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+                print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
+
+        elif option_name == "copyExposureGroup" and param:
+            group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+
+            dataFrom = helicon.images2dataframe(
+                inputFiles=param,
+                ignore_bad_particle_path=True,
+                ignore_bad_micrograph_path=True,
+                warn_missing_ctf=0,
+                target_convention="relion",
+            )
+
+            helicon.check_required_columns(
+                dataFrom, required_cols=["rlnMicrographMovieName", "rlnOpticsGroup"]
+            )
+            dataFrom["rlnOpticsGroup"] = dataFrom["rlnOpticsGroup"].astype(int)
+            dataFrom["rlnOpticsGroup"] = (
+                dataFrom["rlnOpticsGroup"].astype(int)
+                - np.min(dataFrom["rlnOpticsGroup"])
+                + 1
+            )
+            mapping = {}
+            for i, row in dataFrom.iterrows():
+                mapping[Path(row["rlnMicrographMovieName"]).stem.split(".")[0]] = row[
+                    "rlnOpticsGroup"
+                ]
+
+            image_name = helicon.first_matched_atrr(
+                data, attrs="location/micrograph_path blob/path".split()
+            )
+            if image_name is None:
+                helicon.color_print(
+                    f"\tERROR: location/micrograph_path or blob/path must be available"
+                )
+                sys.exit(-1)
+
+            micrographs = np.unique(data[image_name])
+            from tqdm import tqdm
+
+            for mi, m in tqdm(
+                enumerate(micrographs),
+                total=len(micrographs),
+                desc="\tProcessing micrographs",
+                unit="micrograph",
+            ):
+                group = 0
+                for k, v in mapping.items():
+                    if m.find(k) != -1:
+                        group = v
+                        break
+                mask = np.where(data[image_name] == m)
+                data["ctf/exp_group_id"][mask] = group
+                if group == 0:
+                    helicon.color_print(
+                        f"\tWARNING: cannot find matching optics group info in {param} for {m}. Assign it to exposure group 0"
+                    )
+
+            group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+
+            output_slots.add("ctf")
+            output_title += (
+                f"->{len(group_ids)} exposure groups copied from {Path(param).name}"
+            )
+
+            if args.verbose > 1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
 
         elif option_name == "splitByMicrograph" and param:
@@ -245,63 +323,79 @@ def main(args):
                     f"\thalf dataset 2: {len(group2)} micrographs, {np.sum(data[col_split]==1)} particles"
                 )
 
-    if args.save_local:
-        output_file = (
-            f"{args.project_id}_{args.workspace_id}_{args.job_id}"
-            + output_title
-            + ".cs"
-        )
+    if args.csFile or args.saveLocal:
+        if args.csFile:
+            output_file = (
+                f"{Path(args.csFile).stem}"
+                + (output_title if output_title else ".output")
+                + ".cs"
+            )
+        else:
+            output_file = (
+                f"{args.projectID}_{args.workspaceID}_{args.jobID}"
+                + output_title
+                + ".cs"
+            )
         output_file = "-".join(output_file.split())
         output_file = output_file.replace(" ", "-")
         output_file = output_file.replace("->", "_")
+        output_file = output_file.replace("/", "_")
         data.save(output_file)
         if args.verbose > 1:
             print(f"The results are saved to {output_file}")
     else:
-        project = cs.find_project(args.project_id)
-        new_job_id = project.save_external_result(
-            workspace_uid=args.workspace_id,
+        project = cs.find_project(args.projectID)
+        new_jobID = project.save_external_result(
+            workspace_uid=args.workspaceID,
             dataset=data,
             type="particle",
             name="particles",
             slots=list(output_slots),
             passthrough=(job.uid, "particles"),
-            title=f"{args.job_id}" + output_title,
+            title=f"{args.jobID}" + output_title,
         )
         if args.verbose > 1:
             print(
-                f"The results are saved to a new CryoSPARC external job: {args.project_id}/{args.workspace_id}/{new_job_id}"
+                f"The results are saved to a new CryoSPARC external job: {args.projectID}/{args.workspaceID}/{new_jobID}"
             )
 
 
 def add_args(parser):
     parser.add_argument(
-        "--project_id",
+        "--csFile",
+        type=str,
+        metavar="<filename>",
+        help="input cryosparc particles cs file",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--projectID",
         type=str,
         metavar="<Pxx>",
-        help="input cryosparc project id",
-        required=True,
+        help="input cryosparc project id (short version: -p)",
+        default=None,
     )
     parser.add_argument(
-        "--workspace_id",
+        "--workspaceID",
         type=str,
         metavar="<Wx>",
         help="input cryosparc workspace id",
-        required=True,
+        default=None,
     )
     parser.add_argument(
-        "--job_id",
+        "--jobID",
         type=str,
         metavar="<Jxx>",
         help="input cryosparc job id",
-        required=True,
+        default=None,
     )
 
     parser.add_argument(
         "--assignExposureGroupByBeamShift",
         type=bool,
         metavar="<0|1>",
-        help="assign images to exposure groups according to the beam shifts, one group per beam shift position. default to 0",
+        help="assign images to exposure groups according to the beam shifts, one group per beam shift position. default to %(default)s",
         default=0,
     )
     parser.add_argument(
@@ -315,35 +409,42 @@ def add_args(parser):
         "--assignExposureGroupPerMicrograph",
         type=bool,
         metavar="<0|1>",
-        help="assign images to exposure groups, one group per micrograph. default to 0",
+        help="assign images to exposure groups, one group per micrograph. default to %(default)s",
+        default=0,
+    )
+    parser.add_argument(
+        "--copyExposureGroup",
+        type=str,
+        metavar="<star file>",
+        help="copy the optics group info from this star file. rlnMicrographMovieName and rlnOpticsGroup must be in this star file. disabled by default",
         default=0,
     )
     parser.add_argument(
         "--splitByMicrograph",
         type=bool,
         metavar="<0|1>",
-        help="split the dataset by micrograph. default to 0",
+        help="split the dataset by micrograph. default to %(default)s",
         default=0,
     )
     parser.add_argument(
-        "--save_local",
+        "--saveLocal",
         type=int,
         metavar="<0|1>",
-        help="save results to a local cs file instead of creating a new external job on the CryoSPARC server. default to 0",
+        help="save results to a local cs file instead of creating a new external job on the CryoSPARC server. default to %(default)s",
         default=0,
     )
     parser.add_argument(
         "--verbose",
         type=int,
         metavar="<0|1>",
-        help="verbose mode. default to 2",
+        help="verbose mode. default to %(default)s",
         default=3,
     )
     parser.add_argument(
         "--cpu",
         type=int,
         metavar="<n>",
-        help="number of cpus to use. default to 1",
+        help="number of cpus to use. default to %(default)s",
         default=1,
     )
 
@@ -358,8 +459,18 @@ def check_args(args, parser):
     args.all_options = [
         o
         for o in all_options
-        if o not in "cpu job_id project_id save_local verbose workspace_id".split()
+        if o not in "cpu jobID projectID saveLocal verbose workspaceID".split()
     ]
+
+    if (args.projectID or args.workspaceID or args.jobID) and args.csFile:
+        msg = f"You should only specify options for CryoSPARC server (--projectID --workspaceID --jobID) or local file (--csFile), but not both"
+        helicon.color_print(msg)
+        raise ValueError(msg)
+
+    if not ((args.projectID and args.workspaceID and args.jobID) or args.csFile):
+        msg = f"You should specify options for either CryoSPARC server (--projectID --workspaceID --jobID) or local file (--csFile)"
+        helicon.color_print(msg)
+        raise ValueError(msg)
 
     return args
 

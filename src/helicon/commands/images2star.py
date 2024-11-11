@@ -1887,7 +1887,7 @@ def main(args):
             attrSrc = helicon.first_matched_atrr(data, attrs_required)
             if attrSrc is None:
                 helicon.color_print(
-                    f"ERROR: the input does not have any of the columns: {' '.john(attr_required)}"
+                    f"ERROR: the input does not have any of the columns: {' '.john(attrs_required)}"
                 )
                 sys.exit(-1)
 

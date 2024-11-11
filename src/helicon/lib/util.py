@@ -409,6 +409,20 @@ def convert_dataframe_file_path(df, attr, to="current", relpath_start=os.curdir)
     return ret
 
 
+def check_required_columns(data, required_cols=[]):
+    from cryosparc.dataset import Dataset
+
+    if isinstance(data, Dataset):
+        cols = data.fields()
+    else:
+        cols = data.columns
+    missing_cols = [c for c in required_cols if c not in cols]
+    if missing_cols:
+        msg = f"\tERROR: required columns {' '.join(missing_cols)} are unavailable. Availalable columns are {' '.join(cols)}"
+        color_print(msg)
+        raise ValueError(msg)
+
+
 def bytes2units(bytes, to=None, bsize=1024):
     units = {"k": 1, "m": 2, "g": 3, "t": 4, "p": 5, "e": 6}
     unitStr = {"k": "kB", "m": "MB", "g": "GB", "t": "TB", "p": "PB", "e": "EB"}
