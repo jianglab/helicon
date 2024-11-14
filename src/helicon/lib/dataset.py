@@ -88,7 +88,9 @@ class EMDB:
                 )
                 return map_file
         url = self.get_emdb_map_url(emd_id)
-        map_file = helicon.download_url(url, target_file_name=str(map_file))
+        map_file = helicon.download_file_from_url(
+            url, target_file_name=str(map_file), return_filename=True
+        )
         return Path(map_file)
 
     def download_all_map_files(self, verbose=0):
@@ -145,7 +147,9 @@ class EMDB:
                 )
                 return xml_file
         url = self.get_emdb_xml_url(emd_id)
-        xml_file = helicon.download_url(url, target_file_name=str(xml_file))
+        xml_file = helicon.download_file_from_url(
+            url, target_file_name=str(xml_file), return_filename=True
+        )
         return Path(xml_file)
 
     def download_all_xml_files(self, verbose=0):

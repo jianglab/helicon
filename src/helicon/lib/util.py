@@ -283,7 +283,7 @@ def get_file_size(url):
         return None
 
 
-def download_file_from_url(url):
+def download_file_from_url(url, target_file_name=None, return_filename=False):
     import tempfile
     import requests
     import os
@@ -291,13 +291,19 @@ def download_file_from_url(url):
     if Path(url).is_file():
         return open(url, "rb")
     try:
-        local_filename = url.split("/")[-1]
-        suffix = "." + local_filename
-        fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
+        if target_file_name:
+            fileobj = open(target_file_name, mode="wb")
+        else:
+            local_filename = url.split("/")[-1]
+            suffix = "." + local_filename
+            fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
         with requests.get(url) as r:
             r.raise_for_status()  # Check for request success
             fileobj.write(r.content)
-        return fileobj
+        if return_filename:
+            return fileobj.name
+        else:
+            return fileobj
     except requests.exceptions.RequestException as e:
         print(e)
         return None
