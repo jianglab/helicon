@@ -62,7 +62,7 @@ with ui.sidebar(
 
                     fc = FileChooser(
                         path=".",
-                        select_desc="Browse",
+                        select_desc="Select",
                         show_hidden=False,
                         filter_pattern=["*_data.star", "*.cs"],
                         title="Select a RELION star or cryoSPARC cs file on the server",

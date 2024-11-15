@@ -6,7 +6,7 @@ from importlib import import_module
 import helicon
 
 shiny_commands = ["helicalPitch", "helicalProjection", "whereIsMyClass"]
-streamlit_commands = ["helicalLattice", "hi3d", "hill", "procart"]
+streamlit_commands = ["ctfSimulation", "helicalLattice", "hi3d", "hill", "procart"]
 
 
 def _get_commands(cmd_dir: str, doc_str: str = "") -> None:
