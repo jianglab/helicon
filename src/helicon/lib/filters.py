@@ -2,7 +2,7 @@ import numpy as np
 import helicon
 
 
-def calculate_structural_factor(data, apix, return_fft=False):
+def calculate_structural_factor(data, apix, thresh=None, mask=None, return_fft=False):
     """
     Calculate the 1D structural factor, which is the rotational average of the FFT amplitude squared.
 
@@ -14,22 +14,29 @@ def calculate_structural_factor(data, apix, return_fft=False):
     structural_factor (np.ndarray): Rotational average of the FFT amplitude squared.
     """
 
-    if data.ndim == 2:
-        ny, nx = data.shape
+    if thresh:
+        data_work = threshold_data(data, thresh_value=thresh)
+    else:
+        data_work = data
+    if mask is not None:
+        data_work = data_work * mask
+
+    if data_work.ndim == 2:
+        ny, nx = data_work.shape
         qy, qx = np.meshgrid(np.fft.fftfreq(ny), np.fft.fftfreq(nx), indexing="ij")
-        F = np.fft.fft2(data)
-    elif data.ndim == 3:
-        nz, ny, nx = data.shape
+        F = np.fft.fft2(data_work)
+    elif data_work.ndim == 3:
+        nz, ny, nx = data_work.shape
         qz, qy, qx = np.meshgrid(
             np.fft.fftfreq(nz), np.fft.fftfreq(ny), np.fft.fftfreq(nx), indexing="ij"
         )
-        F = np.fft.fftn(data)
+        F = np.fft.fftn(data_work)
     else:
         raise ValueError("Input data must be a 2D or 3D array.")
 
     amplitude_squared = F.real**2 + F.imag**2
 
-    if data.ndim == 2:
+    if data_work.ndim == 2:
         qr = np.sqrt(qx**2 + qy**2) / apix
     else:
         qr = np.sqrt(qx**2 + qy**2 + qz**2) / apix
@@ -51,7 +58,9 @@ def calculate_structural_factor(data, apix, return_fft=False):
         return qbins, structural_factor
 
 
-def set_structural_factors(data, apix, target_bins, target_structural_factors):
+def set_structural_factors(
+    data, apix, target_bins, target_structural_factors, thresh=None, mask=None
+):
     """
     Scale the structural factors of the data array to match the target structural factors.
 
@@ -66,8 +75,10 @@ def set_structural_factors(data, apix, target_bins, target_structural_factors):
     """
 
     qbins, structural_factor, fft = calculate_structural_factor(
-        data, apix, return_fft=True
+        data, apix, thresh=thresh, mask=mask, return_fft=True
     )
+    if mask is not None:
+        fft = np.fft.fftn(data)
 
     from scipy import interpolate
 
@@ -103,7 +114,9 @@ def set_structural_factors(data, apix, target_bins, target_structural_factors):
     return np.real(modified_data)
 
 
-def match_structural_factors(data, apix, data_target, apix_target):
+def match_structural_factors(
+    data, apix, data_target, apix_target, thresh=None, thresh_target=None, mask=None
+):
     """
     Scale the structural factors of the data array to match those of the target data array.
 
@@ -118,9 +131,11 @@ def match_structural_factors(data, apix, data_target, apix_target):
     """
 
     target_bins, target_structural_factors = calculate_structural_factor(
-        data_target, apix_target, return_fft=False
+        data_target, apix_target, thresh=thresh_target, mask=mask, return_fft=False
     )
-    return set_structural_factors(data, apix, target_bins, target_structural_factors)
+    return set_structural_factors(
+        data, apix, target_bins, target_structural_factors, thresh=thresh, mask=mask
+    )
 
 
 def normalize_min_max(data, min=0, max=1):
@@ -147,10 +162,13 @@ def normalize_percentile(data, percentile=(0, 100)):
     return (data - vmin) / (vmax - vmin)
 
 
-def threshold_data(data, thresh_fraction=-1):
-    if thresh_fraction < 0:
+def threshold_data(data, thresh_fraction=None, thresh_value=None):
+    if thresh_fraction is not None and thresh_fraction >= 0:
+        thresh = data.max() * thresh_fraction
+    elif thresh_value is not None:
+        thresh = thresh_value
+    else:
         return data
-    thresh = data.max() * thresh_fraction
     ret = np.clip(data, thresh, None) - thresh
     return ret
 
