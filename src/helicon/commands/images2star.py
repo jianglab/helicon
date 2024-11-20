@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""A command line tool that analyzes/transforms dataset(s) and saves the dataset in RELION star file"""
+"""A command line tool that analyzes/transforms dataset(s) and saves the dataset in a RELION star file"""
 
 import argparse, math, os, sys, types
 from pathlib import Path
