@@ -2,8 +2,9 @@
 
 """A command line tool for de novo helical indexing and 3D reconstruction from a single 2D image"""
 
-import itertools, os, sys, pathlib, datetime
+import itertools, os, sys, pathlib, datetime, joblib
 import numpy as np
+
 import helicon
 
 from scipy.sparse import csr_matrix
@@ -23,7 +24,7 @@ except ImportError:
 
     prange = range
 
-memory = helicon.DummyMemory(
+memory = joblib.Memory(
     location=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".cache",
     bytes_limit=2**36,
     verbose=0,
@@ -36,15 +37,6 @@ def main(args):
     logger = helicon.get_logger(
         logfile=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".log",
         verbose=args.verbose,
-    )
-
-    from joblib import Memory
-
-    global memory
-    memory = Memory(
-        location=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".cache",
-        bytes_limit=2**36,
-        verbose=0,
     )
 
     output_path = pathlib.Path(args.output_prefix)

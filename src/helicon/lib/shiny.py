@@ -405,6 +405,8 @@ def file_selection_server(
 
 @expressify
 def google_analytics(id):
+    if id is None or not len(id):
+        return
     ui.head_content(
         ui.HTML(
             f"""

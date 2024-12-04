@@ -40,7 +40,8 @@ first_point = reactive.Value(None)
 second_point = reactive.Value(None)
 
 
-ui.head_content(ui.tags.title("HelicalClassesOnMicrographs"))
+ui.head_content(ui.tags.title("Helicon whereIsMyClass"))
+helicon.shiny.google_analytics(id="G-CJC1WDZ58Y")
 helicon.shiny.setup_ajdustable_sidebar(width="25vw")
 ui.tags.style(
     """
