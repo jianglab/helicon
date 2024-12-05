@@ -11,6 +11,7 @@ def image_gallery(
     label=reactive.value(""),
     images=reactive.value([]),
     display_image_labels=True,
+    display_dashed_line=False,
     image_labels=reactive.value([]),
     image_links=reactive.value([]),
     image_size=reactive.value(128),
@@ -75,19 +76,30 @@ def image_gallery(
         if link:
             img = ui.a(img, href=link, target="_blank")
 
-        return ui.div(
-            (
-                ui.div(
-                    img,
+        if display_image_labels or display_dashed_line:
+            elements = [img]
+            if display_image_labels:
+                elements.append(
                     ui.p(
                         label,
                         style="text-align: left; color: white; text-shadow: -1px -1px 0.5px rgba(0,0,0,0.5), 1px -1px 0.5px rgba(0,0,0,0.5), -1px 1px 0.5px rgba(0,0,0,0.5), 1px 1px 0.5px rgba(0,0,0,0.5); position: absolute; top: 2px; left: 5px;",
-                    ),
-                    style="position: relative;",
+                    )
                 )
-                if display_image_labels
-                else img
-            ),
+            if display_dashed_line:
+                elements.append(
+                    ui.div(
+                        style=f"border-top: 1px dashed white; position: absolute; top: {image_size() // 2}px; left: 0; right: 0;"
+                    ),
+                )
+            ui_img = ui.div(
+                *elements,
+                style="position: relative;",
+            )
+        else:
+            ui_img = img
+
+        return ui.div(
+            ui_img,
             id=bid,
             style=f"padding: 0px; border: 0px; margin: 0px; background-color: transparent;",
             onmouseover=(
@@ -232,6 +244,7 @@ def image_select(
     label="Select Image(s):",
     images=reactive.value([]),
     display_image_labels=True,
+    display_dashed_line=False,
     image_labels=reactive.value([]),
     image_links=reactive.value([]),
     image_size=reactive.value(128),
@@ -249,6 +262,7 @@ def image_select(
             label=label,
             images=images,
             display_image_labels=display_image_labels,
+            display_dashed_line=display_dashed_line,
             image_labels=image_labels,
             image_links=image_links,
             image_size=image_size,

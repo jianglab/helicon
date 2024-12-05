@@ -66,7 +66,7 @@ with ui.sidebar(
                     "input_mode_images",
                     "How to obtain the input images:",
                     choices=["upload", "url"],
-                    selected="url",
+                    selected="upload",
                     inline=True,
                 )
 
@@ -275,6 +275,7 @@ with ui.div(
         image_size=input.selected_image_display_size,
         justification="left",
         enable_selection=False,
+        display_dashed_line=True,
     )
 
     with ui.layout_columns(col_widths=4):
@@ -877,7 +878,7 @@ def display_denovo3D_projections():
         query_image_padded = helicon.pad_to_size(query_image, shape=rec3d_x_proj.shape)
 
         label_x = f"{ri+1}: X|score={score:.4f}|pitch={int(round(rise*360/abs(twist))):,}Å|twist={round(twist,3)}°|rise={round(rise,6)}Å"
-        labels += [f"Input image: {selected_images_labels()[0]}", label_x, "Z"]
+        labels += [f"Input image: {selected_images_labels()[0]}", label_x, f"{ri+1}: Z"]
         images += [query_image_padded, rec3d_x_proj, rec3d_z_sections]
 
     reconstructed_projection_labels.set(labels)
