@@ -330,7 +330,7 @@ with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
             ui.input_numeric("twist_min", "min", value=0.1, step=0.1, width="70px")
-            ui.input_numeric("twist_max", "max", value=2, step=0.1, width="70px")
+            ui.input_numeric("twist_max", "max", value=1.0, step=0.1, width="70px")
             ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px")
 
     with ui.card(style="height: 115px"):
@@ -806,7 +806,7 @@ def run_denovo3D_reconstruction():
         logger.warning("Nothing to do. I will quit")
         return
 
-    with ui.Progress(min=1, max=len(tasks)) as p:
+    with ui.Progress(min=0, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
         from concurrent.futures import ThreadPoolExecutor
