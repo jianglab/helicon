@@ -401,7 +401,7 @@ def display_denovo3D_scores():
 
 
 with ui.div(
-    style="max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
+    style="max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
 ):
     helicon.shiny.image_select(
         id="display_reconstructed_projections",
@@ -809,23 +809,26 @@ def run_denovo3D_reconstruction():
     with ui.Progress(min=1, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
-        from tqdm import tqdm
-        from joblib import Parallel, delayed
-        from time import time
+        from concurrent.futures import ThreadPoolExecutor
 
-        t0 = time()
-        results = []
-        for ti, task in enumerate(tasks):
-            result = compute.process_one_task(*task)
-            t1 = time()
-            results.append(result)
-            remaining = (len(tasks) - ti - 1) * (t1 - t0)
-            p.set(
-                ti + 1,
-                message=f"Completed {ti+1}/{len(tasks)}",
-                detail=f"{helicon.timedelta2string(remaining)} remaining",
-            )
+        with ThreadPoolExecutor(max_workers=helicon.available_cpu()) as executor:
+            future_tasks = [
+                executor.submit(compute.process_one_task, *task) for task in tasks
+            ]
+            from time import time
+
             t0 = time()
+            results = []
+            for ti, task in enumerate(future_tasks):
+                result = task.result()
+                t1 = time()
+                results.append(result)
+                remaining = (len(tasks) - (ti + 1)) / (ti + 1) * (t1 - t0)
+                p.set(
+                    ti + 1,
+                    message=f"Completed {ti+1}/{len(tasks)}",
+                    detail=f"{helicon.timedelta2string(remaining)} remaining",
+                )
 
     results_none = [res for res in results if res is None]
     if len(results_none):
