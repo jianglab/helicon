@@ -400,94 +400,93 @@ def display_denovo3D_scores():
 
 
 with ui.div(
-    style="max-height: 80vh; overflow-y: auto; display: flex; flex-direction: column; align-items: center;"
+    style="max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
 ):
-    with ui.div(
-        style="max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; align-items: center; margin-bottom: 5px"
-    ):
-        helicon.shiny.image_select(
-            id="display_reconstructed_projections",
-            label=reactive.value("Reconstructed map projections:"),
-            images=reconstructed_projection_images,
-            image_labels=reconstructed_projection_labels,
-            image_size=input.selected_image_display_size,
-            justification="center",
-            enable_selection=False,
-        )
+    helicon.shiny.image_select(
+        id="display_reconstructed_projections",
+        label=reactive.value("Reconstructed map projections:"),
+        images=reconstructed_projection_images,
+        image_labels=reconstructed_projection_labels,
+        image_size=input.selected_image_display_size,
+        justification="left",
+        enable_selection=False,
+    )
 
-    @render.ui
-    @reactive.event(input.show_download_print_buttons)
-    def generate_ui_print_reeconstructed_images():
-        req(input.show_download_print_buttons())
-        return ui.input_action_button(
-            "print_reeconstructed_images",
-            "Print reeconstructed images",
-            onclick=""" 
-                            var w = window.open();
-                            w.document.write(document.head.outerHTML);
-                            var printContents = document.getElementById('display_reconstructed_projections-show_image_gallery').innerHTML;
-                            w.document.write(printContents);
-                            w.document.write('<script type="text/javascript">window.onload = function() { window.print(); w.close();};</script>');
-                            w.document.close();
-                            w.focus();
-                        """,
-            width="256px",
-        )
 
-    @render.download(label="Download map", filename="helicon_denovo3d_map.mrc")
-    @reactive.event(reconstrunction_results)
-    def download_denovo3D_map():
-        req(len(reconstrunction_results()) == 1)
+@render.ui
+@reactive.event(input.show_download_print_buttons)
+def generate_ui_print_reeconstructed_images():
+    req(input.show_download_print_buttons())
+    return ui.input_action_button(
+        "print_reeconstructed_images",
+        "Print reeconstructed images",
+        onclick=""" 
+                        var w = window.open();
+                        w.document.write(document.head.outerHTML);
+                        var printContents = document.getElementById('display_reconstructed_projections-show_image_gallery').innerHTML;
+                        w.document.write(printContents);
+                        w.document.write('<script type="text/javascript">window.onload = function() { window.print(); w.close();};</script>');
+                        w.document.close();
+                        w.focus();
+                    """,
+        width="256px",
+    )
+
+
+@render.download(label="Download map", filename="helicon_denovo3d_map.mrc")
+@reactive.event(reconstrunction_results)
+def download_denovo3D_map():
+    req(len(reconstrunction_results()) == 1)
+    (
+        score,
         (
-            score,
-            (
-                rec3d_x_proj,
-                rec3d_y_proj,
-                rec3d_z_sections,
-                rec3d,
-                reconstruct_diameter_2d_pixel,
-                reconstruct_diameter_3d_pixel,
-                reconstruct_length_2d_pixel,
-                reconstruct_length_3d_pixel,
-            ),
-            (
-                data,
-                imageFile,
-                imageIndex,
-                apix3d,
-                apix2d,
-                twist,
-                rise,
-                csym,
-                tilt,
-                psi,
-                dy,
-            ),
-        ) = reconstrunction_results()[0]
+            rec3d_x_proj,
+            rec3d_y_proj,
+            rec3d_z_sections,
+            rec3d,
+            reconstruct_diameter_2d_pixel,
+            reconstruct_diameter_3d_pixel,
+            reconstruct_length_2d_pixel,
+            reconstruct_length_3d_pixel,
+        ),
+        (
+            data,
+            imageFile,
+            imageIndex,
+            apix3d,
+            apix2d,
+            twist,
+            rise,
+            csym,
+            tilt,
+            psi,
+            dy,
+        ),
+    ) = reconstrunction_results()[0]
 
-        ny, nx = images_all()[0].shape
-        apix = image_apix()
-        rec3d_map = helicon.apply_helical_symmetry(
-            data=rec3d[0],
-            apix=apix3d,
-            twist_degree=twist,
-            rise_angstrom=rise,
-            csym=csym,
-            fraction=1.0,
-            new_size=(nx, ny, ny),
-            new_apix=apix,
-            cpu=input.cpu(),
-        ).astype(np.float32)
+    ny, nx = images_all()[0].shape
+    apix = image_apix()
+    rec3d_map = helicon.apply_helical_symmetry(
+        data=rec3d[0],
+        apix=apix3d,
+        twist_degree=twist,
+        rise_angstrom=rise,
+        csym=csym,
+        fraction=1.0,
+        new_size=(nx, ny, ny),
+        new_apix=apix,
+        cpu=input.cpu(),
+    ).astype(np.float32)
 
-        import mrcfile
-        import tempfile
+    import mrcfile
+    import tempfile
 
-        with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
-            with mrcfile.new(temp.name, overwrite=True) as mrc:
-                mrc.set_data(rec3d_map)
-                mrc.voxel_size = apix
-            with open(temp.name, "rb") as file:
-                yield file.read()
+    with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
+        with mrcfile.new(temp.name, overwrite=True) as mrc:
+            mrc.set_data(rec3d_map)
+            mrc.voxel_size = apix
+        with open(temp.name, "rb") as file:
+            yield file.read()
 
 
 ui.HTML(
@@ -811,12 +810,21 @@ def run_denovo3D_reconstruction():
 
         from tqdm import tqdm
         from joblib import Parallel, delayed
+        from time import time
 
+        t0 = time()
         results = []
         for ti, task in enumerate(tasks):
             result = compute.process_one_task(*task)
+            t1 = time()
             results.append(result)
-            p.set(ti, message=f"Computing {ti+1}/{len(tasks)}")
+            remaining = (len(tasks) - ti - 1) * (t1 - t0)
+            p.set(
+                ti + 1,
+                message=f"Completed {ti+1}/{len(tasks)}",
+                detail=f"{helicon.timedelta2string(remaining)} remaining",
+            )
+            t0 = time()
 
     results_none = [res for res in results if res is None]
     if len(results_none):
@@ -865,9 +873,12 @@ def display_denovo3D_projections():
             ),
         ) = result
 
+        query_image = selected_images_thresholded_rotated_shifted_cropped()[0]
+        query_image_padded = helicon.pad_to_size(query_image, shape=rec3d_x_proj.shape)
+
         label_x = f"{ri+1}: X|score={score:.4f}|pitch={int(round(rise*360/abs(twist))):,}Å|twist={round(twist,3)}°|rise={round(rise,6)}Å"
-        labels += [label_x, "Z"]
-        images += [rec3d_x_proj, rec3d_z_sections]
+        labels += [f"Input image: {selected_images_labels()[0]}", label_x, "Z"]
+        images += [query_image_padded, rec3d_x_proj, rec3d_z_sections]
 
     reconstructed_projection_labels.set(labels)
     reconstructed_projection_images.set(images)

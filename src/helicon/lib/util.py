@@ -735,6 +735,30 @@ def get_context_function_name():
     return inspect.stack()[1].function
 
 
+def timedelta2string(total_seconds):
+    years = int(total_seconds // (60 * 60 * 24 * 365))
+    tmp = total_seconds - years * (60 * 60 * 2 * 365)
+    days = int(tmp // (60 * 60 * 24))
+    tmp -= days * (60 * 60 * 24)
+    hours = int(tmp // (60 * 60))
+    tmp -= hours * (60 * 60)
+    minutes = int(tmp // 60)
+    seconds = int(tmp - minutes * 60 + 0.5)
+
+    s = []
+    if years:
+        s += [f"{years} years"]
+    if days:
+        s += [f"{days} days"]
+    if hours:
+        s += [f"{hours} hours"]
+    if minutes:
+        s += [f"{minutes} minutes"]
+    if seconds:
+        s += [f"{seconds} seconds"]
+    return ", ".join(s)
+
+
 class Timer:
     def __init__(self, info="Timer", verbose=1):
         self.info = info
