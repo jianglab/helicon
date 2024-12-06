@@ -36,6 +36,9 @@ displayed_helices_class_images = reactive.value([])
 displayed_helices_class_labels = reactive.value([])
 displayed_helices_classes_xys = reactive.value(None)
 
+df_selected_helices = reactive.value(([], [], 0))
+pair_distances_df_selected = reactive.value([])
+
 first_point = reactive.Value(None)
 second_point = reactive.Value(None)
 
@@ -194,6 +197,25 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 height="30vh",
                 width="100%",
             )
+        
+        @reactive.effect
+        def get_df_selected_helices():
+            df_selected = display_helices_dataframe.data_view(selected=True)
+            df_selected_helixids = df_selected['helixID'].tolist()
+            mask = params()["helixID"].astype(int).isin(df_selected_helixids)
+            particles = params().loc[mask, :]
+            
+            class_indices = [int(i)-1 for i in input.marked_helices_classes()]
+            
+            helices = compute.select_classes(params=particles, class_indices=class_indices)
+            if len(helices):
+                filement_lengths = compute.get_filament_length(helices=helices)
+                segments_count = np.sum([abundance()[i] for i in class_indices])
+            else:
+                filement_lengths = []
+                segments_count = 0
+
+            df_selected_helices.set((helices, filement_lengths, segments_count))
 
         helicon.shiny.image_select(
             id="classes_selected_helices",
@@ -203,6 +225,39 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
             image_size=reactive.value(128),
             enable_selection=False,
         )
+
+        with ui.layout_columns(
+            col_widths=6, style="align-items: flex-end;"
+        ):
+            ui.input_numeric(
+                "max_len",
+                "Maximal length (Å)",
+                min=-1,
+                value=-1,
+                step=1.0,
+            )
+            ui.input_numeric(
+                "max_pair_dist",
+                "Maximal pair distance (Å) to plot",
+                min=-1,
+                value=-1,
+                step=1.0,
+            )
+            ui.input_numeric(
+                "bins",
+                "Number of histogram bins",
+                min=1,
+                value=100,
+                step=1,
+            )        
+            ui.input_numeric(
+                "rise",
+                "Helical rise (Å)",
+                min=0.01,
+                max=1000.0,
+                value=4.75,
+                step=0.01,
+            )
 
     with ui.div():
         with ui.div(id="div_marked_classes", style="display: none;"):
@@ -258,10 +313,70 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                         data.on_hover(plot_micrograph_on_hover)
 
                 return fig
+        
+        @render_plotly
+        @reactive.event(pair_distances_df_selected, input.bins, input.max_pair_dist, input.rise)
+        def pair_distances_histogram_df_selected_display():
+            req(input.bins() is not None and input.bins() > 0)
+            req(input.max_pair_dist() is not None)
+            req(input.rise() is not None and input.rise() > 0)
+            fig = getattr(pair_distances_histogram_df_selected_display, "fig", None)
+            data = pair_distances_df_selected()
+            
+            (helices, filement_lengths, _) = df_selected_helices()
+            
+            if len(helices):
+                class_indices = np.unique(
+                    np.concatenate(
+                        [h["rlnClassNumber"] for hi, h in helices]
+                    )
+                ).astype(int)
+            else:
+                class_indices = []
+            class_indices = [
+                str(displayed_class_ids()[i] + 1)
+                for i in input.select_classes()
+                if (displayed_class_ids()[i] + 1) in class_indices
+            ]
+            segment_count = np.sum([len(h) for hi, h in helices])
+            rise = input.rise()
+            log_y = True
+            title = f"Pair Distances: Class {' '.join(class_indices)}<br><i>{len(helices)} filaments | {segment_count:,} segments | {len(pair_distances_df_selected()):,} segment pairs"
+            xlabel = "Pair Distance (Å)"
+            ylabel = "# of Pairs"
+            nbins = input.bins()
+            max_pair_dist = input.max_pair_dist()
+
+            fig = compute.plot_histogram(
+                data=data,
+                title=title,
+                xlabel=xlabel,
+                ylabel=ylabel,
+                max_pair_dist=max_pair_dist,
+                bins=nbins,
+                log_y=log_y,
+                show_pitch_twist=dict(rise=rise, csyms=(1, 2, 3, 4)),
+                multi_crosshair=True,
+                fig=fig,
+            )
+            pair_distances_histogram_df_selected_display.fig = fig
+
+            return fig            
 
     ui.HTML(
         "<i><p>Developed by the <a href='https://jiang.bio.purdue.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
     )
+
+
+@reactive.effect
+@reactive.event(df_selected_helices)
+def get_pair_lengths_df_selected():
+    (helices, filement_lengths, _) = df_selected_helices()
+    if len(helices):
+        dists, _ = compute.compute_pair_distances(helices=helices)
+        pair_distances_df_selected.set(dists)
+    else:
+        pair_distances_df_selected.set([])
 
 
 @reactive.effect
@@ -273,6 +388,7 @@ def get_params_from_file():
 
     project_root_dir.set(compute.get_project_root_dir(filepath))
     filepath_classes.set(compute.get_class_file(filepath))
+    print(filepath_classes())
 
     msg = None
     try:
@@ -301,25 +417,28 @@ def get_params_from_file():
         )
         ui.modal_show(m)
 
-
 @reactive.effect
 @reactive.event(filepath_classes)
-def get_class2d_from_file():
+def get_2d_images_from_files():
     req(filepath_classes())
-    try:
-        data, apix = compute.get_class2d_from_file(filepath_classes())
-        nx = data.shape[-1]
-    except Exception as e:
-        print(e)
-        data, apix = None, 0
-        nx = 0
-        m = ui.modal(
-            f"failed to read 2D class average images from {filepath_classes()}",
-            title="File read error",
-            easy_close=True,
-            footer=None,
-        )
-        ui.modal_show(m)
+    print(filepath_classes())
+    if type(filepath_classes()) is list:
+        data, apix, nx = compute.get_class3d_projections_from_files(filepath_classes())
+    else:
+        try:
+            data, apix = compute.get_class2d_from_file(filepath_classes())
+            nx = data.shape[-1]
+        except Exception as e:
+            print(e)
+            data, apix = None, 0
+            nx = 0
+            m = ui.modal(
+                f"failed to read 2D class average images from {filepath_classes()}",
+                title="File read error",
+                easy_close=True,
+                footer=None,
+            )
+            ui.modal_show(m)
     data_all.set((data, apix))
     image_size.set(nx)
 

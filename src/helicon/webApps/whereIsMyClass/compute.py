@@ -50,7 +50,11 @@ def get_micrograph(filename, target_apix, low_pass_angstrom, high_pass_angstrom)
 def get_class_file(param_file):
     f = pathlib.Path(param_file)
     if param_file.endswith(".star"):
-        return f.parent / (f.stem[:10] + "classes.mrcs")
+        if 'Class3D' in f.as_posix():
+            class_files = f.parent.glob(f.stem[:10] + "class*.mrc")
+            return sorted([f for f in class_files])
+        else:
+            return f.parent / (f.stem[:10] + "classes.mrcs")
     elif param_file.endswith(".cs"):
         return f.parent / (f.stem[:7] + "class_averages.mrc")
     else:
@@ -73,6 +77,69 @@ def select_classes(params, class_indices):
     helices = list(particles.groupby(["rlnMicrographName", "rlnHelicalTubeID"]))
     return helices
 
+def select_helices_from_helixID(params, ids):
+    mask = params["helixID"].astype(int).isin(ids)
+    particles = params.loc[mask, :]
+    helices = list(particles.groupby(["rlnMicrographName", "rlnHelicalTubeID"]))
+    return helices
+
+def compute_pair_distances(helices, lengths=None, target_total_count=-1):
+    if lengths is not None:
+        sorted_indices = (np.argsort(lengths))[::-1]
+    else:
+        sorted_indices = range(len(helices))
+    min_len = 0
+    dists_same_class = []
+    for i in sorted_indices:
+        _, segments_all_classes = helices[i]
+        class_ids = np.unique(segments_all_classes["rlnClassNumber"])
+        for ci in class_ids:
+            mask = segments_all_classes["rlnClassNumber"] == ci
+            segments = segments_all_classes.loc[mask, :]
+            pos_along_helix = segments["rlnHelicalTrackLengthAngst"].values.astype(
+                float
+            )
+            psi = segments["rlnAnglePsi"].values.astype(float)
+
+            distances = np.abs(pos_along_helix[:, None] - pos_along_helix)
+            distances = np.triu(distances)
+
+            # Calculate pairwise distances only for segments with the same polarity
+            mask = np.abs((psi[:, None] - psi + 180) % 360 - 180) < 90
+            distances = distances[mask]
+            dists_same_class.extend(
+                distances[distances > 0]
+            )  # Exclude zero distances (self-distances)
+        if (
+            lengths is not None
+            and target_total_count > 0
+            and len(dists_same_class) > target_total_count
+        ):
+            min_len = lengths[i]
+            break
+    if not dists_same_class:
+        return [], 0
+    else:
+        return np.sort(dists_same_class), min_len
+
+
+
+def estimate_inter_segment_distance(data):
+    # data must have been sorted by micrograph, rlnHelicalTubeID, and rlnHelicalTrackLengthAngst
+    helices = data.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False)
+
+    import numpy as np
+
+    dists_all = []
+    for _, particles in helices:
+        if len(particles) < 2:
+            continue
+        dists = np.sort(particles["rlnHelicalTrackLengthAngst"].astype(float).values)
+        dists = dists[1:] - dists[:-1]
+        dists_all.append(dists)
+    dists_all = np.hstack(dists_all)
+    dist_seg = np.median(dists_all)  # Angstrom
+    return dist_seg
 
 def get_class_abundance(params, nClass):
     abundance = np.zeros(nClass, dtype=int)
@@ -80,12 +147,41 @@ def get_class_abundance(params, nClass):
         abundance[int(gn) - 1] = len(g)
     return abundance
 
+def get_class3d_projections_from_files(classFiles):
+    projections = []
+    nx = 0
+    for f in classFiles:
+        with mrcfile.open(f) as mrc:
+            apix = float(mrc.voxel_size.x)
+            data = mrc.data
+            nx = mrc.header['nx']
+        img = get_one_map_xyz_projects(data, nx)
+        projections.append(img)
+
+    return np.array(projections), apix, nx
+
+
+@helicon.cache(expires_after=7, cache_dir=helicon.cache_dir / "whereIsMyClass", verbose=0)
+def get_one_map_xyz_projects(data, nx): 
+    min_data = np.min(data)
+    max_data = np.max(data)
+    if max_data-min_data != 0:
+        data = (data-min_data)/(max_data-min_data)
+    image = np.zeros((nx,nx*3+2))
+    
+    #image[:,0:nx] = data.sum(axis=0)
+    image[:,0:nx] = data[int(nx/2),:,:]*nx
+    image[:,nx+1:nx*2+1] = data.sum(axis=1)
+    image[:,nx*2+2:nx*3+2] = data.sum(axis=2)
+        
+    return image
 
 def get_class2d_from_file(classFile):
-
     with mrcfile.open(classFile) as mrc:
         apix = float(mrc.voxel_size.x)
         data = mrc.data
+    print(np.shape(data))
+
     return data, round(apix, 4)
 
 
@@ -325,3 +421,98 @@ def draw_distance_measurement(
         other_traces = [d for d in fig.data if d.name != "distance_line"]
         if len(other_traces) < len(fig.data):
             fig.data = other_traces
+
+def plot_histogram(
+    data,
+    title,
+    xlabel,
+    ylabel,
+    max_pair_dist=None,
+    bins=50,
+    log_y=True,
+    show_pitch_twist={},
+    multi_crosshair=False,
+    fig=None,
+):
+    import plotly.graph_objects as go
+
+    if max_pair_dist is not None and max_pair_dist > 0:
+        data = [d for d in data if d <= max_pair_dist]
+
+    hist, edges = np.histogram(data, bins=bins)
+    hist_linear = hist
+    if log_y:
+        hist = np.log10(1 + hist)
+
+    center = (edges[:-1] + edges[1:]) / 2
+
+    hover_text = []
+    for i, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
+        hover_info = f"{xlabel.replace(" (Å)", "")}: {center[i]:.0f} ({left:.0f}-{right:.0f})Å<br>{ylabel}: {hist_linear[i]}"
+        if show_pitch_twist:
+            rise = show_pitch_twist["rise"]
+            csyms = show_pitch_twist["csyms"]
+            for csym in csyms:
+                twist = 360 / (center[i] * csym / rise)
+                hover_info += f"<br>Twist for C{csym}: {twist:.2f}°"
+        hover_text.append(hover_info)
+
+    if fig:
+        fig.data[0].x = center
+        fig.data[0].y = hist
+        fig.data[0].text = hover_text
+        fig.layout.title.text = title
+    else:
+        fig = go.FigureWidget()
+
+        histogram = go.Bar(
+            x=center,
+            y=hist,
+            name="Histogram",
+            marker_color="blue",
+            hoverinfo="none",
+        )
+
+        fig.add_trace(histogram)
+
+        fig.data[0].text = hover_text
+        fig.data[0].hoverinfo = "text"
+        fig.update_layout(
+            template="plotly_white",
+            title_text=title,
+            title_x=0.5,
+            title_font=dict(size=12),
+            xaxis_title=xlabel,
+            yaxis_title=ylabel,
+            autosize=True,
+            hovermode="closest",
+            hoverlabel=dict(bgcolor="white", font_size=12),
+        )
+
+        if multi_crosshair:
+            for i in range(20):
+                fig.add_vline(
+                    x=0,
+                    line_width=3 if i == 0 else 2,
+                    line_dash="solid" if i == 0 else "dash",
+                    line_color="green",
+                    visible=False,
+                )
+
+            def update_vline(trace, points, state):
+                if points.point_inds:
+                    hover_x = points.xs[0]
+                    with fig.batch_update():
+                        for i, vline in enumerate(fig.layout.shapes):
+                            x = hover_x * (i + 1)
+                            vline.x0 = x
+                            vline.x1 = x
+                            if x <= fig.data[0].x.max():
+                                vline.visible = True
+                            else:
+                                vline.visible = False
+
+            fig.data[0].on_hover(update_vline)
+
+    return fig
+
