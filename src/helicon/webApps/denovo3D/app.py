@@ -280,18 +280,18 @@ with ui.div(
 
     with ui.layout_columns(col_widths=4):
         ui.input_slider(
-            "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
-        )
-
-        ui.input_slider("threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1)
-
-        ui.input_slider(
             "pre_rotation",
             "Rotation (°)",
             min=-45,
             max=45,
             value=0,
             step=0.1,
+        )
+
+        ui.input_slider("threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1)
+
+        ui.input_slider(
+            "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
         )
 
         ui.input_slider(
@@ -575,24 +575,49 @@ def get_displayed_images():
 
 
 @reactive.effect
-@reactive.event(selected_images_original)
-def update_selected_image_rotation_shift_diameter():
-    req(len(selected_images_original()))
+@reactive.event(input.select_image)
+def update_selecte_images_orignal():
+    selected_images_original.set([displayed_images()[i] for i in input.select_image()])
+    selected_images_labels.set(
+        [displayed_image_labels()[i] for i in input.select_image()]
+    )
+    reconstrunction_results.set([])
 
-    ny = int(np.max([img.shape[0] for img in selected_images_original()]))
-    nx = int(np.max([img.shape[1] for img in selected_images_original()]))
+
+@reactive.effect
+@reactive.event(selected_images_original, input.threshold)
+def threshold_selected_images():
+    req(len(selected_images_original()))
+    tmp = [
+        helicon.threshold_data(img, thresh_value=input.threshold())
+        for img in selected_images_original()
+    ]
+    selected_images_thresholded.set(tmp)
+
+
+@reactive.effect
+@reactive.event(selected_images_thresholded)
+def update_selected_image_rotation_shift_diameter():
+    req(len(selected_images_thresholded()))
+
+    images = selected_images_thresholded()
+
+    ny = int(np.max([img.shape[0] for img in images]))
+    nx = int(np.max([img.shape[1] for img in images]))
     tmp = np.array(
         [
-            helicon.estimate_helix_rotation_center_diameter(img)
-            for img in selected_images_original()
+            helicon.estimate_helix_rotation_center_diameter(
+                img, threshold=np.max(img) * 0.2
+            )
+            for img in images
         ]
     )
     rotation = np.mean(tmp[:, 0])
     shift_y = np.mean(tmp[:, 1]) * input.apix()
     diameter = np.max(tmp[:, 2])
-    crop_size = int(diameter * 3) // 4 * 4
-    min_val = float(np.min([np.min(img) for img in selected_images_original()]))
-    max_val = float(np.max([np.max(img) for img in selected_images_original()]))
+    crop_size = int(diameter * 2) // 4 * 4
+    min_val = float(np.min([np.min(img) for img in images]))
+    max_val = float(np.max([np.max(img) for img in images]))
     step_val = (max_val - min_val) / 100
 
     selected_image_diameter.set(diameter)
@@ -618,27 +643,6 @@ def update_selected_image_rotation_shift_diameter():
         max=round(max_val, 3),
         step=round(step_val, 3),
     )
-
-
-@reactive.effect
-@reactive.event(input.select_image)
-def update_selecte_images_orignal():
-    selected_images_original.set([displayed_images()[i] for i in input.select_image()])
-    selected_images_labels.set(
-        [displayed_image_labels()[i] for i in input.select_image()]
-    )
-    reconstrunction_results.set([])
-
-
-@reactive.effect
-@reactive.event(selected_images_original, input.threshold)
-def threshold_selected_images():
-    req(len(selected_images_original()))
-    tmp = [
-        helicon.threshold_data(img, thresh_value=input.threshold())
-        for img in selected_images_original()
-    ]
-    selected_images_thresholded.set(tmp)
 
 
 @reactive.effect

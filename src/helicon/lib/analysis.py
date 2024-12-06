@@ -37,7 +37,7 @@ def calc_fsc(map1, map2, apix):
     return np.vstack((qbins[qidx], FSC[qidx])).T
 
 
-def estimate_helix_rotation_center_diameter(data):
+def estimate_helix_rotation_center_diameter(data, threshold=0):
     """
     Returns:
         rotation (float): The rotation (degrees) needed to rotate the helix to horizontal direction.
@@ -48,8 +48,7 @@ def estimate_helix_rotation_center_diameter(data):
     from skimage.morphology import closing
     import helicon
 
-    thresh = np.max(data) * 0.2
-    bw = closing(data > thresh, mode="ignore")
+    bw = closing(data > threshold, mode="ignore")
     label_image = label(bw)
     props = regionprops(label_image=label_image, intensity_image=data)
     props.sort(key=lambda x: x.area, reverse=True)
@@ -61,14 +60,14 @@ def estimate_helix_rotation_center_diameter(data):
     rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
 
     data_rotated = helicon.transform_image(image=data, rotation=rotation)
-    bw = closing(data_rotated > thresh, mode="ignore")
+    bw = closing(data_rotated > threshold, mode="ignore")
     label_image = label(bw)
     props = regionprops(label_image=label_image, intensity_image=data_rotated)
     props.sort(key=lambda x: x.area, reverse=True)
     minr, minc, maxr, maxc = props[0].bbox
     diameter = maxr - minr + 1
     center = props[0].centroid
-    shift_y = center[0] - data.shape[0] // 2
+    shift_y = data.shape[0] // 2 - center[0]
 
     return rotation, shift_y, diameter
 
