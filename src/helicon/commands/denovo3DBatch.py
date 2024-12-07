@@ -24,18 +24,14 @@ except ImportError:
 
     prange = range
 
-memory = joblib.Memory(
-    location=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".cache",
-    bytes_limit=2**36,
-    verbose=0,
-)
+cache_dir = helicon.cache_dir / "denovo3DBatch"
 
 
 def main(args):
     helicon.log_command_line()
 
     logger = helicon.get_logger(
-        logfile=os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".log",
+        logfile="helicon.denovo3DBatch.log",
         verbose=args.verbose,
     )
 
@@ -43,7 +39,9 @@ def main(args):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.force:
-        memory.clear(warn=False)
+        import shutil
+
+        shutil.rmtree(cache_dir)
 
     logger.info(" ".join(sys.argv))
 
@@ -61,7 +59,7 @@ def main(args):
             logger.error(f"ERROR: cannot find the input image file {str(input_file)}")
             sys.exit(-1)
         if input_file.suffix in [".star"]:
-            df = star_to_dataframe(str(input_file))
+            df = star_to_dataframe(str(input_file), logger=logger)
             if args.i:
                 bad_i = [i for i in args.i if i < 1 or i > len(df)]
                 if len(bad_i):
@@ -393,7 +391,12 @@ np.set_printoptions(
 )  # to speed up joblib memory cache for input numpy arrays and avoid the "UserWarning: Persisting input arguments took 0.65s to run"
 
 
-@memory.cache(ignore=["ti", "ntasks", "verbose", "logger"])
+@helicon.cache(
+    cache_dir=cache_dir,
+    ignore=["ti", "ntasks", "verbose", "logger"],
+    expires_after=7,
+    verbose=0,
+)  # 7 days
 def process_one_task(
     ti,
     ntasks,
@@ -430,7 +433,7 @@ def process_one_task(
     logger,
 ):
 
-    @memory.cache()
+    @helicon.cache(cache_dir=cache_dir, expires_after=7, verbose=0)  # 7 days
     def prepare_data(
         data, imageFile, imageIndex, denoise, low_pass, transpose, horizontalize, apix
     ):
@@ -715,7 +718,6 @@ def process_one_task(
     return result
 
 
-# @memory.cache(ignore=['verbose'])
 def lsq_reconstruct(
     projection_image,
     scale2d_to_3d,
@@ -827,7 +829,6 @@ def lsq_reconstruct(
         ), f"ERROR: {len(b_set_1)=:,}\t{len(b_set_2)=:,}\t{len(b)=:,}"
         return (A_set_1, b_set_1), (A_set_2, b_set_2)
 
-    # @memory.cache(ignore=["verbose"])
     def solve_equations(
         A_data,
         b_data,
@@ -1081,7 +1082,9 @@ def lsq_reconstruct(
         return (rec3d, rec3d_set_1, rec3d_set_2), score
 
 
-@memory.cache(ignore=["verbose"])
+@helicon.cache(
+    cache_dir=cache_dir, ignore=["verbose"], expires_after=7, verbose=0
+)  # 7 days
 def build_A_helical_sym_matrix(
     nz: int,
     ny: int,
@@ -1503,7 +1506,9 @@ def build_A_helical_sym_matrix(
         return A, b
 
 
-@memory.cache(ignore=["verbose"])
+@helicon.cache(
+    cache_dir=cache_dir, ignore=["verbose"], expires_after=7, verbose=0
+)  # 7 days
 def build_A_data_matrix(
     image,
     scale2d_to_3d,
@@ -1843,7 +1848,6 @@ def back_project_2d_coords_to_3d_coords(
     return (X2, Y2, Z2), region_pixel_vals
 
 
-# @memory.cache
 def simulate_helical_projection(
     n,
     twist,
@@ -2087,27 +2091,6 @@ def random_polymer(n_atoms=100, rmin=0, rmax=100, csym=1, planarity=0.9):
     return xyz[: n_good_points * csym, :]
 
 
-def estimate_diameter(data):
-    from scipy.optimize import curve_fit
-
-    y = np.mean(data, axis=1)
-    n = len(y)
-    x = np.arange(n) - n // 2
-    lower_bounds = [0, -n // 2, 0, min(y)]
-    upper_bounds = [max(y), n // 2, n // 2, max(y)]
-
-    def gaussian(x, amp, center, sigma, background):
-        return amp * np.exp(-(((x - center) / sigma) ** 2)) + background
-
-    (amp, center, sigma, background), _ = curve_fit(
-        gaussian, x, y, bounds=(lower_bounds, upper_bounds)
-    )
-    # diameter = (abs(center) + sigma*1.731) *2   # exp(-1.731**2) = 0.05
-    diameter = sigma * 1.731 * 2  # exp(-1.731**2) = 0.05
-    return diameter  # pixel
-
-
-# @memory.cache
 def auto_horizontalize(data, refine=False):
     from skimage.transform import radon
     from scipy.interpolate import interp1d
@@ -2798,7 +2781,7 @@ def tilt_psi_dy_str(tilt, psi, dy, sep=" ", sep2="=", unit=True):
     return tpy_str
 
 
-def star_to_dataframe(starFile):
+def star_to_dataframe(starFile, logger):
     df = helicon.star2dataframe(starFile=starFile)
 
     fileNameCol = ""
@@ -2872,7 +2855,7 @@ def add_args(parser):
         type=str,
         nargs="?",
         help="Output rootname. default to %(default)s",
-        default=f"HELICON/helicon",
+        default=f"HELICON/denovo3DBatch",
     )
     i_parser = parser.add_mutually_exclusive_group(required=False)
     i_parser.add_argument(

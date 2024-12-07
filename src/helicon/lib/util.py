@@ -49,7 +49,7 @@ def get_option_list(argv):
 
 
 def parse_param_str(param_str):
-    """parse a=b:c=d,e to {'a':b, 'c':'d,e'}"""
+    """parse [opt:]a=b:c=d,e to (opt, {'a':b, 'c':'d,e'})"""
     params = param_str.split(":")
 
     name = None
@@ -77,77 +77,6 @@ def parse_param_str(param_str):
             else:
                 color_print(f"ERROR: failed to parse parameter {p}. Ignored")
     return (name, d)
-
-
-def parsemodopt(optstr=None):
-    """This is used so the user can provide the name of a comparator, processor, etc. with options
-    in a convenient form. It will parse "dot:normalize=1:negative=0" and return
-    ("dot",{"normalize":1,"negative":0})"""
-
-    if optstr is None or len(optstr) == 0:
-        return (None, {})
-    if optstr.lower() == "none":
-        return None  # special case doesn't return a tuple
-
-    op2 = optstr.split(":")
-    if len(op2) == 1 or op2[1] == "":
-        return (op2[0], {})  # name with no options
-
-    r2 = {}
-    for p in op2[1:]:
-        try:
-            k, v = p.split("=")
-        except:
-            print("ERROR: Command line parameter parsing failed on ", optstr)
-            print("must have the form name:key=value:key=value")
-            return (None, None)
-
-        # 		v=v.replace("bdb%","bdb:")
-        if v.lower() == "true":
-            v = 1
-        elif v.lower() == "false":
-            v = 0
-        else:
-            try:
-                v = int(v)
-            except:
-                try:
-                    v = float(v)
-                except:
-                    if len(v) > 2 and v[0] == '"' and v[-1] == '"':
-                        v = v[1:-1]
-        r2[k] = v
-
-    return (op2[0], r2)
-
-
-def parsemodopt2(optstr):
-    """parse a=b:c=d,e to {'a':b, 'c':'d,e'}"""
-    op2 = optstr.split(":")
-
-    r2 = {}
-    for p in op2:
-        try:
-            k, v = p.split("=")
-        except:
-            color_print("ERROR: Command line parameter parsing failed on ", optstr)
-            color_print("must have the form key=value:key=value")
-            return {}
-        if v.lower() == "true":
-            v = 1
-        elif v.lower() == "false":
-            v = 0
-        else:
-            try:
-                v = int(v)
-            except:
-                try:
-                    v = float(v)
-                except:
-                    if len(v) > 2 and v[0] == '"' and v[-1] == '"':
-                        v = v[1:-1]
-        r2[k] = v
-    return r2
 
 
 def has_shiny():
@@ -220,7 +149,7 @@ def omp_set_num_threads(n):
         libomp.omp_set_num_threads(n)
 
 
-def which(program, useCurrentDir=0):
+def which(program, use_current_dir=0):
     """unix which command equivalent"""
     location = None
     if program.find(os.sep) != -1:
@@ -229,7 +158,7 @@ def which(program, useCurrentDir=0):
             location = os.path.abspath(file)
     else:
         path = os.environ["PATH"]
-        if useCurrentDir:
+        if use_current_dir:
             path = ".:%s" % (path)
         dirs = path.split(":")
         for d in dirs:
@@ -238,6 +167,30 @@ def which(program, useCurrentDir=0):
                 location = os.path.abspath(file)
                 break
     return location
+
+
+def find_relion_project_folders(
+    start_folder=None, target_filename="default_pipeline.star", verbose=0
+):
+    """Find all RELION project folders containing default_pipeline.star"""
+    if not (
+        start_folder is not None
+        and Path(start_folder).exists()
+        and Path(start_folder).is_dir()
+    ):
+        start_folder = Path.home()
+    else:
+        start_folder = Path(start_folder)
+
+    project_folders = []
+    for root, dirs, files in os.walk(start_folder):
+        if target_filename in files:
+            project_folders.append(Path(root))
+            dirs.clear()
+            if verbose:
+                print(f"{len(project_folders)}: {str(project_folders[-1])}")
+
+    return project_folders
 
 
 def get_direct_url(url):
@@ -803,7 +756,9 @@ class DummyMemory:
             return decorator(func)
 
 
-def cache(expires_after=datetime.timedelta(weeks=1), cache_dir=None, verbose=0):
+def cache(
+    expires_after=datetime.timedelta(weeks=1), cache_dir=None, ignore=[], verbose=0
+):
     """
     A decorator that caches function results for a specified time period using joblib.Memory.
     After the period expires, the cache is invalidated and the function is recomputed.
@@ -844,11 +799,17 @@ def cache(expires_after=datetime.timedelta(weeks=1), cache_dir=None, verbose=0):
 
         cache_dir = helicon.cache_dir
 
-    memory = joblib.Memory(cache_dir, verbose=verbose)
+    try:
+        memory = joblib.Memory(cache_dir, verbose=verbose)
+    except:
+        color_print(
+            f"WARNING: cannot create the cache folder {cache_dir}. Please make sure that you have write permission in the folder ({str(Path(cache_dir).parent.absolute())})"
+        )
+        memory = DummyMemory()
 
     def decorator(func):
         cached_func = memory.cache(
-            func, cache_validation_callback=cache_validation_callback
+            func, ignore=ignore, cache_validation_callback=cache_validation_callback
         )
 
         @functools.wraps(func)

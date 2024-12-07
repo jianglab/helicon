@@ -161,7 +161,7 @@ def main(args):
         elif option_name == "recoverFullFilaments" and len(param):
             if param.find("=") != -1:
                 # minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]
-                param_dict = helicon.parsemodopt2(param)
+                param_dict = helicon.parse_param_str(param)
             else:
                 param_dict = {}
 
@@ -642,7 +642,7 @@ def main(args):
 
         elif option_name in ["selectFile", "excludeFile"] and len(param) > 0:
             # starfile:col1=<name>:col2=<name>:pattern=<str>
-            sf, param_dict = helicon.parsemodopt(param)
+            sf, param_dict = helicon.parse_param_str(param)
             col1 = param_dict.get("col1", "rlnImageName")
             col2 = param_dict.get("col2", "rlnImageName")
             assert col1 in data
@@ -703,7 +703,7 @@ def main(args):
 
         elif option_name == "selectCommonHelices" and len(param) > 0:
             # starfile:col1=<name>:col2=<name>:pattern=<str>
-            sf, _ = helicon.parsemodopt(param)
+            sf, _ = helicon.parse_param_str(param)
             assert "rlnMicrographName" in data
             assert "rlnHelicalTubeID" in data
             if not os.path.exists(sf):
@@ -778,7 +778,7 @@ def main(args):
                 missing_attrs == []
             ), f"\tERROR: requried parameters {' '.join(missing_attrs)} are not available"
 
-            sf, param_dict = helicon.parsemodopt(param)
+            sf, param_dict = helicon.parse_param_str(param)
             maxDist = param_dict.get("maxDist", 5)
             assert Path(sf).exists(), f"ERROR: {sf} does not exist"
             assert maxDist >= 0
@@ -1495,7 +1495,7 @@ def main(args):
 
         elif option_name == "createStack" and param:
             # outputFile:rescale2size=<n>:float16=<0|1>
-            outputFile, param_dict = helicon.parsemodopt(param)
+            outputFile, param_dict = helicon.parse_param_str(param)
             if os.path.splitext(outputFile)[1] != ".mrcs":
                 suffix = Path(outputFile).suffix
                 helicon.color_print(
@@ -1825,7 +1825,7 @@ def main(args):
 
             processors = []
             for p in process:
-                processorname, param_dict = helicon.parsemodopt(p)
+                processorname, param_dict = helicon.parse_param_str(p)
                 if not param_dict:
                     param_dict = {}
                 if processorname in helicon.outplaceprocs:
@@ -1892,7 +1892,7 @@ def main(args):
                 sys.exit(-1)
 
             # value_sigma=<n>:gradient_sigma=<Å>:min_area=<Å^2>:both_sides=<0|1>:outdir=<str>:force=<0|1>:cpu=<n>
-            param_dict = helicon.parsemodopt2(param)
+            param_dict = helicon.parse_param_str(param)
             value_sigma = param_dict.get(
                 "value_sigma", 4.0
             )  # value_sigma fold of mad above median
