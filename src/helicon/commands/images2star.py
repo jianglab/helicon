@@ -161,7 +161,7 @@ def main(args):
         elif option_name == "recoverFullFilaments" and len(param):
             if param.find("=") != -1:
                 # minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]
-                param_dict = helicon.parse_param_str(param)
+                _, param_dict = helicon.parse_param_str(param)
             else:
                 param_dict = {}
 
@@ -706,7 +706,7 @@ def main(args):
             sf, _ = helicon.parse_param_str(param)
             assert "rlnMicrographName" in data
             assert "rlnHelicalTubeID" in data
-            if not os.path.exists(sf):
+            if sf is None or not os.path.exists(sf):
                 helicon.color_print(
                     "\tERROR: option --selectCommonHelices %s has specified a non-existent file %s"
                     % (args.selectCommonHelices, sf)
@@ -780,7 +780,7 @@ def main(args):
 
             sf, param_dict = helicon.parse_param_str(param)
             maxDist = param_dict.get("maxDist", 5)
-            assert Path(sf).exists(), f"ERROR: {sf} does not exist"
+            assert sf is not None and Path(sf).exists(), f"ERROR: {sf} does not exist"
             assert maxDist >= 0
 
             data_sf = helicon.images2dataframe(
@@ -1892,7 +1892,7 @@ def main(args):
                 sys.exit(-1)
 
             # value_sigma=<n>:gradient_sigma=<Å>:min_area=<Å^2>:both_sides=<0|1>:outdir=<str>:force=<0|1>:cpu=<n>
-            param_dict = helicon.parse_param_str(param)
+            _, param_dict = helicon.parse_param_str(param)
             value_sigma = param_dict.get(
                 "value_sigma", 4.0
             )  # value_sigma fold of mad above median
