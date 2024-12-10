@@ -181,6 +181,8 @@ def find_relion_project_folders(
         start_folder = Path.home()
     else:
         start_folder = Path(start_folder)
+    if verbose:
+        print(f"Searching {str(start_folder)} ...")
 
     project_folders = []
     for root, dirs, files in os.walk(start_folder):

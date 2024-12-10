@@ -433,7 +433,6 @@ def process_one_task(
     logger,
 ):
 
-    @helicon.cache(cache_dir=cache_dir, expires_after=7, verbose=0)  # 7 days
     def prepare_data(
         data, imageFile, imageIndex, denoise, low_pass, transpose, horizontalize, apix
     ):
