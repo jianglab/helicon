@@ -520,7 +520,7 @@ def process_one_task(
             f"Image {imageFile}-{imageIndex}: reconstruct_length set to {reconstruct_length}Å"
         )
 
-    if target_apix2d <= 0:
+    if target_apix2d < apix2d_orig:
         target_apix2d = apix2d_orig
     logger.debug(
         f"Image {imageFile}-{imageIndex}: target_apix2d set to {target_apix2d}"
@@ -548,7 +548,7 @@ def process_one_task(
             * np.pi
         )
         target_apix3d = max(
-            apix2d_orig, round(np.power(vol / (nx * ny), 1 / 3) + 0.5)
+            target_apix2d, round(np.power(vol / (nx * ny), 1 / 3) + 0.5)
         )  # make the number of 3D voxels < number of data points (i.e. number of 2D pixels of down-scaled image)
     elif target_apix3d == 0:
         target_apix3d = target_apix2d

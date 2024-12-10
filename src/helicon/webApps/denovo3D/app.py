@@ -172,7 +172,7 @@ with ui.sidebar(
                         "target_apix2d",
                         "Target image pixel size (Å)",
                         min=-1,
-                        value=-1,
+                        value=5,
                         step=1,
                     )
 
@@ -697,7 +697,7 @@ def run_denovo3D_reconstruction():
     ny, nx = data.shape
     tube_length = nx * input.apix()
 
-    imageFile = selected_images_title()
+    imageFile = selected_images_title().strip(":")
     imageIndex = selected_images_labels()[0]
 
     logger = helicon.get_logger(
@@ -734,7 +734,7 @@ def run_denovo3D_reconstruction():
         low_pass = -1
         transpose = 0
         horizontalize = 0
-        target_apix2d = apix
+        target_apix2d = input.target_apix2d()
         target_apix3d = input.target_apix3d()
         thresh_fraction = -1
         positive_constraint = int(input.positive_constraint())
@@ -813,7 +813,7 @@ def run_denovo3D_reconstruction():
     with ui.Progress(min=0, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=helicon.available_cpu()) as executor:
             future_tasks = [
@@ -823,14 +823,14 @@ def run_denovo3D_reconstruction():
 
             t0 = time()
             results = []
-            for ti, task in enumerate(future_tasks):
-                result = task.result()
-                t1 = time()
+            for completed_task in as_completed(future_tasks):
+                result = completed_task.result()
                 results.append(result)
-                remaining = (len(tasks) - (ti + 1)) / (ti + 1) * (t1 - t0)
+                t1 = time()
+                remaining = (len(tasks) - len(results)) / len(results) * (t1 - t0)
                 p.set(
-                    ti + 1,
-                    message=f"Completed {ti+1}/{len(tasks)}",
+                    len(results),
+                    message=f"Completed {len(results)}/{len(tasks)}",
                     detail=f"{helicon.timedelta2string(remaining)} remaining",
                 )
 
