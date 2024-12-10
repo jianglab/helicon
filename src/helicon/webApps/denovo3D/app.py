@@ -330,7 +330,7 @@ with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
             ui.input_numeric("twist_min", "min", value=0.1, step=0.1, width="70px")
-            ui.input_numeric("twist_max", "max", value=1.0, step=0.1, width="70px")
+            ui.input_numeric("twist_max", "max", value=2.0, step=0.1, width="70px")
             ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px")
 
     with ui.card(style="height: 115px"):
@@ -577,11 +577,23 @@ def get_displayed_images():
 @reactive.effect
 @reactive.event(input.select_image)
 def update_selecte_images_orignal():
-    selected_images_original.set([displayed_images()[i] for i in input.select_image()])
+    images = [displayed_images()[i] for i in input.select_image()]
+    selected_images_original.set(images)
     selected_images_labels.set(
         [displayed_image_labels()[i] for i in input.select_image()]
     )
     reconstrunction_results.set([])
+
+    min_val = float(np.min([np.min(img) for img in images]))
+    max_val = float(np.max([np.max(img) for img in images]))
+    step_val = (max_val - min_val) / 100
+    ui.update_numeric(
+        "threshold",
+        value=0,
+        min=round(min_val, 3),
+        max=round(max_val, 3),
+        step=round(step_val, 3),
+    )
 
 
 @reactive.effect
@@ -616,9 +628,6 @@ def update_selected_image_rotation_shift_diameter():
     shift_y = np.mean(tmp[:, 1]) * input.apix()
     diameter = np.max(tmp[:, 2])
     crop_size = int(diameter * 2) // 4 * 4
-    min_val = float(np.min([np.min(img) for img in images]))
-    max_val = float(np.max([np.max(img) for img in images]))
-    step_val = (max_val - min_val) / 100
 
     selected_image_diameter.set(diameter)
     ui.update_numeric("apix", value=round(image_apix(), 4), max=round(image_apix() * 2))
@@ -636,13 +645,6 @@ def update_selected_image_rotation_shift_diameter():
         max=ny,
     )
     ui.update_numeric("horizontal_crop_size", value=nx, min=32, max=nx)
-    ui.update_numeric(
-        "threshold",
-        value=0,
-        min=round(min_val, 3),
-        max=round(max_val, 3),
-        step=round(step_val, 3),
-    )
 
 
 @reactive.effect
