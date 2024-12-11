@@ -484,6 +484,7 @@ def process_one_task(
         apix2d_orig,
     )
     ny, nx = data.shape
+    ny_orig, nx_orig = ny, nx
 
     if tube_diameter < 0:
         rotation, shift_y, diameter = helicon.estimate_helix_rotation_center_diameter(
@@ -633,10 +634,10 @@ def process_one_task(
     with helicon.Timer("apply_helical_symmetry", verbose=verbose > 10):
         twist_degree = twist if abs(twist) < 90 else 180 - abs(twist)
         if abs(twist_degree) > 1e-2:
-            pitch_pixel = int(360 / abs(twist_degree) * rise / target_apix2d + 0.5)
+            pitch_pixel = int(360 / abs(twist_degree) * rise / apix2d_orig + 0.5)
         else:
-            pitch_pixel = int(np.ceil(2 * rise / target_apix2d))
-        new_length = max(reconstruct_length_2d_pixel, int(pitch_pixel * 1.2))
+            pitch_pixel = int(np.ceil(2 * rise / apix2d_orig))
+        new_length = max(nx_orig, int(pitch_pixel * 1.2))
         cpu = helicon.available_cpu()
         rec3d_xform = helicon.apply_helical_symmetry(
             data=rec3d,
@@ -646,14 +647,14 @@ def process_one_task(
             csym=csym,
             new_size=(
                 new_length,
-                reconstruct_diameter_2d_pixel,
-                reconstruct_diameter_2d_pixel,
+                ny_orig,
+                ny_orig,
             ),
-            new_apix=target_apix2d,
+            new_apix=apix2d_orig,
             cpu=cpu,
         )
     rec3d_xform_2 = helicon.transform_map(
-        rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy_pixel=dy / target_apix2d
+        rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy_pixel=dy / apix2d_orig
     )
     rec3d_x_proj = np.sum(rec3d_xform_2, axis=2).T
     rec3d_y_proj = np.sum(rec3d_xform_2, axis=1).T
@@ -661,7 +662,7 @@ def process_one_task(
     if rec3d_y_proj_max > 0:
         rec3d_y_proj *= rec3d_x_proj.max() / rec3d_y_proj_max
 
-    nz_per_rise = max(1, int(np.ceil(rise / target_apix2d)))
+    nz_per_rise = max(1, int(np.ceil(rise / apix2d_orig)))
     z0 = rec3d_xform.shape[0] // 2 - nz_per_rise // 2
     z1 = z0 + nz_per_rise
     rec3d_z_sections = np.sum(rec3d_xform[z0:z1, :, :], axis=0)
@@ -679,7 +680,7 @@ def process_one_task(
 
     nz, ny, nx = rec3d.shape
     if target_apix2d != apix2d_orig:
-        apix_tag = f"apix={apix2d_orig}->{target_apix2d}Å"
+        apix_tag = f"apix={apix2d_orig}->{target_apix2d}->{apix2d_orig}Å"
     else:
         apix_tag = f"apix={target_apix2d}Å"
     logger.info(
@@ -873,7 +874,7 @@ def lsq_reconstruct(
                 # positive constraint - very important when pitch>2*tube_length
                 lb = 0.0
                 ub = np.max(b_data)
-                logger.debug(
+                helicon.color_print(
                     f"Imposing constraint for the reconstruction: lb={round(lb, 6)} ub={round(ub, 6)}"
                 )
             else:
@@ -902,7 +903,7 @@ def lsq_reconstruct(
 
             if positive:
                 A_train = A_train.toarray()
-                logger.warn(
+                helicon.color_print(
                     "WARNING: --algorithm=lreq with positive contraints uses very large amount memory!"
                 )
             model = LinearRegression(fit_intercept=True, positive=positive)

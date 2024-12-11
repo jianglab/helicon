@@ -172,7 +172,7 @@ with ui.sidebar(
                         "target_apix2d",
                         "Target image pixel size (Å)",
                         min=-1,
-                        value=5,
+                        value=-1,
                         step=1,
                     )
 
@@ -183,7 +183,7 @@ with ui.sidebar(
                         "target_apix3d",
                         "Target voxel size (Å)",
                         min=-1,
-                        value=-1,
+                        value=5,
                         step=1,
                     )
 
@@ -817,7 +817,7 @@ def run_denovo3D_reconstruction():
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        with ThreadPoolExecutor(max_workers=helicon.available_cpu()) as executor:
+        with ThreadPoolExecutor(max_workers=cpu) as executor:
             future_tasks = [
                 executor.submit(compute.process_one_task, *task) for task in tasks
             ]
