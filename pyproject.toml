@@ -6,13 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "helicon"
 description = "A collection of tools for cryo-EM analysis of helical structures"
 authors = [
-    {name = "Wen Jiang", email = "wjiang@gmail.com"}
+    {name = "Wen Jiang", email = "wjiang@gmail.com"},
+    {name = "Daoyi Li", email = "lidaoyi16@hotmail.com"},
+    {name = "Xiaoqi Zhang", email = "zhan4377@purdue.edu"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
+dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]',
+    'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm', 'itk-montage']
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
     "Programming Language :: Python :: 3",
