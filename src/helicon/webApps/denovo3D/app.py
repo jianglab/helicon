@@ -15,7 +15,8 @@ from . import compute
 
 input_data = reactive.value(None)
 
-map_projections = reactive.value([])
+map_symmetrized = reactive.value(None)
+map_xyz_projections = reactive.value([])
 
 all_images = reactive.value(None)
 
@@ -148,9 +149,9 @@ with ui.sidebar(
                     return ret
 
             helicon.shiny.image_select(
-                id="map_projections",
+                id="map_xyz_projections",
                 label=reactive.value("XYZ Projections"),
-                images=map_projections,
+                images=map_xyz_projections,
                 image_labels=reactive.value("X Y Z".split()),
                 image_size=reactive.value(128),
                 enable_selection=False,
@@ -274,10 +275,29 @@ with ui.sidebar(
                     allow_multiple_selection=False,
                 )
 
+                @render.download(
+                    label="Download symmetrized input map",
+                    filename="helicon_denovo3d_input_map.mrc",
+                )
+                @reactive.event(map_symmetrized)
+                def download_denovo3D_input_map():
+                    req(map_symmetrized() is not None)
+
+                    import mrcfile
+                    import tempfile
+
+                    with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
+                        with mrcfile.new(temp.name, overwrite=True) as mrc:
+                            mrc.set_data(map_symmetrized())
+                            mrc.voxel_size = input.output_apix()
+                        with open(temp.name, "rb") as file:
+                            yield file.read()
+
                 @render.ui
-                @reactive.event(input.show_download_print_buttons)
+                @reactive.event(input.show_download_print_buttons, displayed_images)
                 def generate_ui_print_input_images():
                     req(input.show_download_print_buttons())
+                    req(len(displayed_images()))
                     return ui.input_action_button(
                         "print_input_images",
                         "Print input images",
@@ -290,7 +310,7 @@ with ui.sidebar(
                                         w.document.close();
                                         w.focus();
                                     """,
-                        width="200px",
+                        width="270px",
                     )
 
         with ui.nav_panel("Parameters"):
@@ -585,9 +605,10 @@ with ui.div(
 
 
 @render.ui
-@reactive.event(input.show_download_print_buttons)
+@reactive.event(input.show_download_print_buttons, reconstructed_projection_images)
 def generate_ui_print_reeconstructed_images():
     req(input.show_download_print_buttons())
+    req(len(reconstructed_projection_images()))
     return ui.input_action_button(
         "print_reeconstructed_images",
         "Print reeconstructed images",
@@ -604,9 +625,12 @@ def generate_ui_print_reeconstructed_images():
     )
 
 
-@render.download(label="Download map", filename="helicon_denovo3d_map.mrc")
+@render.download(
+    label="Download reconstructed map",
+    filename="helicon_denovo3d_reconstructed_map.mrc",
+)
 @reactive.event(reconstrunction_results)
-def download_denovo3D_map():
+def download_denovo3D_output_map():
     req(len(reconstrunction_results()) == 1)
     (
         score,
@@ -670,7 +694,8 @@ ui.HTML(
 def reset_input_data_ui():
     input_data.set(None)
     ui.update_checkbox("is_3d", value=False)
-    map_projections.set(None)
+    map_symmetrized.set(None)
+    map_xyz_projections.set(None)
     selected_images_thresholded_rotated_shifted_cropped.set(None)
 
 
@@ -816,9 +841,9 @@ def get_xyz_projections():
             is_amyloid=input_data().is_amyloid,
             apix=input_data().apix,
         )
-        map_projections.set(proj_xyz)
+        map_xyz_projections.set(proj_xyz)
     else:
-        map_projections.set(None)
+        map_xyz_projections.set(None)
 
 
 @reactive.effect
@@ -827,7 +852,7 @@ def update_all_images_from_3d_input_data():
     req(input_data())
     req(len(input_data().data))
     req(input_data().is_3d)
-    proj = compute.symmetrize_project(
+    m = compute.symmetrize_transform_map(
         data=input_data().data,
         apix=input.input_apix(),
         twist_degree=input.input_twist(),
@@ -838,6 +863,10 @@ def update_all_images_from_3d_input_data():
         axial_rotation=input.output_axial_rotation(),
         tilt=input.output_tilt(),
     )
+    map_symmetrized.set(m)
+
+    proj = np.transpose(m.sum(axis=-1))[:, ::-1]
+    proj = proj[np.newaxis, :, :]
     d = helicon.DotDict(data=proj, apix=input.output_apix())
     all_images.set(d)
 
@@ -1038,11 +1067,19 @@ def run_denovo3D_reconstruction():
     )
 
     if input.twist_min() < input.twist_max():
-        twists = np.arange(input.twist_min(), input.twist_max(), input.twist_step())
+        twists = np.arange(
+            input.twist_min(),
+            input.twist_max() + input.twist_step() / 2,
+            input.twist_step(),
+        )
     else:
         twists = [input.twist_min()]
     if input.rise_min() < input.rise_max():
-        rises = np.arange(input.rise_min(), input.rise_max(), input.rise_step())
+        rises = np.arange(
+            input.rise_min(),
+            input.rise_max() + input.rise_step() / 2,
+            input.rise_step(),
+        )
     else:
         rises = [input.rise_min()]
 
@@ -1225,10 +1262,24 @@ def display_denovo3D_projections():
 
 
 @render.ui
-@reactive.event(reconstrunction_results)
-def toggle_map_download_button():
-    if len(reconstrunction_results()) == 1:
-        ret = ui.tags.style("#download_denovo3D_map {visibility: visible;}")
+@reactive.event(reconstrunction_results, input.show_download_print_buttons)
+def toggle_input_map_download_button():
+    if input.show_download_print_buttons() and map_symmetrized() is not None:
+        ret = ui.tags.style(
+            "#download_denovo3D_input_map {visibility: visible; width: 270px;}"
+        )
     else:
-        ret = ui.tags.style("#download_denovo3D_map {visibility: hidden;}")
+        ret = ui.tags.style("#download_denovo3D_input_map {visibility: hidden;}")
+    return ret
+
+
+@render.ui
+@reactive.event(reconstrunction_results)
+def toggle_output_map_download_button():
+    if len(reconstrunction_results()) == 1:
+        ret = ui.tags.style(
+            "#download_denovo3D_output_map {visibility: visible; width: 256px;}"
+        )
+    else:
+        ret = ui.tags.style("#download_denovo3D_output_map {visibility: hidden;}")
     return ret

@@ -53,7 +53,7 @@ def generate_xyz_projections(map3d, is_amyloid=False, apix=None):
 @helicon.cache(
     cache_dir=str(helicon.cache_dir / "denovo3D"), expires_after=7, verbose=0
 )  # 7 days
-def symmetrize_project(
+def symmetrize_transform_map(
     data,
     apix,
     twist_degree,
@@ -84,9 +84,7 @@ def symmetrize_project(
     )
     if axial_rotation or tilt:
         m = helicon.transform_map(m, rot=axial_rotation, tilt=tilt)
-    proj = np.transpose(m.sum(axis=-1))[:, ::-1]
-    proj = proj[np.newaxis, :, :]
-    return proj
+    return m
 
 
 @helicon.cache(
