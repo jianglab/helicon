@@ -21,6 +21,7 @@ def image_gallery(
     enable_selection=False,
     allow_multiple_selection=False,
     initial_selected_indices=reactive.value([]),
+    style="",
 ):
     if images() is None or len(images()) == 0:
         return None
@@ -199,7 +200,7 @@ def image_gallery(
             )
             for i, (image, bid) in enumerate(zip(images_final, bids))
         ],
-        style=f"display: flex; flex-flow: row wrap; justify-content: {justification}; justify-items: center; align-items: center; gap: {gap}px {gap}px; margin: 0 0 {image_border}px 0",
+        style=f"display: flex; flex-flow: row wrap; justify-content: {justification}; justify-items: center; align-items: center; gap: {gap}px {gap}px; margin: 0 0 {image_border}px 0;",
     )
 
     if len(label()):
@@ -210,8 +211,11 @@ def image_gallery(
                 title="Hold the Shift key while clicking to select multiple images; Hold the Alt/Option key while clicking to select/unselect all images",
             ),
             ui_images,
-            style=f"display: flex; flex-direction: column; gap: {gap}px; margin: 0",
+            style=f"display: flex; flex-direction: column; gap: {gap}px; margin: 0;",
         )
+
+    if len(style):
+        ui_images.add_style(style)
 
     if enable_selection and len(initial_selected_indices()) > 0:
         click_scripts = []
@@ -254,6 +258,7 @@ def image_select(
     enable_selection=True,
     allow_multiple_selection=True,
     initial_selected_indices=reactive.value([]),
+    style="",
 ):
     @shiny.render.ui
     def show_image_gallery():
@@ -272,6 +277,7 @@ def image_select(
             image_border=image_border,
             gap=gap,
             justification=justification,
+            style=style,
         )
 
 

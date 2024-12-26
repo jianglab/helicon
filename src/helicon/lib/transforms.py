@@ -128,8 +128,31 @@ def apply_helical_symmetry(
     return data_work
 
 
-def transform_map(data, scale=1.0, tilt=0, psi=0, dy_pixel=0):
-    if scale == 1 and tilt == 0 and psi == 0 and dy_pixel == 0:
+def transform_map(data, scale=1.0, rot=0, tilt=0, psi=0, dx=0, dy=0, dz=0):
+    """Transform a 3D volume by applying scaling, rotations and translations.
+
+    Args:
+        data (ndarray): Input 3D volume of shape (nz,ny,nx)
+        scale (float): Scale factor to apply to all dimensions
+        rot (float): First rotation angle around z-axis in degrees
+        tilt (float): Second rotation angle around y-axis in degrees
+        psi (float): Third rotation angle around new z-axis in degrees
+        dx (float): Translation along x-axis
+        dy (float): Translation along y-axis
+        dz (float): Translation along z-axis
+
+    Returns:
+        ndarray: Transformed 3D volume
+    """
+    if (
+        scale == 1
+        and rot == 0
+        and tilt == 0
+        and psi == 0
+        and dx == 0
+        and dy == 0
+        and dz == 0
+    ):
         return data
     from scipy.spatial.transform import Rotation as R
     from scipy.ndimage import map_coordinates
@@ -143,13 +166,14 @@ def transform_map(data, scale=1.0, tilt=0, psi=0, dy_pixel=0):
         Z = Z * scale
         Y = Y * scale
         X = X * scale
-    ZYX = np.vstack((Z.ravel(), Y.ravel(), X.ravel())).transpose()
-    xform = R.from_euler("yz", (tilt, psi), degrees=True)
-    zyx = xform.apply(ZYX, inverse=False)
-    zyx[:, 0] += nz // 2
-    zyx[:, 1] += ny // 2 - dy_pixel
-    zyx[:, 2] += nx // 2
-    ret = map_coordinates(data, zyx.T, order=3)
+    XYZ = np.vstack((X.ravel(), Y.ravel(), Z.ravel())).transpose()
+    xform = R.from_euler("zyz", (psi, tilt, rot), degrees=True)
+    xyz = xform.apply(XYZ, inverse=False)
+    xyz[:, 0] += nx // 2 - dx
+    xyz[:, 1] += ny // 2 - dy
+    xyz[:, 2] += nz // 2 - dz
+    zyx = xyz[:, [2, 1, 0]].T
+    ret = map_coordinates(data, zyx, order=3)
     ret = ret.reshape((nz, ny, nx))
     return ret
 

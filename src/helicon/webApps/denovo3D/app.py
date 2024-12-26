@@ -12,9 +12,12 @@ import helicon
 
 from . import compute
 
-images_all = reactive.value([])
-image_size = reactive.value(0)
-image_apix = reactive.value(0)
+
+input_data = reactive.value(None)
+
+map_projections = reactive.value([])
+
+all_images = reactive.value(None)
 
 displayed_image_ids = reactive.value([])
 displayed_images = reactive.value([])
@@ -25,7 +28,6 @@ initial_selected_image_indices = reactive.value([0])
 selected_images_original = reactive.value([])
 selected_images_thresholded = reactive.value([])
 selected_images_thresholded_rotated_shifted = reactive.value([])
-selected_image_diameter = reactive.value(0)
 selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
 selected_images_title = reactive.value("Selected image:")
 selected_images_labels = reactive.value([])
@@ -62,13 +64,20 @@ with ui.sidebar(
                 id="input_image_files",
                 style="display: flex; flex-direction: column; align-items: flex-start;",
             ):
-                ui.input_radio_buttons(
-                    "input_mode_images",
-                    "How to obtain the input images:",
-                    choices=["upload", "url"],
-                    selected="upload",
-                    inline=True,
-                )
+
+                @render.ui
+                @reactive.event(input.show_emdb_input_mode)
+                def create_input_modes_ui():
+                    choices = ["upload", "url"]
+                    if input.show_emdb_input_mode():
+                        choices.append("emdb")
+                    return ui.input_radio_buttons(
+                        "input_mode_images",
+                        "How to obtain the input images:",
+                        choices=choices,
+                        selected="url",
+                        inline=True,
+                    )
 
                 @render.ui
                 @reactive.event(input.input_mode_images)
@@ -88,11 +97,168 @@ with ui.sidebar(
                         ret.append(
                             ui.input_text(
                                 "url_images",
-                                "Download URL for a RELION or cryoSPARC image output mrc(s) file",
+                                "Download URL for a RELION or cryoSPARC 2D class mrc(s) file",
                                 value=urls[url_key][0],
                             )
                         )
+                    elif input.input_mode_images() == "emdb":
+                        ret.append(
+                            ui.div(
+                                ui.input_text(
+                                    "emdb_id",
+                                    "Specify an amyloid structure EMDB ID",
+                                    value="EMD-14046",
+                                    width="calc(100% - 110px)",
+                                ),
+                                ui.input_action_button(
+                                    "randomize_emdb_id",
+                                    "Randomize",
+                                    style="width: 100px; height: 30px; margin-bottom: 14px; display: flex; align-items: center; justify-content: center;",
+                                ),
+                                style="""
+                                    display: flex;
+                                    flex-wrap: wrap;
+                                    width: 100%;
+                                    justify-content: space-between;
+                                    align-items: flex-end;
+                                    gap: 10px;
+                                """,
+                            )
+                        )
                     return ret
+
+                @render.ui
+                @reactive.event(input_data)
+                def display_emdb_info():
+                    req(input_data() is not None)
+                    req(len(input_data().data))
+                    req(input_data().emdb_id)
+                    emdb = helicon.dataset.EMDB()
+                    emd_id_num = input.emdb_id().split("-")[-1].split("_")[-1]
+                    req(emd_id_num in emdb.emd_ids)
+                    emd_id = f"EMD-{emd_id_num}"
+                    info = emdb.get_info(emd_id)
+                    nz, ny, nx = input_data().data.shape
+                    apix = input_data().apix
+                    s = f"<p><a href='https://www.ebi.ac.uk/emdb/{emd_id}' target='_blank'>{emd_id}</a>"
+                    s += f": {info.title}"
+                    s += f"<br>{nx}x{ny}x{nz}|{apix}Å/pixel|resolution={info.resolution}Å|twist={info.twist}°|pitch={info.pitch:,}Å|rise={info.rise}Å|{info.csym}"
+                    s += "</p>"
+                    ret = ui.HTML(s)
+                    return ret
+
+            helicon.shiny.image_select(
+                id="map_projections",
+                label=reactive.value("XYZ Projections"),
+                images=map_projections,
+                image_labels=reactive.value("X Y Z".split()),
+                image_size=reactive.value(128),
+                enable_selection=False,
+                style="margin-bottom: 20px;",
+            )
+
+            @render.ui
+            @reactive.event(input_data)
+            def generate_ui_symmetrize_projection():
+                req(input_data().is_3d)
+                req(input_data() is not None)
+                req(len(input_data().data))
+                twist = 0
+                pitch = np.nan
+                rise = 0
+                csym = 1
+                if input_data().emdb_id:
+                    emdb = helicon.dataset.EMDB()
+                    emd_id_num = input_data().emdb_id.split("-")[-1].split("_")[-1]
+                    if emd_id_num in emdb.emd_ids:
+                        emd_id = f"EMD-{emd_id_num}"
+                        info = emdb.get_info(emd_id)
+                        twist = info.twist
+                        rise = info.rise
+                        csym = int(info.csym[1:])
+                        pitch = info.pitch
+                width = (
+                    int((input_data().data.shape[2] * input_data().apix) / 5) // 4 * 4
+                )
+                length = (
+                    int(round(0.5 * pitch / 5)) // 4 * 4
+                    if not np.isnan(pitch)
+                    else width * 2
+                )
+
+                ret = ui.div(
+                    ui.tags.hr(),
+                    ui.input_numeric(
+                        "input_twist", "Twist (°)", value=twist, step=0.1, width="140px"
+                    ),
+                    ui.input_numeric(
+                        "input_rise", "Rise (Å)", value=rise, step=0.1, width="140px"
+                    ),
+                    ui.input_numeric(
+                        "input_csym", "Csym", value=csym, min=1, step=1, width="140px"
+                    ),
+                    ui.input_numeric(
+                        "input_apix",
+                        "Input voxel size (Å)",
+                        value=input_data().apix,
+                        min=0.1,
+                        step=0.1,
+                        width="140px",
+                    ),
+                    ui.input_numeric(
+                        "output_apix",
+                        "Output pixel size (Å)",
+                        value=5,
+                        min=0.1,
+                        step=0.1,
+                        width="140px",
+                    ),
+                    ui.input_numeric(
+                        "output_axial_rotation",
+                        "Axial rotation (°)",
+                        value=0,
+                        min=-180,
+                        max=180,
+                        step=1,
+                        width="140px",
+                    ),
+                    ui.input_numeric(
+                        "output_width",
+                        "Output width (pixels)",
+                        value=width,
+                        min=32,
+                        step=16,
+                        width="140px",
+                    ),
+                    ui.input_numeric(
+                        "output_length",
+                        "Output length (pixels)",
+                        value=length,
+                        min=32,
+                        step=16,
+                        width="140px",
+                    ),
+                    ui.input_numeric(
+                        "output_tilt",
+                        "Tilt out of plane (°)",
+                        value=0,
+                        min=-90,
+                        max=90,
+                        step=1,
+                        width="140px",
+                    ),
+                    style="display: flex; flex-wrap: wrap; flex-direction: row; gap: 4px; align-items: flex-end; justify-content: center;",
+                )
+                ret = ui.div(
+                    ret,
+                    ui.input_task_button(
+                        "symmetrization_projection",
+                        "Generate proejction",
+                        style="margin-bottom: 10px;",
+                    ),
+                    style="display: flex; flex-direction: column; justify-content: center;",
+                )
+                return ret
 
             with ui.div(
                 id="image-selection",
@@ -129,6 +295,10 @@ with ui.sidebar(
 
         with ui.nav_panel("Parameters"):
             with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
+                ui.input_checkbox(
+                    "show_emdb_input_mode", "Show EMDB input mode", value=False
+                )
+                ui.input_checkbox("is_3d", "The input is a 3D map", value=False)
                 ui.input_checkbox(
                     "ignore_blank", "Ignore blank input images", value=True
                 )
@@ -172,7 +342,7 @@ with ui.sidebar(
                         "target_apix2d",
                         "Target image pixel size (Å)",
                         min=-1,
-                        value=-1,
+                        value=5,
                         step=1,
                     )
 
@@ -465,8 +635,8 @@ def download_denovo3D_map():
         ),
     ) = reconstrunction_results()[0]
 
-    ny, nx = images_all()[0].shape
-    apix = image_apix()
+    ny, nx = input_data().data[0].shape
+    apix = input_data().apix
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
         apix=apix3d,
@@ -496,6 +666,15 @@ ui.HTML(
 
 
 @reactive.effect
+@reactive.event(input.input_mode_images)
+def reset_input_data_ui():
+    input_data.set(None)
+    ui.update_checkbox("is_3d", value=False)
+    map_projections.set(None)
+    selected_images_thresholded_rotated_shifted_cropped.set(None)
+
+
+@reactive.effect
 @reactive.event(input.input_mode_images, input.upload_images)
 def get_image_from_upload():
     req(input.input_mode_images() == "upload")
@@ -505,8 +684,11 @@ def get_image_from_upload():
     try:
         data, apix = compute.get_images_from_file(image_file)
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         print(e)
-        data, apix = None, 0
+        data, apix = None, 1
         m = ui.modal(
             f"failed to read the uploaded 2D images from {fileinfo[0]['name']}",
             title="File upload error",
@@ -515,9 +697,15 @@ def get_image_from_upload():
         )
         ui.modal_show(m)
         return
-    images_all.set(data)
-    image_size.set(min(data.shape))
-    image_apix.set(apix)
+
+    emdb_id = helicon.get_emdb_id(fileinfo[0]["name"])
+    is_3d = emdb_id or helicon.is_3d(data)
+    is_amyloid = helicon.is_amyloid(emdb_id)
+    d = helicon.DotDict(
+        data=data, apix=apix, emdb_id=emdb_id, is_3d=is_3d, is_amyloid=is_amyloid
+    )
+    input_data.set(d)
+    ui.update_checkbox("is_3d", value=is_3d)
 
 
 @reactive.effect
@@ -529,8 +717,11 @@ def get_images_from_url():
     try:
         data, apix = compute.get_images_from_url(url)
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         print(e)
-        data, apix = None, 0
+        data, apix = None, 1
         m = ui.modal(
             f"failed to download 2D images from {input.url_images()}",
             title="File download error",
@@ -539,44 +730,168 @@ def get_images_from_url():
         )
         ui.modal_show(m)
         return
-    images_all.set(data)
-    image_size.set(min(data.shape))
-    image_apix.set(apix)
+
+    emdb_id = helicon.get_emdb_id(url)
+    is_3d = emdb_id or helicon.is_3d(data)
+    is_amyloid = helicon.is_amyloid(emdb_id)
+    d = helicon.DotDict(
+        data=data, apix=apix, emdb_id=emdb_id, is_3d=is_3d, is_amyloid=is_amyloid
+    )
+    input_data.set(d)
+    ui.update_checkbox("is_3d", value=is_3d)
 
 
 @reactive.effect
-@reactive.event(images_all, input.ignore_blank)
-def get_displayed_images():
-    req(len(images_all()))
-    data = images_all()
-    n = len(data)
-    ny, nx = data[0].shape[:2]
-    images = [data[i] for i in range(n)]
-    image_size.set(max(images[0].shape))
+@reactive.event(input.randomize_emdb_id)
+def randomize_emdb_id():
+    emdb = helicon.dataset.EMDB()
+    ids = emdb.amyloid_atlas_ids()
+    import random
 
-    display_seq_all = np.arange(n, dtype=int)
-    if input.ignore_blank():
-        included = []
-        for i in range(n):
-            image = images[display_seq_all[i]]
-            if np.max(image) > np.min(image):
-                included.append(display_seq_all[i])
-        images = [images[i] for i in included]
+    emdb_id = f"EMD-{random.choice(ids)}"
+    ui.update_text("emdb_id", value=emdb_id)
+
+
+@reactive.effect
+@reactive.event(input.input_mode_images, input.emdb_id)
+def get_images_from_emdb():
+    req(input.input_mode_images() == "emdb")
+    emdb_id = input.emdb_id()
+    req(len(emdb_id) > 0)
+    try:
+        data, apix = compute.get_images_from_emdb(emdb_id=emdb_id)
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        print(e)
+        data, apix = None, 1
+        m = ui.modal(
+            f"failed to obtain {emdb_id} map from EMDB",
+            title="File download error",
+            easy_close=True,
+            footer=None,
+        )
+        ui.modal_show(m)
+        return
+
+    is_amyloid = helicon.is_amyloid(emdb_id)
+    d = helicon.DotDict(
+        data=data, apix=apix, emdb_id=emdb_id, is_3d=True, is_amyloid=is_amyloid
+    )
+    input_data.set(d)
+    ui.update_checkbox("is_3d", value=True)
+
+
+@reactive.effect
+@reactive.event(input_data)
+def update_all_images_from_2d_input_data():
+    req(input_data())
+    req(len(input_data().data))
+    if input_data().is_3d:
+        all_images.set(None)
     else:
-        included = display_seq_all
-    image_labels = [f"{i+1}" for i in included]
+        d = helicon.DotDict(data=input_data().data, apix=input_data().apix)
+        all_images.set(d)
+
+
+@reactive.effect
+@reactive.event(input.is_3d)
+def update_input_data_is_3d():
+    req(input_data())
+    d = input_data()
+    d.is_3d = input.is_3d()
+    d2 = helicon.DotDict(d)
+    input_data.set(d2)
+
+
+@reactive.effect
+@reactive.event(input_data)
+def get_xyz_projections():
+    req(input_data())
+    req(len(input_data().data))
+    if input_data().is_3d:
+        proj_xyz = compute.generate_xyz_projections(
+            input_data().data,
+            is_amyloid=input_data().is_amyloid,
+            apix=input_data().apix,
+        )
+        map_projections.set(proj_xyz)
+    else:
+        map_projections.set(None)
+
+
+@reactive.effect
+@reactive.event(input.symmetrization_projection)
+def update_all_images_from_3d_input_data():
+    req(input_data())
+    req(len(input_data().data))
+    req(input_data().is_3d)
+    proj = compute.symmetrize_project(
+        data=input_data().data,
+        apix=input.input_apix(),
+        twist_degree=input.input_twist(),
+        rise_angstrom=input.input_rise(),
+        csym=input.input_csym(),
+        new_size=(input.output_length(), input.output_width(), input.output_width()),
+        new_apix=input.output_apix(),
+        axial_rotation=input.output_axial_rotation(),
+        tilt=input.output_tilt(),
+    )
+    d = helicon.DotDict(data=proj, apix=input.output_apix())
+    all_images.set(d)
+
+
+@reactive.effect
+@reactive.event(all_images, input.ignore_blank)
+def get_displayed_images():
+    if all_images() is None:
+        displayed_images.set([])
+        return
+    req(len(all_images().data))
+    data = all_images().data
+    apix = all_images().apix
+    n = len(data)
+    if n:
+        ny, nx = data[0].shape[:2]
+        images = [data[i] for i in range(n)]
+
+        display_seq_all = np.arange(n, dtype=int)
+        if input.ignore_blank():
+            included = []
+            for i in range(n):
+                image = images[display_seq_all[i]]
+                if np.max(image) > np.min(image):
+                    included.append(display_seq_all[i])
+            images = [images[i] for i in included]
+        else:
+            included = display_seq_all
+        image_labels = [f"{i+1}" for i in included]
+        title = f"{len(images)}/{n} images|{nx}x{ny}|{apix}Å/pixel|length={round(nx*apix):,}Å"
+        if input_data().emdb_id:
+            emdb = helicon.dataset.EMDB()
+            info = emdb.get_info(input_data().emdb_id)
+            if not np.isnan(info.pitch):
+                title += f"({round(nx*apix/info.pitch,2)}pitch)"
+
+    else:
+        included = []
+        images = []
+        image_labels = []
+        title = ""
 
     displayed_image_ids.set(included)
     displayed_images.set(images)
-    displayed_image_title.set(
-        f"{len(images)}/{n} images | {nx}x{ny} pixels | {image_apix()} Å/pixel"
-    )
+    displayed_image_title.set(title)
     displayed_image_labels.set(image_labels)
 
 
 @reactive.effect
-@reactive.event(input.select_image)
+@reactive.event(input.select_image, displayed_images)
 def update_selecte_images_orignal():
+    req(len(displayed_images()))
+    req(0 <= min(input.select_image()))
+    req(max(input.select_image()) < len(displayed_images()))
     images = [displayed_images()[i] for i in input.select_image()]
     selected_images_original.set(images)
     selected_images_labels.set(
@@ -610,16 +925,27 @@ def threshold_selected_images():
 @reactive.effect
 @reactive.event(selected_images_thresholded)
 def update_selected_image_rotation_shift_diameter():
+    req(all_images())
     req(len(selected_images_thresholded()))
 
     images = selected_images_thresholded()
 
     ny = int(np.max([img.shape[0] for img in images]))
     nx = int(np.max([img.shape[1] for img in images]))
+
+    if input_data().is_3d:
+        estimate_rotation = False
+        estimate_center = False
+    else:
+        estimate_rotation = True
+        estimate_center = True
     tmp = np.array(
         [
             helicon.estimate_helix_rotation_center_diameter(
-                img, threshold=np.max(img) * 0.2
+                img,
+                threshold=np.max(img) * 0.2,
+                estimate_rotation=estimate_rotation,
+                estimate_center=estimate_center,
             )
             for img in images
         ]
@@ -627,16 +953,20 @@ def update_selected_image_rotation_shift_diameter():
     rotation = np.mean(tmp[:, 0])
     shift_y = np.mean(tmp[:, 1]) * input.apix()
     diameter = np.max(tmp[:, 2])
-    crop_size = int(diameter * 2) // 4 * 4
 
-    selected_image_diameter.set(diameter)
-    ui.update_numeric("apix", value=round(image_apix(), 4), max=round(image_apix() * 2))
+    if input_data().is_3d:
+        crop_size = int(diameter * 1.2) // 4 * 4
+    else:
+        crop_size = int(diameter * 2) // 4 * 4
+
+    apix = round(all_images().apix, 4)
+    ui.update_numeric("apix", value=apix, max=apix * 2)
     ui.update_numeric("pre_rotation", value=round(rotation, 1))
     ui.update_numeric(
         "shift_y",
         value=shift_y,
-        min=-crop_size * input.apix() // 2,
-        max=crop_size * input.apix() // 2,
+        min=-crop_size * apix // 2,
+        max=crop_size * apix // 2,
     )
     ui.update_numeric(
         "vertical_crop_size",

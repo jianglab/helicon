@@ -2,6 +2,43 @@ import numpy as np
 import helicon
 
 
+def is_3d(data: np.ndarray):
+    if data.ndim != 3:
+        return False
+    nz, ny, nx = data.shape
+    if nz == ny and nz == nx:
+        return True
+    if nz > ny and ny == nx:
+        return True
+    return False
+
+
+def is_amyloid(emdb_id: str):
+    if not isinstance(emdb_id, str):
+        return False
+    emdb = helicon.dataset.EMDB()
+    if emdb_id.split("-")[-1].split("_")[-1] in emdb.amyloid_atlas_ids():
+        return True
+    return False
+
+
+def twist2pitch(twist, rise, return_pitch_for_4p75Angstrom_rise=True):
+    if not return_pitch_for_4p75Angstrom_rise:
+        return rise * 360 / abs(twist)
+
+    rise_star = abs(rise)
+    twist_star = abs(twist)
+    for n in range(10, 1, -1):
+        condition = (rise * n < 5) & (4.5 < rise * n)
+        tmp_twist = abs(helicon.set_angle_range(twist_star * n, range=(-180, 180)))
+        condition &= tmp_twist < 90
+        if condition:
+            twist_star = tmp_twist
+            rise_star = rise_star * n
+            break
+    return rise_star * 360 / twist_star
+
+
 # adapted from https://github.com/tdgrant1/denss/blob/3fbbefea45cb6d615e629e672d65440c46ac83da/saxstats/saxstats.py#L2185
 def calc_fsc(map1, map2, apix):
     n = map1.shape[0]
@@ -37,7 +74,9 @@ def calc_fsc(map1, map2, apix):
     return np.vstack((qbins[qidx], FSC[qidx])).T
 
 
-def estimate_helix_rotation_center_diameter(data, threshold=0):
+def estimate_helix_rotation_center_diameter(
+    data, estimate_rotation=True, estimate_center=True, threshold=0
+):
     """
     Returns:
         rotation (float): The rotation (degrees) needed to rotate the helix to horizontal direction.
@@ -48,25 +87,34 @@ def estimate_helix_rotation_center_diameter(data, threshold=0):
     from skimage.morphology import closing
     import helicon
 
-    bw = closing(data > threshold, mode="ignore")
-    label_image = label(bw)
-    props = regionprops(label_image=label_image, intensity_image=data)
-    props.sort(key=lambda x: x.area, reverse=True)
-    angle = (
-        np.rad2deg(props[0].orientation) + 90
-    )  # relative to +x axis, counter-clockwise
-    if abs(angle) > 90:
-        angle -= 180
-    rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
+    if estimate_rotation:
+        bw = closing(data > threshold, mode="ignore")
+        label_image = label(bw)
+        props = regionprops(label_image=label_image, intensity_image=data)
+        props.sort(key=lambda x: x.area, reverse=True)
+        angle = (
+            np.rad2deg(props[0].orientation) + 90
+        )  # relative to +x axis, counter-clockwise
+        if abs(angle) > 90:
+            angle -= 180
+        rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
+        data_rotated = helicon.transform_image(image=data, rotation=rotation)
+    else:
+        rotation = 0.0
+        data_rotated = data
 
-    data_rotated = helicon.transform_image(image=data, rotation=rotation)
     bw = closing(data_rotated > threshold, mode="ignore")
     label_image = label(bw)
     props = regionprops(label_image=label_image, intensity_image=data_rotated)
     props.sort(key=lambda x: x.area, reverse=True)
     minr, minc, maxr, maxc = props[0].bbox
     diameter = maxr - minr + 1
-    center = props[0].centroid
+
+    if estimate_center:
+        center = props[0].centroid
+    else:
+        ny, nx = data.shape
+        center = (ny // 2, nx // 2)
     shift_y = data.shape[0] // 2 - center[0]
 
     return rotation, shift_y, diameter

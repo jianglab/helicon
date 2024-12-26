@@ -654,7 +654,7 @@ def process_one_task(
             cpu=cpu,
         )
     rec3d_xform_2 = helicon.transform_map(
-        rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy_pixel=dy / apix2d_orig
+        rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy=dy / apix2d_orig
     )
     rec3d_x_proj = np.sum(rec3d_xform_2, axis=2).T
     rec3d_y_proj = np.sum(rec3d_xform_2, axis=1).T

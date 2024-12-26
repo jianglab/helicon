@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import numpy as np
 import pandas as pd
 import helicon
 
@@ -12,7 +13,7 @@ class EMDB:
             cls._instance = super(EMDB, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, cache_dir=None):
+    def __init__(self, use_curated_helical_parameters=True, cache_dir=None):
         self.emd_ids = []
         self.meta = None
 
@@ -31,7 +32,9 @@ class EMDB:
             ):
                 self.local_emdb_mirror = None
 
-        self.update_emd_entries()
+        self.update_emd_entries(
+            use_curated_helical_parameters=use_curated_helical_parameters
+        )
 
     def update_emd_entries(
         self,
@@ -45,11 +48,14 @@ class EMDB:
             "image_reconstruction_helical_delta_phi_value",
             "image_reconstruction_helical_axial_symmetry_details",
         ],
+        use_curated_helical_parameters=True,
     ):
         try:
             entries = get_emd_entries(fields=fields)
+            if use_curated_helical_parameters:
+                entries = update_helical_parameters_from_curated_table(df=entries)
             self.meta = entries.sort_values(by="emd_id", key=lambda x: x.astype(int))
-            self.emd_ids = list(entries["emd_id"])
+            self.emd_ids = list(self.meta["emd_id"])
         except Exception as e:
             helicon.color_print(e)
             helicon.color_print("WARNING: failed to obtain the list of EMDB entries")
@@ -73,7 +79,7 @@ class EMDB:
         emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
         assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
         map_file = self.cache_dir / f"emd_{emd_id}.map.gz"
-        if map_file.exists():
+        if map_file.exists() and map_file.stat().st_size:
             return map_file
         if self.local_emdb_mirror:
             map_file_mirror = (
@@ -91,6 +97,8 @@ class EMDB:
         map_file = helicon.download_file_from_url(
             url, target_file_name=str(map_file), return_filename=True
         )
+        if map_file is None:
+            raise IOError(f"ERROR: failed to download {emd_id} from EMDB")
         return Path(map_file)
 
     def download_all_map_files(self, verbose=0):
@@ -103,6 +111,9 @@ class EMDB:
 
     def read_emdb_map(self, emd_id: str):
         map_file = self.get_emdb_map_file(emd_id=emd_id)
+        if map_file is None:
+            raise IOError(f"ERROR: failed to download {emd_id} from EMDB")
+
         import mrcfile
 
         with mrcfile.open(map_file) as mrc:
@@ -167,25 +178,52 @@ class EMDB:
         tree = ET.parse(xml_file)
         root = tree.getroot()
 
-        class DotDict(dict):
-            def __getattr__(self, name):
-                return self[name]
-
-            def __setattr__(self, name, value):
-                self[name] = value
-
-        data = DotDict()
+        data = helicon.DotDict()
 
         def parse_element(element, data):
             for child in element:
                 if len(child) == 0:
                     data[child.tag] = child.text
                 else:
-                    data[child.tag] = DotDict()
+                    data[child.tag] = helicon.DotDict()
                     parse_element(child, data[child.tag])
 
         parse_element(root, data)
         return data
+
+    def get_info(self, emd_id, return_xml_content=False):
+        """Return metadata for the specified EMDB entry as a dictionary with dot notation access.
+
+        Args:
+            emd_id (str): EMDB ID
+            return_xml_content (bool, optional): Whether to also return parsed XML content. Defaults to False.
+
+        Returns:
+            DotDict or tuple: Metadata for the entry with dot notation access. If return_xml_content=True, returns tuple of (dot_dict, xml_content).
+        """
+
+        if not isinstance(emd_id, str):
+            emd_id = str(emd_id)
+        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
+        assert emd_id in self.emd_ids, f"ERROR: {emd_id} is not in EMDB"
+
+        row = self.meta.loc[self.meta["emd_id"] == emd_id].iloc[0]
+        info = helicon.DotDict(row.to_dict())
+        try:
+            pitch = round(
+                helicon.twist2pitch(
+                    info.twist, info.rise, return_pitch_for_4p75Angstrom_rise=True
+                )
+            )
+        except:
+            pitch = np.nan
+        info.pitch = pitch
+
+        if return_xml_content:
+            xml_content = self.read_emdb_xml(emd_id)
+            return info, xml_content
+
+        return info
 
     def helical_structure_ids(self):
         ids = self.meta.loc[self.meta["method"] == "helical", "emd_id"]
@@ -274,3 +312,30 @@ def get_amyloid_atlas(url="https://people.mbi.ucla.edu/sawaya/amyloidatlas"):
     df = df.reset_index()
 
     return df
+
+
+def update_helical_parameters_from_curated_table(
+    df,
+    url="https://raw.githubusercontent.com/jianglab/EMDB_helical_parameter_curation/refs/heads/main/EMDB_validation.csv",
+):
+    columns = df.columns
+    df_curated = pd.read_csv(url)
+    df_curated = df_curated[df_curated["emdb_id"].isin(df["emdb_id"])]
+    df_curated = df_curated.rename(
+        columns={
+            "curated_twist (°)": "twist",
+            "curated_rise (Å)": "rise",
+            "curated_csym": "csym",
+        }
+    )
+    df_curated = df_curated[["emdb_id", "twist", "rise", "csym"]]
+    df_updated = df.merge(
+        df_curated, on="emdb_id", how="left", suffixes=("", "_curated")
+    )
+    df_updated["twist"] = df_updated["twist_curated"].combine_first(df_updated["twist"])
+    df_updated["rise"] = df_updated["rise_curated"].combine_first(df_updated["rise"])
+    df_updated["csym"] = df_updated["csym_curated"].combine_first(df_updated["csym"])
+    df_updated["twist"] = pd.to_numeric(df_updated["twist"], errors="coerce").round(3)
+    df_updated["rise"] = pd.to_numeric(df_updated["rise"], errors="coerce").round(3)
+    df_updated = df_updated[columns]
+    return df_updated

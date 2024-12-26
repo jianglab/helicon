@@ -260,8 +260,21 @@ def download_file_from_url(url, target_file_name=None, return_filename=False):
         else:
             return fileobj
     except requests.exceptions.RequestException as e:
+        import traceback
+
+        traceback.print_exc()
         print(e)
-        return None
+        raise IOError(f"ERROR: failed to down {url}")
+
+
+def get_emdb_id(label):
+    import re
+
+    pattern = r"(?i)(EMD[-_]\d{4,5})"
+    match = re.search(pattern, label)
+    if match:
+        return match.group(1)
+    return None
 
 
 def get_terminal_size():
@@ -736,6 +749,14 @@ class Timer:
             print(
                 f"{self.info}: ended at {datetime.datetime.now()}, duration={self.interval} seconds"
             )
+
+
+class DotDict(dict):
+    def __getattr__(self, name):
+        return self[name]
+
+    def __setattr__(self, name, value):
+        self[name] = value
 
 
 class DummyMemory:
