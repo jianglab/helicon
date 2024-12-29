@@ -287,7 +287,7 @@ def assign_beamshifts_to_cluster(
 
             if verbose > 2:
                 print(
-                    f"\t{n_clusters} clusters: silhouette score={silhouette_avg}{'*' if silhouette_avg >= best_score else ''}"
+                    f"\t{n_clusters} clusters: silhouette score={silhouette_avg}{' *' if silhouette_avg >= best_score else ''}"
                 )
 
             if silhouette_avg >= best_score:

@@ -154,28 +154,6 @@ def main(args):
                         [beamshifts_dict[row[micrograph_name]] for row in data.rows()]
                     )
 
-                if args.verbose > 1:
-                    import matplotlib.pyplot as plt
-
-                    beamshift_positions = np.array(list(exposure_groups.keys()))
-                    group_ids = np.array(list(exposure_groups.values()))
-
-                    plt.figure(figsize=(8, 8))
-                    scatter = plt.scatter(
-                        beamshift_positions[:, 0],
-                        beamshift_positions[:, 1],
-                        c=group_ids,
-                        cmap="tab20",
-                        s=2,
-                    )
-                    plt.colorbar(scatter, label="Exposure Group")
-                    plt.xlabel("Beam Shift X")
-                    plt.ylabel("Beam Shift Y")
-                    plt.title("Exposure groups by beam shifts")
-                    plt.savefig("exposure_groups_by_beamshifts.pdf")
-                    plt.show()
-                    plt.close()
-
             exposure_group = [
                 micrograph_2_beamshift_group[row[micrograph_name]]
                 for row in data.rows()
@@ -197,6 +175,48 @@ def main(args):
 
             if args.verbose > 1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
+
+            if args.verbose > 1 and "exposure_groups" in locals():
+                if args.csFile:
+                    output_file = (
+                        f"{Path(args.csFile).stem}"
+                        + (output_title if output_title else ".output")
+                        + ".pdf"
+                    )
+                else:
+                    output_file = (
+                        f"{args.projectID}_{args.workspaceID}_{args.jobID}"
+                        + output_title
+                        + ".pdf"
+                    )
+                output_file = "-".join(output_file.split())
+                output_file = output_file.replace(" ", "-")
+                output_file = output_file.replace("->", "_")
+                output_file = output_file.replace("/", "_")
+
+                import matplotlib.pyplot as plt
+
+                beamshift_positions = np.array(list(exposure_groups.keys()))
+                group_ids = np.array(list(exposure_groups.values()))
+
+                plt.figure(figsize=(8, 8))
+                scatter = plt.scatter(
+                    beamshift_positions[:, 0],
+                    beamshift_positions[:, 1],
+                    c=group_ids,
+                    cmap="tab20",
+                    s=2,
+                )
+                plt.colorbar(scatter, label="Exposure Group")
+                plt.xlabel("Beam Shift X")
+                plt.ylabel("Beam Shift Y")
+                plt.title("Exposure groups by beam shifts")
+                plt.savefig(output_file)
+                print(
+                    f"\tPlot of exposure group assignments based on beam shifts is saved to {output_file}"
+                )
+                plt.show()
+                plt.close()
 
         elif option_name == "assignExposureGroupByTime" and abs(param) > 0:
             time_group_size = param
@@ -406,6 +426,7 @@ def main(args):
             slots=list(output_slots),
             passthrough=(job.uid, group_name_to_load),
             title=f"{args.jobID}" + output_title,
+            desc=f"{' '.join(sys.argv)}",
         )
         if args.verbose > 1:
             print(
