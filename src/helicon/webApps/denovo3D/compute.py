@@ -79,7 +79,7 @@ def symmetrize_transform_map(
         csym=csym,
         new_size=new_size,
         new_apix=new_apix,
-        fraction=1 / 3,
+        fraction=fraction,
         cpu=helicon.available_cpu(),
     )
     if axial_rotation or tilt:

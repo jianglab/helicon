@@ -5,7 +5,7 @@ import pandas as pd
 
 pd.options.mode.copy_on_write = True
 
-from .util import color_print
+from .util import color_print, available_cpu
 
 
 def get_image_number(imageFile, as2D=False):
@@ -157,9 +157,8 @@ def extract_EPU_data_collection_time(filename):
         timestamp = datetime_obj.timestamp()
         return timestamp
     else:
-        print(filename)
-        print(pattern)
-        raise
+        msg = "ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
+        color_print(msg)
     return 0
 
 
@@ -176,9 +175,8 @@ def extract_EPU_old_data_collection_time(filename):
         timestamp = datetime_obj.timestamp()
         return timestamp
     else:
-        print(filename)
-        print(pattern)
-        raise
+        msg = "ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
+        color_print(msg)
     return 0
 
 
@@ -210,21 +208,33 @@ def extract_serialEM_pncc_beamshift(filename):
     return ""
 
 
-def EPU_micrograph_path_2_movie_xml_path(micrograph_path, movies_folder):
+def EPU_micrograph_path_2_movie_xml_path(micrograph_path, movies_folder=""):
     import re
 
-    pattern = r"(\d{21}_FoilHole_\d{8}_Data_\d{8}_\d{8}_\d{8}_\d{6}_fractions)"
-    match = re.search(pattern, micrograph_path)
+    pattern = r"\d{21}_(FoilHole_\d{8}_Data_\d{8}_\d{8}_\d{8}_\d{6})"
+    match = re.search(pattern, str(micrograph_path))
     if match:
         mid = match.group(1)
         from pathlib import Path
 
-        xml_path = (Path(movies_folder) / (mid + ".tiff")).resolve()
-        xml_path = str(xml_path).replace("_fractions.tiff", ".xml")
-        assert Path(xml_path).exists(), f"{xml_path} does not exist"
-        return xml_path
+        folder = (
+            Path(movies_folder)
+            if movies_folder
+            else Path(micrograph_path).resolve().parent
+        )
+        pattern_xml = f"*{mid}*.xml"
+        xml_files = list(folder.glob(pattern_xml))
+        assert (
+            len(xml_files) > 0
+        ), f"cannot find the xml file ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
+        assert (
+            len(xml_files) == 1
+        ), f"find {len(xml_files)} xml files ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
+        return xml_files[0]
     else:
-        raise ValueError("ERROR: bad micrograph path: {micrograph_path}")
+        raise ValueError(
+            "ERROR: {str(micrograph_path)} filename is inconsistent with EPU output image filename pattern"
+        )
 
 
 def EPU_xml_2_beamshift(xml_file):
@@ -237,11 +247,25 @@ def EPU_xml_2_beamshift(xml_file):
     return beamshift
 
 
-def assign_beamshifts_to_cluster(
-    beamshifts, min_cluster_size=4, range_n_clusters=range(2, 200), verbose=True
-):
+def __process_cluster(args):
     from sklearn.metrics import silhouette_score
     from .analysis import AgglomerativeClusteringWithMinSize
+
+    n_clusters, X, min_cluster_size = args
+    clustering_method = AgglomerativeClusteringWithMinSize(
+        n_clusters=n_clusters, min_cluster_size=min_cluster_size
+    )
+    cluster_labels = clustering_method.fit_predict(X)
+    if len(np.unique(cluster_labels)) > 1:
+        silhouette_avg = silhouette_score(X, cluster_labels)
+    else:
+        silhouette_avg = -1
+    return n_clusters, silhouette_avg, cluster_labels
+
+
+def assign_beamshifts_to_cluster(
+    beamshifts, min_cluster_size=4, range_n_clusters=range(2, 200), verbose=2
+):
 
     X = np.array(beamshifts)
 
@@ -249,16 +273,28 @@ def assign_beamshifts_to_cluster(
     best_n_clusters = range_n_clusters[0]
     best_score = -1
     best_cluster_labels = None
-    for n_clusters in range_n_clusters:
-        clustering_method = AgglomerativeClusteringWithMinSize(
-            n_clusters=n_clusters, min_cluster_size=min_cluster_size
-        )
-        cluster_labels = clustering_method.fit_predict(X)
-        silhouette_avg = silhouette_score(X, cluster_labels)
-        if silhouette_avg > best_score:
-            best_score = silhouette_avg
-            best_n_clusters = n_clusters
-            best_cluster_labels = cluster_labels
+
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(max_workers=available_cpu()) as executor:
+        futures = [
+            executor.submit(__process_cluster, (n, X, min_cluster_size))
+            for n in range_n_clusters
+        ]
+
+        for future in as_completed(futures):
+            n_clusters, silhouette_avg, cluster_labels = future.result()
+
+            if verbose > 2:
+                print(
+                    f"\t{n_clusters} clusters: silhouette score={silhouette_avg}{'*' if silhouette_avg >= best_score else ''}"
+                )
+
+            if silhouette_avg >= best_score:
+                best_score = silhouette_avg
+                best_n_clusters = n_clusters
+                best_cluster_labels = cluster_labels
+
     if verbose:
         print(
             f"The optimal number of clusters is {best_n_clusters} with a silhouette score of {best_score:.2f}"
@@ -272,8 +308,8 @@ def assign_beamshifts_to_cluster(
 
 
 def euler_relion2eman(rot, tilt, psi):
-    # order of rotation: rot around z, tilt around y, psi around z
-    # order of rotation: az around z, alt around x, phi around z
+    # RELION order of rotations: rot around z, tilt around y, psi around z
+    # EMAN order of rotations: az around z, alt around x, phi around z
     az = rot + 90.0
     alt = tilt
     phi = psi - 90.0
@@ -281,8 +317,8 @@ def euler_relion2eman(rot, tilt, psi):
 
 
 def euler_eman2relion(az, alt, phi):
-    # order of rotation: rot around z, tilt around y, psi around z
-    # order of rotation: az around z, alt around x, phi around z
+    # RELION order of rotations: rot around z, tilt around y, psi around z
+    # EMAN order of rotations: az around z, alt around x, phi around z
     rot = az - 90
     tilt = alt
     psi = phi + 90
@@ -408,110 +444,6 @@ except ImportError:
         return
 
     prange = range
-
-
-@jit(nopython=True, cache=False, nogil=True, parallel=True)
-def apply_helical_symmetry(
-    data,
-    apix,
-    twist_degree,
-    rise_angstrom,
-    csym=1,
-    fraction=1.0,
-    new_size=None,
-    new_apix=None,
-    cpu=1,
-):
-    if new_apix is None:
-        new_apix = apix
-    nz0, ny0, nx0 = data.shape
-    if new_size != data.shape:
-        nz1, ny1, nx1 = new_size
-        nz2, ny2, nx2 = max(nz0, nz1), max(ny0, ny1), max(nx0, nx1)
-        data_work = np.zeros((nz2, ny2, nx2), dtype=np.float32)
-    else:
-        data_work = np.zeros((nz0, ny0, nx0), dtype=np.float32)
-
-    nz, ny, nx = data_work.shape
-    w = np.zeros((nz, ny, nx), dtype=np.float32)
-
-    hsym_max = max(1, int(nz * new_apix / rise_angstrom))
-    hsyms = range(-hsym_max, hsym_max + 1)
-    csyms = range(csym)
-
-    mask = (data != 0) * 1
-    z_nonzeros = np.nonzero(mask)[0]
-    z0 = np.min(z_nonzeros)
-    z1 = np.max(z_nonzeros)
-    z0 = max(z0, nz0 // 2 - int(nz0 * fraction + 0.5) // 2)
-    z1 = min(nz0 - 1, min(z1, nz0 // 2 + int(nz0 * fraction + 0.5) // 2))
-
-    set_num_threads(cpu)
-
-    for hi in hsyms:
-        for k in prange(nz):
-            k2 = ((k - nz // 2) * new_apix + hi * rise_angstrom) / apix + nz0 // 2
-            if k2 < z0 or k2 >= z1:
-                continue
-            k2_floor, k2_ceil = int(np.floor(k2)), int(np.ceil(k2))
-            wk = k2 - k2_floor
-
-            for ci in csyms:
-                rot = np.deg2rad(twist_degree * hi + 360 * ci / csym)
-                m = np.array([[np.cos(rot), np.sin(rot)], [-np.sin(rot), np.cos(rot)]])
-                for j in prange(ny):
-                    for i in prange(nx):
-                        j2 = (
-                            m[0, 0] * (j - ny // 2) + m[0, 1] * (i - nx / 2)
-                        ) * new_apix / apix + ny0 // 2
-                        i2 = (
-                            m[1, 0] * (j - ny // 2) + m[1, 1] * (i - nx / 2)
-                        ) * new_apix / apix + nx0 // 2
-
-                        j2_floor, j2_ceil = int(np.floor(j2)), int(np.ceil(j2))
-                        i2_floor, i2_ceil = int(np.floor(i2)), int(np.ceil(i2))
-                        if j2_floor < 0 or j2_floor >= ny0 - 1:
-                            continue
-                        if i2_floor < 0 or i2_floor >= nx0 - 1:
-                            continue
-
-                        wj = j2 - j2_floor
-                        wi = i2 - i2_floor
-
-                        data_work[k, j, i] += (
-                            (1 - wk)
-                            * (1 - wj)
-                            * (1 - wi)
-                            * data[k2_floor, j2_floor, i2_floor]
-                            + (1 - wk)
-                            * (1 - wj)
-                            * wi
-                            * data[k2_floor, j2_floor, i2_ceil]
-                            + (1 - wk)
-                            * wj
-                            * (1 - wi)
-                            * data[k2_floor, j2_ceil, i2_floor]
-                            + (1 - wk) * wj * wi * data[k2_floor, j2_ceil, i2_ceil]
-                            + wk
-                            * (1 - wj)
-                            * (1 - wi)
-                            * data[k2_ceil, j2_floor, i2_floor]
-                            + wk * (1 - wj) * wi * data[k2_ceil, j2_floor, i2_ceil]
-                            + wk * wj * (1 - wi) * data[k2_ceil, j2_ceil, i2_floor]
-                            + wk * wj * wi * data[k2_ceil, j2_ceil, i2_ceil]
-                        )
-                        w[k, j, i] += 1.0
-    mask = w > 0
-    data_work = np.where(mask, data_work / w, data_work)
-    if data_work.shape != new_size:
-        nz1, ny1, nx1 = new_size
-        data_work = data_work[
-            nz // 2 - nz1 // 2 : nz // 2 + nz1 // 2,
-            ny // 2 - ny1 // 2 : ny // 2 + ny1 // 2,
-            nx // 2 - nx1 // 2 : nx // 2 + nx1 // 2,
-        ]
-    data_work = np.ascontiguousarray(data_work)
-    return data_work
 
 
 ########################################################################################################################
@@ -770,7 +702,7 @@ def star_dissolve_opticsgroup(data):
     """
     assert (
         data.attrs["convention"] == "relion"
-    ), f"star_dissolve_opticsgroup: requires data in relion convention. current convention is {data.attrs["convention"]}"
+    ), f"star_dissolve_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
     try:
         optics = data.attrs["optics"]
         optics.loc[:, "rlnOpticsGroup"] = optics.loc[:, "rlnOpticsGroup"].astype(str)
@@ -822,7 +754,7 @@ Relion_OpticsGroup_Parameters = "rlnOpticsGroup rlnOpticsGroupName rlnMtfFileNam
 def star_build_opticsgroup(data):
     assert (
         data.attrs["convention"] == "relion"
-    ), f"star_build_opticsgroup: requires data in relion convention. current convention is {data.attrs["convention"]}"
+    ), f"star_build_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
 
     def remove_invalid_opticsgroup_parameters(data):
         try:
@@ -1481,7 +1413,7 @@ def dataframe_convert(data, target="relion"):
     if data.attrs["convention"] == target:
         return data
 
-    msg = f"ERROR: dataframe_convert(): unavailable conversion of convention from {data.attrs["convention"]} to {target}"
+    msg = f"ERROR: dataframe_convert(): unavailable conversion of convention from {data.attrs['convention']} to {target}"
     if data.attrs["convention"] == "relion":
         if target == "cryosparc":
             return dataframe_relion_to_cryosparc(data)
@@ -1503,10 +1435,7 @@ def dataframe_cryosparc_to_relion(data):
         return data
 
     if data.attrs["convention"] != "cryosparc":
-        msg = (
-            "ERROR: dataframe_cryosparc_to_relion(): input dataframe is in %s instead of the required cryosparc convention"
-            % (data.attrs["convention"])
-        )
+        msg = f"ERROR: dataframe_cryosparc_to_relion(): input dataframe is in {data.attrs['convention']} instead of the required cryosparc convention"
         raise AttributeError(msg)
 
     ret = pd.DataFrame()

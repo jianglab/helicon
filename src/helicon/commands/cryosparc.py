@@ -20,30 +20,50 @@ def main(args):
         data_orig = Dataset.load(args.csFile)
     else:
         cs = helicon.connect_cryosparc()
+        project_folder = cs.find_project(args.projectID).dir()
         job = cs.find_job(args.projectID, args.jobID)
-        data_orig = job.load_output("particles")
+        group_name_to_load = job.doc["output_result_groups"][args.groupIndex]["name"]
+        data_orig = job.load_output(group_name_to_load)
 
     data = data_orig.copy()
 
-    if args.verbose > 1:
-        image_name = helicon.first_matched_atrr(
-            data, attrs="location/micrograph_path blob/path".split()
+    attrs = "movie_blob/path micrograph_blob/path location/micrograph_path blob/path".split()
+    micrograph_name = helicon.first_matched_atrr(data, attrs=attrs)
+    if micrograph_name is None:
+        helicon.color_print(
+            f"\tERROR: at least one of the {len(attrs)} parameters ({' '.join(attrs)}) must be available"
         )
-        if image_name is None:
-            helicon.color_print(
-                f"\tERROR: location/micrograph_path or blob/path must be available"
-            )
-            sys.exit(-1)
-        micrographs = np.unique(data[image_name])
-        if args.verbose > 1:
-            if args.csFile:
-                print(
-                    f"{args.csFile}: {len(data)} particles from {len(micrographs)} micrographs"
-                )
-            else:
-                print(
-                    f"{args.projectID}/{args.workspaceID}/{args.jobID}: {len(data)} particles from {len(micrographs)} micrographs"
-                )
+        sys.exit(-1)
+
+    if "blob/path" in data:
+        input_type = "particle"
+    else:
+        input_type = "exposure"
+
+    exp_group_id_name = helicon.first_matched_atrr(
+        data, attrs="ctf/exp_group_id mscope_params/exp_group_id".split()
+    )
+
+    if args.verbose > 1:
+        micrographs = np.unique(data[micrograph_name])
+        if input_type == "particle":
+            if args.verbose > 1:
+                if args.csFile:
+                    print(
+                        f"{args.csFile}: {len(data):,} particles from {len(micrographs):,} micrographs"
+                    )
+                else:
+                    print(
+                        f"{args.projectID}/{args.workspaceID}/{args.jobID}: {len(data):, } particles from {len(micrographs):,} micrographs"
+                    )
+        else:
+            if args.verbose > 1:
+                if args.csFile:
+                    print(f"{args.csFile}: {len(micrographs):,} micrographs")
+                else:
+                    print(
+                        f"{args.projectID}/{args.workspaceID}/{args.jobID}: {len(micrographs):,} micrographs"
+                    )
 
     if args.verbose > 10:
         print(data)
@@ -65,57 +85,114 @@ def main(args):
             print("%s: %s" % (option_name, param))
 
         if option_name == "assignExposureGroupByBeamShift" and param:
-            group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
 
-            image_name = helicon.first_matched_atrr(
-                data, attrs="location/micrograph_path blob/path".split()
-            )
-            if image_name is None:
-                helicon.color_print(
-                    f"\tERROR: location/micrograph_path or blob/path must be available"
-                )
-                sys.exit(-1)
-
-            software = helicon.guess_data_collection_software(data[image_name][0])
+            software = helicon.guess_data_collection_software(data[micrograph_name][0])
             if software is None:
                 helicon.color_print(
-                    f"\tWARNING: cannot detect the data collection software using {image_name}: {data[image_name][0]}\n\tI only know the filenames by {', '.join(sorted(helicon.movie_filename_patterns().keys()))}"
+                    f"\tWARNING: cannot detect the data collection software using {micrograph_name}: {data[micrograph_name][0]}\n\tI only know the filenames by {', '.join(sorted(helicon.movie_filename_patterns().keys()))}"
                 )
                 sys.exit(-1)
 
-            if software in ["EPU"]:
-                extractBeamShift = helicon.extract_EPU_beamshift_pos
-            elif software in ["serialEM_pncc"]:
-                extractBeamShift = helicon.extract_serialEM_pncc_beamshift
+            micrographs = np.unique(data[micrograph_name])
 
-            # split by beamshift groups
-            def get_micrograph_path_2_beamshift_groups(micrographs):
-                mapping = {m: extractBeamShift(m) for m in micrographs}
-                mapping2 = {
-                    s: si + 1 for si, s in enumerate(sorted(set(mapping.values())))
+            if software in ["EPU", "serialEM_pncc"]:
+                if software in ["EPU"]:
+                    extractBeamShift = helicon.extract_EPU_beamshift_pos
+                elif software in ["serialEM_pncc"]:
+                    extractBeamShift = helicon.extract_serialEM_pncc_beamshift
+
+                # split by beamshift groups
+                def get_micrograph_2_beamshift_groups(micrographs):
+                    mapping = {m: extractBeamShift(m) for m in micrographs}
+                    mapping2 = {
+                        s: si + 1 for si, s in enumerate(sorted(set(mapping.values())))
+                    }
+                    return {m: mapping2[mapping[m]] for m in micrographs}
+
+                micrograph_2_beamshift_group = get_micrograph_2_beamshift_groups(
+                    micrographs
+                )
+            elif software in ["EPU_old"]:
+
+                @helicon.cache(
+                    cache_dir=str(helicon.cache_dir / "cryosparc"),
+                    expires_after=7,
+                    verbose=0,
+                )  # 7 days
+                def EPU_micrograph_path_2_beamshift(micrograph_path):
+                    xml_file = helicon.EPU_micrograph_path_2_movie_xml_path(
+                        micrograph_path
+                    )
+                    beamshift = helicon.EPU_xml_2_beamshift(xml_file=xml_file)
+                    return beamshift
+
+                from tqdm import tqdm
+
+                beamshifts_dict = {
+                    m: EPU_micrograph_path_2_beamshift(project_folder / m)
+                    for m in tqdm(
+                        micrographs,
+                        total=len(micrographs),
+                        desc="Processing",
+                        unit="micrograph",
+                    )
                 }
-                return {m: mapping2[mapping[m]] for m in micrographs}
+                beamshifts_list = list(beamshifts_dict.values())
+                exposure_groups = helicon.assign_beamshifts_to_cluster(
+                    beamshifts=beamshifts_list,
+                    range_n_clusters=range(2, 200),
+                    verbose=args.verbose,
+                )
+                micrograph_2_beamshift_group = {
+                    m: exposure_groups[beamshifts_dict[m]]
+                    for mi, m in enumerate(micrographs)
+                }
 
-            micrographs = np.unique(data[image_name])
-            micrograph_path_2_beamshift_group = get_micrograph_path_2_beamshift_groups(
-                micrographs
-            )
-            particle_group = [
-                micrograph_path_2_beamshift_group[row[image_name]]
+                if "mscope_params/beam_shift" in data:
+                    data["mscope_params/beam_shift"] = np.array(
+                        [beamshifts_dict[row[micrograph_name]] for row in data.rows()]
+                    )
+
+                if args.verbose > 1:
+                    import matplotlib.pyplot as plt
+
+                    beamshift_positions = np.array(list(exposure_groups.keys()))
+                    group_ids = np.array(list(exposure_groups.values()))
+
+                    plt.figure(figsize=(8, 8))
+                    scatter = plt.scatter(
+                        beamshift_positions[:, 0],
+                        beamshift_positions[:, 1],
+                        c=group_ids,
+                        cmap="tab20",
+                        s=2,
+                    )
+                    plt.colorbar(scatter, label="Exposure Group")
+                    plt.xlabel("Beam Shift X")
+                    plt.ylabel("Beam Shift Y")
+                    plt.title("Exposure groups by beam shifts")
+                    plt.savefig("exposure_groups_by_beamshifts.pdf")
+                    plt.show()
+                    plt.close()
+
+            exposure_group = [
+                micrograph_2_beamshift_group[row[micrograph_name]]
                 for row in data.rows()
             ]
-            data["ctf/exp_group_id"] = np.array(particle_group)
+            data[exp_group_id_name] = np.array(exposure_group)
 
-            group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids = np.sort(np.unique(data[exp_group_id_name]))
             for gi in group_ids:
-                mask = np.where(data["ctf/exp_group_id"] == gi)
+                mask = np.where(data[exp_group_id_name] == gi)
                 for (
                     col
                 ) in "ctf/cs_mm ctf/phase_shift_rad ctf/shift_A ctf/tilt_A ctf/trefoil_A ctf/tetra_A ctf/anisomag".split():
                     if col in data:
                         data[col][mask] = np.median(data[col][mask])
 
-            output_slots.add("ctf")
+            slot = exp_group_id_name.split("/")[0]
+            output_slots.add(slot)
             output_title += f"->{len(group_ids)} beamshift groups"
 
             if args.verbose > 1:
@@ -124,7 +201,7 @@ def main(args):
         elif option_name == "assignExposureGroupByTime" and abs(param) > 0:
             time_group_size = param
 
-            group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
 
             if (
                 time_group_size < 0 and len(group_ids_orig) > 1
@@ -133,23 +210,14 @@ def main(args):
                     print(
                         f"\tCombining {len(group_ids_orig)} exposure groups into 1 group"
                     )
-                data["ctf/exp_group_id"] = 1
-                group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+                data[exp_group_id_name] = 1
+                group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
                 time_group_size = abs(time_group_size)
 
-            image_name = helicon.first_matched_atrr(
-                data, attrs="location/micrograph_path blob/path".split()
-            )
-            if image_name is None:
-                helicon.color_print(
-                    f"\tERROR: location/micrograph_path or blob/path must be available"
-                )
-                sys.exit(-1)
-
-            software = helicon.guess_data_collection_software(data[image_name][0])
+            software = helicon.guess_data_collection_software(data[micrograph_name][0])
             if software is None:
                 helicon.color_print(
-                    f"\tWARNING: cannot detect the data collection software using {image_name}: {data[image_name][0]}\n\tI only know the filenames by {', '.join(sorted(helicon.movie_filename_patterns().keys()))}"
+                    f"\tWARNING: cannot detect the data collection software using {micrograph_name}: {data[micrograph_name][0]}\n\tI only know the filenames by {', '.join(sorted(helicon.movie_filename_patterns().keys()))}"
                 )
                 sys.exit(-1)
             elif software not in ["EPU", "EPU_old"]:
@@ -163,15 +231,15 @@ def main(args):
             elif software in ["EPU_old"]:
                 extractDataCollectionTime = helicon.extract_EPU_old_data_collection_time
 
-            micrographs = np.unique(data[image_name])
+            micrographs = np.unique(data[micrograph_name])
             micrograph_path_2_time = {
                 m: extractDataCollectionTime(m) for m in micrographs
             }
             last_group_id = 0
             new_particle_group_ids = np.zeros(len(data))
             for gi in group_ids_orig:
-                mask = np.where(data["ctf/exp_group_id"] == gi)
-                group_micrographs = np.unique(data[image_name][mask])
+                mask = np.where(data[exp_group_id_name] == gi)
+                group_micrographs = np.unique(data[micrograph_name][mask])
                 group_micrograph_time = [
                     micrograph_path_2_time[m] for m in group_micrographs
                 ]
@@ -180,56 +248,49 @@ def main(args):
                 )
                 group_particle_2_subgroup = [
                     group_time_2_subgroup[micrograph_path_2_time[m]]
-                    for m in data[image_name][mask]
+                    for m in data[micrograph_name][mask]
                 ]
                 new_particle_group_ids[mask] = (
                     np.array(group_particle_2_subgroup) + last_group_id
                 )
                 last_group_id = np.max(new_particle_group_ids)
-            data["ctf/exp_group_id"] = new_particle_group_ids
+            data[exp_group_id_name] = new_particle_group_ids
 
-            group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids = np.sort(np.unique(data[exp_group_id_name]))
             for gi in group_ids:
-                mask = np.where(data["ctf/exp_group_id"] == gi)
+                mask = np.where(data[exp_group_id_name] == gi)
                 for (
                     col
                 ) in "ctf/cs_mm ctf/phase_shift_rad ctf/shift_A ctf/tilt_A ctf/trefoil_A ctf/tetra_A ctf/anisomag".split():
                     if col in data:
                         data[col][mask] = np.median(data[col][mask])
 
-            output_slots.add("ctf")
+            slot = exp_group_id_name.split("/")[0]
+            output_slots.add(slot)
             output_title += f"->{len(group_ids)} time groups"
 
             if args.verbose > 1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
 
         elif option_name == "assignExposureGroupPerMicrograph" and param:
-            group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
 
-            image_name = helicon.first_matched_atrr(
-                data, attrs="location/micrograph_path blob/path".split()
-            )
-            if image_name is None:
-                helicon.color_print(
-                    f"\tERROR: location/micrograph_path or blob/path must be available"
-                )
-                sys.exit(-1)
-
-            micrographs = np.unique(data[image_name])
+            micrographs = np.unique(data[micrograph_name])
             for mi, m in enumerate(micrographs):
-                mask = np.where(data[image_name] == m)
-                data["ctf/exp_group_id"][mask] = mi + 1
+                mask = np.where(data[micrograph_name] == m)
+                data[exp_group_id_name][mask] = mi + 1
 
-            group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
-            output_slots.add("ctf")
+            slot = exp_group_id_name.split("/")[0]
+            output_slots.add(slot)
             output_title += f"->{len(group_ids)} per-micrograph groups"
 
             if args.verbose > 1:
                 print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
 
         elif option_name == "copyExposureGroup" and param:
-            group_ids_orig = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
 
             dataFrom = helicon.images2dataframe(
                 inputFiles=param,
@@ -254,16 +315,7 @@ def main(args):
                     "rlnOpticsGroup"
                 ]
 
-            image_name = helicon.first_matched_atrr(
-                data, attrs="location/micrograph_path blob/path".split()
-            )
-            if image_name is None:
-                helicon.color_print(
-                    f"\tERROR: location/micrograph_path or blob/path must be available"
-                )
-                sys.exit(-1)
-
-            micrographs = np.unique(data[image_name])
+            micrographs = np.unique(data[micrograph_name])
             from tqdm import tqdm
 
             for mi, m in tqdm(
@@ -277,16 +329,17 @@ def main(args):
                     if m.find(k) != -1:
                         group = v
                         break
-                mask = np.where(data[image_name] == m)
-                data["ctf/exp_group_id"][mask] = group
+                mask = np.where(data[micrograph_name] == m)
+                data[exp_group_id_name][mask] = group
                 if group == 0:
                     helicon.color_print(
                         f"\tWARNING: cannot find matching optics group info in {param} for {m}. Assign it to exposure group 0"
                     )
 
-            group_ids = np.sort(np.unique(data["ctf/exp_group_id"]))
+            group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
-            output_slots.add("ctf")
+            slot = exp_group_id_name.split("/")[0]
+            output_slots.add(slot)
             output_title += (
                 f"->{len(group_ids)} exposure groups copied from {Path(param).name}"
             )
@@ -348,10 +401,10 @@ def main(args):
         new_jobID = project.save_external_result(
             workspace_uid=args.workspaceID,
             dataset=data,
-            type="particle",
-            name="particles",
+            type=input_type,
+            name=input_type,
             slots=list(output_slots),
-            passthrough=(job.uid, "particles"),
+            passthrough=(job.uid, group_name_to_load),
             title=f"{args.jobID}" + output_title,
         )
         if args.verbose > 1:
@@ -389,6 +442,13 @@ def add_args(parser):
         metavar="<Jxx>",
         help="input cryosparc job id",
         default=None,
+    )
+    parser.add_argument(
+        "--groupIndex",
+        type=int,
+        metavar="<n>",
+        help="the output group index of the input cryosparc job",
+        default=0,
     )
 
     parser.add_argument(
@@ -459,10 +519,13 @@ def check_args(args, parser):
     args.all_options = [
         o
         for o in all_options
-        if o not in "cpu jobID projectID saveLocal verbose workspaceID".split()
+        if o
+        not in "cpu groupIndex jobID projectID saveLocal verbose workspaceID".split()
     ]
 
-    if (args.projectID or args.workspaceID or args.jobID) and args.csFile:
+    if (
+        args.projectID or args.workspaceID or args.jobID or args.groupIndex
+    ) and args.csFile:
         msg = f"You should only specify options for CryoSPARC server (--projectID --workspaceID --jobID) or local file (--csFile), but not both"
         helicon.color_print(msg)
         raise ValueError(msg)
