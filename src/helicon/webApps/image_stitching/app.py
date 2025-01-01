@@ -162,7 +162,7 @@ with ui.sidebar(
                     "# CPUs",
                     min=1,
                     max=helicon.available_cpu(),
-                    value=4,
+                    value=8,
                     step=1,
                 )
                 ui.input_numeric(
@@ -415,9 +415,9 @@ def display_reconstruction_panel():
             ui.div(
                 ui.h3("Twist (°)", style="margin: 0;"),
                 ui.div(
-                    ui.input_numeric("twist_min", "min", value=0.1, step=0.1, width="70px"),
+                    ui.input_numeric("twist_min", "min", value=0.2, step=0.1, width="70px"),
                     ui.input_numeric("twist_max", "max", value=2.0, step=0.1, width="70px"),
-                    ui.input_numeric("twist_step", "step", value=1, step=0.1, width="70px"),
+                    ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px"),
                     style="display: flex; flex-direction: row; align-items: center; gap: 10px;",
                 ),
                 style="padding: 10px; border: 1px solid #ddd; border-radius: 5px; width: 33%;",
