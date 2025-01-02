@@ -346,6 +346,55 @@ def pad_to_size(data, shape):
     return ret
 
 
+def get_clip(image, y0, x0, height, width):
+    clip = np.zeros(shape=(height, width), dtype=image.dtype)
+    y0_clipped = max(0, y0)
+    x0_clipped = max(0, x0)
+    y1_clipped = min(y0 + height, image.shape[0])
+    x1_clipped = min(x0 + width, image.shape[1])
+    clip[y0_clipped - y0 : y1_clipped - y0, x0_clipped - x0 : x1_clipped - x0] = image[
+        y0_clipped:y1_clipped, x0_clipped:x1_clipped
+    ]
+    return clip
+
+
+def fft_crop(data, output_size=None):
+    if output_size is None or data.shape == output_size:
+        return data
+
+    assert data.ndim in (2, 3), f"ERROR: only 2-D images and 3-D maps are supported"
+    assert data.ndim == len(output_size)
+
+    if data.ndim == 2:
+        ny, nx = data.shape
+        ony, onx = output_size
+        assert ony <= ny and onx <= nx
+        fft = np.fft.rfft2(data)  # shape = (ny//2+1, nx//2+1)
+        fft_truncated = np.fft.fftshift(
+            np.fft.fftshift(fft, axes=0)[
+                ny // 2 - ony // 2 : ny // 2 + ony // 2, : onx // 2 + 1
+            ],
+            axes=0,
+        )
+        data_downnscaled = np.fft.irfft2(fft_truncated)
+        return data_downnscaled
+    elif data.ndim == 3:
+        nz, ny, nx = data.shape
+        onz, ony, onx = output_size
+        assert onz <= nz and ony <= ny and onx <= nx
+        fft = np.fft.rfftn(data)  # shape = (ny//2+1, nx//2+1)
+        fft_truncated = np.fft.fftshift(
+            np.fft.fftshift(fft, axes=(0, 1))[
+                nz // 2 - onz // 2 : nz // 2 + onz // 2,
+                ny // 2 - ony // 2 : ny // 2 + ony // 2,
+                : onx // 2 + 1,
+            ],
+            axes=(0, 1),
+        )
+        data_downnscaled = np.fft.irfft2(fft_truncated)
+        return data_downnscaled
+
+
 def fft_rescale(image, apix=1.0, cutoff_res=None, output_size=None):
     if cutoff_res:
         cutoff_res_y, cutoff_res_x = cutoff_res

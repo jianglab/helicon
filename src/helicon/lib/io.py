@@ -208,33 +208,39 @@ def extract_serialEM_pncc_beamshift(filename):
     return ""
 
 
-def EPU_micrograph_path_2_movie_xml_path(micrograph_path, movies_folder=""):
+def EPU_micrograph_path_2_movie_xml_path(micrograph_path, xml_folder=""):
+    if not hasattr(EPU_micrograph_path_2_movie_xml_path, "xml_files"):
+        EPU_micrograph_path_2_movie_xml_path.xml_files = {}
+    xml_files = EPU_micrograph_path_2_movie_xml_path.xml_files
+
+    folder = Path(xml_folder) if xml_folder else Path(micrograph_path).resolve().parent
+    if folder not in xml_files:
+        xml_files[folder] = list(folder.rglob("*.xml"))
+
     import re
 
     pattern = r"\d{21}_(FoilHole_\d{8}_Data_\d{8}_\d{8}_\d{8}_\d{6})"
     match = re.search(pattern, str(micrograph_path))
     if match:
         mid = match.group(1)
-        from pathlib import Path
-
-        folder = (
-            Path(movies_folder)
-            if movies_folder
-            else Path(micrograph_path).resolve().parent
-        )
-        pattern_xml = f"*{mid}*.xml"
-        xml_files = list(folder.glob(pattern_xml))
-        assert (
-            len(xml_files) > 0
-        ), f"cannot find the xml file ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
-        assert (
-            len(xml_files) == 1
-        ), f"find {len(xml_files)} xml files ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
-        return xml_files[0]
+        matched_xml_files = [f for f in xml_files[folder] if str(f).find(mid) != -1]
+        if not len(matched_xml_files):
+            pattern_xml = f"*{mid}*.xml"
+            color_print(
+                f"ERROR: cannot find the xml file ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
+            )
+            sys.exit(-1)
+        if len(matched_xml_files) != 1:
+            color_print(
+                f"ERROR: find {len(matched_xml_files)} xml files instead of 1 xml file ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
+            )
+            sys.exit(-1)
+        return matched_xml_files[0]
     else:
-        raise ValueError(
-            "ERROR: {str(micrograph_path)} filename is inconsistent with EPU output image filename pattern"
+        color_print(
+            f"ERROR: {str(micrograph_path)} filename is inconsistent with EPU output image filename pattern '{pattern}'"
         )
+        sys.exit(-1)
 
 
 def EPU_xml_2_beamshift(xml_file):
@@ -247,15 +253,16 @@ def EPU_xml_2_beamshift(xml_file):
     return beamshift
 
 
-def __process_cluster(args):
+def __process_cluster(X, n_clusters, min_cluster_size):
     from sklearn.metrics import silhouette_score
     from .analysis import AgglomerativeClusteringWithMinSize
 
-    n_clusters, X, min_cluster_size = args
     clustering_method = AgglomerativeClusteringWithMinSize(
         n_clusters=n_clusters, min_cluster_size=min_cluster_size
     )
-    cluster_labels = clustering_method.fit_predict(X)
+    cluster_labels = clustering_method.fit_predict(
+        X
+    )  # note: the number of clusters can be smaller than the requested number of clusters due to small clusters being merged
     if len(np.unique(cluster_labels)) > 1:
         silhouette_avg = silhouette_score(X, cluster_labels)
     else:
@@ -264,7 +271,7 @@ def __process_cluster(args):
 
 
 def assign_beamshifts_to_cluster(
-    beamshifts, min_cluster_size=4, range_n_clusters=range(2, 200), verbose=2
+    beamshifts, min_cluster_size=4, range_n_clusters=range(2, 200), cpu=-1, verbose=2
 ):
 
     X = np.array(beamshifts)
@@ -276,9 +283,11 @@ def assign_beamshifts_to_cluster(
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    with ProcessPoolExecutor(max_workers=available_cpu()) as executor:
+    with ProcessPoolExecutor(
+        max_workers=cpu if cpu > 0 else available_cpu()
+    ) as executor:
         futures = [
-            executor.submit(__process_cluster, (n, X, min_cluster_size))
+            executor.submit(__process_cluster, X, n, min_cluster_size)
             for n in range_n_clusters
         ]
 
@@ -287,24 +296,20 @@ def assign_beamshifts_to_cluster(
 
             if verbose > 2:
                 print(
-                    f"\t{n_clusters} clusters: silhouette score={silhouette_avg}{' *' if silhouette_avg >= best_score else ''}"
+                    f"\t{n_clusters} -> {len(np.unique(cluster_labels))} clusters: silhouette score={silhouette_avg}{' *' if silhouette_avg >= best_score else ''}"
                 )
 
             if silhouette_avg >= best_score:
                 best_score = silhouette_avg
-                best_n_clusters = n_clusters
                 best_cluster_labels = cluster_labels
 
     if verbose:
         print(
-            f"The optimal number of clusters is {best_n_clusters} with a silhouette score of {best_score:.2f}"
+            f"The optimal number of clusters is {len(np.unique(best_cluster_labels))} with a silhouette score of {best_score:.3f}"
         )
-    beamshifts_tuples = [tuple(v) for v in beamshifts]
-    data_cluster_dict = {
-        tuple(data_point): cluster_id + 1
-        for data_point, cluster_id in zip(beamshifts_tuples, best_cluster_labels)
-    }
-    return data_cluster_dict
+
+    cluster_labels = np.array(best_cluster_labels) + 1
+    return cluster_labels
 
 
 def euler_relion2eman(rot, tilt, psi):

@@ -79,6 +79,16 @@ def parse_param_str(param_str):
     return (name, d)
 
 
+def validate_param_dict(param, param_ref):
+    unsupported = {k: param[k] for k in param if k not in param_ref}
+    final_param = {
+        k: (type(param_ref[k])(param[k]) if k in param else param_ref[k])
+        for k in param_ref
+    }
+    changed = {k: final_param[k] for k in final_param if final_param[k] != param_ref[k]}
+    return final_param, changed, unsupported
+
+
 def has_shiny():
     try:
         from helicon.lib import shiny
@@ -671,7 +681,24 @@ def unique_attr_name(data, attr_prefix):
     return attr
 
 
-def first_matched_atrr(data, attrs):
+def all_matched_attrs(data, query_str):
+    import pandas as pd
+    from cryosparc.tools import Dataset
+
+    if isinstance(data, pd.DataFrame):
+        cols = data.columns
+    elif isinstance(data, Dataset):
+        cols = list(data.keys())
+    else:
+        raise TypeError(
+            f"first_matched_atrrs(data, query_str): data is a {type(data)} but it must be a pandas dataframe or a cryosparc.tools.Dataset"
+        )
+
+    ret = [col for col in cols if col.find(query_str) != -1]
+    return ret
+
+
+def first_matched_attr(data, attrs):
     ret = None
     for attr in attrs:
         if attr in data:

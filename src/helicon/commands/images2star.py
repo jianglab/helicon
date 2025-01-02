@@ -34,7 +34,7 @@ def main(args):
         optics = None
 
     if args.verbose:
-        image_name = helicon.first_matched_atrr(
+        image_name = helicon.first_matched_attr(
             data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split()
         )
         tmpCol = helicon.unique_attr_name(data, attr_prefix=image_name)
@@ -1884,7 +1884,7 @@ def main(args):
 
         elif option_name == "maskGold" and param:
             attrs_required = "rlnImageName rlnMicrographName".split()
-            attrSrc = helicon.first_matched_atrr(data, attrs_required)
+            attrSrc = helicon.first_matched_attr(data, attrs_required)
             if attrSrc is None:
                 helicon.color_print(
                     f"ERROR: the input does not have any of the columns: {' '.john(attrs_required)}"
@@ -2241,7 +2241,7 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)
 
-            image_name = helicon.first_matched_atrr(
+            image_name = helicon.first_matched_attr(
                 data,
                 attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split(),
             )
@@ -2339,7 +2339,7 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)
 
-            image_name = helicon.first_matched_atrr(
+            image_name = helicon.first_matched_attr(
                 data,
                 attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split(),
             )
@@ -2436,7 +2436,7 @@ def main(args):
                 helicon.color_print(f"\tERROR: data_optics block must be available")
                 sys.exit(-1)
 
-            image_name = helicon.first_matched_atrr(
+            image_name = helicon.first_matched_attr(
                 data,
                 attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split(),
             )
@@ -2503,7 +2503,7 @@ def main(args):
             if param in data:
                 fileAttr = param
             else:
-                fileAttr = helicon.first_matched_atrr(
+                fileAttr = helicon.first_matched_attr(
                     data,
                     attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split(),
                 )
