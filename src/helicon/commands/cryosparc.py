@@ -500,6 +500,7 @@ def main(args):
                 fp16=0,
                 micrographs_cs_file="",
                 micrographs_job_id="",
+                reuse_job_id="",
             )
             _, param_dict = helicon.parse_param_str(param)
             param_dict, param_changed, param_unsuppported = helicon.validate_param_dict(
@@ -528,6 +529,7 @@ def main(args):
             n_micrographs = int(param_dict["n_micrographs"])
             micrographs_job_id = param_dict["micrographs_job_id"]
             micrographs_cs_file = param_dict["micrographs_cs_file"]
+            reuse_job_id = param_dict["reuse_job_id"]
 
             output_slots.add("blob")
             output_slots.add("location")
@@ -665,6 +667,19 @@ def main(args):
                 else:
                     data["alignments2D/shift"][:] = [0, 0]
 
+            if "blob" not in data.prefixes():
+                data.add_fields(
+                    fields=[
+                        "blob/path",
+                        "blob/idx",
+                        "blob/shape",
+                        "blob/psize_A",
+                        "blob/sign",
+                        "blob/import_sig",
+                    ],
+                    dtypes=["|O", "<u4", ("<u4", (2,)), "<f4", "<f4", "<u8"],
+                )
+
             if args.projectID and not args.saveLocal:
                 output_job = project.create_external_job(
                     args.workspaceID,
@@ -701,6 +716,12 @@ def main(args):
                     # output_job.save_output("micrographs", data_micrographs)
                 output_job.mkdir("extract")
                 particle_dir = f"{output_job.uid}/extract"
+                reuse_result_folder = None
+                if reuse_job_id:
+                    reuse_job = project.find_job(reuse_job_id)
+                    source_path = Path(reuse_job.dir()) / "extract"
+                    if source_path.exists() and source_path.is_dir():
+                        reuse_result_folder = source_path
                 output_job.start()
             else:
                 output_job = None
@@ -735,8 +756,10 @@ def main(args):
             from concurrent.futures import ProcessPoolExecutor, as_completed
 
             with ProcessPoolExecutor(max_workers=args.cpu) as executor:
+                n_skipped = 0
                 futures = []
-                for task in tasks:
+                results = []
+                for ti, task in enumerate(tasks):
                     (
                         data,
                         mid,
@@ -751,7 +774,55 @@ def main(args):
                         fp16,
                     ) = task
                     subset = data.query({"location/micrograph_uid": mid})
-                    executor.submit(
+
+                    micrograph_path = subset["location/micrograph_path"][0]
+                    skip = False
+                    if reuse_result_folder:
+                        source_file = Path(
+                            reuse_result_folder / f"{Path(micrograph_path).stem}.mrcs"
+                        )
+                        if source_file.exists() and source_file.is_file():
+                            import mrcfile
+
+                            with mrcfile.open(source_file, header_only=True) as mrc:
+                                nx = mrc.header.nx
+                                ny = mrc.header.ny
+                                nz = mrc.header.nz
+                                if (
+                                    nz == len(subset)
+                                    and ny == nx
+                                    and ny == fft_crop_size
+                                ):
+                                    target_file = Path(
+                                        project.dir() / particle_dir / source_file.name
+                                    )
+                                    target_file.hardlink_to(source_file)
+                                    skip = True
+                                    n_skipped += 1
+
+                    if skip:
+                        apix = (
+                            subset["location/micrograph_psize_A"][0]
+                            * box_size
+                            / fft_crop_size
+                        )
+                        result = subset.copy()
+                        result["blob/path"] = f"{particle_dir}/{source_file.name}"
+                        result["blob/idx"] = np.arange(len(result))
+                        result["blob/shape"] = [(fft_crop_size, fft_crop_size)] * len(
+                            result
+                        )
+                        result["blob/psize_A"] = apix
+                        result["blob/sign"] = [sign] * len(result)
+                        result["blob/import_sig"] = [1] * len(result)
+                        results.append(result)
+                        if args.verbose > 1:
+                            print(
+                                f"\t{ti+1}/{len(tasks)}: reuses {str(source_file)}. skipped ({n_skipped})"
+                            )
+                        continue
+
+                    future = executor.submit(
                         extract_one_micrograph,
                         subset,
                         box_size,
@@ -764,19 +835,24 @@ def main(args):
                         normalize,
                         fp16,
                     )
-                results = []
-                count = 0
-                for i, future in enumerate(as_completed(futures)):
-                    result = future.result()
-                    count += len(result)
-                    msg = (
-                        f"{i+1}/{len(mids)}: {len(result):,} particles. Total={count:,}"
+                    futures.append(future)
+
+                if args.verbose > 1:
+                    print(
+                        f"\t{len(tasks)} micrographs: {n_skipped} skipped, {len(futures)} to go"
                     )
-                    if args.verbose > 2:
-                        print(f"\t{msg}")
-                        if output_job:
-                            output_job.log(msg, level="text")
-                    results.append(result)
+
+                if len(futures):
+                    from tqdm import tqdm
+
+                    for future in tqdm(
+                        as_completed(futures),
+                        total=len(futures),
+                        desc="Extracting",
+                        unit="micrograph",
+                    ):
+                        result = future.result()
+                        results.append(result)
 
             from cryosparc.dataset import Dataset
 
@@ -849,6 +925,7 @@ def extract_one_micrograph(
     fill_mode="random",
     normalize=True,
     fp16=False,
+    force=False,
 ):
     micrograph_path = subset["location/micrograph_path"][0]
     micrograph_file = input_project_folder / subset["location/micrograph_path"][0]
@@ -858,82 +935,99 @@ def extract_one_micrograph(
     )
     particle_file = output_project_folder / extracted_particles_filename
 
-    mic_w = subset["location/micrograph_shape"][:, 1]
-    mic_h = subset["location/micrograph_shape"][:, 0]
-    center_x_frac = subset["location/center_x_frac"]
-    center_y_frac = subset["location/center_y_frac"]
-
-    location_x = np.rint(center_x_frac * mic_w).astype(int)
-    location_y = np.rint(center_y_frac * mic_h).astype(int)
-
-    apix = subset["location/micrograph_psize_A"][0] * box_size / fft_crop_size
-
     import mrcfile
 
-    with mrcfile.open(str(micrograph_file)) as mrc_micrograph:
-        micrograph = mrc_micrograph.data
+    skip = False
+    if Path(particle_file).exists():
+        if force:
+            Path(particle_file).unlink()
+        else:
+            with mrcfile.open(particle_file, header_only=True) as mrc:
+                nx = mrc.header.nx
+                ny = mrc.header.ny
+                nz = mrc.header.nz
+                if nz == len(subset) and ny == nx and ny == fft_crop_size:
+                    skip = True
 
-    if sign < 0:
-        max_micrograph = np.max(micrograph)
-        min_micrograph = np.min(micrograph)
-        micrograph = max_micrograph - micrograph + min_micrograph
-    """
-    micrograph_lp = helicon.low_high_pass_filter(data=micrograph, low_pass_fraction=0.05)
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots()
-    ax.imshow(micrograph_lp, cmap='gray')
-    ax.scatter(location_x, location_y, color='red', s=10, label='Particle Locations')
-    ax.set_title('Micrograph with Particle Locations')
-    ax.set_xlabel('X Coordinate')
-    ax.set_ylabel('Y Coordinate')
-    ax.legend()
-    pdf_filename = particle_file.with_suffix(".pdf")
-    plt.savefig(pdf_filename, format='pdf')
-    plt.close(fig)
-    """
-    dtype = np.float16 if fp16 else np.float32
-    particles = np.zeros(shape=(len(subset), fft_crop_size, fft_crop_size), dtype=dtype)
+    if not skip:
+        mic_w = subset["location/micrograph_shape"][:, 1]
+        mic_h = subset["location/micrograph_shape"][:, 0]
+        center_x_frac = subset["location/center_x_frac"]
+        center_y_frac = subset["location/center_y_frac"]
 
-    x0_offsets = location_x - box_size // 2
-    y0_offsets = location_y - box_size // 2
+        location_x = np.rint(center_x_frac * mic_w).astype(int)
+        location_y = np.rint(center_y_frac * mic_h).astype(int)
 
-    for i in range(len(subset)):
-        clip = helicon.get_clip(
-            micrograph,
-            y0=y0_offsets[i],
-            x0=x0_offsets[i],
-            height=box_size,
-            width=box_size,
+        apix = subset["location/micrograph_psize_A"][0] * box_size / fft_crop_size
+
+        with mrcfile.open(str(micrograph_file)) as mrc_micrograph:
+            micrograph = mrc_micrograph.data
+
+        if sign < 0:
+            max_micrograph = np.max(micrograph)
+            min_micrograph = np.min(micrograph)
+            micrograph = max_micrograph - micrograph + min_micrograph
+        """
+        micrograph_lp = helicon.low_high_pass_filter(data=micrograph, low_pass_fraction=0.05)
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        ax.imshow(micrograph_lp, cmap='gray')
+        ax.scatter(location_x, location_y, color='red', s=10, label='Particle Locations')
+        ax.set_title('Micrograph with Particle Locations')
+        ax.set_xlabel('X Coordinate')
+        ax.set_ylabel('Y Coordinate')
+        ax.legend()
+        pdf_filename = particle_file.with_suffix(".pdf")
+        plt.savefig(pdf_filename, format='pdf')
+        plt.close(fig)
+        """
+        dtype = np.float16 if fp16 else np.float32
+        particles = np.zeros(
+            shape=(len(subset), fft_crop_size, fft_crop_size), dtype=dtype
         )
-        if clip.dtype not in [np.float32, np.float64]:
-            clip = clip.astype(np.float32)
 
-        if fill_mode is not None and np.count_nonzero(clip) < box_size * box_size:
-            zeros = clip == 0
-            if fill_mode == "mean":
-                clip[zeros] = np.mean(clip[~zeros])
-            elif fill_mode == "random":
-                non_zero_values = clip[~zeros]
-                clip[zeros] = np.random.normal(
-                    loc=np.mean(non_zero_values),
-                    scale=np.std(non_zero_values),
-                    size=np.count_nonzero(zeros),
+        x0_offsets = location_x - box_size // 2
+        y0_offsets = location_y - box_size // 2
+
+        for i in range(len(subset)):
+            clip = helicon.get_clip(
+                micrograph,
+                y0=y0_offsets[i],
+                x0=x0_offsets[i],
+                height=box_size,
+                width=box_size,
+            )
+            if clip.dtype not in [np.float32, np.float64]:
+                clip = clip.astype(np.float32)
+
+            if fill_mode is not None and np.count_nonzero(clip) < box_size * box_size:
+                zeros = clip == 0
+                if fill_mode == "mean":
+                    clip[zeros] = np.mean(clip[~zeros])
+                elif fill_mode == "random":
+                    non_zero_values = clip[~zeros]
+                    clip[zeros] = np.random.normal(
+                        loc=np.mean(non_zero_values),
+                        scale=np.std(non_zero_values),
+                        size=np.count_nonzero(zeros),
+                    )
+
+            if fft_crop_size < box_size:
+                clip = helicon.fft_crop(
+                    clip, output_size=(fft_crop_size, fft_crop_size)
                 )
 
-        if fft_crop_size < box_size:
-            clip = helicon.fft_crop(clip, output_size=(fft_crop_size, fft_crop_size))
+            if normalize:
+                std = np.std(clip)
+                if std:
+                    mean = np.mean(clip)
+                    clip = (clip - mean) / std
 
-        if normalize:
-            std = np.std(clip)
-            if std:
-                mean = np.mean(clip)
-                clip = (clip - mean) / std
+            particles[i] = clip.astype(dtype)
 
-        particles[i] = clip.astype(dtype)
-
-    with mrcfile.new(particle_file, overwrite=True) as mrc_output:
-        mrc_output.set_data(particles)
-        mrc_output.voxel_size = (apix, apix, apix)
+        with mrcfile.new(particle_file, overwrite=True) as mrc_output:
+            mrc_output.set_data(particles)
+            mrc_output.voxel_size = (apix, apix, apix)
 
     ret = subset.copy()
     ret["blob/path"] = str(extracted_particles_filename)
@@ -941,6 +1035,7 @@ def extract_one_micrograph(
     ret["blob/shape"] = [(fft_crop_size, fft_crop_size)] * len(ret)
     ret["blob/psize_A"] = apix
     ret["blob/sign"] = [sign] * len(ret)
+    ret["blob/import_sig"] = [1] * len(ret)
     return ret
 
 
@@ -1020,7 +1115,7 @@ def add_args(parser):
     parser.add_argument(
         "--extractParticles",
         type=str,
-        metavar="box_size=<n>:fft_crop_size=<n>[:recenter=<0|1>][replace_ctf=<0|1>][normalize=<0|1>][fill_mode=<mean|random>][sign=<-1|1>][n_micrographs=<-1|n>][fp16=<0|1>][:<micrographs_cs_file=filename>|<micrographs_job_id=JXXX>]",
+        metavar="box_size=<n>:fft_crop_size=<n>[:recenter=<0|1>][replace_ctf=<0|1>][normalize=<0|1>][fill_mode=<mean|random>][sign=<-1|1>][n_micrographs=<-1|n>][fp16=<0|1>][:micrographs_cs_file=<filename>|micrographs_job_id=<JXXX>][reuse_job_id=<JXXX>]",
         help="split the dataset by micrograph. default to %(default)s",
         default="",
     )
