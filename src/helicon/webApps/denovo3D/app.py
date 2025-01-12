@@ -519,8 +519,8 @@ with ui.div(
         with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
-            ui.input_numeric("twist_min", "min", value=0.1, step=0.1, width="70px")
-            ui.input_numeric("twist_max", "max", value=2.0, step=0.1, width="70px")
+            ui.input_numeric("twist_min", "min", value=1.2, step=0.1, width="70px")
+            ui.input_numeric("twist_max", "max", value=1.2, step=0.1, width="70px")
             ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px")
 
     with ui.card(style="height: 115px"):
@@ -1255,6 +1255,8 @@ def display_denovo3D_projections():
 
         label_x = f"{ri+1}: X|score={score:.4f}|pitch={int(round(rise*360/abs(twist))):,}Å|twist={round(twist,3)}°|rise={round(rise,6)}Å"
         labels += [f"Input image: {selected_images_labels()[0]}", label_x, f"{ri+1}: Z"]
+
+        rec3d_z_sections = helicon.pad_to_size(rec3d_z_sections, shape=rec3d_x_proj.shape)
         images += [query_image_padded, rec3d_x_proj, rec3d_z_sections]
 
     reconstructed_projection_labels.set(labels)
