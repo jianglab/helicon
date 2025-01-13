@@ -498,7 +498,7 @@ with ui.div(
             "Vertical crop (pixel)",
             min=32,
             max=256,
-            value=0,
+            value=32,
             step=2,
         )
 
@@ -507,9 +507,15 @@ with ui.div(
             "Horizontal crop (pixel)",
             min=32,
             max=256,
-            value=0,
+            value=256,
             step=2,
         )
+
+
+    ui.input_task_button(
+    "auto_transform", label="Auto Transform", style="width: 115px; height: 80px;"
+    )
+
 
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -590,18 +596,53 @@ def display_denovo3D_scores():
     return fig
 
 
-with ui.div(
-    style="max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
-):
-    helicon.shiny.image_select(
-        id="display_reconstructed_projections",
-        label=reactive.value("Reconstructed map projections:"),
-        images=reconstructed_projection_images,
-        image_labels=reconstructed_projection_labels,
-        image_size=input.selected_image_display_size,
-        justification="left",
-        enable_selection=False,
-    )
+
+@render.ui
+@reactive.event(reconstructed_projection_images, reconstructed_projection_labels)
+def image_label_pairs():
+
+    req(len(reconstructed_projection_images()))
+    img_list = reconstructed_projection_images()  # Your reactive images
+    label_list = reconstructed_projection_labels()  # Your reactive labels
+
+    from helicon import encode_numpy, encode_PIL_Image
+    # Create pairs of labels and images
+    pairs = []
+    for img, label_value in zip(img_list, label_list):
+        height, width = img.shape
+        img = encode_numpy(img)
+        label_value = str(label_value)
+        pairs.extend([
+            ui.div(
+                {"class": "label-row", "style": "margin: 10px 0;"},
+                ui.h4(label_value)
+            ),
+            # Image row
+            ui.div(
+                {"class": "image-row", "style":"max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"},
+                ui.img({
+                    "src": img,
+                    #"width": str(width),  # Original width
+                    #"height": str(height),
+                    "style": "max-width: 100%; height: auto;"
+                })
+            )
+        ])
+    
+    return ui.div(pairs)
+
+#with ui.div(
+#    style="max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
+#):
+#    helicon.shiny.image_select(
+#        id="display_reconstructed_projections",
+#        label=reactive.value("Reconstructed map projections:"),
+#        images=reconstructed_projection_images,
+#        image_labels=reconstructed_projection_labels,
+#        image_size=input.selected_image_display_size,
+#        justification="left",
+#        enable_selection=False,
+#    )
 
 
 @render.ui
@@ -952,7 +993,7 @@ def threshold_selected_images():
 
 
 @reactive.effect
-@reactive.event(selected_images_thresholded)
+@reactive.event(input.auto_transform)
 def update_selected_image_rotation_shift_diameter():
     req(all_images())
     req(len(selected_images_thresholded()))
