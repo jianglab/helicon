@@ -300,6 +300,7 @@ with ui.div(style="display: flex; flex-direction: row; align-items: flex-start; 
             req(len(selected_images_labels()))
             print(selected_images_labels())
             labels = selected_images_labels().copy()
+            print(len(labels))
             for i,idx in enumerate(labels):
                 curr_t_ui_counter=t_ui_counter()
                 #ui.remove_ui(selector=f"t_ui_group_{idx}_card", multiple=True)

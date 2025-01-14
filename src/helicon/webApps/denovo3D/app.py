@@ -272,7 +272,7 @@ with ui.sidebar(
                     image_labels=displayed_image_labels,
                     image_size=reactive.value(128),
                     initial_selected_indices=initial_selected_image_indices,
-                    allow_multiple_selection=False,
+                    allow_multiple_selection=True,
                 )
 
                 @render.download(
@@ -730,6 +730,46 @@ ui.HTML(
 )
 
 
+# below are the code of the reactive function
+
+
+def transformation_ui_group(prefix):
+    return shiny.ui.card(shiny.ui.layout_columns(
+        ui.input_slider(
+            prefix+"_pre_rotation",
+            "Rotation (°)",
+            min=-45,
+            max=45,
+            value=0,
+            step=0.1,
+        ),       
+        ui.input_slider(
+            prefix+"_shift_x",
+            "Horizontal shift (pixel)",
+            min=-100,
+            max=100,
+            value=0,
+            step=1,
+        ),
+        ui.input_slider(
+            prefix+"_shift_y",
+            "Vertical shift (pixel)",
+            min=-100,
+            max=100,
+            value=0,
+            step=1,
+        ),
+        # ui.input_slider(
+            # prefix+"_vertical_crop_size",
+            # "Vertical crop (pixel)",
+            # min=32,
+            # max=256,
+            # value=0,
+            # step=2,
+        # ),
+        col_widths=4),id=f"{prefix}_card")
+
+
 @reactive.effect
 @reactive.event(input.input_mode_images)
 def reset_input_data_ui():
@@ -992,6 +1032,7 @@ def threshold_selected_images():
     selected_images_thresholded.set(tmp)
 
 
+# change from selected_images_thresholded to auto_transform
 @reactive.effect
 @reactive.event(input.auto_transform)
 def update_selected_image_rotation_shift_diameter():
