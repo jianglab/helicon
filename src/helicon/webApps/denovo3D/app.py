@@ -33,6 +33,21 @@ selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
 selected_images_title = reactive.value("Selected image:")
 selected_images_labels = reactive.value([])
 
+t_ui_counter = reactive.value(0)
+selected_images_rotated_shifted = reactive.value([])
+transformed_images_displayed = reactive.value([])
+transformed_images_title = reactive.value("Transformed selected images:")
+transformed_images_labels = reactive.value([])
+transformed_images_links = reactive.value([])
+transformed_images_vertical_display_size = reactive.value(128)
+transformed_images_x_offsets = reactive.value([])
+
+stitched_image_displayed = reactive.value([])
+stitched_image_title = reactive.value("Stitched image:")
+stitched_image_labels = reactive.value([])
+stitched_image_links = reactive.value([])
+stitched_image_vertical_display_size = reactive.value(128)
+
 reconstrunction_results = reactive.value([])
 reconstructed_projection_images = reactive.value([])
 reconstructed_projection_labels = reactive.value([])
@@ -457,61 +472,124 @@ ui.h1(title, style="font-weight: bold;")
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
-    helicon.shiny.image_select(
-        id="display_selected_image",
-        label=selected_images_title,
-        images=selected_images_thresholded_rotated_shifted_cropped,
-        image_labels=selected_images_labels,
-        image_size=input.selected_image_display_size,
-        justification="left",
-        enable_selection=False,
-        display_dashed_line=True,
-    )
 
-    with ui.layout_columns(col_widths=4):
-        ui.input_slider(
-            "pre_rotation",
-            "Rotation (°)",
-            min=-45,
-            max=45,
-            value=0,
-            step=0.1,
+    @render.ui
+    @reactive.event(selected_images_original, ignore_init=True)
+    def generate_image_transformation_uis():
+        req(len(displayed_images()))
+        req(0 <= min(input.select_image()))
+        req(max(input.select_image()) < len(displayed_images()))
+        n_images_selected = len(selected_images_original())
+
+        if n_images_selected <= 1:
+            print(selected_images_labels())
+            return ui.div(            
+                helicon.shiny.image_gallery(
+                    id="display_selected_image",
+                    label=selected_images_title,
+                    images=selected_images_thresholded_rotated_shifted_cropped,
+                    image_labels=selected_images_labels,
+                    image_size=input.selected_image_display_size,
+                    justification="left",
+                    enable_selection=False,
+                    display_dashed_line=True,
+                ),
+                # Transformation controls
+                transformation_ui_single(),
+                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+            )
+        else:
+            # Create main container
+            container = ui.div(
+                style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"
+            )
+
+            # First, display individual transformed images
+            container.append(
+                helicon.shiny.image_select(
+                    id="display_selected_image",
+                    label=selected_images_title,
+                    images=selected_images_rotated_shifted,
+                    image_labels=selected_images_labels,
+                    image_size=stitched_image_vertical_display_size,
+                    justification="left",
+                    enable_selection=False,
+                )
+            )
+
+            # Add transformation controls for each image
+            for i, label in enumerate(selected_images_labels()):
+                curr_t_ui_counter = t_ui_counter() + i
+
+                # Add transformation UI group
+                container.append(
+                    shiny.ui.row(
+                        transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}")
+                    )
+                )
+
+                # Setup reactive bindings
+                id_rotation = f"t_ui_group_{curr_t_ui_counter}_pre_rotation"
+                id_x_shift = f"t_ui_group_{curr_t_ui_counter}_shift_x"
+                id_y_shift = f"t_ui_group_{curr_t_ui_counter}_shift_y"
+
+                @reactive.effect
+                @reactive.event(input[id_rotation], input[id_y_shift])
+                def transform_selected_images(i=i, id_rotation=id_rotation, id_y_shift=id_y_shift):
+                    req(len(selected_images_original()))
+                    rotated = selected_images_rotated_shifted().copy()
+                    if input[id_rotation]() != 0 or input[id_y_shift]() != 0:
+                        rotated[i] = helicon.transform_image(
+                            image=selected_images_original()[i].copy(),
+                            rotation=input[id_rotation](),
+                            post_translation=(input[id_y_shift](), 0)
+                        )
+                    selected_images_rotated_shifted.set(rotated)
+                    print(f"rot shift {i} done")
+
+                @reactive.effect
+                @reactive.event(selected_images_rotated_shifted, input[id_x_shift])
+                def update_transformed_images_displayed(x_shift_i=i, id_x_shift=id_x_shift):
+                    req(len(selected_images_rotated_shifted()))
+
+                    images_displayed = []
+                    images_displayed_labels = []
+                    images_displayed_links = []
+
+                    curr_x_offsets = transformed_images_x_offsets().copy()
+                    ny, nx = np.shape(selected_images_rotated_shifted()[0])
+
+                    image_work = np.zeros((ny, nx*len(selected_images_rotated_shifted())))
+                    for img_i, transformed_img in enumerate(selected_images_rotated_shifted()):
+                        if img_i == x_shift_i:
+                            image_work[:, nx*img_i+input[id_x_shift]():nx*(img_i+1)+input[id_x_shift]()] = transformed_img
+                            curr_x_offsets[x_shift_i] = input[id_x_shift]()
+                        else:
+                            image_work[:, nx*img_i:nx*(img_i+1)] = transformed_img
+
+                    images_displayed.append(image_work)
+                    images_displayed_labels.append("Combined images")
+                    images_displayed_links.append("")
+
+                    transformed_images_displayed.set(images_displayed)
+                    transformed_images_labels.set(images_displayed_labels)
+                    transformed_images_links.set(images_displayed_links)
+                    transformed_images_x_offsets.set(curr_x_offsets)
+
+        # Add stitch button
+        container.append(
+            ui.input_task_button(
+                "perform_stitching",
+                label="Stitch Images",
+                style="width: 100%; margin-top: 10px;"
+            )
         )
 
-        ui.input_slider("threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1)
-
-        ui.input_slider(
-            "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
-        )
-
-        ui.input_slider(
-            "shift_y",
-            "Vertical shift (Å)",
-            min=-100,
-            max=100,
-            value=0,
-            step=0.1,
-        )
-
-        ui.input_slider(
-            "vertical_crop_size",
-            "Vertical crop (pixel)",
-            min=32,
-            max=256,
-            value=32,
-            step=2,
-        )
-
-        ui.input_slider(
-            "horizontal_crop_size",
-            "Horizontal crop (pixel)",
-            min=32,
-            max=256,
-            value=256,
-            step=2,
-        )
-
-
+        # Update counter
+        t_ui_counter.set(t_ui_counter() + n_images_selected)
+        
+        return container
+    
     ui.input_task_button(
     "auto_transform", label="Auto Transform", style="width: 115px; height: 80px;"
     )
@@ -731,6 +809,53 @@ ui.HTML(
 
 
 # below are the code of the reactive function
+
+
+def transformation_ui_single():
+    return shiny.ui.card(shiny.ui.layout_columns(
+         ui.input_slider(
+                "pre_rotation",
+                "Rotation (°)",
+                min=-45,
+                max=45,
+                value=0,
+                step=0.1,
+            ),
+
+            ui.input_slider("threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1),
+
+            ui.input_slider(
+                "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
+            ),
+
+            ui.input_slider(
+                "shift_y",
+                "Vertical shift (Å)",
+                min=-100,
+                max=100,
+                value=0,
+                step=0.1,
+            ),
+
+            ui.input_slider(
+                "vertical_crop_size",
+                "Vertical crop (pixel)",
+                min=32,
+                max=256,
+                value=32,
+                step=2,
+            ),
+
+            ui.input_slider(
+                "horizontal_crop_size",
+                "Horizontal crop (pixel)",
+                min=32,
+                max=256,
+                value=256,
+                step=2,
+            ),
+        col_widths=4),
+    id=f"single_card_ui")
 
 
 def transformation_ui_group(prefix):
@@ -1034,7 +1159,7 @@ def threshold_selected_images():
 
 # change from selected_images_thresholded to auto_transform
 @reactive.effect
-@reactive.event(input.auto_transform)
+@reactive.event(input.selected_images_thresholded)
 def update_selected_image_rotation_shift_diameter():
     req(all_images())
     req(len(selected_images_thresholded()))

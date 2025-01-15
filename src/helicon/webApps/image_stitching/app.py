@@ -303,6 +303,7 @@ with ui.div(style="display: flex; flex-direction: row; align-items: flex-start; 
             print(len(labels))
             for i,idx in enumerate(labels):
                 curr_t_ui_counter=t_ui_counter()
+                print(f'current counter {curr_t_ui_counter}')
                 #ui.remove_ui(selector=f"t_ui_group_{idx}_card", multiple=True)
                 #selected_transformation(f"st_{idx}")
                 ui.insert_ui(shiny.ui.row(transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}")),
