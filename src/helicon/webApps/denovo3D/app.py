@@ -48,6 +48,9 @@ stitched_image_labels = reactive.value([])
 stitched_image_links = reactive.value([])
 stitched_image_vertical_display_size = reactive.value(128)
 
+initial_image = reactive.value([])
+display_initial_image_value = reactive.value([''])
+
 reconstrunction_results = reactive.value([])
 reconstructed_projection_images = reactive.value([])
 reconstructed_projection_labels = reactive.value([])
@@ -475,30 +478,6 @@ with ui.div(
 ):
     
     @shiny.render.ui
-    @reactive.event(selected_images_thresholded_rotated_shifted_cropped, ignore_init=False)
-    def generate_image_gallery_single():
-        req(len(displayed_images()))
-        req(0 <= min(input.select_image()))
-        req(max(input.select_image()) < len(displayed_images()))
-        n_images_selected = len(selected_images_original())
-
-        # Return None early if condition isn't met
-        if n_images_selected != 1:
-            return None
-            
-        # Only proceed with accessing other reactive values if we have exactly 1 image
-        return helicon.shiny.image_gallery(
-            id="display_selected_image",
-            label=selected_images_title,
-            images=selected_images_thresholded_rotated_shifted_cropped,
-            image_labels=selected_images_labels,
-            image_size=input.selected_image_display_size,
-            justification="left",
-            enable_selection=False,
-            display_dashed_line=True,
-        )
-    
-    @shiny.render.ui
     @reactive.event(selected_images_rotated_shifted, input.image_stitching, ignore_init=False)
     def generate_image_gallery_mutiple():
         req(len(displayed_images()))
@@ -525,19 +504,14 @@ with ui.div(
     
     @shiny.render.ui
     @reactive.event(selected_images_original, ignore_init=False)
-    def generate_image_transformation_uis():
+    def generate_image_transformation_multiple():
         req(len(displayed_images()))
         req(0 <= min(input.select_image()))
         req(max(input.select_image()) < len(displayed_images()))
         n_images_selected = len(selected_images_original())
 
         if n_images_selected == 1:
-            return ui.div(            
-                
-                # Transformation controls
-                transformation_ui_single(),
-                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
-            )
+            return None
         else:
             # Create main container
             container = ui.div(
@@ -664,7 +638,6 @@ def display_stitched_image():
     n_images_selected = len(selected_images_original())
     if n_images_selected == 1:
         return None
-    print(len(stitched_image_displayed()),'stitched image')
     return helicon.shiny.image_gallery(
             id="display_stitched_image",
             label=stitched_image_title,
@@ -675,6 +648,49 @@ def display_stitched_image():
             justification="left",
             enable_selection=False
         )
+with ui.div(
+    style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+):
+    @shiny.render.ui
+    @reactive.event(selected_images_thresholded_rotated_shifted_cropped, initial_image, ignore_init=False)
+    def generate_image_gallery_single():
+        req(len(initial_image()))
+        req(0 <= min(input.select_image()))
+        req(max(input.select_image()) < len(displayed_images()))
+        n_images_selected = len(initial_image())
+        # To check whether there is image for transformation and display
+        if n_images_selected == 1:
+            return helicon.shiny.image_gallery(
+                id="display_selected_image",
+                label=selected_images_title,
+                images=selected_images_thresholded_rotated_shifted_cropped,
+                image_labels=display_initial_image_value,
+                image_size=input.selected_image_display_size,
+                justification="left",
+                enable_selection=False,
+                display_dashed_line=True,
+            )
+        else:
+            return None
+
+
+    @shiny.render.ui
+    @reactive.event(initial_image, ignore_init=False)
+    def generate_image_transformation_single():
+        req(len(initial_image()))
+        req(0 <= min(input.select_image()))
+        req(max(input.select_image()) < len(displayed_images()))
+        n_images_selected = len(initial_image())
+        # To check whether there is image for transformation and display
+        if n_images_selected == 1:
+            return ui.div(            
+
+                # Transformation controls
+                transformation_ui_single(),
+                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+            )
+        else:
+            return None
 
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -861,6 +877,8 @@ def download_denovo3D_output_map():
 
     ny, nx = input_data().data[0].shape
     apix = input_data().apix
+    #ny, nx = 200,200
+    #apix = 5
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
         apix=apix3d,
@@ -1154,6 +1172,12 @@ def update_all_images_from_3d_input_data():
         axial_rotation=input.output_axial_rotation(),
         tilt=input.output_tilt(),
     )
+
+    #import mrcfile
+    #with mrcfile.new('/mnt/f/Pili_input.mrc', overwrite=True) as mrc:
+    #                        mrc.set_data(m)
+    #                        mrc.voxel_size = input.output_apix()
+
     map_symmetrized.set(m)
 
     proj = np.transpose(m.sum(axis=-1))[:, ::-1]
@@ -1219,6 +1243,37 @@ def update_selecte_images_orignal():
     )
     reconstrunction_results.set([])
 
+    
+
+
+@reactive.effect
+@reactive.event(selected_images_original)
+def set_initial_image():
+    req(len(selected_images_original()))
+    n_images_selected = len(selected_images_original())
+    
+    # Return None early if condition isn't met
+    if n_images_selected == 1:
+        initial_image.set(selected_images_original()) 
+    else:
+
+        initial_image.set([]) 
+
+        @reactive.effect
+        @reactive.event(stitched_image_displayed, input.threshold)
+        def set_stitched_image_initial():
+            req(len(stitched_image_displayed()))
+
+            
+            
+            initial_image.set(stitched_image_displayed()) 
+            print(len(initial_image()),'initial image')
+
+@reactive.effect
+@reactive.event(initial_image)
+def update_threshold_scale():
+    req(len(initial_image()))
+    images = initial_image()
     min_val = float(np.min([np.min(img) for img in images]))
     max_val = float(np.max([np.max(img) for img in images]))
     step_val = (max_val - min_val) / 100
@@ -1230,16 +1285,67 @@ def update_selecte_images_orignal():
         step=round(step_val, 3),
     )
 
-
 @reactive.effect
-@reactive.event(selected_images_original, input.threshold)
+@reactive.event(initial_image, input.threshold)
 def threshold_selected_images():
-    req(len(selected_images_original()))
+    req(len(initial_image()))
+
+    images = initial_image()
+    
     tmp = [
         helicon.threshold_data(img, thresh_value=input.threshold())
-        for img in selected_images_original()
+        for img in images
     ]
     selected_images_thresholded.set(tmp)
+
+
+
+def estimate_helix_rotation_center_diameter(
+    data, estimate_rotation=True, estimate_center=True, threshold=0
+):
+    """
+    Returns:
+        rotation (float): The rotation (degrees) needed to rotate the helix to horizontal direction.
+        shift_y (float): The post-rotation vertical shift (pixels) needed to shift the helix to the box center in vertical direction.
+        diameter (int): The estimated diameter (pixels) of the helix.
+    """
+    from skimage.measure import label, regionprops
+    from skimage.morphology import closing
+    import helicon
+
+    if estimate_rotation:
+        bw = closing(data > threshold, mode="ignore")
+        label_image = label(bw)
+        props = regionprops(label_image=label_image, intensity_image=data)
+        props.sort(key=lambda x: x.area, reverse=True)
+        angle = (
+            np.rad2deg(props[0].orientation) + 90
+        )  # relative to +x axis, counter-clockwise
+        if abs(angle) > 90:
+            angle -= 180
+        rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
+        data_rotated = helicon.transform_image(image=data, rotation=rotation)
+    else:
+        rotation = 0.0
+        data_rotated = data
+    
+
+    bw = closing(data_rotated > threshold, mode="ignore")
+    label_image = label(bw)
+
+    props = regionprops(label_image=label_image, intensity_image=data_rotated)
+    props.sort(key=lambda x: x.area, reverse=True)
+    minr, minc, maxr, maxc = props[0].bbox
+    diameter = maxr - minr + 1
+
+    if estimate_center:
+        center = props[0].centroid
+    else:
+        ny, nx = data.shape
+        center = (ny // 2, nx // 2)
+    shift_y = data.shape[0] // 2 - center[0]
+
+    return rotation, shift_y, diameter
 
 
 # change from selected_images_thresholded to auto_transform
@@ -1262,7 +1368,7 @@ def update_selected_image_rotation_shift_diameter():
         estimate_center = True
     tmp = np.array(
         [
-            helicon.estimate_helix_rotation_center_diameter(
+            estimate_helix_rotation_center_diameter(
                 img,
                 threshold=np.max(img) * 0.2,
                 estimate_rotation=estimate_rotation,
@@ -1292,10 +1398,10 @@ def update_selected_image_rotation_shift_diameter():
     ui.update_numeric(
         "vertical_crop_size",
         value=max(32, crop_size),
-        min=max(32, int(diameter) // 2 * 2),
-        max=ny,
+        min=min(32, int(diameter) // 2 * 2),
+        max= ny//2 * 2 ,
     )
-    ui.update_numeric("horizontal_crop_size", value=nx, min=32, max=nx)
+    ui.update_numeric("horizontal_crop_size", value=nx, min=32, max= nx//2 * 2)
 
 
 @reactive.effect
@@ -1393,6 +1499,10 @@ def update_stitched_image_displayed():
         
 
         result = compute.itk_stitch(temp_dir)
+    
+    result = result.astype(np.float32)
+    result = (result-result.mean())/result.std()
+    result = result/result.max()
     
 
     images_displayed.append(result)
