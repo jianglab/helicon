@@ -16,7 +16,7 @@ def main(args):
 
         subprocess.call(cmd, shell=True)
     except:
-        homephage = "https://jiang.bio.purdue.edu/helicon"
+        homephage = "https://jianglab.science.psu.edu/helicon"
         print(f"Please visit {homephage} for more information")
 
 

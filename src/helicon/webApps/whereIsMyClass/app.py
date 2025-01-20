@@ -197,17 +197,19 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 height="30vh",
                 width="100%",
             )
-        
+
         @reactive.effect
         def get_df_selected_helices():
             df_selected = display_helices_dataframe.data_view(selected=True)
-            df_selected_helixids = df_selected['helixID'].tolist()
+            df_selected_helixids = df_selected["helixID"].tolist()
             mask = params()["helixID"].astype(int).isin(df_selected_helixids)
             particles = params().loc[mask, :]
-            
-            class_indices = [int(i)-1 for i in input.marked_helices_classes()]
-            
-            helices = compute.select_classes(params=particles, class_indices=class_indices)
+
+            class_indices = [int(i) - 1 for i in input.marked_helices_classes()]
+
+            helices = compute.select_classes(
+                params=particles, class_indices=class_indices
+            )
             if len(helices):
                 filement_lengths = compute.get_filament_length(helices=helices)
                 segments_count = np.sum([abundance()[i] for i in class_indices])
@@ -226,9 +228,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
             enable_selection=False,
         )
 
-        with ui.layout_columns(
-            col_widths=6, style="align-items: flex-end;"
-        ):
+        with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
             ui.input_numeric(
                 "max_len",
                 "Maximal length (Å)",
@@ -249,7 +249,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 min=1,
                 value=100,
                 step=1,
-            )        
+            )
             ui.input_numeric(
                 "rise",
                 "Helical rise (Å)",
@@ -313,23 +313,23 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                         data.on_hover(plot_micrograph_on_hover)
 
                 return fig
-        
+
         @render_plotly
-        @reactive.event(pair_distances_df_selected, input.bins, input.max_pair_dist, input.rise)
+        @reactive.event(
+            pair_distances_df_selected, input.bins, input.max_pair_dist, input.rise
+        )
         def pair_distances_histogram_df_selected_display():
             req(input.bins() is not None and input.bins() > 0)
             req(input.max_pair_dist() is not None)
             req(input.rise() is not None and input.rise() > 0)
             fig = getattr(pair_distances_histogram_df_selected_display, "fig", None)
             data = pair_distances_df_selected()
-            
+
             (helices, filement_lengths, _) = df_selected_helices()
-            
+
             if len(helices):
                 class_indices = np.unique(
-                    np.concatenate(
-                        [h["rlnClassNumber"] for hi, h in helices]
-                    )
+                    np.concatenate([h["rlnClassNumber"] for hi, h in helices])
                 ).astype(int)
             else:
                 class_indices = []
@@ -361,10 +361,10 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
             )
             pair_distances_histogram_df_selected_display.fig = fig
 
-            return fig            
+            return fig
 
     ui.HTML(
-        "<i><p>Developed by the <a href='https://jiang.bio.purdue.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
+        "<i><p>Developed by the <a href='https://jianglab.science.psu.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
     )
 
 
@@ -416,6 +416,7 @@ def get_params_from_file():
             footer=None,
         )
         ui.modal_show(m)
+
 
 @reactive.effect
 @reactive.event(filepath_classes)

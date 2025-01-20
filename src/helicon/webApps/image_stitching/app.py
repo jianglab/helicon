@@ -13,7 +13,7 @@ import helicon
 
 from . import compute
 
-tmp_out_dir = tempfile.mkdtemp(dir='./')
+tmp_out_dir = tempfile.mkdtemp(dir="./")
 
 prev_t_ui_counter = reactive.value(0)
 t_ui_counter = reactive.value(0)
@@ -52,7 +52,7 @@ reconstrunction_results = reactive.value([])
 reconstructed_projection_images = reactive.value([])
 reconstructed_projection_labels = reactive.value([])
 reconstructed_map = reactive.value(None)
- 
+
 ui.head_content(ui.tags.title("Image Stitching"))
 helicon.shiny.google_analytics(id="G-ELN1JJVYYZ")
 helicon.shiny.setup_ajdustable_sidebar()
@@ -72,9 +72,12 @@ url_key = "empiar-10940_job010"
 with ui.sidebar(
     width="33vw", style="display: flex; flex-direction: column; height: 100%;"
 ):
-    with ui.navset_pill(id="tab"):  
+    with ui.navset_pill(id="tab"):
         with ui.nav_panel("Input 2D Images"):
-            with ui.div(id="input_image_files", style="display: flex; flex-direction: column; align-items: flex-start;"):
+            with ui.div(
+                id="input_image_files",
+                style="display: flex; flex-direction: column; align-items: flex-start;",
+            ):
                 ui.input_radio_buttons(
                     "input_mode_images",
                     "How to obtain the input images:",
@@ -82,22 +85,22 @@ with ui.sidebar(
                     selected="url",
                     inline=True,
                 )
-                
+
                 @render.ui
                 @reactive.event(input.input_mode_images)
                 def create_input_image_files_ui():
                     displayed_images.set([])
                     ret = []
-                    if input.input_mode_images() == 'upload':
+                    if input.input_mode_images() == "upload":
                         ret.append(
                             ui.input_file(
                                 "upload_images",
                                 "Upload the input images in MRC format (.mrcs, .mrc)",
                                 accept=[".mrcs", ".mrc"],
                                 placeholder="mrcs or mrc file",
-                            )                            
+                            )
                         )
-                    elif input.input_mode_images() == 'url':
+                    elif input.input_mode_images() == "url":
                         ret.append(
                             ui.input_text(
                                 "url_images",
@@ -106,8 +109,11 @@ with ui.sidebar(
                             )
                         )
                     return ret
-            
-            with ui.div(id="image-selection", style="max-height: 80vh; overflow-y: auto; display: flex; flex-direction: column; align-items: center;"):
+
+            with ui.div(
+                id="image-selection",
+                style="max-height: 80vh; overflow-y: auto; display: flex; flex-direction: column; align-items: center;",
+            ):
                 helicon.shiny.image_select(
                     id="select_image",
                     label=displayed_image_title,
@@ -115,7 +121,7 @@ with ui.sidebar(
                     image_labels=displayed_image_labels,
                     image_size=reactive.value(128),
                     initial_selected_indices=initial_selected_image_indices,
-                    allow_multiple_selection=True
+                    allow_multiple_selection=True,
                 )
 
                 @render.ui
@@ -123,9 +129,9 @@ with ui.sidebar(
                 def generate_ui_print_input_images():
                     req(input.show_gallery_print_button())
                     return ui.input_action_button(
-                            "print_input_images",
-                            "Print input images",
-                            onclick=""" 
+                        "print_input_images",
+                        "Print input images",
+                        onclick=""" 
                                         var w = window.open();
                                         w.document.write(document.head.outerHTML);
                                         var printContents = document.getElementById('select_image-show_image_gallery').innerHTML;
@@ -134,18 +140,18 @@ with ui.sidebar(
                                         w.document.close();
                                         w.focus();
                                     """,
-                            width="200px"
-                        )
-                        
+                        width="200px",
+                    )
+
         with ui.nav_panel("Parameters_stiching"):
-            with ui.layout_columns(
-                col_widths=6, style="align-items: flex-end;"
-            ):
+            with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
                 ui.input_checkbox(
                     "ignore_blank", "Ignore blank input images", value=True
                 )
                 ui.input_checkbox(
-                    "show_gallery_print_button", "Show image gallery print button", value=False
+                    "show_gallery_print_button",
+                    "Show image gallery print button",
+                    value=False,
                 )
         with ui.nav_panel("Parameters_LR"):
             with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
@@ -282,7 +288,9 @@ with ui.sidebar(
 title = "Helical Image Stitching"
 ui.h1(title, style="font-weight: bold;")
 
-with ui.div(style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"):
+with ui.div(
+    style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+):
     helicon.shiny.image_select(
         id="display_selected_image",
         label=selected_images_title,
@@ -292,66 +300,93 @@ with ui.div(style="display: flex; flex-direction: row; align-items: flex-start; 
         justification="left",
         enable_selection=False,
     )
-    
-    with ui.div(style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"):
+
+    with ui.div(
+        style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"
+    ):
+
         @reactive.effect
-        @reactive.event(selected_images_original,ignore_init=True)
+        @reactive.event(selected_images_original, ignore_init=True)
         def generate_image_transformation_uis():
             req(len(selected_images_labels()))
             print(selected_images_labels())
             labels = selected_images_labels().copy()
             print(len(labels))
-            for i,idx in enumerate(labels):
-                curr_t_ui_counter=t_ui_counter()
-                print(f'current counter {curr_t_ui_counter}')
-                #ui.remove_ui(selector=f"t_ui_group_{idx}_card", multiple=True)
-                #selected_transformation(f"st_{idx}")
-                ui.insert_ui(shiny.ui.row(transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}")),
-                    selector = "#perform_stitching",
-                    where = "beforeBegin")
+            for i, idx in enumerate(labels):
+                curr_t_ui_counter = t_ui_counter()
+                print(f"current counter {curr_t_ui_counter}")
+                # ui.remove_ui(selector=f"t_ui_group_{idx}_card", multiple=True)
+                # selected_transformation(f"st_{idx}")
+                ui.insert_ui(
+                    shiny.ui.row(
+                        transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}")
+                    ),
+                    selector="#perform_stitching",
+                    where="beforeBegin",
+                )
 
-                id_rotation = "t_ui_group_"+str(curr_t_ui_counter)+"_pre_rotation"
-                id_x_shift = "t_ui_group_"+str(curr_t_ui_counter)+"_shift_x"
-                id_y_shift = "t_ui_group_"+str(curr_t_ui_counter)+"_shift_y"
-        
+                id_rotation = "t_ui_group_" + str(curr_t_ui_counter) + "_pre_rotation"
+                id_x_shift = "t_ui_group_" + str(curr_t_ui_counter) + "_shift_x"
+                id_y_shift = "t_ui_group_" + str(curr_t_ui_counter) + "_shift_y"
+
                 @reactive.effect
                 @reactive.event(input[id_rotation], input[id_y_shift])
-                def transform_selected_images(i=i,id_rotation=id_rotation,id_y_shift=id_y_shift):
+                def transform_selected_images(
+                    i=i, id_rotation=id_rotation, id_y_shift=id_y_shift
+                ):
                     req(len(selected_images_original()))
-                    curr_img_idx=i
+                    curr_img_idx = i
                     print(f"listening to {id_rotation}, {id_y_shift}")
 
                     rotated = selected_images_rotated_shifted().copy()
-                    if input[id_rotation]()!=0 or input[id_y_shift]()!=0:
-                        rotated[curr_img_idx] = helicon.transform_image(image=selected_images_original()[curr_img_idx].copy(), rotation=input[id_rotation](), post_translation=(input[id_y_shift](), 0))
+                    if input[id_rotation]() != 0 or input[id_y_shift]() != 0:
+                        rotated[curr_img_idx] = helicon.transform_image(
+                            image=selected_images_original()[curr_img_idx].copy(),
+                            rotation=input[id_rotation](),
+                            post_translation=(input[id_y_shift](), 0),
+                        )
                     selected_images_rotated_shifted.set(rotated)
                     print("curr_img_idx = " + str(curr_img_idx))
                     print("curr_t_ui_counter = " + str(curr_t_ui_counter))
                     print(f"rot shift {i} done")
+
                 print(f"inserted t_ui_group_{curr_t_ui_counter}")
                 curr_t_ui_counter += 1
                 t_ui_counter.set(curr_t_ui_counter)
-            
+
                 @reactive.effect
                 @reactive.event(selected_images_rotated_shifted, input[id_x_shift])
-                def update_transformed_images_displayed(x_shift_i=i,id_x_shift=id_x_shift):
+                def update_transformed_images_displayed(
+                    x_shift_i=i, id_x_shift=id_x_shift
+                ):
                     req(len(selected_images_rotated_shifted()))
-    
+
                     images_displayed = []
                     images_displayed_labels = []
                     images_displayed_links = []
-                
+
                     curr_x_offsets = transformed_images_x_offsets().copy()
-                    ny,nx = np.shape(selected_images_rotated_shifted()[0])
-    
-                    image_work = np.zeros((ny,nx*len(selected_images_rotated_shifted())))
-                    for img_i, transformed_img in enumerate(selected_images_rotated_shifted()):
+                    ny, nx = np.shape(selected_images_rotated_shifted()[0])
+
+                    image_work = np.zeros(
+                        (ny, nx * len(selected_images_rotated_shifted()))
+                    )
+                    for img_i, transformed_img in enumerate(
+                        selected_images_rotated_shifted()
+                    ):
                         if img_i == x_shift_i:
-                            image_work[:,nx*img_i+input[id_x_shift]():nx*(img_i+1)+input[id_x_shift]()]=transformed_img
+                            image_work[
+                                :,
+                                nx * img_i
+                                + input[id_x_shift]() : nx * (img_i + 1)
+                                + input[id_x_shift](),
+                            ] = transformed_img
                             curr_x_offsets[x_shift_i] = input[id_x_shift]()
                         else:
-                            image_work[:,nx*img_i:nx*(img_i+1)]=transformed_img
-    
+                            image_work[:, nx * img_i : nx * (img_i + 1)] = (
+                                transformed_img
+                            )
+
                     images_displayed.append(image_work)
                     images_displayed_labels.append(f"Selected images:")
                     images_displayed_links.append("")
@@ -359,16 +394,15 @@ with ui.div(style="display: flex; flex-direction: row; align-items: flex-start; 
                     transformed_images_displayed.set(images_displayed)
                     transformed_images_labels.set(images_displayed_labels)
                     transformed_images_links.set(images_displayed_links)
-                
+
                     transformed_images_x_offsets.set(curr_x_offsets)
 
-
-        
         @render.ui
         @reactive.event(input.select_image)
         def display_action_button():
             req(len(selected_images_rotated_shifted()))
             return ui.input_task_button("perform_stitching", label="Stitch!")
+
 
 with ui.div(style="max-height: 50vh; overflow-y: auto;"):
     helicon.shiny.image_select(
@@ -379,9 +413,9 @@ with ui.div(style="max-height: 50vh; overflow-y: auto;"):
         image_links=transformed_images_links,
         image_size=transformed_images_vertical_display_size,
         justification="left",
-        enable_selection=False
+        enable_selection=False,
     )
-        
+
 with ui.div(style="max-height: 50vh; overflow-y: auto;"):
     helicon.shiny.image_select(
         id="display_stitched_image",
@@ -391,21 +425,24 @@ with ui.div(style="max-height: 50vh; overflow-y: auto;"):
         image_links=stitched_image_links,
         image_size=stitched_image_vertical_display_size,
         justification="left",
-        enable_selection=False
+        enable_selection=False,
     )
 
 with ui.layout_columns(col_widths=2):
-    @render.download(label = "Download stitched image")
+
+    @render.download(label="Download stitched image")
     @reactive.event(stitched_image_displayed)
     def download_stitched_image():
         req(len(stitched_image_displayed()))
         import tempfile
         import mrcfile
-        with mrcfile.new(tmp_out_dir+'/stitched.mrc',overwrite=True) as o_mrc:
-            data = np.array(stitched_image_displayed()).astype(np.float32)/255
-            o_mrc.set_data(np.array(data,dtype=np.float32))
-            o_mrc.voxel_size=image_apix()
-            return tmp_out_dir+'/stitched.mrc'
+
+        with mrcfile.new(tmp_out_dir + "/stitched.mrc", overwrite=True) as o_mrc:
+            data = np.array(stitched_image_displayed()).astype(np.float32) / 255
+            o_mrc.set_data(np.array(data, dtype=np.float32))
+            o_mrc.voxel_size = image_apix()
+            return tmp_out_dir + "/stitched.mrc"
+
 
 @render.ui
 @reactive.event(stitched_image_displayed)
@@ -417,9 +454,15 @@ def display_reconstruction_panel():
             ui.div(
                 ui.h3("Twist (°)", style="margin: 0;"),
                 ui.div(
-                    ui.input_numeric("twist_min", "min", value=0.2, step=0.1, width="70px"),
-                    ui.input_numeric("twist_max", "max", value=2.0, step=0.1, width="70px"),
-                    ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px"),
+                    ui.input_numeric(
+                        "twist_min", "min", value=0.2, step=0.1, width="70px"
+                    ),
+                    ui.input_numeric(
+                        "twist_max", "max", value=2.0, step=0.1, width="70px"
+                    ),
+                    ui.input_numeric(
+                        "twist_step", "step", value=0.1, step=0.1, width="70px"
+                    ),
                     style="display: flex; flex-direction: row; align-items: center; gap: 10px;",
                 ),
                 style="padding: 10px; border: 1px solid #ddd; border-radius: 5px; width: 33%;",
@@ -427,9 +470,15 @@ def display_reconstruction_panel():
             ui.div(
                 ui.h3("Rise (Å)", style="margin: 0;"),
                 ui.div(
-                    ui.input_numeric("rise_min", "min", value=4.75, step=0.1, width="70px"),
-                    ui.input_numeric("rise_max", "max", value=4.75, step=0.1, width="70px"),
-                    ui.input_numeric("rise_step", "step", value=0.1, step=0.01, width="70px"),
+                    ui.input_numeric(
+                        "rise_min", "min", value=4.75, step=0.1, width="70px"
+                    ),
+                    ui.input_numeric(
+                        "rise_max", "max", value=4.75, step=0.1, width="70px"
+                    ),
+                    ui.input_numeric(
+                        "rise_step", "step", value=0.1, step=0.01, width="70px"
+                    ),
                     style="display: flex; flex-direction: row; align-items: center; gap: 10px;",
                 ),
                 style="padding: 10px; border: 1px solid #ddd; border-radius: 5px; width: 33%;",
@@ -442,7 +491,9 @@ def display_reconstruction_panel():
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 15px; width: 100%;",
         ),
         ui.input_task_button(
-            "run_denovo3D", label="Reconstruct 3D Map", style="width: 150px; height: 50px; margin-top: 20px;"
+            "run_denovo3D",
+            label="Reconstruct 3D Map",
+            style="width: 150px; height: 50px; margin-top: 20px;",
         ),
         style="display: flex; flex-direction: column; align-items: flex-start; gap: 20px;",
     )
@@ -496,6 +547,7 @@ def display_denovo3D_scores():
 
     return fig
 
+
 with ui.div(
     style="max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
 ):
@@ -508,6 +560,7 @@ with ui.div(
         justification="left",
         enable_selection=False,
     )
+
 
 @render.ui
 @reactive.event(input.show_download_print_buttons)
@@ -586,50 +639,55 @@ def download_denovo3D_map():
 
 
 ui.HTML(
-    "<i><p>Developed by the <a href='https://jiang.bio.purdue.edu/HelicalImageStitching' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/HelicalImageStitching/issues' target='_blank'>HelicalImageStitching</a>.</p></i>"
+    "<i><p>Developed by the <a href='https://jianglab.science.psu.edu/HelicalImageStitching' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/HelicalImageStitching/issues' target='_blank'>HelicalImageStitching</a>.</p></i>"
 )
 
-#@module
-#def selected_transformation(input, output, session):
-#	@shiny.render.ui
-#	def show_ui_groups():
-#		return transformation_ui_group(id=session.ns)
+# @module
+# def selected_transformation(input, output, session):
+# 	@shiny.render.ui
+# 	def show_ui_groups():
+# 		return transformation_ui_group(id=session.ns)
+
 
 def transformation_ui_group(prefix):
-    return shiny.ui.card(shiny.ui.layout_columns(
-        ui.input_slider(
-            prefix+"_pre_rotation",
-            "Rotation (°)",
-            min=-45,
-            max=45,
-            value=0,
-            step=0.1,
-        ),       
-        ui.input_slider(
-            prefix+"_shift_x",
-            "Horizontal shift (pixel)",
-            min=-100,
-            max=100,
-            value=0,
-            step=1,
-        ),
-        ui.input_slider(
-            prefix+"_shift_y",
-            "Vertical shift (pixel)",
-            min=-100,
-            max=100,
-            value=0,
-            step=1,
-        ),
-        # ui.input_slider(
+    return shiny.ui.card(
+        shiny.ui.layout_columns(
+            ui.input_slider(
+                prefix + "_pre_rotation",
+                "Rotation (°)",
+                min=-45,
+                max=45,
+                value=0,
+                step=0.1,
+            ),
+            ui.input_slider(
+                prefix + "_shift_x",
+                "Horizontal shift (pixel)",
+                min=-100,
+                max=100,
+                value=0,
+                step=1,
+            ),
+            ui.input_slider(
+                prefix + "_shift_y",
+                "Vertical shift (pixel)",
+                min=-100,
+                max=100,
+                value=0,
+                step=1,
+            ),
+            # ui.input_slider(
             # prefix+"_vertical_crop_size",
             # "Vertical crop (pixel)",
             # min=32,
             # max=256,
             # value=0,
             # step=2,
-        # ),
-        col_widths=4),id=f"{prefix}_card")
+            # ),
+            col_widths=4,
+        ),
+        id=f"{prefix}_card",
+    )
 
 
 @reactive.effect
@@ -705,48 +763,48 @@ def get_displayed_images():
 
     displayed_image_ids.set(included)
     displayed_images.set(images)
-    displayed_image_title.set(f"{len(images)}/{n} images | {nx}x{ny} pixels | {image_apix()} Å/pixel")
+    displayed_image_title.set(
+        f"{len(images)}/{n} images | {nx}x{ny} pixels | {image_apix()} Å/pixel"
+    )
     displayed_image_labels.set(image_labels)
 
 
 @reactive.effect
 @reactive.event(input.select_image)
 def update_selecte_images_orignal():
-    selected_images_original.set(
-        [displayed_images()[i] for i in input.select_image()]
-    )
+    selected_images_original.set([displayed_images()[i] for i in input.select_image()])
     selected_images_labels.set(
         [displayed_image_labels()[i] for i in input.select_image()]
     )
     selected_images_rotated_shifted.set(
         [displayed_images()[i] for i in input.select_image()]
     )
-    transformed_images_x_offsets.set(
-        np.zeros(len(input.select_image()))
-    )
+    transformed_images_x_offsets.set(np.zeros(len(input.select_image())))
+
 
 @reactive.effect
 @reactive.event(selected_images_rotated_shifted)
 def update_transformed_images_displayed():
     req(len(selected_images_rotated_shifted()))
-    
+
     images_displayed = []
     images_displayed_labels = []
     images_displayed_links = []
-    
-    ny,nx = np.shape(selected_images_rotated_shifted()[0])
-    
-    image_work = np.zeros((ny,nx*len(selected_images_rotated_shifted())))
+
+    ny, nx = np.shape(selected_images_rotated_shifted()[0])
+
+    image_work = np.zeros((ny, nx * len(selected_images_rotated_shifted())))
     for i, transformed_img in enumerate(selected_images_rotated_shifted()):
-        image_work[:,nx*i:nx*(i+1)]=transformed_img
-    
+        image_work[:, nx * i : nx * (i + 1)] = transformed_img
+
     images_displayed.append(image_work)
     images_displayed_labels.append(f"Selected images:")
     images_displayed_links.append("")
 
     transformed_images_displayed.set(images_displayed)
     transformed_images_labels.set(images_displayed_labels)
-    transformed_images_links.set(images_displayed_links) 
+    transformed_images_links.set(images_displayed_links)
+
 
 @reactive.effect
 @reactive.event(input.perform_stitching)
@@ -762,6 +820,7 @@ def update_stitched_image_displayed():
 
     from PIL import Image
     import tempfile
+
     with tempfile.TemporaryDirectory() as temp_dir:
         with open(temp_dir + "/TileConfiguration.txt", "w") as tc:
             tc.write("dim = 2\n\n")
@@ -783,18 +842,18 @@ def update_stitched_image_displayed():
     stitched_image_links.set(images_displayed_links)
 
 
-
 @reactive.effect
 @reactive.event(input.stitched_image_vertical_display_size)
 def update_stitched_image_vertical_display_size():
-    stitched_image_vertical_display_size.set(input.stitched_image_vertical_display_size())
-
+    stitched_image_vertical_display_size.set(
+        input.stitched_image_vertical_display_size()
+    )
 
 
 @reactive.effect
 @reactive.event(input.run_denovo3D)
 def run_denovo3D_reconstruction():
-    print('start job')
+    print("start job")
 
     req(len(stitched_image_displayed()))
 
@@ -802,7 +861,7 @@ def run_denovo3D_reconstruction():
 
     data = data[0]
     data = data.astype(np.float32)
-    data = (data-data.mean())/data.std()
+    data = (data - data.mean()) / data.std()
     ny, nx = data.shape
 
     apix = image_apix()
@@ -815,7 +874,6 @@ def run_denovo3D_reconstruction():
         logfile="helicon.denovo3D.log",
         verbose=1,
     )
-
 
     if input.twist_min() < input.twist_max():
         twists = np.arange(input.twist_min(), input.twist_max(), input.twist_step())
@@ -917,8 +975,6 @@ def run_denovo3D_reconstruction():
             )
         )
 
-
-
     if len(tasks) < 1:
         logger.warning("Nothing to do. I will quit")
         return
@@ -997,7 +1053,6 @@ def display_denovo3D_projections():
             ),
         ) = result
 
-
         query_image = stitched_image_displayed()[0]
         query_image_padded = helicon.pad_to_size(query_image, shape=rec3d_x_proj.shape)
 
@@ -1009,7 +1064,6 @@ def display_denovo3D_projections():
     reconstructed_projection_images.set(images)
 
 
-
 @render.ui
 @reactive.event(reconstrunction_results)
 def toggle_map_download_button():
@@ -1018,7 +1072,3 @@ def toggle_map_download_button():
     else:
         ret = ui.tags.style("#download_denovo3D_map {visibility: hidden;}")
     return ret
-
-
-
- 
