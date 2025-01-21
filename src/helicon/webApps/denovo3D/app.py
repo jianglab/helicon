@@ -647,6 +647,7 @@ def display_stitched_image():
             image_labels=stitched_image_labels,
             image_links=stitched_image_links,
             image_size=stitched_image_vertical_display_size,
+            display_dashed_line=True,
             justification="left",
             enable_selection=False
         )
