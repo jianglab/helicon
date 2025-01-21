@@ -12,7 +12,7 @@ def main(args):
 
         webbrowser.open(url)
     except:
-        homephage = "https://jiang.bio.purdue.edu/map2seq"
+        homephage = "https://jianglab.science.psu.edu/map2seq"
         print(
             f"ERROR in accessing the map2seq web app. Please visit {homephage} for more information"
         )

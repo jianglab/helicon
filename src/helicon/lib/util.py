@@ -281,7 +281,7 @@ def get_emdb_id(label):
     import re
 
     pattern = r"(?i)(EMD[-_]\d{4,5})"
-    match = re.search(pattern, label)
+    match = re.search(pattern, str(label))
     if match:
         return match.group(1)
     return None

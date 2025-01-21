@@ -12,7 +12,7 @@ def main(args):
         cmd = f"streamlit run https://raw.githubusercontent.com/jianglab/HI3D/main/hi3d.py --server.maxUploadSize 2048 --server.enableCORS false --server.enableXsrfProtection false --browser.gatherUsageStats false"
         subprocess.call(cmd, shell=True)
     except:
-        homephage = "https://jiang.bio.purdue.edu/hi3d"
+        homephage = "https://jianglab.science.psu.edu/hi3d"
         print(
             f"ERROR in running a local instance of HI3D. Please visit {homephage} to use the Web app instances"
         )

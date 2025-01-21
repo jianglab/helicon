@@ -18,7 +18,7 @@ def main(args):
 
         subprocess.call(cmd, shell=True)
     except:
-        homephage = "https://jiang.bio.purdue.edu/HelicalProjection"
+        homephage = "https://jianglab.science.psu.edu/HelicalProjection"
         print(
             f"ERROR in running a local instance of HelicalProjection. Please visit {homephage} to use the Web app instances"
         )

@@ -13,7 +13,7 @@ def main(args):
 
         subprocess.call(cmd, shell=True)
     except:
-        homephage = "https://jiang.bio.purdue.edu/procart"
+        homephage = "https://jianglab.science.psu.edu/procart"
         print(
             f"ERROR in running a local instance of ProCart. Please visit {homephage} to use the Web app instances"
         )

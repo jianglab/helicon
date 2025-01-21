@@ -13,7 +13,7 @@ def main(args):
 
         subprocess.call(cmd, shell=True)
     except:
-        homephage = "https://jiang.bio.purdue.edu/ctfsimulation"
+        homephage = "https://jianglab.science.psu.edu/ctfsimulation"
         print(
             f"ERROR in running a local instance of ctfSimulation. Please visit {homephage} to use the Web app instances"
         )
