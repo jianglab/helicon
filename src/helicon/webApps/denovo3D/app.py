@@ -498,7 +498,8 @@ with ui.div(
                     image_labels=selected_images_labels,
                     image_size=stitched_image_vertical_display_size,
                     justification="left",
-                    enable_selection=False,
+                    display_dashed_line=True,
+                    enable_selection=False
                 )
     
     
@@ -627,6 +628,7 @@ def image_stitching_transformed():
                     image_links=transformed_images_links,
                     image_size=transformed_images_vertical_display_size,
                     justification="left",
+                    display_dashed_line=True,
                     enable_selection=False
                 )
 @shiny.render.ui
@@ -1267,7 +1269,6 @@ def set_initial_image():
             
             
             initial_image.set(stitched_image_displayed()) 
-            print(len(initial_image()),'initial image')
 
 @reactive.effect
 @reactive.event(initial_image)
