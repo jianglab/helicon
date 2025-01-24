@@ -765,6 +765,11 @@ def display_denovo3D_scores():
     twists = np.array(twists)[sort_idx]
     scores = np.array(scores)[sort_idx]
 
+    #output score
+    #np.save('/mnt/f/script/helicon/test/twist.npy', twists)
+    #np.save('/mnt/f/script/helicon/test/score.npy', scores)
+    #print('the score is saved')
+
     import plotly.express as px
 
     fig = px.line(x=twists, y=scores, color_discrete_sequence=["blue"], markers=True)
