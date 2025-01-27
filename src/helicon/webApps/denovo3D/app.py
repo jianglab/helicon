@@ -575,13 +575,44 @@ with ui.div(
                     curr_x_offsets = transformed_images_x_offsets().copy()
                     ny, nx = np.shape(selected_images_rotated_shifted()[0])
 
-                    image_work = np.zeros((ny, nx*len(selected_images_rotated_shifted())))
+                    # Initialize sum and count arrays for averaging
+                    total_width = nx * len(selected_images_rotated_shifted())
+                    sum_image = np.zeros((ny, total_width), dtype=np.float64)  # Use float for precision
+                    count_image = np.zeros((ny, total_width), dtype=np.uint8)   # Track overlaps
+
                     for img_i, transformed_img in enumerate(selected_images_rotated_shifted()):
                         if img_i == x_shift_i:
-                            image_work[:, nx*img_i+input[id_x_shift]():nx*(img_i+1)+input[id_x_shift]()] = transformed_img
-                            curr_x_offsets[x_shift_i] = input[id_x_shift]()
+                            shift = input[id_x_shift]()  # Get the user-defined shift value
+                            start_col = nx * img_i + shift  # Shifted start column
+                            curr_x_offsets[x_shift_i] = shift
                         else:
-                            image_work[:, nx*img_i:nx*(img_i+1)] = transformed_img
+                            start_col = nx * img_i  # Default start column
+
+                        # Calculate the region where the image will be placed
+                        end_col = start_col + nx
+
+                        # Clip to canvas boundaries to avoid out-of-bounds errors
+                        canvas_start = max(start_col, 0)
+                        canvas_end = min(end_col, total_width)
+
+                        # Adjust the image slice if part of it is outside the canvas
+                        img_start = max(0, -start_col)  # Offset if shifted left beyond canvas
+                        img_end = img_start + (canvas_end - canvas_start)
+
+                        # Extract the valid part of the image to place
+                        img_slice = transformed_img[:, img_start:img_end].astype(np.float64)
+
+                        # Add to sum and increment count for averaging
+                        sum_image[:, canvas_start:canvas_end] += img_slice
+                        count_image[:, canvas_start:canvas_end] += 1
+
+                    # Compute the averaged image (avoid division by zero)
+                    image_work = np.divide(
+                        sum_image, 
+                        count_image, 
+                        where=(count_image > 0), 
+                        out=np.zeros_like(sum_image)
+                    )
 
                     images_displayed.append(image_work)
                     images_displayed_labels.append("Combined images")
