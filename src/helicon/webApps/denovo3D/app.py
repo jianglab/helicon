@@ -514,6 +514,9 @@ with ui.div(
         if n_images_selected == 1:
             return None
         else:
+
+            dim = len(selected_images_original()[0])
+            shift_scale = int(0.9*dim)
             # Create main container
             container = ui.div(
                 style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -526,7 +529,7 @@ with ui.div(
                 # Add transformation UI group
                 container.append(
                     shiny.ui.row(
-                        transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}")
+                        transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}",shift_scale=shift_scale)
                     )
                 )
 
@@ -797,9 +800,9 @@ def display_denovo3D_scores():
     scores = np.array(scores)[sort_idx]
 
     #output score
-    #np.save('/mnt/f/script/helicon/test/twist.npy', twists)
-    #np.save('/mnt/f/script/helicon/test/score.npy', scores)
-    #print('the score is saved')
+    np.save('/mnt/f/script/helicon/test/twist.npy', twists)
+    np.save('/mnt/f/script/helicon/test/score.npy', scores)
+    print('the score is saved')
 
     import plotly.express as px
 
@@ -999,7 +1002,7 @@ def transformation_ui_single():
     id=f"single_card_ui")
 
 
-def transformation_ui_group(prefix):
+def transformation_ui_group(prefix, shift_scale = 100):
     return shiny.ui.card(shiny.ui.layout_columns(
         ui.input_slider(
             prefix+"_pre_rotation",
@@ -1012,8 +1015,8 @@ def transformation_ui_group(prefix):
         ui.input_slider(
             prefix+"_shift_x",
             "Horizontal shift (pixel)",
-            min=-100,
-            max=100,
+            min=-shift_scale,
+            max=shift_scale,
             value=0,
             step=1,
         ),
