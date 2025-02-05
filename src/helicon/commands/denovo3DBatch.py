@@ -2847,7 +2847,7 @@ def add_args(parser):
         type=str,
         nargs="?",
         help="Input STAR or mrc/mrcs file containing the input 2D class average image(s). default to %(default)s",
-        default="Simulation:n=1:nx=128:ny=96:apix=5:twist=0.5:rise=4.75:csym=2:poylmer=0:rot=30:tilt=0:psi=0:noise=0",
+        default="Simulation:n=1:nx=128:ny=96:apix=5:twist=1:rise=4.75:csym=2:poylmer=0:rot=30:tilt=0:psi=0:noise=0",
     )
     parser.add_argument(
         "--output_prefix",

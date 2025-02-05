@@ -921,6 +921,7 @@ def download_denovo3D_output_map():
     apix = input_data().apix
     #ny, nx = 200,200
     #apix = 5
+    print(apix, ny, nx)
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
         apix=apix3d,
