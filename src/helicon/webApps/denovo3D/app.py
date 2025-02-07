@@ -39,7 +39,7 @@ transformed_images_displayed = reactive.value([])
 transformed_images_title = reactive.value("Transformed selected images:")
 transformed_images_labels = reactive.value([])
 transformed_images_links = reactive.value([])
-transformed_images_vertical_display_size = reactive.value(128)
+transformed_images_vertical_display_size = reactive.value(256)
 transformed_images_x_offsets = reactive.value([])
 
 stitched_image_displayed = reactive.value([])
@@ -799,10 +799,10 @@ def display_denovo3D_scores():
     twists = np.array(twists)[sort_idx]
     scores = np.array(scores)[sort_idx]
 
-    #output score
-    np.save('/mnt/f/script/helicon/test/twist.npy', twists)
-    np.save('/mnt/f/script/helicon/test/score.npy', scores)
-    print('the score is saved')
+    #output score in windows machine
+    #np.save('/mnt/f/script/helicon/test/twist.npy', twists)
+    #np.save('/mnt/f/script/helicon/test/score.npy', scores)
+    #print('the score is saved')
 
     import plotly.express as px
 
