@@ -955,11 +955,17 @@ ui.HTML(
 
 def transformation_ui_single():
     return shiny.ui.card(shiny.ui.layout_columns(
+         ui.input_checkbox("img_transpose", "Transpose", False),
+         
+         ui.input_checkbox("img_flip", "Flip", False),
+         
+         ui.input_checkbox("img_negate", "Invert contrast", False),
+         
          ui.input_slider(
                 "pre_rotation",
                 "Rotation (°)",
-                min=-45,
-                max=45,
+                min=-180,
+                max=180,
                 value=0,
                 step=0.1,
             ),
@@ -1312,10 +1318,12 @@ def set_initial_image():
             initial_image.set(stitched_image_displayed()) 
 
 @reactive.effect
-@reactive.event(initial_image)
+@reactive.event(initial_image, input.img_negate)
 def update_threshold_scale():
     req(len(initial_image()))
     images = initial_image()
+    if input.img_negate():
+        images = [-img for img in images]
     min_val = float(np.min([np.min(img) for img in images]))
     max_val = float(np.max([np.max(img) for img in images]))
     step_val = (max_val - min_val) / 100
@@ -1328,16 +1336,35 @@ def update_threshold_scale():
     )
 
 @reactive.effect
-@reactive.event(initial_image, input.threshold)
+@reactive.event(initial_image, input.threshold, input.img_transpose, input.img_flip)
 def threshold_selected_images():
     req(len(initial_image()))
 
     images = initial_image()
+
+    if input.img_negate():
+        tmp = [
+            helicon.threshold_data(-img, thresh_value=input.threshold())
+            for img in images
+        ]
+    else:
+        tmp = [
+            helicon.threshold_data(img, thresh_value=input.threshold())
+            for img in images
+        ]
     
-    tmp = [
-        helicon.threshold_data(img, thresh_value=input.threshold())
-        for img in images
-    ]
+    if input.img_transpose():
+        tmp = [
+            np.transpose(img)
+            for img in tmp
+        ]
+
+    if input.img_flip():
+        tmp = [
+            np.fliplr(img)
+            for img in tmp
+        ]
+    
     selected_images_thresholded.set(tmp)
 
 
