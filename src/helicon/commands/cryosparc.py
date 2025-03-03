@@ -96,7 +96,7 @@ def main(args):
         if option_name == "assignExposureGroupByBeamShift" and (
             param is not None and param != "0"
         ):
-            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
+            source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
             software = helicon.guess_data_collection_software(data[micrograph_name][0])
             if software is None:
@@ -237,7 +237,7 @@ def main(args):
             output_title += f"->{len(group_ids)} beamshift groups"
 
             if args.verbose > 1:
-                print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
+                print(f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups")
 
             if (
                 args.verbose > 1
@@ -285,17 +285,17 @@ def main(args):
         elif option_name == "assignExposureGroupByTime" and abs(param) > 0:
             time_group_size = param
 
-            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
+            source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
             if (
-                time_group_size < 0 and len(group_ids_orig) > 1
+                time_group_size < 0 and len(source_group_ids) > 1
             ):  # combine previous groups (if there are) into a single group first
                 if args.verbose > 1:
                     print(
-                        f"\tCombining {len(group_ids_orig)} exposure groups into 1 group"
+                        f"\tCombining {len(source_group_ids)} exposure groups into 1 group"
                     )
                 data[exp_group_id_name] = 1
-                group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
+                source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
                 time_group_size = abs(time_group_size)
 
             software = helicon.guess_data_collection_software(data[micrograph_name][0])
@@ -321,7 +321,7 @@ def main(args):
             }
             last_group_id = 0
             new_particle_group_ids = np.zeros(len(data))
-            for gi in group_ids_orig:
+            for gi in source_group_ids:
                 mask = np.where(data[exp_group_id_name] == gi)
                 group_micrographs = np.unique(data[micrograph_name][mask])
                 group_micrograph_time = [
@@ -359,10 +359,10 @@ def main(args):
             output_title += f"->{len(group_ids)} time groups"
 
             if args.verbose > 1:
-                print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
+                print(f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups")
 
         elif option_name == "assignExposureGroupPerMicrograph" and param:
-            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
+            source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
             micrographs = np.unique(data[micrograph_name])
             for mi, m in enumerate(micrographs):
@@ -382,10 +382,10 @@ def main(args):
             output_title += f"->{len(group_ids)} per-micrograph groups"
 
             if args.verbose > 1:
-                print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
+                print(f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups")
 
-        elif option_name == "copyExposureGroup" and param:
-            group_ids_orig = np.sort(np.unique(data[exp_group_id_name]))
+        elif option_name == "copyExposureGroupAssignments" and param:
+            source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
             dataFrom = helicon.images2dataframe(
                 inputFiles=param,
@@ -446,7 +446,114 @@ def main(args):
             )
 
             if args.verbose > 1:
-                print(f"\t{len(group_ids_orig)} -> {len(group_ids)} exposure groups")
+                print(f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups")
+
+        elif option_name == "copyExposureGroupParameters" and param:
+            param_dict_default = dict(
+                source_cs_file="",
+                source_job_id="",
+                beam_tilt=1,
+                cs=1,
+                trefoil=1,
+                tetrafoil=1,
+                anisomag=1,
+            )
+            _, param_dict = helicon.parse_param_str(param)
+            param_dict, param_changed, param_unsuppported = helicon.validate_param_dict(
+                param=param_dict, param_ref=param_dict_default
+            )
+            if len(param_unsuppported):
+                helicon.color_print(
+                    f"\tWARNING: ignoring unknown parameters: {param_unsuppported}"
+                )
+            if args.verbose > 2:
+                print(f"\tCustom parameters: {param_changed}")
+
+            if param_dict["source_cs_file"]:
+                if param_dict["source_job_id"]:
+                    helicon.color_print(
+                        f"\tWARNING: both source_cs_file and source_job_id are specified. I will use source_cs_file"
+                    )
+                source_data_name = param_dict["source_cs_file"]
+                source_data = Dataset.load(param_dict["source_cs_file"])
+                source_exp_group_id_names_all = helicon.all_matched_attrs(
+                    source_data, query_str="exp_group_id"
+                )
+                if len(source_exp_group_id_names_all) == 0:
+                    helicon.color_print(
+                        f"\tERROR: {param_dict['source_cs_file']} does not contain exp_group_id"
+                    )
+                    sys.exit(-1)
+            elif param_dict["source_job_id"]:
+                source_job = cs.find_job(args.projectID, param_dict["source_job_id"])
+                input_particle_group_name = None
+                for g in source_job.doc["output_result_groups"]:
+                    if g["type"] == "particle":
+                        input_particle_group_name = g["name"]
+                        break
+                if not input_particle_group_name:
+                    helicon.color_print(
+                        f"ERROR: {source_job} does not provide particles"
+                    )
+                    sys.exit(-1)
+                source_data_name = source_job.doc["uid"]
+                source_data = source_job.load_output(input_particle_group_name)
+                source_exp_group_id_names_all = helicon.all_matched_attrs(
+                    source_data, query_str="exp_group_id"
+                )
+                if len(source_exp_group_id_names_all) == 0:
+                    helicon.color_print(
+                        f"\tERROR: {param_dict['source_job_id']} does not contain exp_group_id"
+                    )
+                    sys.exit(-1)
+            else:
+                helicon.color_print(
+                    f"\tERROR: either source_cs_file or source_job_id must be specified"
+                )
+                sys.exit(-1)
+
+            source_exp_group_id_name = helicon.first_matched_attr(
+                source_data,
+                attrs="ctf/exp_group_id location/exp_group_id mscope_params/exp_group_id".split(),
+            )
+
+            ctf_params_to_copy = []
+            if int(param_dict["beam_tilt"]):
+                ctf_params_to_copy.append("ctf/tilt_A")
+            if int(param_dict["cs"]):
+                ctf_params_to_copy.append("ctf/cs_mm")
+            if int(param_dict["trefoil"]):
+                ctf_params_to_copy.append("ctf/trefoil_A")
+            if int(param_dict["tetrafoil"]):
+                ctf_params_to_copy.append("ctf/tetra_A")
+            if int(param_dict["anisomag"]):
+                ctf_params_to_copy.append("ctf/anisomag")
+
+            ctf_params_to_copy = [p for p in ctf_params_to_copy if p in source_data]
+            if not ctf_params_to_copy:
+                helicon.color_print(
+                    f"\tWARNING: No exposure group parameters found in the source dataset. Available parameters: {', '.join(source_data.keys())}"
+                )
+                sys.exit(-1)
+
+            group_ids = np.sort(np.unique(data[exp_group_id_name]))
+            source_group_ids = np.unique(source_data[source_exp_group_id_name])
+
+            for group_id in group_ids:
+                mask = np.where(data[exp_group_id_name] == group_id)
+                if group_id in source_group_ids:
+                    source_mask = np.where(source_data[exp_group_id_name] == group_id)
+                    for p in ctf_params_to_copy:
+                        data[p][mask] = np.median(source_data[p][source_mask])
+                else:
+                    for p in ctf_params_to_copy:
+                        data[p][mask] = np.median(source_data[p])
+
+            for attr in exp_group_id_names_all:
+                slot = attr.split("/")[0]
+                output_slots.add(slot)
+            output_slots.add("ctf")
+            output_title += f"->copied params {' '.join(ctf_params_to_copy)} of {len(group_ids)} exposure groups from {source_data_name}"
 
         elif option_name == "splitByMicrograph" and param:
             col_mid = "location/micrograph_uid"
@@ -497,7 +604,7 @@ def main(args):
                 fill_mode="random",
                 sign=-1,
                 n_micrographs=-1,
-                fp16=0,
+                fp16=1,
                 micrographs_cs_file="",
                 micrographs_job_id="",
                 reuse_job_id="",
@@ -726,7 +833,7 @@ def main(args):
                     source_path = Path(reuse_job.dir()) / "extract"
                     if source_path.exists() and source_path.is_dir():
                         reuse_result_folder = source_path
-                output_job.start()
+                output_job.start(status="running")
             else:
                 output_job = None
                 particle_dir = "extract"
@@ -845,9 +952,9 @@ def main(args):
                     )
                     futures.append(future)
 
-                if args.verbose > 1:
+                if args.verbose > 1 and len(n_skipped) > 0:
                     print(
-                        f"\t{len(tasks)} micrographs: {n_skipped} skipped, {len(futures)} to go"
+                        f"\t{len(tasks):,} micrographs: {n_skipped:,} skipped, {len(futures):,} to go"
                     )
 
                 if len(futures):
@@ -1100,8 +1207,8 @@ def add_args(parser):
     parser.add_argument(
         "--assignExposureGroupByBeamShift",
         type=str,
-        metavar="<0|1|xml_folder=path:min_micrographs_per_group=n>",
-        help="assign images to exposure groups according to the beam shifts, one group per beam shift position. default to %(default)s",
+        metavar="0|1|xml_folder=path:min_micrographs_per_group=<n>",
+        help="assign images to exposure groups according to the beam shifts, one group per beam shift position. disabled by default",
         default=None,
     )
     parser.add_argument(
@@ -1115,28 +1222,35 @@ def add_args(parser):
         "--assignExposureGroupPerMicrograph",
         type=bool,
         metavar="<0|1>",
-        help="assign images to exposure groups, one group per micrograph. default to %(default)s",
+        help="assign images to exposure groups, one group per micrograph. disabled by default",
         default=0,
     )
     parser.add_argument(
-        "--copyExposureGroup",
+        "--copyExposureGroupAssignments",
         type=str,
         metavar="<star file>",
-        help="copy the optics group info from this star file. rlnMicrographMovieName and rlnOpticsGroup must be in this star file. disabled by default",
+        help="copy the optics group assignments from this star file. rlnMicrographMovieName and rlnOpticsGroup must be in this star file. disabled by default",
         default=0,
+    )
+    parser.add_argument(
+        "--copyExposureGroupParameters",
+        type=str,
+        metavar="source_cs_file=<filename>|source_job_id=<Jxx>[:beam_tilt=<0|1>:trefoil=<0|1>:tetrafoil=<0|1>:cs=<0|1>:anisomag=<0|1>]",
+        help="copy exposure group parameters (beam tilt, trefoil, tetrafoil, cs, anisotropic distortion, etc.). disabled by default",
+        default="",
     )
     parser.add_argument(
         "--splitByMicrograph",
         type=bool,
         metavar="<0|1>",
-        help="split the dataset by micrograph. default to %(default)s",
+        help="split the dataset by micrograph. disabled by default",
         default=0,
     )
     parser.add_argument(
         "--extractParticles",
         type=str,
         metavar="box_size=<n>:fft_crop_size=<n>[:recenter=<0|1>][replace_ctf=<0|1>][normalize=<0|1>][fill_mode=<mean|random>][sign=<-1|1>][n_micrographs=<-1|n>][fp16=<0|1>][:micrographs_cs_file=<filename>|micrographs_job_id=<JXXX>][reuse_job_id=<JXXX>]",
-        help="split the dataset by micrograph. default to %(default)s",
+        help="split the dataset by micrograph. disabled by default",
         default="",
     )
     parser.add_argument(
