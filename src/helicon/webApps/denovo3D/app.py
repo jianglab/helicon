@@ -737,8 +737,8 @@ with ui.div(
         with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
-            ui.input_numeric("twist_min", "min", value=1.2, step=0.1, width="70px")
-            ui.input_numeric("twist_max", "max", value=1.2, step=0.1, width="70px")
+            ui.input_numeric("twist_min", "min", value=0.1, step=0.1, width="70px")
+            ui.input_numeric("twist_max", "max", value=2.0, step=0.1, width="70px")
             ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px")
 
     with ui.card(style="height: 115px"):
