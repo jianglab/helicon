@@ -954,7 +954,7 @@ ui.HTML(
 
 
 def transformation_ui_single():
-    return shiny.ui.card(shiny.ui.layout_columns(
+    tui_single = shiny.ui.card(shiny.ui.layout_columns(
          ui.input_checkbox("img_transpose", "Transpose", False),
          
          ui.input_checkbox("img_flip", "Flip", False),
@@ -1007,6 +1007,10 @@ def transformation_ui_single():
             "auto_transform", label="Auto Transform", style="width: 200px; height: 40px;"
             ),
     id=f"single_card_ui")
+    
+    apix = round(all_images().apix, 4)
+    ui.update_numeric("apix", value=apix, max=apix * 2)
+    return tui_single
 
 
 def transformation_ui_group(prefix, shift_scale = 100):
