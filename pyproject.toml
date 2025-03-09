@@ -39,7 +39,7 @@ shiny = ['ipyfilechooser', 'ipywidgets<8', 'itk-montage', 'plotly', 'requests', 
 
 streamlit = ['atomium', 'bokeh==2.4.3', 'kneebow', 'numpy', 'psutil', 'qrcode', 'shapely', 'st-clickable-images', 'streamlit', 'streamlit-drawable-canvas', 'trackpy', 'uptime', 'xmltodict']
 
-all = ['atomium', 'bokeh==2.4.3', 'kneebow', 'ipyfilechooser', 'ipywidgets<8', 'itk-montage', 'plotly', 'psutil', 'qrcode', 'requests', 'shapely', 'shiny', 'shinywidgets', 'st-clickable-images', 'streamlit', 'streamlit-drawable-canvas', 'trackpy', 'uptime', 'xmltodict']
+all = ['atomium', 'bokeh==2.4.3', 'kneebow', 'ipyfilechooser', 'ipywidgets<8', 'itk-montage', 'itk==5.4.0', 'plotly', 'psutil', 'qrcode', 'requests', 'shapely', 'shiny', 'shinywidgets', 'st-clickable-images', 'streamlit', 'streamlit-drawable-canvas', 'trackpy', 'uptime', 'xmltodict']
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -12,7 +12,6 @@ import helicon
 
 from . import compute
 
-
 input_data = reactive.value(None)
 
 map_symmetrized = reactive.value(None)
@@ -546,7 +545,7 @@ with ui.div(
         else:
 
             dim = len(selected_images_original()[0])
-            shift_scale = int(0.9 * dim)
+            shift_scale = int(0.9 * dim) * len(selected_images_original())
             # Create main container
             container = ui.div(
                 style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -554,7 +553,8 @@ with ui.div(
 
             # Add transformation controls for each image
             for i, label in enumerate(selected_images_labels()):
-                curr_t_ui_counter = t_ui_counter() + i
+                # curr_t_ui_counter = t_ui_counter() + i
+                curr_t_ui_counter = i
 
                 # Add transformation UI group
                 container.append(
@@ -623,6 +623,13 @@ with ui.div(
                     for img_i, transformed_img in enumerate(
                         selected_images_rotated_shifted()
                     ):
+                        # if img_i == x_shift_i:
+                        #    shift = input[id_x_shift]()  # Get the user-defined shift value
+                        #    start_col = nx * img_i + shift  # Shifted start column
+                        #    curr_x_offsets[x_shift_i] = shift
+                        # else:
+                        #    start_col = nx * img_i  # Default start column
+
                         if img_i == x_shift_i:
                             shift = input[
                                 id_x_shift
@@ -630,7 +637,9 @@ with ui.div(
                             start_col = nx * img_i + shift  # Shifted start column
                             curr_x_offsets[x_shift_i] = shift
                         else:
-                            start_col = nx * img_i  # Default start column
+                            start_col = (
+                                nx * img_i + input[f"t_ui_group_{img_i}_shift_x"]()
+                            )  # Default start column
 
                         # Calculate the region where the image will be placed
                         end_col = start_col + nx
@@ -1034,7 +1043,7 @@ def download_denovo3D_output_map():
 
 
 ui.HTML(
-    "<i><p>Developed by the <a href='https://jiang.bio.purdue.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
+    "<i><p>Developed by the <a href='https://jianglab.science.psu.edu' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
 )
 
 
@@ -1585,8 +1594,10 @@ def transform_selected_images():
 def crop_selected_images():
     req(len(selected_images_thresholded_rotated_shifted()))
     req(input.vertical_crop_size() > 0 or input.horizontal_crop_size)
-    crop_ny = max(32, int(input.vertical_crop_size()))
-    crop_nx = max(32, int(input.horizontal_crop_size()))
+    # crop_ny = max(32, int(input.vertical_crop_size()))
+    # crop_nx = max(32, int(input.horizontal_crop_size()))
+    crop_ny = int(input.vertical_crop_size())
+    crop_nx = int(input.horizontal_crop_size())
     cropped = []
     for img in selected_images_thresholded_rotated_shifted():
         ny, nx = img.shape
