@@ -49,7 +49,7 @@ stitched_image_links = reactive.value([])
 stitched_image_vertical_display_size = reactive.value(128)
 
 initial_image = reactive.value([])
-display_initial_image_value = reactive.value([''])
+display_initial_image_value = reactive.value([""])
 
 reconstrunction_results = reactive.value([])
 reconstructed_projection_images = reactive.value([])
@@ -208,13 +208,29 @@ with ui.sidebar(
                 ret = ui.div(
                     ui.tags.hr(),
                     ui.input_numeric(
-                        "input_twist", "Twist (°)", value=twist, step=0.1, width="140px"
+                        "input_twist",
+                        "Twist (°)",
+                        value=twist,
+                        step=0.1,
+                        width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
-                        "input_rise", "Rise (Å)", value=rise, step=0.1, width="140px"
+                        "input_rise",
+                        "Rise (Å)",
+                        value=rise,
+                        step=0.1,
+                        width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
-                        "input_csym", "Csym", value=csym, min=1, step=1, width="140px"
+                        "input_csym",
+                        "Csym",
+                        value=csym,
+                        min=1,
+                        step=1,
+                        width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
                         "input_apix",
@@ -223,6 +239,7 @@ with ui.sidebar(
                         min=0.1,
                         step=0.1,
                         width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
                         "output_apix",
@@ -231,6 +248,7 @@ with ui.sidebar(
                         min=0.1,
                         step=0.1,
                         width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
                         "output_axial_rotation",
@@ -240,6 +258,7 @@ with ui.sidebar(
                         max=180,
                         step=1,
                         width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
                         "output_width",
@@ -248,6 +267,7 @@ with ui.sidebar(
                         min=32,
                         step=16,
                         width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
                         "output_length",
@@ -256,6 +276,7 @@ with ui.sidebar(
                         min=32,
                         step=16,
                         width="140px",
+                        update_on="blur",
                     ),
                     ui.input_numeric(
                         "output_tilt",
@@ -265,6 +286,7 @@ with ui.sidebar(
                         max=90,
                         step=1,
                         width="140px",
+                        update_on="blur",
                     ),
                     style="display: flex; flex-wrap: wrap; flex-direction: row; gap: 4px; align-items: flex-end; justify-content: center;",
                 )
@@ -356,6 +378,7 @@ with ui.sidebar(
                     max=helicon.available_cpu(),
                     value=helicon.available_cpu(),
                     step=1,
+                    update_on="blur",
                 )
                 ui.input_numeric(
                     "selected_image_display_size",
@@ -364,6 +387,7 @@ with ui.sidebar(
                     max=512,
                     value=128,
                     step=32,
+                    update_on="blur",
                 )
                 with ui.tooltip():
                     ui.input_numeric(
@@ -372,6 +396,7 @@ with ui.sidebar(
                         min=1,
                         value=3,
                         step=1,
+                        update_on="blur",
                     )
 
                     "Reconstruction length as the number of rises"
@@ -383,6 +408,7 @@ with ui.sidebar(
                         min=-1,
                         value=5,
                         step=1,
+                        update_on="blur",
                     )
 
                     "Down-scale images to have this pixel size before 3D reconstruction. <=0 -> no down-scaling"
@@ -394,6 +420,7 @@ with ui.sidebar(
                         min=-1,
                         value=5,
                         step=1,
+                        update_on="blur",
                     )
 
                     "Voxel size of 3D reconstruction. 0 -> Set to target image pixel size. <0 -> auto-decision."
@@ -405,6 +432,7 @@ with ui.sidebar(
                         min=-1,
                         value=-1,
                         step=1,
+                        update_on="blur",
                     )
 
                     "Helical sym and csym oversampling factor that controls the number of equations when setting up the A matrix of the least square solution. larger values (e.g. 100) -> slower but better quality. A negative value means auto-decision"
@@ -416,6 +444,7 @@ with ui.sidebar(
                         min=0,
                         value=-1,
                         step=1e-4,
+                        update_on="blur",
                     )
 
                     "Only used for elasticnet, lasso and ridge algorithms. default: 1e-4 for elasticnet/lasso and 1 for ridge"
@@ -428,6 +457,7 @@ with ui.sidebar(
                         max=1.0,
                         value=0.5,
                         step=0.1,
+                        update_on="blur",
                     )
 
                     "The ratio (0 to 1) of L1 regularization in the L1/L2 combined regularization. Only used for the elasticnet algorithms"
@@ -476,9 +506,11 @@ ui.h1(title, style="font-weight: bold;")
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
-    
+
     @shiny.render.ui
-    @reactive.event(selected_images_rotated_shifted, input.image_stitching, ignore_init=False)
+    @reactive.event(
+        selected_images_rotated_shifted, input.image_stitching, ignore_init=False
+    )
     def generate_image_gallery_mutiple():
         req(len(displayed_images()))
         req(0 <= min(input.select_image()))
@@ -488,21 +520,19 @@ with ui.div(
         # Return None early if condition isn't met
         if n_images_selected == 1:
             return None
-        
 
         # Only proceed with accessing other reactive values if we have exactly 1 image
         return helicon.shiny.image_gallery(
-                    id="display_selected_image",
-                    label=selected_images_title,
-                    images=selected_images_rotated_shifted,
-                    image_labels=selected_images_labels,
-                    image_size=stitched_image_vertical_display_size,
-                    justification="left",
-                    display_dashed_line=True,
-                    enable_selection=False
-                )
-    
-    
+            id="display_selected_image",
+            label=selected_images_title,
+            images=selected_images_rotated_shifted,
+            image_labels=selected_images_labels,
+            image_size=stitched_image_vertical_display_size,
+            justification="left",
+            display_dashed_line=True,
+            enable_selection=False,
+        )
+
     @shiny.render.ui
     @reactive.event(selected_images_original, ignore_init=False)
     def generate_image_transformation_multiple():
@@ -516,7 +546,7 @@ with ui.div(
         else:
 
             dim = len(selected_images_original()[0])
-            shift_scale = int(0.9*dim)
+            shift_scale = int(0.9 * dim)
             # Create main container
             container = ui.div(
                 style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -529,7 +559,9 @@ with ui.div(
                 # Add transformation UI group
                 container.append(
                     shiny.ui.row(
-                        transformation_ui_group(f"t_ui_group_{curr_t_ui_counter}",shift_scale=shift_scale)
+                        transformation_ui_group(
+                            f"t_ui_group_{curr_t_ui_counter}", shift_scale=shift_scale
+                        )
                     )
                 )
 
@@ -537,7 +569,6 @@ with ui.div(
                 id_rotation = f"t_ui_group_{curr_t_ui_counter}_pre_rotation"
                 id_x_shift = f"t_ui_group_{curr_t_ui_counter}_shift_x"
                 id_y_shift = f"t_ui_group_{curr_t_ui_counter}_shift_y"
-
 
                 @reactive.effect
                 @reactive.event(input.select_image, input.image_stitching)
@@ -551,7 +582,9 @@ with ui.div(
 
                 @reactive.effect
                 @reactive.event(input[id_rotation], input[id_y_shift])
-                def transform_selected_images(i=i, id_rotation=id_rotation, id_y_shift=id_y_shift):
+                def transform_selected_images(
+                    i=i, id_rotation=id_rotation, id_y_shift=id_y_shift
+                ):
                     req(len(selected_images_original()))
 
                     rotated = selected_images_rotated_shifted().copy()
@@ -559,17 +592,17 @@ with ui.div(
                         rotated[i] = helicon.transform_image(
                             image=selected_images_original()[i].copy(),
                             rotation=input[id_rotation](),
-                            post_translation=(input[id_y_shift](), 0)
+                            post_translation=(input[id_y_shift](), 0),
                         )
                     selected_images_rotated_shifted.set(rotated)
                     print(f"rot shift {i} done")
 
                 @reactive.effect
                 @reactive.event(selected_images_rotated_shifted, input[id_x_shift])
-                def update_transformed_images_displayed(x_shift_i=i, id_x_shift=id_x_shift):
+                def update_transformed_images_displayed(
+                    x_shift_i=i, id_x_shift=id_x_shift
+                ):
                     req(len(selected_images_rotated_shifted()))
-
-                    
 
                     images_displayed = []
                     images_displayed_labels = []
@@ -580,12 +613,20 @@ with ui.div(
 
                     # Initialize sum and count arrays for averaging
                     total_width = nx * len(selected_images_rotated_shifted())
-                    sum_image = np.zeros((ny, total_width), dtype=np.float64)  # Use float for precision
-                    count_image = np.zeros((ny, total_width), dtype=np.uint8)   # Track overlaps
+                    sum_image = np.zeros(
+                        (ny, total_width), dtype=np.float64
+                    )  # Use float for precision
+                    count_image = np.zeros(
+                        (ny, total_width), dtype=np.uint8
+                    )  # Track overlaps
 
-                    for img_i, transformed_img in enumerate(selected_images_rotated_shifted()):
+                    for img_i, transformed_img in enumerate(
+                        selected_images_rotated_shifted()
+                    ):
                         if img_i == x_shift_i:
-                            shift = input[id_x_shift]()  # Get the user-defined shift value
+                            shift = input[
+                                id_x_shift
+                            ]()  # Get the user-defined shift value
                             start_col = nx * img_i + shift  # Shifted start column
                             curr_x_offsets[x_shift_i] = shift
                         else:
@@ -599,11 +640,15 @@ with ui.div(
                         canvas_end = min(end_col, total_width)
 
                         # Adjust the image slice if part of it is outside the canvas
-                        img_start = max(0, -start_col)  # Offset if shifted left beyond canvas
+                        img_start = max(
+                            0, -start_col
+                        )  # Offset if shifted left beyond canvas
                         img_end = img_start + (canvas_end - canvas_start)
 
                         # Extract the valid part of the image to place
-                        img_slice = transformed_img[:, img_start:img_end].astype(np.float64)
+                        img_slice = transformed_img[:, img_start:img_end].astype(
+                            np.float64
+                        )
 
                         # Add to sum and increment count for averaging
                         sum_image[:, canvas_start:canvas_end] += img_slice
@@ -611,17 +656,15 @@ with ui.div(
 
                     # Compute the averaged image (avoid division by zero)
                     image_work = np.divide(
-                        sum_image, 
-                        count_image, 
-                        where=(count_image > 0), 
-                        out=np.zeros_like(sum_image)
+                        sum_image,
+                        count_image,
+                        where=(count_image > 0),
+                        out=np.zeros_like(sum_image),
                     )
 
                     images_displayed.append(image_work)
                     images_displayed_labels.append("Combined images")
                     images_displayed_links.append("")
-
-                    
 
                     transformed_images_displayed.set(images_displayed)
                     transformed_images_labels.set(images_displayed_labels)
@@ -633,7 +676,7 @@ with ui.div(
                 ui.input_task_button(
                     "perform_stitching",
                     label="Stitch Images",
-                    style="width: 100%; margin-top: 10px;"
+                    style="width: 100%; margin-top: 10px;",
                 )
             )
 
@@ -655,18 +698,25 @@ def image_stitching_transformed():
         return None
     # Only proceed with accessing other reactive values if we have exactly 1 image
     return helicon.shiny.image_gallery(
-                    id="display_transformed_images",
-                    label=transformed_images_title,
-                    images=transformed_images_displayed,
-                    image_labels=transformed_images_labels,
-                    image_links=transformed_images_links,
-                    image_size=transformed_images_vertical_display_size,
-                    justification="left",
-                    display_dashed_line=True,
-                    enable_selection=False
-                )
+        id="display_transformed_images",
+        label=transformed_images_title,
+        images=transformed_images_displayed,
+        image_labels=transformed_images_labels,
+        image_links=transformed_images_links,
+        image_size=transformed_images_vertical_display_size,
+        justification="left",
+        display_dashed_line=True,
+        enable_selection=False,
+    )
+
+
 @shiny.render.ui
-@reactive.event(stitched_image_displayed, selected_images_original, input.image_stitching, ignore_init=False)
+@reactive.event(
+    stitched_image_displayed,
+    selected_images_original,
+    input.image_stitching,
+    ignore_init=False,
+)
 def display_stitched_image():
     req(len(displayed_images()))
     req(0 <= min(input.select_image()))
@@ -675,21 +725,28 @@ def display_stitched_image():
     if n_images_selected == 1:
         return None
     return helicon.shiny.image_gallery(
-            id="display_stitched_image",
-            label=stitched_image_title,
-            images=stitched_image_displayed,
-            image_labels=stitched_image_labels,
-            image_links=stitched_image_links,
-            image_size=stitched_image_vertical_display_size,
-            display_dashed_line=True,
-            justification="left",
-            enable_selection=False
-        )
+        id="display_stitched_image",
+        label=stitched_image_title,
+        images=stitched_image_displayed,
+        image_labels=stitched_image_labels,
+        image_links=stitched_image_links,
+        image_size=stitched_image_vertical_display_size,
+        display_dashed_line=True,
+        justification="left",
+        enable_selection=False,
+    )
+
+
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
+
     @shiny.render.ui
-    @reactive.event(selected_images_thresholded_rotated_shifted_cropped, initial_image, ignore_init=False)
+    @reactive.event(
+        selected_images_thresholded_rotated_shifted_cropped,
+        initial_image,
+        ignore_init=False,
+    )
     def generate_image_gallery_single():
         req(len(initial_image()))
         req(0 <= min(input.select_image()))
@@ -710,7 +767,6 @@ with ui.div(
         else:
             return None
 
-
     @shiny.render.ui
     @reactive.event(initial_image, ignore_init=False)
     def generate_image_transformation_single():
@@ -720,14 +776,14 @@ with ui.div(
         n_images_selected = len(initial_image())
         # To check whether there is image for transformation and display
         if n_images_selected == 1:
-            return ui.div(            
-
+            return ui.div(
                 # Transformation controls
                 transformation_ui_single(),
-                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
             )
         else:
             return None
+
 
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -737,22 +793,46 @@ with ui.div(
         with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
-            ui.input_numeric("twist_min", "min", value=0.1, step=0.1, width="70px")
-            ui.input_numeric("twist_max", "max", value=2.0, step=0.1, width="70px")
-            ui.input_numeric("twist_step", "step", value=0.1, step=0.1, width="70px")
+            ui.input_numeric(
+                "twist_min", "min", value=0.1, step=0.1, width="70px", update_on="blur"
+            )
+            ui.input_numeric(
+                "twist_max", "max", value=2.0, step=0.1, width="70px", update_on="blur"
+            )
+            ui.input_numeric(
+                "twist_step",
+                "step",
+                value=0.1,
+                step=0.1,
+                width="70px",
+                update_on="blur",
+            )
 
     with ui.card(style="height: 115px"):
         ui.card_header("Rise (Å)")
         with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
-            ui.input_numeric("rise_min", "min", value=4.75, step=0.1, width="70px")
-            ui.input_numeric("rise_max", "max", value=4.75, step=0.1, width="70px")
-            ui.input_numeric("rise_step", "step", value=0.1, step=0.01, width="70px")
+            ui.input_numeric(
+                "rise_min", "min", value=4.75, step=0.1, width="70px", update_on="blur"
+            )
+            ui.input_numeric(
+                "rise_max", "max", value=4.75, step=0.1, width="70px", update_on="blur"
+            )
+            ui.input_numeric(
+                "rise_step",
+                "step",
+                value=0.1,
+                step=0.01,
+                width="70px",
+                update_on="blur",
+            )
 
     with ui.card(style="height: 115px"):
         ui.card_header("Csym")
-        ui.input_numeric("csym", "n", value=1, min=1, step=1, width="70px")
+        ui.input_numeric(
+            "csym", "n", value=1, min=1, step=1, width="70px", update_on="blur"
+        )
 
     ui.input_task_button(
         "run_denovo3D", label="Reconstruct 3D Map", style="width: 115px; height: 115px;"
@@ -799,10 +879,10 @@ def display_denovo3D_scores():
     twists = np.array(twists)[sort_idx]
     scores = np.array(scores)[sort_idx]
 
-    #output score in windows machine
-    #np.save('/mnt/f/script/helicon/test/twist.npy', twists)
-    #np.save('/mnt/f/script/helicon/test/score.npy', scores)
-    #print('the score is saved')
+    # output score in windows machine
+    # np.save('/mnt/f/script/helicon/test/twist.npy', twists)
+    # np.save('/mnt/f/script/helicon/test/score.npy', scores)
+    # print('the score is saved')
 
     import plotly.express as px
 
@@ -811,7 +891,6 @@ def display_denovo3D_scores():
     fig.update_traces(hovertemplate="Twist: %{x}°<br>Score: %{y}")
 
     return fig
-
 
 
 @render.ui
@@ -823,34 +902,43 @@ def image_label_pairs():
     label_list = reconstructed_projection_labels()  # Your reactive labels
 
     from helicon import encode_numpy, encode_PIL_Image
+
     # Create pairs of labels and images
     pairs = []
     for img, label_value in zip(img_list, label_list):
         height, width = img.shape
         img = encode_numpy(img)
         label_value = str(label_value)
-        pairs.extend([
-            ui.div(
-                {"class": "label-row", "style": "margin: 10px 0;"},
-                ui.h4(label_value)
-            ),
-            # Image row
-            ui.div(
-                {"class": "image-row", "style":"max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"},
-                ui.img({
-                    "src": img,
-                    #"width": str(width),  # Original width
-                    #"height": str(height),
-                    "style": "max-width: 100%; height: auto;"
-                })
-            )
-        ])
-    
+        pairs.extend(
+            [
+                ui.div(
+                    {"class": "label-row", "style": "margin: 10px 0;"},
+                    ui.h4(label_value),
+                ),
+                # Image row
+                ui.div(
+                    {
+                        "class": "image-row",
+                        "style": "max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px",
+                    },
+                    ui.img(
+                        {
+                            "src": img,
+                            # "width": str(width),  # Original width
+                            # "height": str(height),
+                            "style": "max-width: 100%; height: auto;",
+                        }
+                    ),
+                ),
+            ]
+        )
+
     return ui.div(pairs)
 
-#with ui.div(
+
+# with ui.div(
 #    style="max-height: 100vh; overflow-y: auto; display: flex; flex-direction: column; align-items: left; margin-bottom: 5px"
-#):
+# ):
 #    helicon.shiny.image_select(
 #        id="display_reconstructed_projections",
 #        label=reactive.value("Reconstructed map projections:"),
@@ -919,8 +1007,8 @@ def download_denovo3D_output_map():
 
     ny, nx = input_data().data[0].shape
     apix = input_data().apix
-    #ny, nx = 200,200
-    #apix = 5
+    # ny, nx = 200,200
+    # apix = 5
     print(apix, ny, nx)
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
@@ -954,14 +1042,12 @@ ui.HTML(
 
 
 def transformation_ui_single():
-    tui_single = shiny.ui.card(shiny.ui.layout_columns(
-         ui.input_checkbox("img_transpose", "Transpose", False),
-         
-         ui.input_checkbox("img_flip", "Flip", False),
-         
-         ui.input_checkbox("img_negate", "Invert contrast", False),
-         
-         ui.input_slider(
+    tui_single = shiny.ui.card(
+        shiny.ui.layout_columns(
+            ui.input_checkbox("img_transpose", "Transpose", False),
+            ui.input_checkbox("img_flip", "Flip", False),
+            ui.input_checkbox("img_negate", "Invert contrast", False),
+            ui.input_slider(
                 "pre_rotation",
                 "Rotation (°)",
                 min=-180,
@@ -969,13 +1055,12 @@ def transformation_ui_single():
                 value=0,
                 step=0.1,
             ),
-
-            ui.input_slider("threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1),
-
+            ui.input_slider(
+                "threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1
+            ),
             ui.input_slider(
                 "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
             ),
-
             ui.input_slider(
                 "shift_y",
                 "Vertical shift (Å)",
@@ -984,7 +1069,6 @@ def transformation_ui_single():
                 value=0,
                 step=0.1,
             ),
-
             ui.input_slider(
                 "vertical_crop_size",
                 "Vertical crop (pixel)",
@@ -993,7 +1077,6 @@ def transformation_ui_single():
                 value=32,
                 step=2,
             ),
-
             ui.input_slider(
                 "horizontal_crop_size",
                 "Horizontal crop (pixel)",
@@ -1002,52 +1085,60 @@ def transformation_ui_single():
                 value=256,
                 step=2,
             ),
-        col_widths=4),
-            ui.input_task_button(
-            "auto_transform", label="Auto Transform", style="width: 200px; height: 40px;"
-            ),
-    id=f"single_card_ui")
-    
+            col_widths=4,
+        ),
+        ui.input_task_button(
+            "auto_transform",
+            label="Auto Transform",
+            style="width: 200px; height: 40px;",
+        ),
+        id=f"single_card_ui",
+    )
+
     apix = round(all_images().apix, 4)
     ui.update_numeric("apix", value=apix, max=apix * 2)
     return tui_single
 
 
-def transformation_ui_group(prefix, shift_scale = 100):
-    return shiny.ui.card(shiny.ui.layout_columns(
-        ui.input_slider(
-            prefix+"_pre_rotation",
-            "Rotation (°)",
-            min=-45,
-            max=45,
-            value=0,
-            step=0.1,
-        ),       
-        ui.input_slider(
-            prefix+"_shift_x",
-            "Horizontal shift (pixel)",
-            min=-shift_scale,
-            max=shift_scale,
-            value=0,
-            step=1,
-        ),
-        ui.input_slider(
-            prefix+"_shift_y",
-            "Vertical shift (pixel)",
-            min=-100,
-            max=100,
-            value=0,
-            step=1,
-        ),
-        # ui.input_slider(
+def transformation_ui_group(prefix, shift_scale=100):
+    return shiny.ui.card(
+        shiny.ui.layout_columns(
+            ui.input_slider(
+                prefix + "_pre_rotation",
+                "Rotation (°)",
+                min=-45,
+                max=45,
+                value=0,
+                step=0.1,
+            ),
+            ui.input_slider(
+                prefix + "_shift_x",
+                "Horizontal shift (pixel)",
+                min=-shift_scale,
+                max=shift_scale,
+                value=0,
+                step=1,
+            ),
+            ui.input_slider(
+                prefix + "_shift_y",
+                "Vertical shift (pixel)",
+                min=-100,
+                max=100,
+                value=0,
+                step=1,
+            ),
+            # ui.input_slider(
             # prefix+"_vertical_crop_size",
             # "Vertical crop (pixel)",
             # min=32,
             # max=256,
             # value=0,
             # step=2,
-        # ),
-        col_widths=4),id=f"{prefix}_card")
+            # ),
+            col_widths=4,
+        ),
+        id=f"{prefix}_card",
+    )
 
 
 @reactive.effect
@@ -1169,7 +1260,6 @@ def get_images_from_emdb():
     ui.update_checkbox("is_3d", value=True)
 
 
-
 @reactive.effect
 @reactive.event(input_data)
 def update_all_images_from_2d_input_data():
@@ -1226,8 +1316,8 @@ def update_all_images_from_3d_input_data():
         tilt=input.output_tilt(),
     )
 
-    #import mrcfile
-    #with mrcfile.new('/mnt/f/Pili_input.mrc', overwrite=True) as mrc:
+    # import mrcfile
+    # with mrcfile.new('/mnt/f/Pili_input.mrc', overwrite=True) as mrc:
     #                        mrc.set_data(m)
     #                        mrc.voxel_size = input.output_apix()
 
@@ -1296,30 +1386,27 @@ def update_selecte_images_orignal():
     )
     reconstrunction_results.set([])
 
-    
-
 
 @reactive.effect
 @reactive.event(selected_images_original)
 def set_initial_image():
     req(len(selected_images_original()))
     n_images_selected = len(selected_images_original())
-    
+
     # Return None early if condition isn't met
     if n_images_selected == 1:
-        initial_image.set(selected_images_original()) 
+        initial_image.set(selected_images_original())
     else:
 
-        initial_image.set([]) 
+        initial_image.set([])
 
         @reactive.effect
         @reactive.event(stitched_image_displayed, input.threshold)
         def set_stitched_image_initial():
             req(len(stitched_image_displayed()))
 
-            
-            
-            initial_image.set(stitched_image_displayed()) 
+            initial_image.set(stitched_image_displayed())
+
 
 @reactive.effect
 @reactive.event(initial_image, input.img_negate)
@@ -1339,6 +1426,7 @@ def update_threshold_scale():
         step=round(step_val, 3),
     )
 
+
 @reactive.effect
 @reactive.event(initial_image, input.threshold, input.img_transpose, input.img_flip)
 def threshold_selected_images():
@@ -1356,21 +1444,14 @@ def threshold_selected_images():
             helicon.threshold_data(img, thresh_value=input.threshold())
             for img in images
         ]
-    
+
     if input.img_transpose():
-        tmp = [
-            np.transpose(img)
-            for img in tmp
-        ]
+        tmp = [np.transpose(img) for img in tmp]
 
     if input.img_flip():
-        tmp = [
-            np.fliplr(img)
-            for img in tmp
-        ]
-    
-    selected_images_thresholded.set(tmp)
+        tmp = [np.fliplr(img) for img in tmp]
 
+    selected_images_thresholded.set(tmp)
 
 
 def estimate_helix_rotation_center_diameter(
@@ -1401,7 +1482,6 @@ def estimate_helix_rotation_center_diameter(
     else:
         rotation = 0.0
         data_rotated = data
-    
 
     bw = closing(data_rotated > threshold, mode="ignore")
     label_image = label(bw)
@@ -1472,9 +1552,9 @@ def update_selected_image_rotation_shift_diameter():
         "vertical_crop_size",
         value=max(32, crop_size),
         min=min(32, int(diameter) // 2 * 2),
-        max= ny//2 * 2 ,
+        max=ny // 2 * 2,
     )
-    ui.update_numeric("horizontal_crop_size", value=nx, min=32, max= nx//2 * 2)
+    ui.update_numeric("horizontal_crop_size", value=nx, min=32, max=nx // 2 * 2)
 
 
 @reactive.effect
@@ -1519,35 +1599,34 @@ def crop_selected_images():
     selected_images_thresholded_rotated_shifted_cropped.set(cropped)
 
 
-
 @reactive.effect
 @reactive.event(selected_images_rotated_shifted)
 def update_transformed_images_displayed():
     req(len(selected_images_rotated_shifted()))
-    
+
     images_displayed = []
     images_displayed_labels = []
     images_displayed_links = []
-    
-    ny,nx = np.shape(selected_images_rotated_shifted()[0])
-    
-    image_work = np.zeros((ny,nx*len(selected_images_rotated_shifted())))
+
+    ny, nx = np.shape(selected_images_rotated_shifted()[0])
+
+    image_work = np.zeros((ny, nx * len(selected_images_rotated_shifted())))
     for i, transformed_img in enumerate(selected_images_rotated_shifted()):
-        image_work[:,nx*i:nx*(i+1)]=transformed_img
-    
+        image_work[:, nx * i : nx * (i + 1)] = transformed_img
+
     images_displayed.append(image_work)
     images_displayed_labels.append(f"Selected images:")
     images_displayed_links.append("")
 
     transformed_images_displayed.set(images_displayed)
     transformed_images_labels.set(images_displayed_labels)
-    transformed_images_links.set(images_displayed_links) 
+    transformed_images_links.set(images_displayed_links)
+
 
 @reactive.effect
 @reactive.event(input.perform_stitching)
 def update_stitched_image_displayed():
     req(len(selected_images_rotated_shifted()))
-
 
     images_displayed = []
     images_displayed_labels = []
@@ -1559,6 +1638,7 @@ def update_stitched_image_displayed():
     from PIL import Image
     import tempfile
     import os
+
     with tempfile.TemporaryDirectory() as temp_dir:
         with open(temp_dir + "/TileConfiguration.txt", "w") as tc:
 
@@ -1569,14 +1649,12 @@ def update_stitched_image_displayed():
                 tmp_imf = Image.fromarray(tmp, "L")
                 tmp_imf.save(temp_dir + "/" + str(i) + ".png")
                 tc.write(str(i) + ".png; ; (" + str(i * nx + x_offsets[i]) + ", 0.0)\n")
-        
 
         result = compute.itk_stitch(temp_dir)
-    
+
     result = result.astype(np.float32)
-    result = (result-result.mean())/result.std()
-    result = result/result.max()
-    
+    result = (result - result.mean()) / result.std()
+    result = result / result.max()
 
     images_displayed.append(result)
     images_displayed_labels.append(f"Stitched image:")
@@ -1585,6 +1663,7 @@ def update_stitched_image_displayed():
     stitched_image_displayed.set(images_displayed)
     stitched_image_labels.set(images_displayed_labels)
     stitched_image_links.set(images_displayed_links)
+
 
 # below are the function doing reconstruction
 @reactive.effect
@@ -1795,7 +1874,9 @@ def display_denovo3D_projections():
         label_x = f"{ri+1}: X|score={score:.4f}|pitch={int(round(rise*360/abs(twist))):,}Å|twist={round(twist,3)}°|rise={round(rise,6)}Å"
         labels += [f"Input image: {selected_images_labels()[0]}", label_x, f"{ri+1}: Z"]
 
-        rec3d_z_sections = helicon.pad_to_size(rec3d_z_sections, shape=rec3d_x_proj.shape)
+        rec3d_z_sections = helicon.pad_to_size(
+            rec3d_z_sections, shape=rec3d_x_proj.shape
+        )
         images += [query_image_padded, rec3d_x_proj, rec3d_z_sections]
 
     reconstructed_projection_labels.set(labels)

@@ -118,10 +118,16 @@ with ui.sidebar(
                     min=0,
                     value=5,
                     step=100,
+                    update_on="blur",
                 )
 
                 ui.input_numeric(
-                    "low_pass_angstrom", "Low-pass filter (Å)", min=0, value=20, step=10
+                    "low_pass_angstrom",
+                    "Low-pass filter (Å)",
+                    min=0,
+                    value=20,
+                    step=10,
+                    update_on="blur",
                 )
 
                 ui.input_numeric(
@@ -131,11 +137,17 @@ with ui.sidebar(
                     max=10000,
                     value=0,
                     step=100,
+                    update_on="blur",
                 )
 
             with ui.layout_columns(col_widths=6, style="align-items: flex-start;"):
                 ui.input_numeric(
-                    "plot_height", "Plot height (pixel)", min=128, value=640, step=32
+                    "plot_height",
+                    "Plot height (pixel)",
+                    min=128,
+                    value=640,
+                    step=32,
+                    update_on="blur",
                 )
 
 
@@ -235,6 +247,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 min=-1,
                 value=-1,
                 step=1.0,
+                update_on="blur",
             )
             ui.input_numeric(
                 "max_pair_dist",
@@ -242,6 +255,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 min=-1,
                 value=-1,
                 step=1.0,
+                update_on="blur",
             )
             ui.input_numeric(
                 "bins",
@@ -249,6 +263,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 min=1,
                 value=100,
                 step=1,
+                update_on="blur",
             )
             ui.input_numeric(
                 "rise",
@@ -257,6 +272,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
                 max=1000.0,
                 value=4.75,
                 step=0.01,
+                update_on="blur",
             )
 
     with ui.div():
