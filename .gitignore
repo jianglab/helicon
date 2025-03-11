@@ -3,3 +3,4 @@
 /build
 /src/helicon.egg-info
 /src/helicon/webApps/image_stitching/__pycache__
+.idea
