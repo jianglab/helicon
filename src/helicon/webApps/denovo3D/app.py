@@ -287,6 +287,13 @@ with ui.sidebar(
                         width="140px",
                         update_on="blur",
                     ),
+                    ui.input_numeric(
+                        "gauss_noise_snr",
+                        "Gaussian noise SNR",
+                        value=1.0,
+                        width="140px",
+                        update_on="blur",
+                    ),
                     style="display: flex; flex-wrap: wrap; flex-direction: row; gap: 4px; align-items: flex-end; justify-content: center;",
                 )
                 ret = ui.div(
@@ -793,6 +800,11 @@ with ui.div(
         else:
             return None
 
+with ui.accordion(id="filtering_options", open=False, width="30%"):
+    with ui.accordion_panel(title="Filtering options:"):
+        ui.input_numeric(
+            "lp_angst", "Low pass filtering (Å):", value=-1, step=0.1, update_on="blur"
+        )
 
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
@@ -1014,7 +1026,11 @@ def download_denovo3D_output_map():
         ),
     ) = reconstrunction_results()[0]
 
-    ny, nx = input_data().data[0].shape
+    if input.img_transpose():
+        nx, ny = input_data().data[0].shape
+    else:
+        ny, nx = input_data().data[0].shape
+        
     apix = input_data().apix
     # ny, nx = 200,200
     # apix = 5
@@ -1334,6 +1350,25 @@ def update_all_images_from_3d_input_data():
 
     proj = np.transpose(m.sum(axis=-1))[:, ::-1]
     proj = proj[np.newaxis, :, :]
+    
+    def add_noise(image, snr, thres=1e-6):
+        x, y = np.shape(image)
+        non_zero_cnt = np.sum(image>thres)
+        print(non_zero_cnt)
+        print(x*y)
+        #xpower = np.sum(image**2) / (x * y)
+        xpower = np.sum(image**2) / non_zero_cnt
+        npower = xpower / snr
+        noise = np.random.randn(x, y) * np.sqrt(npower)
+        noisy_image = image + noise
+        return noisy_image
+    
+    print(np.shape(proj))
+    print(proj[0,0,0])
+    if input.gauss_noise_snr()>0:
+        proj[0,:,:] = add_noise(proj[0,:,:], input.gauss_noise_snr())
+    print(proj[0,0,0])
+    
     d = helicon.DotDict(data=proj, apix=input.output_apix())
     all_images.set(d)
 
@@ -1383,12 +1418,17 @@ def get_displayed_images():
 
 
 @reactive.effect
-@reactive.event(input.select_image, displayed_images)
+@reactive.event(input.select_image, displayed_images, input.lp_angst)
 def update_selecte_images_orignal():
     req(len(displayed_images()))
     req(0 <= min(input.select_image()))
     req(max(input.select_image()) < len(displayed_images()))
-    images = [displayed_images()[i] for i in input.select_image()]
+    if input.lp_angst()<=0 or input.lp_angst() is None:
+        images = [displayed_images()[i] for i in input.select_image()]
+    else:
+        apix = input.apix()
+        low_pass_fraction = 2 * apix / input.lp_angst()
+        images = [helicon.low_high_pass_filter(displayed_images()[i], low_pass_fraction=low_pass_fraction) for i in input.select_image()]
     selected_images_original.set(images)
     selected_images_labels.set(
         [displayed_image_labels()[i] for i in input.select_image()]
@@ -1427,9 +1467,12 @@ def update_threshold_scale():
     min_val = float(np.min([np.min(img) for img in images]))
     max_val = float(np.max([np.max(img) for img in images]))
     step_val = (max_val - min_val) / 100
+    prev_thres = input.threshold()
+    if prev_thres is None:
+        prev_thres = 0
     ui.update_numeric(
         "threshold",
-        value=0,
+        value=-prev_thres,
         min=round(min_val, 3),
         max=round(max_val, 3),
         step=round(step_val, 3),
