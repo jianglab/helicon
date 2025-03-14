@@ -288,8 +288,8 @@ with ui.sidebar(
                         update_on="blur",
                     ),
                     ui.input_numeric(
-                        "gauss_noise_snr",
-                        "Gaussian noise SNR",
+                        "gauss_noise_std",
+                        "Gaussian noise standard deviation",
                         value=1.0,
                         width="140px",
                         update_on="blur",
@@ -803,7 +803,7 @@ with ui.div(
 with ui.accordion(id="filtering_options", open=False, width="30%"):
     with ui.accordion_panel(title="Filtering options:"):
         ui.input_numeric(
-            "lp_angst", "Low pass filtering (Å):", value=-1, step=0.1, update_on="blur"
+            "lp_angst", "Low pass filtering (Å):", value=20, step=0.1, update_on="blur"
         )
 
 with ui.div(
@@ -1351,23 +1351,25 @@ def update_all_images_from_3d_input_data():
     proj = np.transpose(m.sum(axis=-1))[:, ::-1]
     proj = proj[np.newaxis, :, :]
     
-    def add_noise(image, snr, thres=1e-6):
-        x, y = np.shape(image)
-        non_zero_cnt = np.sum(image>thres)
-        print(non_zero_cnt)
-        print(x*y)
-        #xpower = np.sum(image**2) / (x * y)
-        xpower = np.sum(image**2) / non_zero_cnt
-        npower = xpower / snr
-        noise = np.random.randn(x, y) * np.sqrt(npower)
-        noisy_image = image + noise
-        return noisy_image
+    #def add_noise(image, noise, thres=1e-3):
+    #    x, y = np.shape(image)
+    #    non_zero_cnt = np.sum(image>thres)
+    #    print(non_zero_cnt)
+    #    print(x*y)
+    #    #xpower = np.sum(image**2) / (x * y)
+    #    xpower = np.sum(image**2) / non_zero_cnt
+    #    npower = xpower / snr
+    #    noise = np.random.randn(x, y) * np.sqrt(npower)
+    #    noisy_image = image + noise
+    #    return noisy_image
+
+    def add_noise(image, noise, thres=1e-3):
+        sigma = np.std(image[image > thres])  # ignore background pixels
+        image += np.random.normal(scale=sigma * noise, size=image.shape)
+        return image
     
-    print(np.shape(proj))
-    print(proj[0,0,0])
-    if input.gauss_noise_snr()>0:
-        proj[0,:,:] = add_noise(proj[0,:,:], input.gauss_noise_snr())
-    print(proj[0,0,0])
+    if input.gauss_noise_std()>0:
+        proj[0,:,:] = add_noise(proj[0,:,:], input.gauss_noise_std())
     
     d = helicon.DotDict(data=proj, apix=input.output_apix())
     all_images.set(d)
@@ -1423,12 +1425,18 @@ def update_selecte_images_orignal():
     req(len(displayed_images()))
     req(0 <= min(input.select_image()))
     req(max(input.select_image()) < len(displayed_images()))
-    if input.lp_angst()<=0 or input.lp_angst() is None:
-        images = [displayed_images()[i] for i in input.select_image()]
-    else:
-        apix = input.apix()
+    
+    images = [displayed_images()[i] for i in input.select_image()]
+
+    if input.lp_angst()>0:
+        if "apix" in input:
+            apix = input.apix()
+        else:
+            apix = round(all_images().apix, 4)
         low_pass_fraction = 2 * apix / input.lp_angst()
-        images = [helicon.low_high_pass_filter(displayed_images()[i], low_pass_fraction=low_pass_fraction) for i in input.select_image()]
+        print(low_pass_fraction)
+        images = [helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction) for i in input.select_image()]
+    
     selected_images_original.set(images)
     selected_images_labels.set(
         [displayed_image_labels()[i] for i in input.select_image()]
