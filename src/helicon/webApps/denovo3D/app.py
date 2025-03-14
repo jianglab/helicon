@@ -803,7 +803,7 @@ with ui.div(
 with ui.accordion(id="filtering_options", open=False, width="30%"):
     with ui.accordion_panel(title="Filtering options:"):
         ui.input_numeric(
-            "lp_angst", "Low pass filtering (Å):", value=20, step=0.1, update_on="blur"
+            "lp_angst", "Low pass filtering (Å):", value=-1, step=0.1, update_on="blur"
         )
 
 with ui.div(
