@@ -14,19 +14,48 @@ def main(args):
 
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
+
     if args.csFile:
-        input_project_folder = Path(args.csFile).resolve().parent.parent
-        data_orig = Dataset.load(args.csFile)
-        input_type = "particle" if "blob/path" in data_orig else "exposure"
+        input_project_folder = [Path(f).resolve().parent.parent for f in args.csFile]
+        if len(set(input_project_folder)) > 1:
+            tmp = " ".join([str(p) for p in set(input_project_folder)])
+            msg = f"ERROR: you have specified input cs files in {len(input_project_folder)} projects ({tmp}). All input cs files must be from the same project!"
+            helicon.color_print(msg)
+            sys.exit(-1)
+        else:
+            input_project_folder = input_project_folder[0]
+        from cryosparc.dataset import Dataset
+
+        data_orig = [Dataset.load(f) for f in args.csFile]
+        input_type = ["particle" if "blob/path" in d else "exposure" for d in data_orig]
     else:
         cs = helicon.connect_cryosparc()
         project = cs.find_project(args.projectID)
         input_project_folder = project.dir()
-        input_job = cs.find_job(args.projectID, args.jobID)
-        input_group = input_job.doc["output_result_groups"][args.groupIndex]
-        input_group_name = input_group["name"]
-        input_type = input_group["type"]
-        data_orig = input_job.load_output(input_group_name)
+        data_orig = []
+        input_type = []
+        for i, jobID in enumerate(args.jobID):
+            input_job = cs.find_job(args.projectID, jobID)
+            input_group = input_job.doc["output_result_groups"][args.groupIndex[i]]
+            input_group_name = input_group["name"]
+            data_orig.append(input_job.load_output(input_group_name))
+            input_type.append(input_group["type"])
+            if args.outputWorkspaceID is None:
+                args.outputWorkspaceID = input_job.doc["workspace_uids"][-1]
+
+    if len(set(input_type)) > 1:
+        msg = f"ERROR: you have specified {len(input_type)} types of input {input_type}. All inputs should of the same type!"
+        helicon.color_print(msg)
+        sys.exit(-1)
+    else:
+        input_type = input_type[0]
+
+    if len(data_orig) > 1:
+        from cryosparc.dataset import Dataset
+
+        data_orig = Dataset.union(*data_orig)
+    else:
+        data_orig = data_orig[0]
 
     if data_orig is None or not len(data_orig):
         helicon.color_print(f"WARNING: no data in the input. Nothing to do.")
@@ -44,30 +73,21 @@ def main(args):
     micrograph_name = helicon.first_matched_attr(data, attrs=attrs)
     if micrograph_name is None:
         helicon.color_print(
-            f"\tERROR: at least one of the {len(attrs)} parameters ({' '.join(attrs)}) must be available"
+            f"\tERROR: at least one of the {len(attrs)} parameters ({' '.join(attrs)}) must be available. You data are:\n{data}"
         )
         sys.exit(-1)
 
     if args.verbose > 1:
         micrographs = np.unique(data[micrograph_name])
         if input_type == "particle":
-            if args.verbose > 1:
-                if args.csFile:
-                    print(
-                        f"{args.csFile}: {len(data):,} particles from {len(micrographs):,} micrographs"
-                    )
-                else:
-                    print(
-                        f"{args.projectID}/{args.workspaceID}/{args.jobID}: {len(data):,} particles from {len(micrographs):,} micrographs"
-                    )
+            msg = f"{len(data):,} particles in {len(micrographs):,} micrographs"
         else:
-            if args.verbose > 1:
-                if args.csFile:
-                    print(f"{args.csFile}: {len(micrographs):,} micrographs")
-                else:
-                    print(
-                        f"{args.projectID}/{args.workspaceID}/{args.jobID}: {len(micrographs):,} micrographs"
-                    )
+            msg = f"{len(micrographs):,} micrographs"
+        if args.csFile:
+            msg += f" from {len(args.csFile)} cs files"
+        else:
+            msg += f" from {args.projectID}/{','.join(args.jobID)}"
+        print(msg)
 
     if args.verbose > 10:
         print(data)
@@ -252,7 +272,7 @@ def main(args):
                     )
                 else:
                     output_file = (
-                        f"{args.projectID}_{args.workspaceID}_{args.jobID}"
+                        f"{args.projectID}_{args.outputWorkspaceID}_{args.jobID}"
                         + output_title
                         + ".pdf"
                     )
@@ -794,16 +814,22 @@ def main(args):
             reuse_result_folder = None
             if args.projectID and not args.saveLocal:
                 output_job = project.create_external_job(
-                    args.workspaceID,
+                    args.outputWorkspaceID,
                     title="Extract Particles",
                     desc=f"{' '.join(sys.argv)}",
                 )
-                output_job.connect(
-                    target_input="particles",
-                    source_job_uid=args.jobID,
-                    source_output=input_group_name,
-                    title="Particles",
-                )
+                for i, jobID in enumerate(args.jobID):
+                    input_job = cs.find_job(args.projectID, jobID)
+                    input_group = input_job.doc["output_result_groups"][
+                        args.groupIndex[i]
+                    ]
+                    input_group_name = input_group["name"]
+                    output_job.connect(
+                        target_input="particles",
+                        source_job_uid=jobID,
+                        source_output=input_group_name,
+                        title="Particles",
+                    )
                 output_job.add_output(
                     type="particle",
                     name="extracted_particles",
@@ -952,7 +978,7 @@ def main(args):
                     )
                     futures.append(future)
 
-                if args.verbose > 1 and len(n_skipped) > 0:
+                if args.verbose > 1 and n_skipped > 0:
                     print(
                         f"\t{len(tasks):,} micrographs: {n_skipped:,} skipped, {len(futures):,} to go"
                     )
@@ -994,15 +1020,13 @@ def main(args):
     if args.csFile or args.saveLocal:
         if args.csFile:
             output_file = (
-                f"{Path(args.csFile).stem}"
+                f"{'-'.join([Path(f).stem for f in args.csFile])}"
                 + (output_title if output_title else ".output")
                 + ".cs"
             )
         else:
             output_file = (
-                f"{args.projectID}_{args.workspaceID}_{args.jobID}"
-                + output_title
-                + ".cs"
+                f"{args.projectID}_{' '.join(args.jobID)}" + output_title + ".cs"
             )
         output_file = "-".join(output_file.split())
         output_file = output_file.replace(" ", "-")
@@ -1014,18 +1038,18 @@ def main(args):
     else:
         project = cs.find_project(args.projectID)
         new_jobID = project.save_external_result(
-            workspace_uid=args.workspaceID,
+            workspace_uid=args.outputWorkspaceID,
             dataset=data,
             type=input_type,
             name=input_type,
             slots=list(output_slots),
             passthrough=(input_job.uid, input_group_name),
-            title=f"{args.jobID}" + output_title,
+            title=f"{', '.join(args.jobID)}" + output_title,
             desc=f"{' '.join(sys.argv)}",
         )
         if args.verbose > 1:
             print(
-                f"The results are saved to a new CryoSPARC external job: {args.projectID}/{args.workspaceID}/{new_jobID}"
+                f"The results are saved to a new CryoSPARC external job: {args.projectID}/{args.outputWorkspaceID}/{new_jobID}"
             )
 
 
@@ -1171,8 +1195,9 @@ def add_args(parser):
         "--csFile",
         type=str,
         metavar="<filename>",
+        nargs="+",
         help="input cryosparc particles cs file",
-        default=None,
+        default=[],
     )
 
     parser.add_argument(
@@ -1183,7 +1208,7 @@ def add_args(parser):
         default=None,
     )
     parser.add_argument(
-        "--workspaceID",
+        "--outputWorkspaceID",
         type=str,
         metavar="<Wx>",
         help="input cryosparc workspace id",
@@ -1193,15 +1218,17 @@ def add_args(parser):
         "--jobID",
         type=str,
         metavar="<Jxx>",
+        nargs="+",
         help="input cryosparc job id",
-        default=None,
+        default=[],
     )
     parser.add_argument(
         "--groupIndex",
         type=int,
         metavar="<n>",
+        nargs="+",
         help="the output group index of the input cryosparc job",
-        default=0,
+        default=[],
     )
 
     parser.add_argument(
@@ -1241,7 +1268,7 @@ def add_args(parser):
     )
     parser.add_argument(
         "--splitByMicrograph",
-        type=bool,
+        type=int,
         metavar="<0|1>",
         help="split the dataset by micrograph. disabled by default",
         default=0,
@@ -1287,20 +1314,26 @@ def check_args(args, parser):
         o
         for o in all_options
         if o
-        not in "cpu groupIndex jobID projectID saveLocal verbose workspaceID".split()
+        not in "cpu groupIndex jobID projectID saveLocal verbose outputWorkspaceID".split()
     ]
 
-    if (
-        args.projectID or args.workspaceID or args.jobID or args.groupIndex
-    ) and args.csFile:
-        msg = f"You should only specify options for CryoSPARC server (--projectID --workspaceID --jobID) or local file (--csFile), but not both"
+    if (args.projectID or args.jobID or args.groupIndex) and args.csFile:
+        msg = f"You should only specify options for CryoSPARC server (--projectID --jobID) or local file (--csFile), but not both"
         helicon.color_print(msg)
         raise ValueError(msg)
 
-    if not ((args.projectID and args.workspaceID and args.jobID) or args.csFile):
-        msg = f"You should specify options for either CryoSPARC server (--projectID --workspaceID --jobID) or local file (--csFile)"
+    if not ((args.projectID and args.jobID) or args.csFile):
+        msg = f"You should specify options for either CryoSPARC server (--projectID --jobID) or local file (--csFile)"
         helicon.color_print(msg)
         raise ValueError(msg)
+
+    if len(args.jobID):
+        if len(args.groupIndex) not in [0, len(args.jobID)]:
+            msg = f"You should specify {len(args.jobID)} --jobID options but {len(args.groupIndex)} --groupIndex options. You should specify either no --groupIndex option (i.e. default to 0) or {len(args.jobID)} --groupIndex options (i.e. the same number as that of --joibID options)"
+            helicon.color_print(msg)
+            raise ValueError(msg)
+        elif len(args.groupIndex) == 0:
+            args.groupIndex = [0] * len(args.jobID)
 
     return args
 
