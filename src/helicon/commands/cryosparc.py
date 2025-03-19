@@ -998,6 +998,8 @@ def main(args):
             from cryosparc.dataset import Dataset
 
             data = Dataset.append(*results, assert_same_fields=True)
+            data = fill_missing_fields(data)
+
             if args.verbose > 1:
                 print(
                     f"\t{len(data):,} particles extracted from {n_micrographs:,} micrographs"
@@ -1016,6 +1018,8 @@ def main(args):
 
     if data is None:
         return
+
+    data = fill_missing_fields(data)
 
     if args.csFile or args.saveLocal:
         if args.csFile:
@@ -1036,6 +1040,12 @@ def main(args):
         if args.verbose > 1:
             print(f"The results are saved to {output_file}")
     else:
+        if len(args.jobID) == 1 and len(output_slots):
+            passthrough = (input_job.uid, input_group_name)
+        else:
+            passthrough = None
+            output_slots = [p for p in data.prefixes()]
+
         project = cs.find_project(args.projectID)
         new_jobID = project.save_external_result(
             workspace_uid=args.outputWorkspaceID,
@@ -1043,7 +1053,7 @@ def main(args):
             type=input_type,
             name=input_type,
             slots=list(output_slots),
-            passthrough=(input_job.uid, input_group_name),
+            passthrough=passthrough,
             title=f"{', '.join(args.jobID)}" + output_title,
             desc=f"{' '.join(sys.argv)}",
         )
@@ -1188,6 +1198,30 @@ def extract_one_micrograph(
     ret["blob/sign"] = [sign] * len(ret)
     ret["blob/import_sig"] = [1] * len(ret)
     return ret
+
+
+def fill_missing_fields(data):  # inplace modifications
+    for p in data.prefixes():
+        if p == "ctf":
+            default_var_type = {
+                "ctf/tetra_A": ("<f4", (4,)),
+                "ctf/scale_const": "<f4",
+                "ctf/trefoil_A": ("<f4", (2,)),
+                "ctf/bfactor": "<f4",
+                "ctf/scale": "<f4",
+                "ctf/tilt_A": ("<f4", (2,)),
+                "ctf/anisomag": ("<f4", (4,)),
+                "ctf/shift_A": ("<f4", (2,)),
+            }
+            for var in default_var_type:
+                if var not in data:
+                    data.add_fields([var], [default_var_type[var]])
+        if p == "pick_stats":
+            default_var_type = {}
+            for var in default_var_type:
+                if var not in data:
+                    data.add_fields([var], [default_var_type[var]])
+    return data
 
 
 def add_args(parser):
