@@ -212,7 +212,7 @@ def low_high_pass_filter(
         f2 = np.log(2) / (high_pass_fraction**2)
         filter_hp = 1.0 - np.exp(-f2 * R2)
         fft *= np.fft.fftshift(filter_hp)
-    ret = np.abs(np.fft.ifftn(fft))
+    ret = np.real(np.fft.ifftn(fft))
     return ret
 
 

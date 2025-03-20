@@ -1384,6 +1384,8 @@ def get_displayed_images():
     req(len(all_images().data))
     data = all_images().data
     apix = all_images().apix
+    if len(data.shape)<3:
+            data = np.expand_dims(data,axis=0)
     n = len(data)
     if n:
         ny, nx = data[0].shape[:2]
