@@ -604,6 +604,27 @@ def main(args):
                     f"\thalf dataset 2: {len(group2)} micrographs, {np.sum(data[col_split]==1)} particles"
                 )
 
+        elif option_name == "changePixelSize" and param > 0:
+            col_apix = "blob/psize_A"
+            if col_apix not in data:
+                helicon.color_print(
+                    f"\tERROR: required parameter {col_apix} is not available"
+                )
+                sys.exit(-1)
+            apix_orig = data[col_apix][0]
+            apix_new = param
+            data[col_apix] = apix_new
+
+            for col in ["ctf/df1_A", "ctf/df2_A"]:
+                if col in data:
+                    data[col] *= (apix_new / apix_orig) ** 2
+            for col in ["ctf/cs_mm"]:
+                if col in data:
+                    data[col] *= (apix_new / apix_orig) ** 4
+
+            if args.verbose > 1:
+                print(f"\tPixel size: {apix_orig:.4f} -> {apix_new} Angstrom/pixel")
+
         elif option_name == "extractParticles" and param:
             if (
                 "location/center_x_frac" not in data
@@ -1201,26 +1222,25 @@ def extract_one_micrograph(
 
 
 def fill_missing_fields(data):  # inplace modifications
-    for p in data.prefixes():
-        if p == "ctf":
-            default_var_type = {
-                "ctf/tetra_A": ("<f4", (4,)),
-                "ctf/scale_const": "<f4",
-                "ctf/trefoil_A": ("<f4", (2,)),
-                "ctf/bfactor": "<f4",
-                "ctf/scale": "<f4",
-                "ctf/tilt_A": ("<f4", (2,)),
-                "ctf/anisomag": ("<f4", (4,)),
-                "ctf/shift_A": ("<f4", (2,)),
-            }
-            for var in default_var_type:
-                if var not in data:
-                    data.add_fields([var], [default_var_type[var]])
-        if p == "pick_stats":
-            default_var_type = {}
-            for var in default_var_type:
-                if var not in data:
-                    data.add_fields([var], [default_var_type[var]])
+    default_var_type = {
+        "ctf/tetra_A": ("<f4", (4,)),
+        "ctf/scale_const": "<f4",
+        "ctf/trefoil_A": ("<f4", (2,)),
+        "ctf/bfactor": "<f4",
+        "ctf/scale": "<f4",
+        "ctf/tilt_A": ("<f4", (2,)),
+        "ctf/anisomag": ("<f4", (4,)),
+        "ctf/shift_A": ("<f4", (2,)),
+    }
+    nonzero_default = {
+        "ctf/scale": 1,
+    }
+    for var in default_var_type:
+        prefix = var.split("/")[0]
+        if prefix in data.prefixes() and var not in data:
+            data.add_fields([var], [default_var_type[var]])
+            if var in nonzero_default:
+                data[var] = nonzero_default[var]
     return data
 
 
@@ -1305,6 +1325,13 @@ def add_args(parser):
         type=int,
         metavar="<0|1>",
         help="split the dataset by micrograph. disabled by default",
+        default=0,
+    )
+    parser.add_argument(
+        "--changePixelSize",
+        type=float,
+        metavar="<Angstrom>",
+        help="change the pixel size to this value. Adjust defocus and Cs accordingly. disabled by default",
         default=0,
     )
     parser.add_argument(
