@@ -800,6 +800,7 @@ with ui.div(
         else:
             return None
 
+
 with ui.accordion(id="filtering_options", open=False, width="30%"):
     with ui.accordion_panel(title="Filtering options:"):
         ui.input_numeric(
@@ -865,8 +866,9 @@ with ui.div(
 def display_denovo3D_scores():
     req(len(reconstrunction_results()) > 1)
 
-    scores = []
-    twists = []
+    import plotly.express as px
+
+    results = np.zeros((3, len(reconstrunction_results())), dtype=float)
     for ri, result in enumerate(reconstrunction_results()):
         (
             score,
@@ -894,22 +896,75 @@ def display_denovo3D_scores():
                 dy,
             ),
         ) = result
-        scores.append(score)
-        twists.append(twist)
-    sort_idx = np.argsort(twists)
-    twists = np.array(twists)[sort_idx]
-    scores = np.array(scores)[sort_idx]
+        results[0, ri] = twist
+        results[1, ri] = rise
+        results[2, ri] = score
 
-    # output score in windows machine
-    # np.save('/mnt/f/script/helicon/test/twist.npy', twists)
-    # np.save('/mnt/f/script/helicon/test/score.npy', scores)
-    # print('the score is saved')
+    n_twists = len(np.unique(results[0, :]))
+    n_rises = len(np.unique(results[1, :]))
 
-    import plotly.express as px
+    if n_twists > 1 and n_rises > 1:
+        x = results[0, :]  # twist
+        y = results[1, :]  # rise
+        scores = results[2, :]
+        vmin = np.min(results[2, :])
+        x_unique = np.sort(np.unique(x))
+        y_unique = np.sort(np.unique(y))
+        X, Y = np.meshgrid(x_unique, y_unique, indexing="ij")
+        Z = np.zeros_like(X) + vmin
+        for j in range(Z.shape[1]):
+            for i in range(Z.shape[0]):
+                vals = []
+                for si in range(len(x)):
+                    if y[si] == Y[i, j] and x[si] == X[i, j]:
+                        vals.append(scores[si])
+                if len(vals):
+                    Z[i, j] = np.max(vals)
 
-    fig = px.line(x=twists, y=scores, color_discrete_sequence=["blue"], markers=True)
-    fig.update_layout(xaxis_title="Twist (°)", yaxis_title="Score", showlegend=False)
-    fig.update_traces(hovertemplate="Twist: %{x}°<br>Score: %{y}")
+        fig = px.imshow(
+            Z.T,
+            x=x_unique,
+            y=y_unique,
+            origin="lower",
+            labels=dict(x="Twist (°)", y="Rise (Å)", color="Score"),
+            color_continuous_scale="viridis",
+        )
+
+        fig.update_layout(coloraxis_colorbar_title="Score")
+
+        # Add red box marker at maximum
+        max_idx = np.unravel_index(np.argmax(Z), Z.shape)
+        max_x = x_unique[max_idx[0]]
+        max_y = y_unique[max_idx[1]]
+        fig.add_shape(
+            type="rect",
+            x0=max_x - (x_unique[1] - x_unique[0]) / 2,
+            y0=max_y - (y_unique[1] - y_unique[0]) / 2,
+            x1=max_x + (x_unique[1] - x_unique[0]) / 2,
+            y1=max_y + (y_unique[1] - y_unique[0]) / 2,
+            line=dict(color="red", width=2),
+            fillcolor=None,
+        )
+
+    elif n_twists > 1 or n_rises > 1:
+        if n_twists > 1:
+            x = results[0, :]
+            x_title = f"Twist (°)"
+            hovertemplate = "Twist: %{x}°<br>Score: %{y}"
+        else:
+            x = results[1, :]
+            x_title = f"Rise (Å)"
+            hovertemplate = "Rise: %{x}Å<br>Score: %{y}"
+        y_title = "Score"
+        y = results[2, :]
+
+        sort_idx = np.argsort(x)
+        x = np.array(x)[sort_idx]
+        y = np.array(y)[sort_idx]
+
+        fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
+        fig.update_layout(xaxis_title=x_title, yaxis_title=y_title, showlegend=False)
+        fig.update_traces(hovertemplate=hovertemplate)
 
     return fig
 
@@ -1030,7 +1085,7 @@ def download_denovo3D_output_map():
         nx, ny = input_data().data[0].shape
     else:
         ny, nx = input_data().data[0].shape
-        
+
     apix = input_data().apix
     # ny, nx = 200,200
     # apix = 5
@@ -1350,8 +1405,8 @@ def update_all_images_from_3d_input_data():
 
     proj = np.transpose(m.sum(axis=-1))[:, ::-1]
     proj = proj[np.newaxis, :, :]
-    
-    #def add_noise(image, noise, thres=1e-3):
+
+    # def add_noise(image, noise, thres=1e-3):
     #    x, y = np.shape(image)
     #    non_zero_cnt = np.sum(image>thres)
     #    print(non_zero_cnt)
@@ -1367,10 +1422,10 @@ def update_all_images_from_3d_input_data():
         sigma = np.std(image[image > thres])  # ignore background pixels
         image += np.random.normal(scale=sigma * noise, size=image.shape)
         return image
-    
-    if input.gauss_noise_std()>0:
-        proj[0,:,:] = add_noise(proj[0,:,:], input.gauss_noise_std())
-    
+
+    if input.gauss_noise_std() > 0:
+        proj[0, :, :] = add_noise(proj[0, :, :], input.gauss_noise_std())
+
     d = helicon.DotDict(data=proj, apix=input.output_apix())
     all_images.set(d)
 
@@ -1384,8 +1439,8 @@ def get_displayed_images():
     req(len(all_images().data))
     data = all_images().data
     apix = all_images().apix
-    if len(data.shape)<3:
-            data = np.expand_dims(data,axis=0)
+    if len(data.shape) < 3:
+        data = np.expand_dims(data, axis=0)
     n = len(data)
     if n:
         ny, nx = data[0].shape[:2]
@@ -1427,18 +1482,21 @@ def update_selecte_images_orignal():
     req(len(displayed_images()))
     req(0 <= min(input.select_image()))
     req(max(input.select_image()) < len(displayed_images()))
-    
+
     images = [displayed_images()[i] for i in input.select_image()]
 
-    if input.lp_angst()>0:
+    if input.lp_angst() > 0:
         if "apix" in input:
             apix = input.apix()
         else:
             apix = round(all_images().apix, 4)
         low_pass_fraction = 2 * apix / input.lp_angst()
         print(low_pass_fraction)
-        images = [helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction) for i in input.select_image()]
-    
+        images = [
+            helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction)
+            for i in input.select_image()
+        ]
+
     selected_images_original.set(images)
     selected_images_labels.set(
         [displayed_image_labels()[i] for i in input.select_image()]

@@ -9,9 +9,9 @@ def main(args):
     try:
         from pathlib import Path
 
-        folder = Path(__file__).parent.parent / "webApps" / "denovo3D"
+        app_file = Path(__file__).parent.parent / "webApps" / "denovo3D" / "app.py"
 
-        cmd = f"shiny run --launch-browser --no-dev-mode --port 0 {folder}/app.py"
+        cmd = f'shiny run --launch-browser --no-dev-mode --port 0 "{app_file}"'
         import subprocess
 
         subprocess.call(cmd, shell=True)
