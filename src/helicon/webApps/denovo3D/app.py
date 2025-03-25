@@ -1185,6 +1185,13 @@ def transformation_ui_single():
 
     apix = round(all_images().apix, 4)
     ui.update_numeric("apix", value=apix, max=apix * 2)
+    if len(all_images().data.shape)<3:
+        ny, nx = all_images().data.shape
+    else:
+        _, ny, nx = all_images().data.shape
+
+    if ny>nx:
+        ui.update_checkbox("img_transpose", value=True)
     return tui_single
 
 
