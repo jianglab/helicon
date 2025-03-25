@@ -417,7 +417,7 @@ with ui.sidebar(
                         update_on="blur",
                     )
 
-                    "Down-scale images to have this pixel size before 3D reconstruction. <=0 -> no down-scaling"
+                    "Down-scale images to have this pixel size before 3D reconstruction. <=0 -> no down-scaling. Will be ignored if it's smaller than the input image pixel size."
 
                 with ui.tooltip():
                     ui.input_numeric(
@@ -429,7 +429,7 @@ with ui.sidebar(
                         update_on="blur",
                     )
 
-                    "Voxel size of 3D reconstruction. 0 -> Set to target image pixel size. <0 -> auto-decision."
+                    "Voxel size of 3D reconstruction. 0 -> Set to target image pixel size. <0 -> auto-decision. Will be ignored if it's smaller than the input image pixel size."
 
                 with ui.tooltip():
                     ui.input_numeric(
@@ -1488,6 +1488,7 @@ def get_displayed_images():
 @reactive.event(input.select_image, displayed_images, input.lp_angst)
 def update_selecte_images_orignal():
     req(len(displayed_images()))
+    req(input.select_image())
     req(0 <= min(input.select_image()))
     req(max(input.select_image()) < len(displayed_images()))
 
@@ -1836,6 +1837,16 @@ def run_denovo3D_reconstruction():
     tr_pairs = list(itertools.product(twists, rises))
     return_3d = len(tr_pairs) == 1
 
+    if input.target_apix2d() > input.apix():
+        target_apix2d_overwrite = input.target_apix2d()
+    else:
+        target_apix2d_overwrite = -1
+    if input.target_apix3d() > input.apix():
+        target_apix3d_overwrite = input.target_apix3d()
+    else:
+        target_apix3d_overwrite = -1
+
+
     tasks = []
     for ti, t in enumerate(tr_pairs):
         twist, rise = t
@@ -1851,8 +1862,8 @@ def run_denovo3D_reconstruction():
         low_pass = -1
         transpose = 0
         horizontalize = 0
-        target_apix2d = input.target_apix2d()
-        target_apix3d = input.target_apix3d()
+        target_apix2d = target_apix2d_overwrite
+        target_apix3d = target_apix3d_overwrite
         thresh_fraction = -1
         positive_constraint = int(input.positive_constraint())
         tube_diameter = ny * apix
