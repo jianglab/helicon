@@ -757,31 +757,45 @@ with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
 
-    @shiny.render.ui
-    @reactive.event(
-        selected_images_thresholded_rotated_shifted_cropped,
-        initial_image,
-        ignore_init=False,
-    )
-    def generate_image_gallery_single():
-        req(len(initial_image()))
-        req(0 <= min(input.select_image()))
-        req(max(input.select_image()) < len(displayed_images()))
-        n_images_selected = len(initial_image())
-        # To check whether there is image for transformation and display
-        if n_images_selected == 1:
-            return helicon.shiny.image_gallery(
-                id="display_selected_image",
-                label=selected_images_title,
-                images=selected_images_thresholded_rotated_shifted_cropped,
-                image_labels=display_initial_image_value,
-                image_size=input.selected_image_display_size,
-                justification="left",
-                enable_selection=False,
-                display_dashed_line=True,
-            )
-        else:
-            return None
+    with ui.div(
+        style="display: flex; flex-flow: column wrap; align-items: flex-start; gap: 10px; margin-bottom: 0"
+    ):
+
+        @shiny.render.ui
+        @reactive.event(
+            selected_images_thresholded_rotated_shifted_cropped,
+            initial_image,
+            ignore_init=False,
+        )
+        def generate_image_gallery_single():
+            req(len(initial_image()))
+            req(0 <= min(input.select_image()))
+            req(max(input.select_image()) < len(displayed_images()))
+            n_images_selected = len(initial_image())
+            # To check whether there is image for transformation and display
+            if n_images_selected == 1:
+                return helicon.shiny.image_gallery(
+                    id="display_selected_image",
+                    label=selected_images_title,
+                    images=selected_images_thresholded_rotated_shifted_cropped,
+                    image_labels=display_initial_image_value,
+                    image_size=input.selected_image_display_size,
+                    justification="left",
+                    enable_selection=False,
+                    display_dashed_line=True,
+                )
+            else:
+                return None
+
+        with ui.accordion(id="filtering_options", open=False, width="100%"):
+            with ui.accordion_panel(title="Filtering options:"):
+                ui.input_numeric(
+                    "lp_angst",
+                    "Low pass filtering (Å):",
+                    value=-1,
+                    step=0.1,
+                    update_on="blur",
+                )
 
     @shiny.render.ui
     @reactive.event(initial_image, ignore_init=False)
@@ -800,12 +814,6 @@ with ui.div(
         else:
             return None
 
-
-with ui.accordion(id="filtering_options", open=False, width="30%"):
-    with ui.accordion_panel(title="Filtering options:"):
-        ui.input_numeric(
-            "lp_angst", "Low pass filtering (Å):", value=-1, step=0.1, update_on="blur"
-        )
 
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
