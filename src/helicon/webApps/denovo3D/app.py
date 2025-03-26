@@ -1098,10 +1098,13 @@ def download_denovo3D_output_map():
         ),
     ) = reconstrunction_results()[0]
 
-    if input.img_transpose():
-        nx, ny = input_data().data[0].shape
+    if len(all_images().data.shape) < 3:
+        ny, nx = all_images().data.shape
     else:
-        ny, nx = input_data().data[0].shape
+        _, ny, nx = all_images().data.shape
+
+    if input.img_transpose():
+        nx, ny = ny, nx
 
     apix = input_data().apix
     # ny, nx = 200,200
