@@ -358,6 +358,30 @@ def get_clip(image, y0, x0, height, width):
     return clip
 
 
+def get_rotated_clip(image, y0, x0, y1, x1, width, order=1):
+    # image: numpy 2D array of shape (ny, nx)
+    # y0, x0: coordinate of the starting point
+    # y1, x1: coordinate of the ending point
+    # order: interpolation order
+
+    dy = y1 - y0
+    dx = x1 - x0
+    angle = np.atan2(dy, dx)
+    length = np.sqrt(dy**2 + dx**2)
+    x_steps = np.linspace(0, length, int(length))
+    y_steps = np.linspace(-width / 2, width / 2, width)
+    X, Y = np.meshgrid(x_steps, y_steps)
+    X_rot = X * np.cos(angle) - Y * np.sin(angle) + x0
+    Y_rot = X * np.sin(angle) + Y * np.cos(angle) + y0
+
+    from scipy.ndimage import map_coordinates
+
+    coords = np.stack([Y_rot, X_rot])
+    result = map_coordinates(image, coords, order=order)
+
+    return result
+
+
 def fft_crop(data, output_size=None):
     if output_size is None or data.shape == output_size:
         return data
