@@ -468,6 +468,15 @@ with ui.sidebar(
 
                     "The ratio (0 to 1) of L1 regularization in the L1/L2 combined regularization. Only used for the elasticnet algorithms"
 
+                ui.input_numeric(
+                    "top_n_results",
+                    "# of results to show",
+                    min=-1,
+                    value=10,
+                    step=1,
+                    update_on="blur",
+                )
+
             with ui.layout_columns(col_widths=12, style="align-items: flex-end;"):
                 with ui.tooltip():
                     ui.input_radio_buttons(
@@ -1122,7 +1131,7 @@ def download_denovo3D_output_map():
 
 
 ui.HTML(
-    "<i><p>Developed by the <a href='https://jianglab.science.psu.edu' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
+    "<i><p>Developed by the <a href='https://jianglab.science.psu.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
 )
 
 
@@ -1185,12 +1194,12 @@ def transformation_ui_single():
 
     apix = round(all_images().apix, 4)
     ui.update_numeric("apix", value=apix, max=apix * 2)
-    if len(all_images().data.shape)<3:
+    if len(all_images().data.shape) < 3:
         ny, nx = all_images().data.shape
     else:
         _, ny, nx = all_images().data.shape
 
-    if ny>nx:
+    if ny > nx:
         ui.update_checkbox("img_transpose", value=True)
     return tui_single
 
@@ -1853,7 +1862,6 @@ def run_denovo3D_reconstruction():
     else:
         target_apix3d_overwrite = -1
 
-
     tasks = []
     for ti, t in enumerate(tr_pairs):
         twist, rise = t
@@ -1986,9 +1994,14 @@ def display_denovo3D_projections():
     reconstructed_projection_labels.set([])
     reconstructed_projection_images.set([])
     req(len(reconstrunction_results()))
+
+    top_n = input.top_n_results()
+    if top_n <= 0:
+        top_n = len(reconstrunction_results())
+
     labels = []
     images = []
-    for ri, result in enumerate(reconstrunction_results()):
+    for ri, result in enumerate(reconstrunction_results()[:top_n]):
         (
             score,
             (
