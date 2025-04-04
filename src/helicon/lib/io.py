@@ -896,7 +896,7 @@ def star2dataframe(
     data = None
     d = starfile.read(starFile, always_dict=True)
     for k in d:
-        if k in ["movies", "micrographs", "particles"]:
+        if k in ["movies", "micrographs", "particles", "coordinate_files"]:
             data = d[k]
             break
     assert (
@@ -1319,7 +1319,7 @@ def dataframe_normalize_filename(
 
     attrs = []
     attrs_with_at = []
-    for attr in "rlnImageName rlnMicrographName rlnMicrographMovieName".split():
+    for attr in "rlnImageName rlnMicrographName rlnMicrographMovieName rlnMicrographCoordinates".split():
         if attr in data:
             if attr == "rlnImageName":
                 ignore_bad_path = ignore_bad_particle_path

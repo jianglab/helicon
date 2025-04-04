@@ -533,7 +533,7 @@ def main(args):
                 plt.show()
 
             index_d[option_name] += 1
-
+        
         elif option_name == "select" and len(param) == 2:
             var, val = param
             if var in data:
@@ -668,6 +668,9 @@ def main(args):
 
             dids = convert_dataframe_file_path(data, col1, to="abs")
             sids = convert_dataframe_file_path(data_sf, col2, to="abs")
+            dids = dids.apply((lambda row: row.lstrip('0')))
+            sids = sids.apply((lambda row: row.lstrip('0')))
+
             if pattern:
                 dids = dids.str.extract(pattern, expand=False)
                 sids = sids.str.extract(pattern, expand=False)
@@ -702,7 +705,7 @@ def main(args):
             index_d[option_name] += 1
 
         elif option_name == "selectCommonHelices" and len(param) > 0:
-            # starfile:col1=<name>:col2=<name>:pattern=<str>
+            # starfile
             sf, _ = helicon.parse_param_str(param)
             assert "rlnMicrographName" in data
             assert "rlnHelicalTubeID" in data
@@ -838,6 +841,110 @@ def main(args):
             data = data2
             data.drop(["sbpl_rlnMicrographName"], axis=1, inplace=True)
             index_d[option_name] += 1
+
+        elif option_name == "extractHelices" and len(param):
+            if param.find("=") != -1:
+                # width=300:outPath=./helicon.helices/:topLength=<10>[:topLengthFraction=<0.1>][lengthCutoffAngst=<1000>]
+                _, param_dict = helicon.parse_param_str(param)
+            else:
+                param_dict = {}
+            
+            if len(param.split(":"))>3:
+                helicon.color_print(
+                    "WARNING: here might be multiple selection criteria. Will use the intersection of them."
+                )
+
+            
+            width = param_dict.get("width", None)
+            outPath = param_dict.get("outPath", "./helicon.helices/")
+            topLength = param_dict.get("topLength", None)
+            topLengthFraction = param_dict.get("topLengthFraction", None)
+            lengthCutoffAngst = param_dict.get("lengthCutoffAngst", None)
+            
+            import starfile
+            
+            get_apix=True
+            coord_df = pd.DataFrame(columns = ["startX", "startY", "endX", "endY", "rlnMicrographName", "helixLength"])
+            for _, mic_name, coordfile in data.itertuples():
+                if get_apix:
+                    import mrcfile
+                    with mrcfile.open(mic_name,'r') as mic:
+                        mic_data = np.array(mic.data, dtype=np.float32)
+                        apix=mic.voxel_size['x']
+                        get_apix=False
+                cf = starfile.read(coordfile)
+                if cf is not None:
+                    cf = cf.reset_index(drop=True)
+                    cf = cf.loc[:,["rlnCoordinateX", "rlnCoordinateY"]]
+                    starts = cf.iloc[::2].reset_index(drop=True)
+                    ends = cf.iloc[1::2].reset_index(drop=True)
+                    filaments = pd.DataFrame({
+                        'startX': starts['rlnCoordinateX'],
+                        'startY': starts['rlnCoordinateY'],
+                        'endX': ends['rlnCoordinateX'],
+                        'endY': ends['rlnCoordinateY'],
+                        'rlnMicrographName': mic_name
+                    })
+                    filaments['helixLength'] = np.sqrt((filaments['endX'] - filaments['startX']) ** 2 + 
+                               (filaments['endY'] - filaments['startY']) ** 2)
+                    #print(filaments)
+                    coord_df = pd.concat([coord_df,filaments])
+
+            coord_df['helixLength'] *= apix    
+            coord_df = coord_df.sort_values(by="helixLength", ascending=False)
+            
+            if topLengthFraction:
+                coord_df = coord_df.iloc[0:np.floor(len(coord_df)*topLengthFraction),:]
+            
+            if topLength:
+                if len(coord_df) > topLength:
+                    coord_df = coord_df.iloc[0:topLength,:]            
+            
+            if lengthCutoffAngst:
+                coord_df = coord_df[coord_df['helixLength']>=lengthCutoffAngst]
+            
+            cpu=args.cpu
+            tasks=[]
+            helix_idx=0
+            coord_df.reset_index(drop=True)
+            out_names=[]
+            for _,startX,startY,endX,endY,mic_name,_ in coord_df.itertuples():
+                mic_prefix='.'.join(mic_name.split('/')[-1].split('.')[:-1])
+                out_name = outPath+'/helix_'+str(helix_idx)+'_width_'+str(width)+'px_'+mic_prefix+'.mrc'
+                out_names.append(out_name)
+                tasks.append((startX,startY,endX,endY,mic_name,width,out_name))
+                helix_idx+=1
+            
+            coord_df["rlnHelixImageName"] = out_names
+
+            def process_one_task(startX,startY,endX,endY,mic_name,width,out_name):
+                import mrcfile
+                with mrcfile.open(mic_name,'r') as mic:
+                    mic_data = np.array(mic.data, dtype=np.float32)
+                    apix=mic.voxel_size['x']
+                    helix_image = helicon.get_rotated_clip(mic_data,startY,startX,endY,endX,width)
+                    with mrcfile.new(out_name,overwrite=True) as o_mrc:
+                        o_mrc.set_data(np.array(helix_image,dtype=np.float32))
+                        o_mrc.voxel_size=apix
+            
+            import os
+                
+            if not os.path.isdir(outPath):
+                os.makedirs(outPath)
+            
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=cpu) as executor:
+                future_tasks = [
+                    executor.submit(process_one_task, *task) for task in tasks
+                ]
+                results = []
+                for completed_task in as_completed(future_tasks):
+                    result = completed_task.result()
+                    results.append(result)
+            
+            data = coord_df
+            #print(data)
 
         elif option_name == "sets" and param > 1:
             sets = param
@@ -3104,6 +3211,14 @@ def add_args(parser):
         metavar="starFile:maxDist=<pixel>",
         action="append",
         help="select particles that are at the same locations in the micrograph (example: x.star:maxDist=10). disabled by default",
+        default=[],
+    )
+    parser.add_argument(
+        "--extractHelices",
+        type=str,
+        metavar="width=300:outPath=./helicon.helices/:topLength=<10>[:topLengthFraction=<0.1>][lengthCutoffAngst=<1000>]",
+        action="append",
+        help="extract helical filaments from input files. disabled by default",
         default=[],
     )
     parser.add_argument(
