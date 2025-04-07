@@ -36,12 +36,20 @@ def main(args):
         input_type = []
         for i, jobID in enumerate(args.jobID):
             input_job = cs.find_job(args.projectID, jobID)
+            if len(input_job.doc["output_result_groups"]) < 1:
+                helicon.color_print(
+                    f"\t{jobID} does not have any output groups. Ignored"
+                )
+                continue
             input_group = input_job.doc["output_result_groups"][args.groupIndex[i]]
             input_group_name = input_group["name"]
             data_orig.append(input_job.load_output(input_group_name))
             input_type.append(input_group["type"])
             if args.outputWorkspaceID is None:
                 args.outputWorkspaceID = input_job.doc["workspace_uids"][-1]
+        if len(data_orig) < 1:
+            helicon.color_print(f"\tWARNING: no input data. I am going to quit")
+            sys.exit(-1)
 
     if len(set(input_type)) > 1:
         msg = f"ERROR: you have specified {len(input_type)} types of input {input_type}. All inputs should of the same type!"
@@ -97,6 +105,9 @@ def main(args):
         data,
         attrs="ctf/exp_group_id location/exp_group_id mscope_params/exp_group_id".split(),
     )
+    if exp_group_id_name is None:
+        exp_group_id_name = "mscope_params/exp_group_id"
+        data.add_fields([exp_group_id_name], ["u4"])
 
     output_title = ""
     output_slots = set()
@@ -144,6 +155,24 @@ def main(args):
                 micrograph_to_beamshift_clusters = get_micrograph_2_beamshift_groups(
                     micrographs
                 )
+            elif software in ["serialEM_cuhksz"]:
+                _, param_dict = helicon.parse_param_str(param)
+                if "n_per_stage_shift" not in param_dict:
+                    helicon.color_print(f"\tERROR: n_per_stage_shift must be specified")
+                    sys.exit(-1)
+                n_per_stage_shift = int(param_dict["n_per_stage_shift"])
+                assert n_per_stage_shift > 0
+
+                micrograph_to_beamshift_clusters = {}
+                for m in micrographs:
+                    i = int(helicon.extract_serialEM_cuhksz_beamshift(m))
+                    if i > 0:
+                        i = i % n_per_stage_shift
+                        if i == 0:
+                            i = n_per_stage_shift
+                    else:
+                        i = 0
+                    micrograph_to_beamshift_clusters[m] = i
             elif software in ["EPU_old"]:
                 _, param_dict = helicon.parse_param_str(param)
                 xml_folder = param_dict.get("xml_folder", "")
@@ -254,7 +283,9 @@ def main(args):
             for attr in exp_group_id_names_all:
                 slot = attr.split("/")[0]
                 output_slots.add(slot)
-            output_title += f"->{len(group_ids)} beamshift groups"
+            output_title += (
+                f" {len(source_group_ids)}->{len(group_ids)} beamshift groups"
+            )
 
             if args.verbose > 1:
                 print(f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups")

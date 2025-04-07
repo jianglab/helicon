@@ -121,6 +121,7 @@ def movie_filename_patterns():
         EPU_old=r"FoilHole_\d{7,8}_Data_\d{7,8}_\d{8}_\d{8}_\d{6}_",
         EPU=r"FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_",
         serialEM_pncc=r"([XY][\+-]\d[XY][\+-]\d-\d)",
+        serialEM_cuhksz=r"_(\d{5})[_\.]",
     )
     return d
 
@@ -206,6 +207,20 @@ def extract_serialEM_pncc_beamshift(filename):
         print(pattern)
         raise
     return ""
+
+
+def extract_serialEM_cuhksz_beamshift(filename):
+    import re
+
+    pattern = movie_filename_patterns()["serialEM_cuhksz"]
+    match = re.search(pattern, filename)
+    if match:
+        return match.group(1)
+    else:
+        print(filename)
+        print(pattern)
+        raise
+    return 0
 
 
 def EPU_micrograph_path_2_movie_xml_path(micrograph_path, xml_folder=""):
@@ -1319,7 +1334,9 @@ def dataframe_normalize_filename(
 
     attrs = []
     attrs_with_at = []
-    for attr in "rlnImageName rlnMicrographName rlnMicrographMovieName rlnMicrographCoordinates".split():
+    for (
+        attr
+    ) in "rlnImageName rlnMicrographName rlnMicrographMovieName rlnMicrographCoordinates".split():
         if attr in data:
             if attr == "rlnImageName":
                 ignore_bad_path = ignore_bad_particle_path
