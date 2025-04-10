@@ -3,6 +3,11 @@
 
 A collection of tools for cryo-EM analysis of helical structures.
 
+## Publication
+  Li, D., Zhang, X., and Jiang, W. (2025). Helicon: Helical indexing and 3D reconstruction from one image. bioRxiv, 2025.04.05.647385. [doi:10.1101/2025.04.05.647385](https://doi.org/10.1101/2025.04.05.647385).
+  
+
+
 ## Installation
 Run this command in a terminal:  
 ```
@@ -30,6 +35,3 @@ helicon --help
 - **procart**:             A Web app that plots cartoon illustration of the residue properties of amyloid atomic models
 - **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
 
-
-## Disclaimer
-Helicon is at a very early stage of development, and we are releasing it to promote open science. However, it might be very unstable/buggy, and the support will be very limited.
