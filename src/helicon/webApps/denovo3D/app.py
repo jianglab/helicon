@@ -107,8 +107,8 @@ with ui.sidebar(
                             ui.input_file(
                                 "upload_images",
                                 "Upload the input images in MRC format (.mrcs, .mrc)",
-                                accept=[".mrcs", ".mrc"],
-                                placeholder="mrcs or mrc file",
+                                accept=[".mrcs", ".mrc", ".star"],
+                                placeholder="mrcs, mrc or star file",
                             )
                         )
                     elif input.input_mode_images() == "url":
@@ -588,7 +588,7 @@ with ui.div(
 
                 @reactive.effect
                 @reactive.event(input.select_image, input.image_stitching)
-                def update_selecte_images_orignal():
+                def update_selected_images_orignal():
                     selected_images_rotated_shifted.set(
                         [displayed_images()[i] for i in input.select_image()]
                     )
@@ -611,7 +611,7 @@ with ui.div(
                             post_translation=(input[id_y_shift](), 0),
                         )
                     selected_images_rotated_shifted.set(rotated)
-                    print(f"rot shift {i} done")
+                   #print(f"rot shift {i} done")
 
                 @reactive.effect
                 @reactive.event(selected_images_rotated_shifted, input[id_x_shift])
@@ -805,7 +805,13 @@ with ui.div(
                     step=0.1,
                     update_on="blur",
                 )
-
+                ui.input_numeric(
+                    "hp_angst",
+                    "High pass filtering (Å):",
+                    value=-1,
+                    step=0.1,
+                    update_on="blur",
+                )
     @shiny.render.ui
     @reactive.event(initial_image, ignore_init=False)
     def generate_image_transformation_single():
@@ -1098,10 +1104,14 @@ def download_denovo3D_output_map():
         ),
     ) = reconstrunction_results()[0]
 
-    if len(all_images().data.shape) < 3:
-        ny, nx = all_images().data.shape
+    if isinstance(all_images().data,np.ndarray):
+        if len(all_images().data.shape) < 3:
+            ny, nx = all_images().data.shape
+        else:
+            _, ny, nx = all_images().data.shape
     else:
-        _, ny, nx = all_images().data.shape
+        ny, nx = all_images().data[int(imageIndex)-1].shape
+
 
     if input.img_transpose():
         nx, ny = ny, nx
@@ -1109,7 +1119,7 @@ def download_denovo3D_output_map():
     apix = input_data().apix
     # ny, nx = 200,200
     # apix = 5
-    print(apix, ny, nx)
+    #print(apix, ny, nx)
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
         apix=apix3d,
@@ -1197,10 +1207,14 @@ def transformation_ui_single():
 
     apix = round(all_images().apix, 4)
     ui.update_numeric("apix", value=apix, max=apix * 2)
-    if len(all_images().data.shape) < 3:
-        ny, nx = all_images().data.shape
+    if isinstance(all_images().data, np.ndarray):
+        if len(all_images().data.shape) < 3:
+            ny, nx = all_images().data.shape
+        else:
+            _, ny, nx = all_images().data.shape
     else:
-        _, ny, nx = all_images().data.shape
+        imageIndex = selected_images_labels()[0]
+        ny, nx = all_images().data[int(imageIndex)-1].shape
 
     if ny > nx:
         ui.update_checkbox("img_transpose", value=True)
@@ -1266,26 +1280,49 @@ def get_image_from_upload():
     fileinfo = input.upload_images()
     req(fileinfo)
     image_file = fileinfo[0]["datapath"]
-    try:
-        data, apix = compute.get_images_from_file(image_file)
-    except Exception as e:
-        import traceback
+    
+    if image_file.split('.')[-1] == "star":
+        df = helicon.star2dataframe(str(image_file))
+        indices = range(len(df))
 
-        traceback.print_exc()
-        print(e)
-        data, apix = None, 1
-        m = ui.modal(
-            f"failed to read the uploaded 2D images from {fileinfo[0]['name']}",
-            title="File upload error",
-            easy_close=True,
-            footer=None,
-        )
-        ui.modal_show(m)
-        return
+        # raw helix images mode
+        if "rlnHelixImageName" in df.columns:
+            data = []
+            import pathlib
+            import mrcfile
+            for i in indices:
+                imageFile = df.loc[i, "rlnHelixImageName"]
+                imageFile = pathlib.Path(imageFile)
 
-    emdb_id = helicon.get_emdb_id(fileinfo[0]["name"])
-    is_3d = emdb_id or helicon.is_3d(data)
-    is_amyloid = helicon.is_amyloid(emdb_id)
+                with mrcfile.open(imageFile) as mrc:
+                    apix = round(float(mrc.voxel_size.x),4)
+                    data.append(mrc.data)
+            is_3d = False
+            emdb_id = None
+            is_amyloid = False
+
+    else:
+        try:
+            data, apix = compute.get_images_from_file(image_file)
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            print(e)
+            data, apix = None, 1
+            m = ui.modal(
+                f"failed to read the uploaded 2D images from {fileinfo[0]['name']}",
+                title="File upload error",
+                easy_close=True,
+                footer=None,
+            )
+            ui.modal_show(m)
+            return
+
+        emdb_id = helicon.get_emdb_id(fileinfo[0]["name"])
+        is_3d = emdb_id or helicon.is_3d(data)
+        is_amyloid = helicon.is_amyloid(emdb_id)
+
     d = helicon.DotDict(
         data=data, apix=apix, emdb_id=emdb_id, is_3d=is_3d, is_amyloid=is_amyloid
     )
@@ -1467,8 +1504,10 @@ def get_displayed_images():
     req(len(all_images().data))
     data = all_images().data
     apix = all_images().apix
-    if len(data.shape) < 3:
-        data = np.expand_dims(data, axis=0)
+    if isinstance(all_images().data,np.ndarray):
+        if len(data.shape) < 3:
+            data = np.expand_dims(data, axis=0)
+
     n = len(data)
     if n:
         ny, nx = data[0].shape[:2]
@@ -1505,8 +1544,8 @@ def get_displayed_images():
 
 
 @reactive.effect
-@reactive.event(input.select_image, displayed_images, input.lp_angst)
-def update_selecte_images_orignal():
+@reactive.event(input.select_image, displayed_images, input.lp_angst, input.hp_angst)
+def update_selected_images_orignal_lp():
     req(len(displayed_images()))
     req(input.select_image())
     req(0 <= min(input.select_image()))
@@ -1514,16 +1553,26 @@ def update_selecte_images_orignal():
 
     images = [displayed_images()[i] for i in input.select_image()]
 
+    if "apix" in input:
+        apix = input.apix()
+    else:
+        apix = round(all_images().apix, 4)
+
+    do_filtering = False
+    low_pass_fraction = -1
+    high_pass_fraction = -1
     if input.lp_angst() > 0:
-        if "apix" in input:
-            apix = input.apix()
-        else:
-            apix = round(all_images().apix, 4)
         low_pass_fraction = 2 * apix / input.lp_angst()
-        print(low_pass_fraction)
+        do_filtering = True
+
+    if input.hp_angst() > 0:
+        high_pass_fraction = 2 * apix / input.hp_angst()
+        do_filtering = True
+
+    if do_filtering:
         images = [
-            helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction)
-            for i in input.select_image()
+            helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction, high_pass_fraction=high_pass_fraction)
+            for i in range(len(input.select_image()))
         ]
 
     selected_images_original.set(images)
