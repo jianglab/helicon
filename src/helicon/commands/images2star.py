@@ -861,6 +861,10 @@ def main(args):
             topLengthFraction = param_dict.get("topLengthFraction", None)
             lengthCutoffAngst = param_dict.get("lengthCutoffAngst", None)
             
+            import os
+            
+            outPath = os.path.abspath(outPath)
+            
             import starfile
             
             get_apix=True
@@ -873,7 +877,7 @@ def main(args):
                         apix=mic.voxel_size['x']
                         get_apix=False
                 cf = starfile.read(coordfile)
-                if cf is not None:
+                if cf is not None and not isinstance(cf,dict):
                     cf = cf.reset_index(drop=True)
                     cf = cf.loc[:,["rlnCoordinateX", "rlnCoordinateY"]]
                     starts = cf.iloc[::2].reset_index(drop=True)
