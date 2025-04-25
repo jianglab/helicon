@@ -358,6 +358,22 @@ def get_clip(image, y0, x0, height, width):
     return clip
 
 
+def get_clip3d(data, z0, y0, x0, nz, ny, nx):
+    clip = np.zeros(shape=(nz, ny, nx), dtype=data.dtype)
+    z0_clipped = max(0, z0)
+    y0_clipped = max(0, y0)
+    x0_clipped = max(0, x0)
+    z1_clipped = min(z0 + nz, data.shape[0])
+    y1_clipped = min(y0 + ny, data.shape[1])
+    x1_clipped = min(x0 + nx, data.shape[2])
+    clip[
+        z0_clipped - z0 : z1_clipped - z0,
+        y0_clipped - y0 : y1_clipped - y0,
+        x0_clipped - x0 : x1_clipped - x0,
+    ] = data[z0_clipped:z1_clipped, y0_clipped:y1_clipped, x0_clipped:x1_clipped]
+    return clip
+
+
 def get_rotated_clip(image, y0, x0, y1, x1, width, order=1):
     # image: numpy 2D array of shape (ny, nx)
     # y0, x0: coordinate of the starting point
@@ -419,33 +435,64 @@ def fft_crop(data, output_size=None):
         return data_downnscaled
 
 
-def fft_rescale(image, apix=1.0, cutoff_res=None, output_size=None):
-    if cutoff_res:
-        cutoff_res_y, cutoff_res_x = cutoff_res
-    else:
-        cutoff_res_y, cutoff_res_x = 2 * apix, 2 * apix
-    if output_size:
-        ony, onx = output_size
-    else:
-        ony, onx = image.shape
-    freq_y = np.fft.fftfreq(ony) * 2 * apix / cutoff_res_y
-    freq_x = np.fft.fftfreq(onx) * 2 * apix / cutoff_res_x
-    Y, X = np.meshgrid(freq_y, freq_x, indexing="ij")
-    Y = (2 * np.pi * Y).flatten(order="C")
-    X = (2 * np.pi * X).flatten(order="C")
+def fft_rescale(data, apix=1.0, cutoff_res=None, output_size=None):
+    if data.ndim == 2:
+        if cutoff_res:
+            cutoff_res_y, cutoff_res_x = cutoff_res
+        else:
+            cutoff_res_y, cutoff_res_x = 2 * apix, 2 * apix
+        if output_size:
+            ony, onx = output_size
+        else:
+            ony, onx = data.shape
+        freq_y = np.fft.fftfreq(ony) * 2 * apix / cutoff_res_y
+        freq_x = np.fft.fftfreq(onx) * 2 * apix / cutoff_res_x
+        Y, X = np.meshgrid(freq_y, freq_x, indexing="ij")
+        Y = (2 * np.pi * Y).flatten(order="C")
+        X = (2 * np.pi * X).flatten(order="C")
 
-    from finufft import nufft2d2
+        from finufft import nufft2d2
 
-    fft = nufft2d2(x=Y, y=X, f=image.astype(np.complex128), eps=1e-6)
-    fft = fft.reshape((ony, onx))
+        fft = nufft2d2(x=Y, y=X, f=data.astype(np.complex128), eps=1e-6)
+        fft = fft.reshape((ony, onx))
 
-    # phase shifts for real-space shifts by half of the image box in both directions
-    phase_shift = np.ones(fft.shape)
-    phase_shift[1::2, :] *= -1
-    phase_shift[:, 1::2] *= -1
-    fft *= phase_shift
-    # now fft has the same layout and phase origin (i.e. np.fft.ifft2(fft) would obtain original image)
-    return fft
+        # phase shifts for real-space shifts by half of the image box in both directions
+        phase_shift = np.ones(fft.shape)
+        phase_shift[1::2, :] *= -1
+        phase_shift[:, 1::2] *= -1
+        fft *= phase_shift
+        # now fft has the same layout and phase origin (i.e. np.fft.ifft2(fft) would obtain original image)
+        return fft
+    elif data.ndim == 3:
+        if cutoff_res:
+            cutoff_res_z, cutoff_res_y, cutoff_res_x = cutoff_res
+        else:
+            cutoff_res_z, cutoff_res_y, cutoff_res_x = 2 * apix, 2 * apix, 2 * apix
+        if output_size:
+            onz, ony, onx = output_size
+        else:
+            onz, ony, onx = data.shape
+        freq_z = np.fft.fftfreq(onz) * 2 * apix / cutoff_res_z
+        freq_y = np.fft.fftfreq(ony) * 2 * apix / cutoff_res_y
+        freq_x = np.fft.fftfreq(onx) * 2 * apix / cutoff_res_x
+        Z, Y, X = np.meshgrid(freq_z, freq_y, freq_x, indexing="ij")
+        Z = (2 * np.pi * Z).flatten(order="C")
+        Y = (2 * np.pi * Y).flatten(order="C")
+        X = (2 * np.pi * X).flatten(order="C")
+
+        from finufft import nufft3d2
+
+        fft = nufft3d2(x=Z, y=Y, z=X, f=data.astype(np.complex128), eps=1e-6)
+        fft = fft.reshape((onz, ony, onx))
+
+        # phase shifts for real-space shifts by half of the image box in both directions
+        phase_shift = np.ones(fft.shape)
+        phase_shift[1::2, :, :] *= -1
+        phase_shift[:, 1::2, :] *= -1
+        phase_shift[:, :, 1::2] *= -1
+        fft *= phase_shift
+        # now fft has the same layout and phase origin (i.e. np.fft.ifft2(fft) would obtain original image)
+        return fft
 
 
 def compute_power_spectra(

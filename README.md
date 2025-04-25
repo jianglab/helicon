@@ -32,6 +32,7 @@ helicon --help
 - **hill**:                A Web app for helical indexing using Fourier layer lines of 2D images
 - **images2star**:         A command line tool that analyzes/transforms dataset(s) and saves the dataset in RELION star file
 - **map2seq**:             A Web app that identifies the best protein sequence explaining a 3D density map
+- **proc3d**:              A command line tool that anaylzes/transforms 3D maps
 - **procart**:             A Web app that plots cartoon illustration of the residue properties of amyloid atomic models
 - **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
 

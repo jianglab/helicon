@@ -27,7 +27,7 @@ def main(args):
             msg += f"\n\tnx,ny,nz={nx},{ny},{nz} pixels\tsampling={apix} Å/pixel"
             print(msg)
 
-    if args.verbose > 0:
+    if args.verbose > 1:
         title = f"{args.inputMapFile[0]}: {nx}x{ny}x{nz} pixels | apix={apix}Å/pixel"
         helicon.display_map_orthoslices(data, title=title, hold=False)
 
@@ -46,6 +46,104 @@ def main(args):
 
         if option_name == "apix":
             apix = float(param)
+
+        elif option_name == "clip" and param:
+            param_dict_default = dict(
+                new_nx=nx,
+                new_ny=ny,
+                new_nz=nz,
+                center_x=nx // 2,
+                center_y=ny // 2,
+                center_z=nz // 2,
+            )
+            _, param_dict = helicon.parse_param_str(param)
+            param_dict, param_changed, param_unsuppported = helicon.validate_param_dict(
+                param=param_dict, param_ref=param_dict_default
+            )
+            if len(param_unsuppported):
+                helicon.color_print(
+                    f"\tWARNING: ignoring unknown parameters: {param_unsuppported}"
+                )
+            if args.verbose > 2:
+                print(f"\tCustom parameters: {param_changed}")
+            new_nx = int(param_dict["new_nx"])
+            new_ny = int(param_dict["new_ny"])
+            new_nz = int(param_dict["new_nz"])
+            center_x = int(param_dict["center_x"])
+            center_y = int(param_dict["center_y"])
+            center_z = int(param_dict["center_z"])
+            if new_nx < 1:
+                helicon.color_print("\tERROR: new_nx must be >0")
+                sys.exit(-1)
+            if new_ny < 1:
+                helicon.color_print("\tERROR: new_ny must be >0")
+                sys.exit(-1)
+            if new_nz < 1:
+                helicon.color_print("\tERROR: new_nz must be >0")
+                sys.exit(-1)
+
+            data = helicon.get_clip3d(
+                data,
+                z0=center_z - new_nz // 2,
+                y0=center_y - new_ny // 2,
+                x0=center_x - new_nx // 2,
+                nz=new_nz,
+                ny=new_ny,
+                nx=new_nx,
+            )
+            nx = new_nx
+            ny = new_ny
+            nz = new_nz
+
+        elif option_name == "fft_resample" and param:
+            param_dict_default = dict(
+                new_nx=nx,
+                new_ny=ny,
+                new_nz=nz,
+            )
+            _, param_dict = helicon.parse_param_str(param)
+            param_dict, param_changed, param_unsuppported = helicon.validate_param_dict(
+                param=param_dict, param_ref=param_dict_default
+            )
+            if len(param_unsuppported):
+                helicon.color_print(
+                    f"\tWARNING: ignoring unknown parameters: {param_unsuppported}"
+                )
+            if args.verbose > 2:
+                print(f"\tCustom parameters: {param_changed}")
+            new_nx = int(param_dict["new_nx"])
+            new_ny = int(param_dict["new_ny"])
+            new_nz = int(param_dict["new_nz"])
+            if new_nx < 1:
+                helicon.color_print("\tERROR: new_nx must be >0")
+                sys.exit(-1)
+            if new_ny < 1:
+                helicon.color_print("\tERROR: new_ny must be >0")
+                sys.exit(-1)
+            if new_nz < 1:
+                helicon.color_print("\tERROR: new_nz must be >0")
+                sys.exit(-1)
+
+            if len(set([new_nx / nx, new_ny / ny, new_nz / nz])) > 1:
+                msg = f"\tWARNING: nx,ny,nz={nx},{ny},{nz} -> {new_nx},{new_ny},{new_nz} FFT-resampling will result in nonuniform pixel size in x/y/z dimensions"
+                helicon.color_print(msg)
+
+            fft = helicon.fft_rescale(
+                data,
+                apix=apix,
+                cutoff_res=(
+                    2 * apix * nz / new_nz,
+                    2 * apix * ny / new_ny,
+                    2 * apix * nx / new_nx,
+                ),
+                output_size=(new_nz, new_ny, new_nx),
+            )
+            data = np.abs(np.fft.ifftn(fft)).astype(np.float32)
+            data *= new_nx * new_ny * new_nz / (nx * ny * nz)
+            apix = round(apix * nx / new_nx, 4)
+            nx = new_nx
+            ny = new_ny
+            nz = new_nz
 
         elif option_name == "helical_sym" and param:
             param_dict_default = dict(
@@ -118,6 +216,43 @@ def main(args):
             apix = new_apix
             nz, ny, nx = data.shape
 
+        elif option_name == "z_moving_average" and param:
+            param_dict_default = dict(
+                length=0.0,  # Å
+                n_pixel=0,
+            )
+            _, param_dict = helicon.parse_param_str(param)
+            param_dict, param_changed, param_unsuppported = helicon.validate_param_dict(
+                param=param_dict, param_ref=param_dict_default
+            )
+            if len(param_unsuppported):
+                helicon.color_print(
+                    f"\tWARNING: ignoring unknown parameters: {param_unsuppported}"
+                )
+            if args.verbose > 2:
+                print(f"\tCustom parameters: {param_changed}")
+            length = float(param_dict["length"])
+            n_pixel = float(param_dict["n_pixel"])
+            if length <= 0 and n_pixel <= 0:
+                helicon.color_print(
+                    f"\tERROR: length (>0) or n_pixel (>0) should be specified"
+                )
+                sys.exit(-1)
+            if length > 0 and n_pixel > 0:
+                helicon.color_print(
+                    f"\tERROR: either length (>0) or n_pixel (>0) but not both should be specified"
+                )
+                sys.exit(-1)
+
+            if length > 0:
+                n_pixel = int(np.round(length / apix))
+
+            tmp = np.cumsum(data, axis=0, dtype=float)
+            data = data.copy()
+            data[n_pixel // 2 : -n_pixel // 2] = (
+                tmp[n_pixel:] - tmp[:-n_pixel]
+            ) / n_pixel
+
         index_d[option_name] += 1
 
     if args.verbose > 1:
@@ -129,7 +264,7 @@ def main(args):
         mrc.set_data(data.astype(np.float32))
         mrc.voxel_size = apix
 
-    if args.verbose > 0:
+    if args.verbose > 1:
         title = f"{str(args.outputMapFile)}: {nx}x{ny}x{nz} pixels | apix={apix}Å/pixel"
         helicon.display_map_orthoslices(data, title=title, hold=True)
 
@@ -165,6 +300,30 @@ def add_args(parser):
         type=str,
         metavar="twist=<°>:rise=<Å>[:csym=<n>:center_n_rise=<n>:center_len=<Å>:center_fraction=<val>:new_apix=<Å>:new_nz=<pixel>:new_nxy=<pixel>]",
         help="symmetrize the map with the specified helical parameters. default to %(default)s",
+        default="",
+    )
+
+    parser.add_argument(
+        "--z_moving_average",
+        type=str,
+        metavar="<n>",
+        help="moving average along z-axis using a window size of n sections",
+        default="",
+    )
+
+    parser.add_argument(
+        "--clip",
+        type=str,
+        metavar="new_nx=<n>:new_ny=<n>:new_nz=<n>:center_x=<n>:center_y=<n>:center_z=<n>",
+        help="clip the map. default to %(default)s",
+        default="",
+    )
+
+    parser.add_argument(
+        "--fft_resample",
+        type=str,
+        metavar="new_nx=<n>:new_ny=<n>:new_nz=<n>",
+        help="resample the map by cropping/padding in Fourier space. default to %(default)s",
         default="",
     )
 
