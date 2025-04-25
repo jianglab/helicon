@@ -79,6 +79,10 @@ def display_map_orthoslices(data, title, hold=False):
     sx = data[:, :, nx // 2]
     images = [sx, sy, sz]
     titles = ["X=%d" % (nx // 2), "Y=%d" % (ny // 2), "Z=%d" % (nz // 2)]
+
+    import matplotlib
+
+    matplotlib.use("TkAgg")
     import matplotlib.pyplot as plt
 
     fig = plt.figure(figsize=(9, 3.5), facecolor="w", edgecolor="w")
