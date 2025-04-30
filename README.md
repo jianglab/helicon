@@ -36,3 +36,5 @@ helicon --help
 - **procart**:             A Web app that plots cartoon illustration of the residue properties of amyloid atomic models
 - **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
 
+## Documentation
+Read AI-generated documents [Helicon@DeepWiki](https://deepwiki.com/jianglab/helicon).

@@ -283,7 +283,7 @@ def add_args(parser):
         "--outputMapFile",
         type=str,
         metavar="<filename>",
-        help="save output map to this file. default to %(default)s",
+        help="save output map to this file",
         default="",
     )
 
@@ -291,7 +291,7 @@ def add_args(parser):
         "--apix",
         type=float,
         metavar="<Å>",
-        help="set pixel size to this value. default to %(default)s",
+        help="set pixel size to this value",
         default=None,
     )
 
@@ -299,7 +299,7 @@ def add_args(parser):
         "--helical_sym",
         type=str,
         metavar="twist=<°>:rise=<Å>[:csym=<n>:center_n_rise=<n>:center_len=<Å>:center_fraction=<val>:new_apix=<Å>:new_nz=<pixel>:new_nxy=<pixel>]",
-        help="symmetrize the map with the specified helical parameters. default to %(default)s",
+        help="symmetrize the map with the specified helical parameters",
         default="",
     )
 
@@ -315,7 +315,7 @@ def add_args(parser):
         "--clip",
         type=str,
         metavar="new_nx=<n>:new_ny=<n>:new_nz=<n>:center_x=<n>:center_y=<n>:center_z=<n>",
-        help="clip the map. default to %(default)s",
+        help="clip the map",
         default="",
     )
 
@@ -323,7 +323,7 @@ def add_args(parser):
         "--fft_resample",
         type=str,
         metavar="new_nx=<n>:new_ny=<n>:new_nz=<n>",
-        help="resample the map by cropping/padding in Fourier space. default to %(default)s",
+        help="resample the map by cropping/padding in Fourier space",
         default="",
     )
 
