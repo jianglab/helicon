@@ -164,6 +164,8 @@ def main(args):
                 _, param_dict = helicon.parse_param_str(param)
             else:
                 param_dict = {}
+            
+            import os
 
             required_attrs = "rlnImageName rlnHelicalTubeID".split()
 
