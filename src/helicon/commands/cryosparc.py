@@ -303,13 +303,13 @@ def main(args):
                     )
                 else:
                     output_file = (
-                        f"{args.projectID}_{args.outputWorkspaceID}_{args.jobID}"
+                        f"{args.projectID}_{args.outputWorkspaceID}_{'-'.join(args.jobID)}"
                         + output_title
                         + ".pdf"
                     )
                 output_file = "-".join(output_file.split())
                 output_file = output_file.replace(" ", "-")
-                output_file = output_file.replace("->", "_")
+                output_file = output_file.replace("->", "-")
                 output_file = output_file.replace("/", "_")
 
                 import matplotlib.pyplot as plt

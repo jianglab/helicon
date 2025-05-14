@@ -119,10 +119,11 @@ def get_relion_project_folder(starFile):
 
 def movie_filename_patterns():
     # EPU:
+    # FoilHole_1464933_Data_427288_427290_20250502_213110_Fractions_patch_aligned_doseweighted.mrc
     # FoilHole_30593197_Data_30537205_30537207_20230430_084907_fractions_patch_aligned_doseweighted.mrc
     # FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff
     d = dict(
-        EPU_old=r"FoilHole_\d{7,8}_Data_\d{7,8}_\d{8}_\d{8}_\d{6}_",
+        EPU_old=r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_\d{8}_\d{6}_",
         EPU=r"FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_",
         serialEM_pncc=r"([XY][\+-]\d[XY][\+-]\d-\d)",
         serialEM_cuhksz=r"_(\d{5})[_\.]",
@@ -162,7 +163,7 @@ def extract_EPU_data_collection_time(filename):
         timestamp = datetime_obj.timestamp()
         return timestamp
     else:
-        msg = "ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
+        msg = f"ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
         color_print(msg)
     return 0
 
@@ -170,7 +171,7 @@ def extract_EPU_data_collection_time(filename):
 def extract_EPU_old_data_collection_time(filename):
     import re
 
-    pattern = r"FoilHole_\d{8}_Data_\d{8}_\d{8}_(\d{8}_\d{6})_"
+    pattern = r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_(\d{8}_\d{6})_"
     match = re.search(pattern, filename)
     if match:
         from datetime import datetime
@@ -180,7 +181,7 @@ def extract_EPU_old_data_collection_time(filename):
         timestamp = datetime_obj.timestamp()
         return timestamp
     else:
-        msg = "ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
+        msg = f"ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
         color_print(msg)
     return 0
 
@@ -238,7 +239,7 @@ def EPU_micrograph_path_2_movie_xml_path(micrograph_path, xml_folder=""):
 
     import re
 
-    pattern = r"\d{21}_(FoilHole_\d{8}_Data_\d{8}_\d{8}_\d{8}_\d{6})"
+    pattern = r"\d{21}_(FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_\d{8}_\d{6})"
     match = re.search(pattern, str(micrograph_path))
     if match:
         mid = match.group(1)
