@@ -109,6 +109,8 @@ def main(args):
         exp_group_id_name = "mscope_params/exp_group_id"
         data.add_fields([exp_group_id_name], ["u4"])
 
+    original_exp_group_ids = np.unique(data[exp_group_id_name])
+
     output_title = ""
     output_slots = set()
 
@@ -291,6 +293,13 @@ def main(args):
                     df = pd.DataFrame(df, columns=["micrograph", "hid", "time"])
                     df = df.sort_values(by="time").reset_index()
 
+                    group_sizes = df.groupby(by="hid").size()
+                    if not all(size == group_sizes.iloc[0] for size in group_sizes):
+                        helicon.color_print(
+                            f"\tERROR: Not all FoilHole groups have the same number of images. Group sizes: {group_sizes.to_dict()}"
+                        )
+                        sys.exit(-1)
+
                     micrograph_to_beamshift_clusters = {}
                     for gn, g in df.groupby(by="hid"):
                         g_mgraphs = g["micrograph"].values
@@ -325,7 +334,9 @@ def main(args):
             )
 
             if args.verbose > 1:
-                print(f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups")
+                print(
+                    f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups stored in {' '.join(exp_group_id_names_all)}"
+                )
 
             if (
                 args.verbose > 1
@@ -576,12 +587,12 @@ def main(args):
                 source_job = cs.find_job(args.projectID, param_dict["source_job_id"])
                 input_particle_group_name = None
                 for g in source_job.doc["output_result_groups"]:
-                    if g["type"] == "particle":
+                    if g["type"] in ["particle", "exposure"]:
                         input_particle_group_name = g["name"]
                         break
                 if not input_particle_group_name:
                     helicon.color_print(
-                        f"ERROR: {source_job} does not provide particles"
+                        f"ERROR: {source_job} does not provide particles or exposures"
                     )
                     sys.exit(-1)
                 source_data_name = source_job.doc["uid"]
@@ -605,6 +616,30 @@ def main(args):
                 attrs="ctf/exp_group_id location/exp_group_id mscope_params/exp_group_id".split(),
             )
 
+            source_group_ids = np.unique(source_data[source_exp_group_id_name])
+
+            source_micrograph_id_name = helicon.first_matched_attr(
+                source_data,
+                attrs="location/micrograph_uid uid".split(),
+            )
+
+            micrograph_id_name = helicon.first_matched_attr(
+                data,
+                attrs="location/micrograph_uid uid".split(),
+            )
+
+            mapping = {}
+            for sgid in source_group_ids:
+                source_mask = np.where(source_data[source_exp_group_id_name] == sgid)
+                for uid in source_data[source_micrograph_id_name][source_mask]:
+                    mapping[uid] = int(sgid)
+            unknown_egid = np.min(np.array(list(mapping.values()))) - 1
+
+            mids = np.unique(data[micrograph_id_name])
+            for mid in mids:
+                mask = np.where(data[micrograph_id_name] == mid)
+                data[exp_group_id_name][mask] = mapping.get(mid, unknown_egid)
+
             ctf_params_to_copy = []
             if int(param_dict["beam_tilt"]):
                 ctf_params_to_copy.append("ctf/tilt_A")
@@ -620,17 +655,17 @@ def main(args):
             ctf_params_to_copy = [p for p in ctf_params_to_copy if p in source_data]
             if not ctf_params_to_copy:
                 helicon.color_print(
-                    f"\tWARNING: No exposure group parameters found in the source dataset. Available parameters: {', '.join(source_data.keys())}"
+                    f"\tWARNING: No exposure group ctf parameters found in the source dataset. I will only copy the exposure group assignments"
                 )
-                sys.exit(-1)
 
             group_ids = np.sort(np.unique(data[exp_group_id_name]))
-            source_group_ids = np.unique(source_data[source_exp_group_id_name])
 
             for group_id in group_ids:
                 mask = np.where(data[exp_group_id_name] == group_id)
                 if group_id in source_group_ids:
-                    source_mask = np.where(source_data[exp_group_id_name] == group_id)
+                    source_mask = np.where(
+                        source_data[source_exp_group_id_name] == group_id
+                    )
                     for p in ctf_params_to_copy:
                         data[p][mask] = np.median(source_data[p][source_mask])
                 else:
@@ -642,6 +677,14 @@ def main(args):
                 output_slots.add(slot)
             output_slots.add("ctf")
             output_title += f"->copied params {' '.join(ctf_params_to_copy)} of {len(group_ids)} exposure groups from {source_data_name}"
+
+            if args.verbose > 1:
+                msg = (
+                    f"{len(original_exp_group_ids)} -> {len(group_ids)} exposure groups"
+                )
+                if len(ctf_params_to_copy):
+                    msg += f": {' '.join(ctf_params_to_copy)}"
+                print(f"\t{msg}")
 
         elif option_name == "splitByMicrograph" and param:
             col_mid = "location/micrograph_uid"

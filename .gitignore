@@ -5,3 +5,8 @@
 /src/helicon/webApps/image_stitching/__pycache__
 .idea
 src/helicon/commands/__pycache__/
+src/helicon/__pycache__/
+src/helicon/lib/__pycache__/
+src/helicon/webApps/whereIsMyClass/__pycache__/
+tests/__pycache__/
+Icon_
