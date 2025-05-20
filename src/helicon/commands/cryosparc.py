@@ -176,90 +176,127 @@ def main(args):
             elif software in ["EPU_old"]:
                 _, param_dict = helicon.parse_param_str(param)
                 xml_folder = param_dict.get("xml_folder", "")
-                min_cluster_size = int(param_dict.get("min_micrographs_per_group", 4))
 
-                from tqdm import tqdm
+                def has_xml(xml_folder, micrograph_path):
+                    if xml_folder:
+                        xfp = Path(xml_folder)
+                        if xfp.exists() and xfp.is_dir() and xfp.glob("FoilHole_*.xml"):
+                            return True
+                    if Path(micrograph_path).exists():
+                        if Path(micrograph_path).parent.glob("FoilHole_*.xml"):
+                            return True
+                    return False
 
-                @helicon.cache(
-                    cache_dir=str(helicon.cache_dir / "cryosparc"),
-                    expires_after=7,
-                    verbose=0,
-                )  # 7 days
-                def EPU_micrograph_path_2_movie_xml_path(micrograph_path, xml_folder):
-                    return helicon.EPU_micrograph_path_2_movie_xml_path(
-                        micrograph_path=micrograph_path, xml_folder=xml_folder
+                if has_xml(xml_folder=xml_folder, micrograph_path=micrographs[0]):
+                    min_cluster_size = int(
+                        param_dict.get("min_micrographs_per_group", 4)
                     )
 
-                xml_files_dict = {
-                    m: EPU_micrograph_path_2_movie_xml_path(
-                        micrograph_path=input_project_folder / m, xml_folder=xml_folder
-                    )
-                    for m in tqdm(
-                        micrographs,
-                        total=len(micrographs),
-                        desc="Finding xml files",
-                        unit="micrograph",
-                    )
-                }
+                    from tqdm import tqdm
 
-                @helicon.cache(
-                    cache_dir=str(helicon.cache_dir / "cryosparc"),
-                    expires_after=7,
-                    verbose=0,
-                )  # 7 days
-                def EPU_micrograph_path_2_beamshift(m):
-                    xml_file = xml_files_dict[m]
-                    beamshift = helicon.EPU_xml_2_beamshift(xml_file=xml_file)
-                    return beamshift
+                    @helicon.cache(
+                        cache_dir=str(helicon.cache_dir / "cryosparc"),
+                        expires_after=7,
+                        verbose=0,
+                    )  # 7 days
+                    def EPU_micrograph_path_2_movie_xml_path(
+                        micrograph_path, xml_folder
+                    ):
+                        return helicon.EPU_micrograph_path_2_movie_xml_path(
+                            micrograph_path=micrograph_path, xml_folder=xml_folder
+                        )
 
-                micrographs_to_beamshifts = {
-                    m: EPU_micrograph_path_2_beamshift(m)
-                    for m in tqdm(
-                        micrographs,
-                        total=len(micrographs),
-                        desc="Parsing xml files",
-                        unit="micrograph",
-                    )
-                }
+                    xml_files_dict = {
+                        m: EPU_micrograph_path_2_movie_xml_path(
+                            micrograph_path=input_project_folder / m,
+                            xml_folder=xml_folder,
+                        )
+                        for m in tqdm(
+                            micrographs,
+                            total=len(micrographs),
+                            desc="Finding xml files",
+                            unit="micrograph",
+                        )
+                    }
 
-                @helicon.cache(
-                    cache_dir=str(helicon.cache_dir / "cryosparc"),
-                    ignore=["cpu", "verbose"],
-                    expires_after=7,
-                    verbose=0,
-                )  # 7 days
-                def assign_beamshifts_to_cluster(
-                    beamshifts, range_n_clusters, min_cluster_size, cpu, verbose
-                ):
-                    return helicon.assign_beamshifts_to_cluster(
+                    @helicon.cache(
+                        cache_dir=str(helicon.cache_dir / "cryosparc"),
+                        expires_after=7,
+                        verbose=0,
+                    )  # 7 days
+                    def EPU_micrograph_path_2_beamshift(m):
+                        xml_file = xml_files_dict[m]
+                        beamshift = helicon.EPU_xml_2_beamshift(xml_file=xml_file)
+                        return beamshift
+
+                    micrographs_to_beamshifts = {
+                        m: EPU_micrograph_path_2_beamshift(m)
+                        for m in tqdm(
+                            micrographs,
+                            total=len(micrographs),
+                            desc="Parsing xml files",
+                            unit="micrograph",
+                        )
+                    }
+
+                    @helicon.cache(
+                        cache_dir=str(helicon.cache_dir / "cryosparc"),
+                        ignore=["cpu", "verbose"],
+                        expires_after=7,
+                        verbose=0,
+                    )  # 7 days
+                    def assign_beamshifts_to_cluster(
+                        beamshifts, range_n_clusters, min_cluster_size, cpu, verbose
+                    ):
+                        return helicon.assign_beamshifts_to_cluster(
+                            beamshifts=beamshifts,
+                            range_n_clusters=range_n_clusters,
+                            min_cluster_size=min_cluster_size,
+                            cpu=cpu,
+                            verbose=verbose,
+                        )
+
+                    beamshifts = np.array(list(micrographs_to_beamshifts.values()))
+                    beamshift_clusters = assign_beamshifts_to_cluster(
                         beamshifts=beamshifts,
-                        range_n_clusters=range_n_clusters,
+                        range_n_clusters=range(2, 200),
                         min_cluster_size=min_cluster_size,
-                        cpu=cpu,
-                        verbose=verbose,
+                        cpu=args.cpu,
+                        verbose=args.verbose,
                     )
+                    assert len(beamshifts) == len(beamshift_clusters)
+                    micrograph_to_beamshift_clusters = {
+                        m: beamshift_clusters[mi]
+                        for mi, m in enumerate(micrographs_to_beamshifts.keys())
+                    }
 
-                beamshifts = np.array(list(micrographs_to_beamshifts.values()))
-                beamshift_clusters = assign_beamshifts_to_cluster(
-                    beamshifts=beamshifts,
-                    range_n_clusters=range(2, 200),
-                    min_cluster_size=min_cluster_size,
-                    cpu=args.cpu,
-                    verbose=args.verbose,
-                )
-                assert len(beamshifts) == len(beamshift_clusters)
-                micrograph_to_beamshift_clusters = {
-                    m: beamshift_clusters[mi]
-                    for mi, m in enumerate(micrographs_to_beamshifts.keys())
-                }
+                    if "mscope_params/beam_shift" in data:
+                        data["mscope_params/beam_shift"] = np.array(
+                            [
+                                micrographs_to_beamshifts[row[micrograph_name]]
+                                for row in data.rows()
+                            ]
+                        )
+                else:
+                    from datetime import datetime
+                    import pandas as pd
 
-                if "mscope_params/beam_shift" in data:
-                    data["mscope_params/beam_shift"] = np.array(
-                        [
-                            micrographs_to_beamshifts[row[micrograph_name]]
-                            for row in data.rows()
-                        ]
-                    )
+                    df = []
+                    for m in micrographs:
+                        tmp = m.split("/")[-1].split("_")
+                        hid = int(tmp[2])
+                        ymd, hms = tmp[6:8]
+                        dt = datetime.strptime(f"{ymd} {hms}", "%Y%m%d %H%M%S")
+                        df.append([m, hid, float(dt.timestamp())])
+                    df = pd.DataFrame(df, columns=["micrograph", "hid", "time"])
+                    df = df.sort_values(by="time").reset_index()
+
+                    micrograph_to_beamshift_clusters = {}
+                    for gn, g in df.groupby(by="hid"):
+                        g_mgraphs = g["micrograph"].values
+                        for i in range(len(g)):
+                            m = g_mgraphs[i]
+                            micrograph_to_beamshift_clusters[m] = i
 
             exposure_groups = [
                 micrograph_to_beamshift_clusters[row[micrograph_name]]
