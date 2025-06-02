@@ -1572,7 +1572,7 @@ def dataframe_cryosparc_to_relion(data):
             if "filament/position_A" in data:
                 filaments = data.groupby(["blob/path", "filament/filament_uid"])
                 for _, f in filaments:
-                    val = f["filament/position_A"].astype(np.float32).values
+                    val = f["filament/position_A"].astype(np.float32).values.copy()
                     val -= np.min(val)
                     ret.loc[f.index, "rlnHelicalTrackLengthAngst"] = val.round(2)
         else:

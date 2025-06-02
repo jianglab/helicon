@@ -2634,6 +2634,7 @@ def main(args):
 
     if args.path != "absolute":
         from helicon import get_relion_project_folder, convert_dataframe_file_path
+        import os
 
         relion_proj_folder = get_relion_project_folder(
             os.path.abspath(args.output_starFile)
