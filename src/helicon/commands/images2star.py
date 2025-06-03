@@ -649,6 +649,9 @@ def main(args):
             col2 = param_dict.get("col2", "rlnImageName")
             assert col1 in data
             pattern = param_dict.get("pattern", None)
+            
+            import os
+            
             if not os.path.exists(sf):
                 helicon.color_print(
                     "\tERROR: option --selectFile=%s has specified a non-existent file %s"
@@ -711,6 +714,9 @@ def main(args):
             sf, _ = helicon.parse_param_str(param)
             assert "rlnMicrographName" in data
             assert "rlnHelicalTubeID" in data
+            
+            import os
+            
             if sf is None or not os.path.exists(sf):
                 helicon.color_print(
                     "\tERROR: option --selectCommonHelices %s has specified a non-existent file %s"
@@ -1279,6 +1285,7 @@ def main(args):
 
         elif option_name == "replaceImageName" and param:
             replaceImageName = param
+            import os
             if not os.path.exists(replaceImageName):
                 helicon.color_print(("\tERROR: %s does not exist" % (replaceImageName)))
                 sys.exit(-1)
@@ -1317,6 +1324,7 @@ def main(args):
             mgraphs = micrographNames.groupby(micrographNames, sort=False)
 
             def setMicrographCTF(mgraphName, mgraphParticles, data, ctfparms):
+                import os
                 mid = os.path.basename(mgraphName)
                 mid = os.path.splitext(mid)[0]
                 mid2 = mid.split(".")[0]
@@ -1503,6 +1511,7 @@ def main(args):
         elif option_name == "path" and param != "current":
             path = param
             from helicon import convert_dataframe_file_path
+            import os
 
             for attr in "rlnImageName rlnMicrographName".split():
                 if attr in data:
@@ -1528,6 +1537,9 @@ def main(args):
             mgraphs = micrographNames.groupby(micrographNames, sort=False)
 
             count = 0
+            
+            import os
+            
             subdir = os.path.splitext(args.output_starFile)[0]
             if not os.path.isdir(subdir):
                 os.mkdir(subdir)
@@ -1609,6 +1621,9 @@ def main(args):
         elif option_name == "createStack" and param:
             # outputFile:rescale2size=<n>:float16=<0|1>
             outputFile, param_dict = helicon.parse_param_str(param)
+            
+            import os
+            
             if os.path.splitext(outputFile)[1] != ".mrcs":
                 suffix = Path(outputFile).suffix
                 helicon.color_print(
@@ -1880,6 +1895,9 @@ def main(args):
             )
             res_peak = 1 / R[np.argmax(pwr_mean)]
             apix_new = round(apix * target_res / res_peak, 3)  # precision: 0.1%
+            
+            import os
+            
             if args.verbose > 1:
                 outputFile = (
                     os.path.splitext(args.output_starFile)[0]
@@ -1957,6 +1975,9 @@ def main(args):
 
             mcount = 0
             d = helicon.EMData()
+            
+            import os
+            
             for mgraphName, mgraphParticles in mgraphs:
                 tmpdata = data.loc[mgraphParticles.index]
                 filename = tmpdata["rlnImageName"].iloc[0].split("@")[-1]
@@ -2596,6 +2617,9 @@ def main(args):
             mgraphs = micrographNames.groupby(micrographNames, sort=False)
 
             count = 0
+            
+            import os
+            
             prefix = os.path.splitext(args.output_starFile)[0]
             for mgraphName, mgraphParticles in mgraphs:
                 tmpStarFile = "%s.%s.star" % (
@@ -2678,6 +2702,8 @@ def main(args):
             for si in range(args.splitNumSets):
                 subsets[si] = list(range(si, len(data), args.splitNumSets))
 
+        import os
+        
         prefix, suffix = os.path.splitext(args.output_starFile)
         for si, subset in enumerate(subsets):
             if args.splitNumSets == 2 and args.splitMode == "evenodd":
@@ -2698,6 +2724,9 @@ def main(args):
                 )
     else:
         helicon.dataframe2file(data, args.output_starFile)
+        
+        import os
+        
         if args.verbose:
             filename = ""
             for choice in "rlnImageName rlnMicrographName".split():
@@ -3619,7 +3648,9 @@ def check_args(args, parser):
             % (args.output_starFile)
         )
         sys.exit(-1)
-
+    
+    import os
+    
     if os.path.exists(args.output_starFile) and not (
         args.force == 1 or args.splitNumSets > 1
     ):
