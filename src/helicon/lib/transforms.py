@@ -495,6 +495,26 @@ def fft_rescale(data, apix=1.0, cutoff_res=None, output_size=None):
         return fft
 
 
+def flip_hand(data, axis="x"):
+    """Flip the handedness of a 3D volume along the specified axis.
+
+    Args:
+        data (ndarray): Input 3D volume of shape (nz,ny,nx)
+        axis (str): Axis along which to flip ('x', 'y', or 'z')
+
+    Returns:
+        ndarray: Flipped 3D volume
+    """
+    if axis == "x":
+        return data[:, :, ::-1]
+    elif axis == "y":
+        return data[:, ::-1, :]
+    elif axis == "z":
+        return data[::-1, :, :]
+    else:
+        raise ValueError("axis must be 'x', 'y', or 'z'")
+
+
 def compute_power_spectra(
     data,
     apix,

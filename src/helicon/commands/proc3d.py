@@ -47,6 +47,13 @@ def main(args):
         if option_name == "apix":
             apix = float(param)
 
+        elif option_name == "flip_hand" and param:
+            axis = param.lower()
+            if axis not in ["x", "y", "z"]:
+                helicon.color_print(f"\tERROR: invalid axis: {axis}")
+                sys.exit(-1)
+            data = helicon.flip_hand(data, axis=axis)
+
         elif option_name == "clip" and param:
             param_dict_default = dict(
                 new_nx=nx,
@@ -308,6 +315,14 @@ def add_args(parser):
         type=str,
         metavar="<n>",
         help="moving average along z-axis using a window size of n sections",
+        default="",
+    )
+
+    parser.add_argument(
+        "--flip_hand",
+        type=str,
+        metavar="<x|y|z>",
+        help="flip the handedness of the map along the specified axis",
         default="",
     )
 
