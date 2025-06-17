@@ -323,9 +323,9 @@ def update_helical_parameters_from_curated_table(
     df_curated = df_curated[df_curated["emdb_id"].isin(df["emdb_id"])]
     df_curated = df_curated.rename(
         columns={
-            "curated_twist (°)": "twist",
-            "curated_rise (Å)": "rise",
-            "curated_csym": "csym",
+            "twist_validated (°)": "twist",
+            "rise_validated (Å)": "rise",
+            "csym_validated": "csym",
         }
     )
     df_curated = df_curated[["emdb_id", "twist", "rise", "csym"]]
