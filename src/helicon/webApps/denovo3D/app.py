@@ -300,7 +300,7 @@ with ui.sidebar(
                     ret,
                     ui.input_task_button(
                         "symmetrization_projection",
-                        "Generate proejction",
+                        "Generate projection",
                         style="margin-bottom: 10px;",
                     ),
                     style="display: flex; flex-direction: column; justify-content: center;",
