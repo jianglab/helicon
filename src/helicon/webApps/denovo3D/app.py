@@ -1618,7 +1618,7 @@ def update_threshold_scale():
         prev_thres = 0
     ui.update_numeric(
         "threshold",
-        value=min_val,
+        value=round((min_val+max_val)/2, 3),
         min=round(min_val, 3),
         max=round(max_val, 3),
         step=round(step_val, 3),
