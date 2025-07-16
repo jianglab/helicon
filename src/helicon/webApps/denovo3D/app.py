@@ -985,6 +985,9 @@ def display_denovo3D_scores():
         x = np.array(x)[sort_idx]
         y = np.array(y)[sort_idx]
 
+        # save the curve or map
+        #np.save("/home/daoyi/helicon/data/denovo3D_scores.npy", results)
+
         fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
         fig.update_layout(xaxis_title=x_title, yaxis_title=y_title, showlegend=False)
         fig.update_traces(hovertemplate=hovertemplate)
