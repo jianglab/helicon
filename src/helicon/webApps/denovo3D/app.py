@@ -56,6 +56,9 @@ reconstructed_projection_labels = reactive.value([])
 reconstructed_map = reactive.value(None)
 
 
+import threading
+denovo3D_abort_event = threading.Event()
+
 ui.head_content(ui.tags.title("Helicon denovo3D"))
 helicon.shiny.google_analytics(id="G-FDSYXQNKLX")
 helicon.shiny.setup_ajdustable_sidebar()
@@ -881,6 +884,10 @@ with ui.div(
 
     ui.input_task_button(
         "run_denovo3D", label="Reconstruct 3D Map", style="width: 115px; height: 115px;"
+    )
+
+    ui.input_task_button(
+    "stop_denovo3D", label="Stop", style="width: 115px; height: 115px;", label_busy='Stopping...'
     )
 
 
@@ -2009,6 +2016,8 @@ def run_denovo3D_reconstruction():
         logger.warning("Nothing to do. I will quit")
         return
 
+    denovo3D_abort_event.clear()
+
     with ui.Progress(min=0, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
@@ -2023,6 +2032,12 @@ def run_denovo3D_reconstruction():
             t0 = time()
             results = []
             for completed_task in as_completed(future_tasks):
+
+                print(denovo3D_abort_event.is_set())
+                if denovo3D_abort_event.is_set():
+                    logger.warning("User aborted the denovo3D run early.")
+                    break
+
                 result = completed_task.result()
                 results.append(result)
                 t1 = time()
@@ -2122,3 +2137,9 @@ def toggle_output_map_download_button():
     else:
         ret = ui.tags.style("#download_denovo3D_output_map {visibility: hidden;}")
     return ret
+
+@reactive.effect
+@reactive.event(input.stop_denovo3D)
+def on_stop_denovo3D():
+    denovo3D_abort_event.set()
+    print('clicked stop button')
