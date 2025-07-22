@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import asyncio
 
 from shinywidgets import render_plotly
 
@@ -55,6 +56,9 @@ reconstructed_projection_images = reactive.value([])
 reconstructed_projection_labels = reactive.value([])
 reconstructed_map = reactive.value(None)
 
+
+
+denovo3D_abort_event = False
 
 ui.head_content(ui.tags.title("Helicon denovo3D"))
 helicon.shiny.google_analytics(id="G-FDSYXQNKLX")
@@ -883,6 +887,10 @@ with ui.div(
         "run_denovo3D", label="Reconstruct 3D Map", style="width: 115px; height: 115px;"
     )
 
+    ui.input_task_button(
+    "stop_denovo3D", label="Stop", style="width: 115px; height: 115px;", label_busy='Stopping...'
+    )
+
 
 @render_plotly
 @reactive.event(reconstrunction_results)
@@ -984,6 +992,9 @@ def display_denovo3D_scores():
         sort_idx = np.argsort(x)
         x = np.array(x)[sort_idx]
         y = np.array(y)[sort_idx]
+
+        # save the curve or map
+        #np.save("/home/lidao/helicon/data/denovo3D_scores.npy", results)
 
         fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
         fig.update_layout(xaxis_title=x_title, yaxis_title=y_title, showlegend=False)
@@ -2005,21 +2016,46 @@ def run_denovo3D_reconstruction():
     if len(tasks) < 1:
         logger.warning("Nothing to do. I will quit")
         return
+    
+    print(reconstruction_task, "reconstruction_task started")
+    reconstruction_task(tasks, cpu)
+    
+
+@ui.bind_task_button(button_id="run_denovo3D")
+@reactive.extended_task
+async def reconstruction_task(tasks, cpu):
+
+    global denovo3D_abort_event
+    denovo3D_abort_event=False
+
+    logger = helicon.get_logger(
+        logfile="helicon.denovo3D.log",
+        verbose=1,
+    )
 
     with ui.Progress(min=0, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from time import time
 
         with ThreadPoolExecutor(max_workers=cpu) as executor:
             future_tasks = [
                 executor.submit(compute.process_one_task, *task) for task in tasks
             ]
-            from time import time
+            
 
             t0 = time()
             results = []
             for completed_task in as_completed(future_tasks):
+
+                print(denovo3D_abort_event)
+                # this is to give a chance to stop the task
+                await asyncio.sleep(0)
+                if denovo3D_abort_event is True:
+                    print("User aborted the denovo3D run early.")
+                    break
+
                 result = completed_task.result()
                 results.append(result)
                 t1 = time()
@@ -2029,6 +2065,9 @@ def run_denovo3D_reconstruction():
                     message=f"Completed {len(results)}/{len(tasks)}",
                     detail=f"{helicon.timedelta2string(remaining)} remaining",
                 )
+            t_final = time()
+            t_passed  = t_final - t0
+            print('reconstruction time: ', t_passed)
 
     results_none = [res for res in results if res is None]
     if len(results_none):
@@ -2039,7 +2078,6 @@ def run_denovo3D_reconstruction():
 
     results.sort(key=lambda x: x[0], reverse=True)  # sort from high to low scores
     reconstrunction_results.set(results)
-
 
 @reactive.effect
 @reactive.event(reconstrunction_results)
@@ -2119,3 +2157,9 @@ def toggle_output_map_download_button():
     else:
         ret = ui.tags.style("#download_denovo3D_output_map {visibility: hidden;}")
     return ret
+
+@reactive.effect
+@reactive.event(input.stop_denovo3D)
+def on_stop_denovo3D():
+    global denovo3D_abort_event
+    denovo3D_abort_event = True
