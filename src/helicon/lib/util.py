@@ -122,7 +122,7 @@ def color_print(*args, **kargs):
     console.print(*args, style=color, end=end, **kargs)
 
 
-def available_cpu() -> int:
+def available_cpu(mem_gb_per_cpu=None) -> int:
     import os
 
     if "SLURM_CPUS_ON_NODE" in os.environ:
@@ -137,6 +137,13 @@ def available_cpu() -> int:
         cpu = min(cpu, int(numba.config.NUMBA_NUM_THREADS))
     except:
         pass
+
+    if mem_gb_per_cpu is not None:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        cpu = min(cpu, int(mem.available / 1024**3 / mem_gb_per_cpu))
+
     return cpu
 
 

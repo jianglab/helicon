@@ -57,7 +57,6 @@ reconstructed_projection_labels = reactive.value([])
 reconstructed_map = reactive.value(None)
 
 
-
 denovo3D_abort_event = False
 
 ui.head_content(ui.tags.title("Helicon denovo3D"))
@@ -615,7 +614,8 @@ with ui.div(
                             post_translation=(input[id_y_shift](), 0),
                         )
                     selected_images_rotated_shifted.set(rotated)
-                   #print(f"rot shift {i} done")
+
+                # print(f"rot shift {i} done")
 
                 @reactive.effect
                 @reactive.event(selected_images_rotated_shifted, input[id_x_shift])
@@ -816,6 +816,7 @@ with ui.div(
                     step=0.1,
                     update_on="blur",
                 )
+
     @shiny.render.ui
     @reactive.event(initial_image, ignore_init=False)
     def generate_image_transformation_single():
@@ -888,7 +889,10 @@ with ui.div(
     )
 
     ui.input_task_button(
-    "stop_denovo3D", label="Stop", style="width: 115px; height: 115px;", label_busy='Stopping...'
+        "stop_denovo3D",
+        label="Stop",
+        style="width: 115px; height: 115px;",
+        label_busy="Stopping...",
     )
 
 
@@ -994,7 +998,7 @@ def display_denovo3D_scores():
         y = np.array(y)[sort_idx]
 
         # save the curve or map
-        #np.save("/home/lidao/helicon/data/denovo3D_scores.npy", results)
+        # np.save("/home/lidao/helicon/data/denovo3D_scores.npy", results)
 
         fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
         fig.update_layout(xaxis_title=x_title, yaxis_title=y_title, showlegend=False)
@@ -1115,14 +1119,13 @@ def download_denovo3D_output_map():
         ),
     ) = reconstrunction_results()[0]
 
-    if isinstance(all_images().data,np.ndarray):
+    if isinstance(all_images().data, np.ndarray):
         if len(all_images().data.shape) < 3:
             ny, nx = all_images().data.shape
         else:
             _, ny, nx = all_images().data.shape
     else:
-        ny, nx = all_images().data[int(imageIndex)-1].shape
-
+        ny, nx = all_images().data[int(imageIndex) - 1].shape
 
     if input.img_transpose():
         nx, ny = ny, nx
@@ -1130,7 +1133,7 @@ def download_denovo3D_output_map():
     apix = input_data().apix
     # ny, nx = 200,200
     # apix = 5
-    #print(apix, ny, nx)
+    # print(apix, ny, nx)
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
         apix=apix3d,
@@ -1225,7 +1228,7 @@ def transformation_ui_single():
             _, ny, nx = all_images().data.shape
     else:
         imageIndex = selected_images_labels()[0]
-        ny, nx = all_images().data[int(imageIndex)-1].shape
+        ny, nx = all_images().data[int(imageIndex) - 1].shape
 
     if ny > nx:
         ui.update_checkbox("img_transpose", value=True)
@@ -1291,8 +1294,8 @@ def get_image_from_upload():
     fileinfo = input.upload_images()
     req(fileinfo)
     image_file = fileinfo[0]["datapath"]
-    
-    if image_file.split('.')[-1] == "star":
+
+    if image_file.split(".")[-1] == "star":
         df = helicon.star2dataframe(str(image_file))
         indices = range(len(df))
 
@@ -1301,12 +1304,13 @@ def get_image_from_upload():
             data = []
             import pathlib
             import mrcfile
+
             for i in indices:
                 imageFile = df.loc[i, "rlnHelixImageName"]
                 imageFile = pathlib.Path(imageFile)
 
                 with mrcfile.open(imageFile) as mrc:
-                    apix = round(float(mrc.voxel_size.x),4)
+                    apix = round(float(mrc.voxel_size.x), 4)
                     data.append(mrc.data)
             is_3d = False
             emdb_id = None
@@ -1515,7 +1519,7 @@ def get_displayed_images():
     req(len(all_images().data))
     data = all_images().data
     apix = all_images().apix
-    if isinstance(all_images().data,np.ndarray):
+    if isinstance(all_images().data, np.ndarray):
         if len(data.shape) < 3:
             data = np.expand_dims(data, axis=0)
 
@@ -1582,7 +1586,11 @@ def update_selected_images_orignal_lp():
 
     if do_filtering:
         images = [
-            helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction, high_pass_fraction=high_pass_fraction)
+            helicon.low_high_pass_filter(
+                images[i],
+                low_pass_fraction=low_pass_fraction,
+                high_pass_fraction=high_pass_fraction,
+            )
             for i in range(len(input.select_image()))
         ]
 
@@ -1624,12 +1632,15 @@ def update_threshold_scale():
     min_val = float(np.min([np.min(img) for img in images]))
     max_val = float(np.max([np.max(img) for img in images]))
     step_val = (max_val - min_val) / 100
+    from skimage.filters import threshold_otsu
+
+    thresh_value = float(np.median([threshold_otsu(img) for img in images]))
     prev_thres = input.threshold()
     if prev_thres is None:
         prev_thres = 0
     ui.update_numeric(
         "threshold",
-        value=round((min_val+max_val)/2, 3),
+        value=round(thresh_value, 3),
         min=round(min_val, 3),
         max=round(max_val, 3),
         step=round(step_val, 3),
@@ -2016,17 +2027,17 @@ def run_denovo3D_reconstruction():
     if len(tasks) < 1:
         logger.warning("Nothing to do. I will quit")
         return
-    
-    print(reconstruction_task, "reconstruction_task started")
+
+    # print(reconstruction_task, "reconstruction_task started")
     reconstruction_task(tasks, cpu)
-    
+
 
 @ui.bind_task_button(button_id="run_denovo3D")
 @reactive.extended_task
 async def reconstruction_task(tasks, cpu):
 
     global denovo3D_abort_event
-    denovo3D_abort_event=False
+    denovo3D_abort_event = False
 
     logger = helicon.get_logger(
         logfile="helicon.denovo3D.log",
@@ -2043,13 +2054,12 @@ async def reconstruction_task(tasks, cpu):
             future_tasks = [
                 executor.submit(compute.process_one_task, *task) for task in tasks
             ]
-            
 
             t0 = time()
             results = []
             for completed_task in as_completed(future_tasks):
 
-                print(denovo3D_abort_event)
+                # print(denovo3D_abort_event)
                 # this is to give a chance to stop the task
                 await asyncio.sleep(0)
                 if denovo3D_abort_event is True:
@@ -2066,8 +2076,8 @@ async def reconstruction_task(tasks, cpu):
                     detail=f"{helicon.timedelta2string(remaining)} remaining",
                 )
             t_final = time()
-            t_passed  = t_final - t0
-            print('reconstruction time: ', t_passed)
+            t_passed = t_final - t0
+            print("reconstruction time: ", t_passed)
 
     results_none = [res for res in results if res is None]
     if len(results_none):
@@ -2078,6 +2088,7 @@ async def reconstruction_task(tasks, cpu):
 
     results.sort(key=lambda x: x[0], reverse=True)  # sort from high to low scores
     reconstrunction_results.set(results)
+
 
 @reactive.effect
 @reactive.event(reconstrunction_results)
@@ -2157,6 +2168,7 @@ def toggle_output_map_download_button():
     else:
         ret = ui.tags.style("#download_denovo3D_output_map {visibility: hidden;}")
     return ret
+
 
 @reactive.effect
 @reactive.event(input.stop_denovo3D)
