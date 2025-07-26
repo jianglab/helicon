@@ -845,7 +845,7 @@ with ui.div(
             )
         else:
             return None
-    
+
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
@@ -855,10 +855,10 @@ with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
             ui.input_numeric(
-                "twist_min", "min", value=0.1, min=0.0, step=0.1, width="70px", update_on="blur"
+                "twist_min", "min", value=0.1, step=0.1, width="70px", update_on="blur"
             )
             ui.input_numeric(
-                "twist_max", "max", value=2.0, min=0.0, step=0.1, width="70px", update_on="blur"
+                "twist_max", "max", value=2.0, step=0.1, width="70px", update_on="blur"
             )
             ui.input_numeric(
                 "twist_step",
@@ -868,9 +868,10 @@ with ui.div(
                 width="70px",
                 update_on="blur",
             )
-            ui.input_radio_buttons(
-                "twisting_handedness", "Reconstruct with:", ["Left-handed twisting (negative twist)", "Right-handed twisting (positive twist)"]
-            )
+            with ui.panel_conditional("input['twist_min']===input['twist_max'] && input['rise_min']===input['rise_max']"):
+                ui.input_radio_buttons(
+                    "twisting_handedness", "Reconstruct with:", ["Left-handed twisting (force negative twist)", "Right-handed twisting (force positive twist)"]
+                )
 
     with ui.card(style="height: 115px"):
         ui.card_header("Rise (Å)")
@@ -2046,21 +2047,21 @@ def run_denovo3D_reconstruction():
         logfile="helicon.denovo3D.log",
         verbose=1,
     )
-    if input.twisting_handedness() == "Left-handed twisting (negative twist)":
-        signed_twist_min = np.negative(np.abs(input.twist_max()))
-        signed_twist_max = np.negative(np.abs(input.twist_min()))
-    else:
-        signed_twist_min = np.abs(input.twist_min())
-        signed_twist_max = np.abs(input.twist_max())        
     
-    if signed_twist_min < signed_twist_max:
-        twists = np.arange(
-            signed_twist_min,
-            signed_twist_max + input.twist_step() / 2,
-            input.twist_step(),
-        )
+    # limited to single parameter reconstruction only
+    if input.twisting_handedness() == "Left-handed twisting (force negative twist)":
+        twists = [np.negative(np.abs(input.twist_max()))]
+    elif input.twisting_handedness() == "Right-handed twisting (force positive twist)":
+        twists = [np.abs(input.twist_max())]
     else:
-        twists = [signed_twist_min]
+        if input.twist_min() < input.twist_max():
+            twists = np.arange(
+                input.twist_min(),
+                input.twist_max() + input.twist_step() / 2,
+                input.twist_step(),
+            )
+        else:
+            twists = [input.twist_min()]
     if input.rise_min() < input.rise_max():
         rises = np.arange(
             input.rise_min(),
@@ -2291,19 +2292,6 @@ def display_denovo3D_projections():
 
     reconstructed_projection_labels.set(labels)
     reconstructed_projection_images.set(images)
-
-
-@render.ui
-@reactive.event(reconstrunction_results, input.show_download_print_buttons)
-def toggle_input_map_download_button():
-    if input.show_download_print_buttons() and map_symmetrized() is not None:
-        ret = ui.tags.style(
-            "#download_denovo3D_input_map {visibility: visible; width: 270px;}"
-        )
-    else:
-        ret = ui.tags.style("#download_denovo3D_input_map {visibility: hidden;}")
-    return ret
-
 
 @render.ui
 @reactive.event(reconstrunction_results)
