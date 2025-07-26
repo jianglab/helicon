@@ -33,6 +33,17 @@ selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
 selected_images_title = reactive.value("Selected image:")
 selected_images_labels = reactive.value([])
 
+img_transpose_reactive = reactive.value(False)
+img_flip_reactive = reactive.value(False)
+img_negate_reactive = reactive.value(False)
+new_initial_image = reactive.value(True)
+pre_rotation_reactive = reactive.value(0)
+threshold_reactive = reactive.value(0.0)
+apix_reactive = reactive.value(1.0)
+shift_y_reactive = reactive.value(0)
+vertical_crop_size_reactive = reactive.value(32)
+horizontal_crop_size_reactive = reactive.value(256)
+
 t_ui_counter = reactive.value(0)
 selected_images_rotated_shifted = reactive.value([])
 transformed_images_displayed = reactive.value([])
@@ -378,6 +389,7 @@ with ui.sidebar(
                     "Show download/print buttons",
                     value=False,
                 )
+                ui.input_radio_buttons("input_ui_type", "Image transformation parameters input type:", ["slider", "input box"])
 
             with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
                 ui.input_numeric(
@@ -818,7 +830,7 @@ with ui.div(
                 )
 
     @shiny.render.ui
-    @reactive.event(initial_image, ignore_init=False)
+    @reactive.event(initial_image, input.input_ui_type, ignore_init=False)
     def generate_image_transformation_single():
         req(len(initial_image()))
         req(0 <= min(input.select_image()))
@@ -833,8 +845,7 @@ with ui.div(
             )
         else:
             return None
-
-
+    
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
@@ -844,10 +855,10 @@ with ui.div(
             style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
         ):
             ui.input_numeric(
-                "twist_min", "min", value=0.1, step=0.1, width="70px", update_on="blur"
+                "twist_min", "min", value=0.1, min=0.0, step=0.1, width="70px", update_on="blur"
             )
             ui.input_numeric(
-                "twist_max", "max", value=2.0, step=0.1, width="70px", update_on="blur"
+                "twist_max", "max", value=2.0, min=0.0, step=0.1, width="70px", update_on="blur"
             )
             ui.input_numeric(
                 "twist_step",
@@ -856,6 +867,9 @@ with ui.div(
                 step=0.1,
                 width="70px",
                 update_on="blur",
+            )
+            ui.input_radio_buttons(
+                "twisting_handedness", "Reconstruct with:", ["Left-handed twisting (negative twist)", "Right-handed twisting (positive twist)"]
             )
 
     with ui.card(style="height: 115px"):
@@ -1166,74 +1180,200 @@ ui.HTML(
 
 
 def transformation_ui_single():
-    tui_single = shiny.ui.card(
-        shiny.ui.layout_columns(
-            ui.input_checkbox("img_transpose", "Transpose", False),
-            ui.input_checkbox("img_flip", "Flip", False),
-            ui.input_checkbox("img_negate", "Invert contrast", False),
-            ui.input_slider(
-                "pre_rotation",
-                "Rotation (°)",
-                min=-20,
-                max=20,
-                value=0,
-                step=0.1,
+    if input.input_ui_type() == "slider":
+        tui_single = shiny.ui.card(
+            shiny.ui.layout_columns(
+                ui.input_checkbox("img_transpose", "Transpose", img_transpose_reactive()),
+                ui.input_checkbox("img_flip", "Flip", img_flip_reactive()),
+                ui.input_checkbox("img_negate", "Invert contrast", img_negate_reactive()),
+                ui.input_slider(
+                    "pre_rotation",
+                    "Rotation (°)",
+                    min=-20,
+                    max=20,
+                    value=pre_rotation_reactive(),
+                    step=0.1,
+                ),
+                ui.input_slider(
+                    "threshold", "Threshold", min=threshold_reactive()-1, max=threshold_reactive()+1, value=threshold_reactive(), step=0.001
+                ),
+                ui.input_slider(
+                    "apix", "Pixel size (Å)", min=0.0, max=10.0, value=apix_reactive(), step=0.001
+                ),
+                ui.input_slider(
+                    "shift_y",
+                    "Vertical shift (Å)",
+                    min=-100,
+                    max=100,
+                    value=shift_y_reactive(),
+                    step=0.1,
+                ),
+                ui.input_slider(
+                    "vertical_crop_size",
+                    "Vertical crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=vertical_crop_size_reactive(),
+                    step=2,
+                ),
+                ui.input_slider(
+                    "horizontal_crop_size",
+                    "Horizontal crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=horizontal_crop_size_reactive(),
+                    step=2,
+                ),
+                col_widths=4,
             ),
-            ui.input_slider(
-                "threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1
+            ui.input_task_button(
+                "auto_transform",
+                label="Auto Transform",
+                style="width: 200px; height: 40px;",
             ),
-            ui.input_slider(
-                "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
+            id=f"single_card_ui",
+        )
+    else:
+        tui_single = shiny.ui.card(
+            shiny.ui.layout_columns(
+                ui.input_checkbox("img_transpose", "Transpose", img_transpose_reactive()),
+                ui.input_checkbox("img_flip", "Flip", img_flip_reactive()),
+                ui.input_checkbox("img_negate", "Invert contrast", img_negate_reactive()),
+                ui.input_numeric(
+                    "pre_rotation",
+                    "Rotation (°)",
+                    min=-20,
+                    max=20,
+                    value=pre_rotation_reactive(),
+                    step=0.1,
+                ),
+                ui.input_numeric(
+                    "threshold", "Threshold", min=threshold_reactive()-1, max=threshold_reactive()+1, value=threshold_reactive(), step=0.001
+                ),
+                ui.input_numeric(
+                    "apix", "Pixel size (Å)", min=0.0, max=10.0, value=apix_reactive(), step=0.001
+                ),
+                ui.input_numeric(
+                    "shift_y",
+                    "Vertical shift (Å)",
+                    min=-100,
+                    max=100,
+                    value=shift_y_reactive(),
+                    step=0.1,
+                ),
+                ui.input_numeric(
+                    "vertical_crop_size",
+                    "Vertical crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=vertical_crop_size_reactive(),
+                    step=2,
+                ),
+                ui.input_numeric(
+                    "horizontal_crop_size",
+                    "Horizontal crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=horizontal_crop_size_reactive(),
+                    step=2,
+                ),
+                col_widths=4,
             ),
-            ui.input_slider(
-                "shift_y",
-                "Vertical shift (Å)",
-                min=-100,
-                max=100,
-                value=0,
-                step=0.1,
+            ui.input_task_button(
+                "auto_transform",
+                label="Auto Transform",
+                style="width: 200px; height: 40px;",
             ),
-            ui.input_slider(
-                "vertical_crop_size",
-                "Vertical crop (pixel)",
-                min=32,
-                max=256,
-                value=32,
-                step=2,
-            ),
-            ui.input_slider(
-                "horizontal_crop_size",
-                "Horizontal crop (pixel)",
-                min=32,
-                max=256,
-                value=256,
-                step=2,
-            ),
-            col_widths=4,
-        ),
-        ui.input_task_button(
-            "auto_transform",
-            label="Auto Transform",
-            style="width: 200px; height: 40px;",
-        ),
-        id=f"single_card_ui",
+            id=f"single_card_ui",
+        )       
+    
+    images = initial_image()
+    ny, nx = np.shape(images[0])
+    ui.update_numeric("vertical_crop_size",min=32,max=ny)
+    ui.update_numeric("horizontal_crop_size",min=32,max=nx)
+    ui.update_numeric("shift_y",min=-ny//2,max=ny//2)
+
+    #if input.img_negate():
+    #    images = [-img for img in images]
+    
+    min_val = float(np.min([np.min(img) for img in images]))
+    max_val = float(np.max([np.max(img) for img in images]))
+    step_val = (max_val - min_val) / 100
+    
+    ui.update_numeric(
+        "threshold",
+        min=round(min_val, 3),
+        max=round(max_val, 3),
+        step=round(step_val, 3),
     )
 
-    apix = round(all_images().apix, 4)
-    ui.update_numeric("apix", value=apix, max=apix * 2)
-    if isinstance(all_images().data, np.ndarray):
-        if len(all_images().data.shape) < 3:
-            ny, nx = all_images().data.shape
+    if new_initial_image():
+        apix = round(all_images().apix, 4)
+        ui.update_numeric("apix", value=apix, max=apix * 2)
+        if ny > nx:
+            ui.update_checkbox("img_transpose", value=True)
+            ui.update_checkbox("img_negate", value=True)
         else:
-            _, ny, nx = all_images().data.shape
-    else:
-        imageIndex = selected_images_labels()[0]
-        ny, nx = all_images().data[int(imageIndex) - 1].shape
+            ui.update_checkbox("img_transpose", value=False)
+            ui.update_checkbox("img_negate", value=False)            
+        new_initial_image.set(False)
 
-    if ny > nx:
-        ui.update_checkbox("img_transpose", value=True)
-        ui.update_checkbox("img_negate", value=True)
     return tui_single
+
+@reactive.effect
+@reactive.event(input.img_transpose)
+def _():
+    if img_transpose_reactive()!=input.img_transpose():
+        img_transpose_reactive.set(input.img_transpose())
+
+@reactive.effect
+@reactive.event(input.img_flip)
+def _():
+    if img_flip_reactive()!=input.img_flip():
+        img_flip_reactive.set(input.img_flip())
+
+@reactive.effect
+@reactive.event(input.img_negate)
+def _():
+    if img_negate_reactive()!=input.img_negate():
+        img_negate_reactive.set(input.img_negate())
+
+@reactive.effect
+@reactive.event(input.pre_rotation)
+def _():
+    if pre_rotation_reactive()!=input.pre_rotation():
+        pre_rotation_reactive.set(input.pre_rotation())
+
+@reactive.effect
+@reactive.event(input.threshold)
+def _():
+    if threshold_reactive()!=input.threshold():
+        threshold_reactive.set(input.threshold())
+
+@reactive.effect
+@reactive.event(input.apix)
+def _():
+    if apix_reactive()!=input.apix():
+        apix_reactive.set(input.apix())
+
+@reactive.effect
+@reactive.event(input.shift_y)
+def _():
+    if shift_y_reactive()!=input.shift_y():
+        shift_y_reactive.set(input.shift_y())
+
+@reactive.effect
+@reactive.event(input.vertical_crop_size)
+def _():
+    if vertical_crop_size_reactive()!=input.vertical_crop_size():
+        vertical_crop_size_reactive.set(input.vertical_crop_size())
+
+@reactive.effect
+@reactive.event(input.horizontal_crop_size)
+def _():
+    if horizontal_crop_size_reactive()!=input.horizontal_crop_size():
+        horizontal_crop_size_reactive.set(input.horizontal_crop_size())
+
 
 
 def transformation_ui_group(prefix, shift_scale=100):
@@ -1610,6 +1750,7 @@ def set_initial_image():
     # Return None early if condition isn't met
     if n_images_selected == 1:
         initial_image.set(selected_images_original())
+        new_initial_image.set(True)
     else:
 
         initial_image.set([])
@@ -1764,7 +1905,7 @@ def update_selected_image_rotation_shift_diameter():
     ui.update_numeric("pre_rotation", value=round(rotation, 1))
     ui.update_numeric(
         "shift_y",
-        value=shift_y,
+        value=round(shift_y,1),
         min=-crop_size * apix // 2,
         max=crop_size * apix // 2,
     )
@@ -1905,15 +2046,21 @@ def run_denovo3D_reconstruction():
         logfile="helicon.denovo3D.log",
         verbose=1,
     )
-
-    if input.twist_min() < input.twist_max():
+    if input.twisting_handedness() == "Left-handed twisting (negative twist)":
+        signed_twist_min = np.negative(np.abs(input.twist_max()))
+        signed_twist_max = np.negative(np.abs(input.twist_min()))
+    else:
+        signed_twist_min = np.abs(input.twist_min())
+        signed_twist_max = np.abs(input.twist_max())        
+    
+    if signed_twist_min < signed_twist_max:
         twists = np.arange(
-            input.twist_min(),
-            input.twist_max() + input.twist_step() / 2,
+            signed_twist_min,
+            signed_twist_max + input.twist_step() / 2,
             input.twist_step(),
         )
     else:
-        twists = [input.twist_min()]
+        twists = [signed_twist_min]
     if input.rise_min() < input.rise_max():
         rises = np.arange(
             input.rise_min(),
