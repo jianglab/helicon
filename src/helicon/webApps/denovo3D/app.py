@@ -2049,9 +2049,9 @@ def run_denovo3D_reconstruction():
     )
     
     # limited to single parameter reconstruction only
-    if input.twisting_handedness() == "Left-handed twisting (force negative twist)":
+    if input.twisting_handedness() == "Left-handed twisting (force negative twist)" and input.twist_max() == input.twist_min():
         twists = [np.negative(np.abs(input.twist_max()))]
-    elif input.twisting_handedness() == "Right-handed twisting (force positive twist)":
+    elif input.twisting_handedness() == "Right-handed twisting (force positive twist)" and input.twisst_max() == input.twist_min():
         twists = [np.abs(input.twist_max())]
     else:
         if input.twist_min() < input.twist_max():
