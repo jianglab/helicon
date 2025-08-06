@@ -67,7 +67,7 @@ reconstructed_projection_images = reactive.value([])
 reconstructed_projection_labels = reactive.value([])
 reconstructed_map = reactive.value(None)
 
-
+run_button_text = reactive.value("Search Parameters")
 denovo3D_abort_event = False
 
 ui.head_content(ui.tags.title("Helicon denovo3D"))
@@ -904,14 +904,16 @@ with ui.div(
         ui.input_numeric(
             "csym", "n", value=1, min=1, step=1, width="70px", update_on="blur"
         )
-
-    ui.input_task_button(
-        "run_denovo3D",
-        ui.span("Completed", slot="completed"),
-        ui.span("Search Parameters", slot="search"),
-        ui.span("Reconstruct 3D Map", slot="reconstruct"),
-        style="width: 115px; height: 115px;"
-    )
+    
+    @shiny.render.ui
+    def show_run_button():
+        return ui.input_task_button(
+            "run_denovo3D",
+            ui.span(run_button_text(), slot="ready"),
+            #ui.span("Search Parameters", slot="search"),
+            #ui.span("Reconstruct 3D Map", slot="reconstruct"),
+            style="width: 115px; height: 115px;"
+        )
 
     with ui.panel_conditional("input['twist_min']!==input['twist_max'] || input['rise_min']!==input['rise_max']"):
         ui.input_task_button(
@@ -925,9 +927,11 @@ with ui.div(
 @reactive.event(input.twist_min, input.twist_max, input.rise_min, input.rise_max, input.select_image)
 def update_run_button_label():
     if input.twist_min()!=input.twist_max() or input.rise_min()!=input.rise_max():
-        ui.update_task_button("run_denovo3D", state="search")
+        run_button_text.set("Search Parameters")
+        #ui.update_task_button("run_denovo3D", state="search")
     elif input.twist_min()==input.twist_max() and input.rise_min()==input.rise_max():
-        ui.update_task_button("run_denovo3D", state="reconstruct")
+        #ui.update_task_button("run_denovo3D", state="reconstruct")
+        run_button_text.set("Reconstruct 3D map") 
 
 #with ui.panel_conditional("len(reconstrunction_results)>1"):
 @render_plotly
@@ -1200,7 +1204,7 @@ ui.HTML(
 
 
 def transformation_ui_single():
-    if input.input_ui_type() == "slider":
+    if input.input_ui_type() == "Slider":
         tui_single = shiny.ui.card(
             shiny.ui.layout_columns(
                 ui.input_checkbox("img_transpose", "Transpose", img_transpose_reactive()),
@@ -1309,12 +1313,12 @@ def transformation_ui_single():
                 ui.input_task_button(
                     "auto_transform",
                     label="Auto Transform",
-                    style="width: 200px; height: 40px;",
+                    #style="width: 200px; height: 40px;",
                 ),
                 ui.input_task_button(
                     "reset_transform",
                     label="Reset Transform",
-                    style="width: 200px; height: 40px;",
+                    #style="width: 200px; height: 40px;",
                 ),
                 col_widths=4,
             ),
