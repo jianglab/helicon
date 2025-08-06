@@ -1,4 +1,4 @@
-__version__ = "2025.06"
+__version__ = "2025.08"
 
 from .lib.util import setup_cache_dir
 
