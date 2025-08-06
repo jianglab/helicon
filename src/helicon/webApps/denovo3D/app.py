@@ -335,23 +335,24 @@ with ui.sidebar(
                     allow_multiple_selection=True,
                 )
 
-                @render.download(
-                    label="Download symmetrized input map",
-                    filename="helicon_denovo3d_input_map.mrc",
-                )
-                @reactive.event(map_symmetrized)
-                def download_denovo3D_input_map():
-                    req(map_symmetrized() is not None)
+                with ui.panel_conditional("input['is_3d'] || input['input_mode_images'] === 'emdb'"):
+                    @render.download(
+                        label="Download symmetrized input map",
+                        filename="helicon_denovo3d_input_map.mrc",
+                    )
+                    @reactive.event(map_symmetrized)
+                    def download_denovo3D_input_map():
+                        req(map_symmetrized() is not None)
 
-                    import mrcfile
-                    import tempfile
+                        import mrcfile
+                        import tempfile
 
-                    with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
-                        with mrcfile.new(temp.name, overwrite=True) as mrc:
-                            mrc.set_data(map_symmetrized())
-                            mrc.voxel_size = input.output_apix()
-                        with open(temp.name, "rb") as file:
-                            yield file.read()
+                        with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
+                            with mrcfile.new(temp.name, overwrite=True) as mrc:
+                                mrc.set_data(map_symmetrized())
+                                mrc.voxel_size = input.output_apix()
+                            with open(temp.name, "rb") as file:
+                                yield file.read()
 
                 @render.ui
                 @reactive.event(input.show_download_print_buttons, displayed_images)
@@ -383,7 +384,7 @@ with ui.sidebar(
                     "ignore_blank", "Ignore blank input images", value=True
                 )
                 ui.input_checkbox("plot_scores", "Plot scores", value=True)
-                ui.input_checkbox("image_stitching", "Image_stitching", value=False)
+                #ui.input_checkbox("image_stitching", "Image_stitching", value=False)
                 ui.input_checkbox(
                     "show_download_print_buttons",
                     "Show download/print buttons",
@@ -529,7 +530,7 @@ with ui.sidebar(
 
                     "How positive constraint is used for the 3D reconstruction"
                 
-                ui.input_radio_buttons("input_ui_type", "Image transformation parameters input type:", ["slider", "input box"], inline=True)
+                ui.input_radio_buttons("input_ui_type", "Image transformation parameters input type:", ["Slider", "Input box"], inline=True)
 
 title = "Denovo3D: de novo helical indexing and 3D reconstruction"
 ui.h1(title, style="font-weight: bold;")
@@ -540,7 +541,7 @@ with ui.div(
 
     @shiny.render.ui
     @reactive.event(
-        selected_images_rotated_shifted, input.image_stitching, ignore_init=False
+        selected_images_rotated_shifted, ignore_init=False # input.image_stitching,
     )
     def generate_image_gallery_mutiple():
         req(len(displayed_images()))
@@ -603,7 +604,7 @@ with ui.div(
                 id_y_shift = f"t_ui_group_{curr_t_ui_counter}_shift_y"
 
                 @reactive.effect
-                @reactive.event(input.select_image, input.image_stitching)
+                @reactive.event(input.select_image) #, input.image_stitching)
                 def update_selected_images_orignal():
                     selected_images_rotated_shifted.set(
                         [displayed_images()[i] for i in input.select_image()]
@@ -729,7 +730,7 @@ with ui.div(
 
 
 @shiny.render.ui
-@reactive.event(transformed_images_displayed, input.image_stitching, ignore_init=False)
+@reactive.event(transformed_images_displayed, ignore_init=False) #input.image_stitching, 
 def image_stitching_transformed():
     req(len(displayed_images()))
     req(0 <= min(input.select_image()))
@@ -756,7 +757,7 @@ def image_stitching_transformed():
 @reactive.event(
     stitched_image_displayed,
     selected_images_original,
-    input.image_stitching,
+    #input.image_stitching,
     ignore_init=False,
 )
 def display_stitched_image():
@@ -896,7 +897,7 @@ with ui.div(
                     width="70px",
                     update_on="blur",
                 )
-        "Will reconstruct when min. twist = max twist and min. rise = max rise"
+        "Will reconstruct 3D map when min. twist = max twist and min. rise = max rise"
 
     with ui.card(style="height: 115px"):
         ui.card_header("Csym")
@@ -921,7 +922,7 @@ with ui.div(
         )
 
 @reactive.effect
-@reactive.event(input.twist_min, input.twist_max, input.rise_min, input.rise_max)
+@reactive.event(input.twist_min, input.twist_max, input.rise_min, input.rise_max, input.select_image)
 def update_run_button_label():
     if input.twist_min()!=input.twist_max() or input.rise_min()!=input.rise_max():
         ui.update_task_button("run_denovo3D", state="search")
@@ -932,9 +933,7 @@ def update_run_button_label():
 @render_plotly
 @reactive.event(reconstrunction_results)
 def display_denovo3D_scores():
-    #req(len(reconstrunction_results()) > 1)
-    if len(reconstrunction_results()) <= 1:
-        return None
+    req(len(reconstrunction_results()) > 1)
 
     import plotly.express as px
 
@@ -1248,12 +1247,12 @@ def transformation_ui_single():
                 ui.input_task_button(
                     "auto_transform",
                     label="Auto Transform",
-                    style="width: 200px; height: 40px;",
+                    #style="width: 200px; height: 40px;",
                 ),
                 ui.input_task_button(
                     "reset_transform",
                     label="Reset Transform",
-                    style="width: 200px; height: 40px;",
+                    #style="width: 200px; height: 40px;",
                 ),
                 col_widths=4,
             ),
@@ -1323,7 +1322,7 @@ def transformation_ui_single():
         )       
 
     if new_initial_image():
-        print("new image")
+        #print("new image")
         # set default parameters for new initial iamge
         apix = round(all_images().apix, 4)
         ui.update_numeric("apix", value=apix, max=apix * 2)
@@ -1340,13 +1339,13 @@ def transformation_ui_single():
             ui.update_checkbox("img_negate", value=False)
         new_initial_image.set(False)
     else:
-        print("existing image")
+        #print("existing image")
         # reload parameters range
         if len(selected_images_thresholded()):
-            print("existing thresholded")
+            #print("existing thresholded")
             ny, nx = np.shape(selected_images_thresholded()[0])
         else:
-            print("existing initial")
+            #print("existing initial")
             ny, nx = np.shape(initial_image()[0])
         ui.update_numeric("vertical_crop_size",min=32,max=ny)
         ui.update_numeric("horizontal_crop_size",min=32,max=nx)
@@ -1814,7 +1813,7 @@ def set_initial_image():
 @reactive.event(initial_image, input.img_negate)
 def update_threshold_scale():
     req(len(initial_image()))
-    print("estimated with negated:"+str(input.img_negate())+" new init image:"+str(new_initial_image()))
+    #print("estimated with negated:"+str(input.img_negate())+" new init image:"+str(new_initial_image()))
     images = initial_image()
     if input.img_negate():
         images = [-img for img in images]
@@ -1840,8 +1839,8 @@ def update_threshold_scale():
 @reactive.event(initial_image, input.threshold, input.img_transpose, input.img_flip)
 def threshold_selected_images():
     req(len(initial_image()))
-    print("negated:"+str(input.img_negate())+"threshold="+str(input.threshold()))
-    print(str(input.threshold())+","+str(threshold_reactive()))
+    #print("negated:"+str(input.img_negate())+"threshold="+str(input.threshold()))
+    #print(str(input.threshold())+","+str(threshold_reactive()))
 
     images = initial_image()
 
