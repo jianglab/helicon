@@ -2383,6 +2383,7 @@ async def reconstruction_task(tasks, cpu):
                 await asyncio.sleep(0)
                 if denovo3D_abort_event is True:
                     print("User aborted the denovo3D run early.")
+                    executor.shutdown(wait=False, cancel_futures=True)
                     break
 
                 result = completed_task.result()
