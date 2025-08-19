@@ -174,10 +174,11 @@ def extract_EPU_old_data_collection_time(filename):
     pattern = r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_(\d{8}_\d{6})_"
     match = re.search(pattern, filename)
     if match:
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         datetime_str = match.group(1)
         datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
+        datetime_obj = datetime_obj.replace(tzinfo=timezone.utc)
         timestamp = datetime_obj.timestamp()
         return timestamp
     else:
