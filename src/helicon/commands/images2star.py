@@ -2604,7 +2604,7 @@ def main(args):
             data.drop(tmp_col, axis=1, inplace=True)
             if args.verbose > 1:
                 print(
-                    f"\t{len(mgraphs)} micrographs -> {len(data.attrs["optics"])} optic groups"
+                    f"\t{len(mgraphs)} micrographs -> {len(data.attrs['optics'])} optic groups"
                 )
 
         elif option_name == "splitByMicrograph" and param:
