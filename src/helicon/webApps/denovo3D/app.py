@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import asyncio
 
 from shinywidgets import render_plotly
 
@@ -32,6 +33,17 @@ selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
 selected_images_title = reactive.value("Selected image:")
 selected_images_labels = reactive.value([])
 
+img_transpose_reactive = reactive.value(False)
+img_flip_reactive = reactive.value(False)
+img_negate_reactive = reactive.value(False)
+new_initial_image = reactive.value(True)
+pre_rotation_reactive = reactive.value(0)
+threshold_reactive = reactive.value(0.0)
+apix_reactive = reactive.value(1.0)
+shift_y_reactive = reactive.value(0)
+vertical_crop_size_reactive = reactive.value(32)
+horizontal_crop_size_reactive = reactive.value(256)
+
 t_ui_counter = reactive.value(0)
 selected_images_rotated_shifted = reactive.value([])
 transformed_images_displayed = reactive.value([])
@@ -55,9 +67,8 @@ reconstructed_projection_images = reactive.value([])
 reconstructed_projection_labels = reactive.value([])
 reconstructed_map = reactive.value(None)
 
-
-import threading
-denovo3D_abort_event = threading.Event()
+run_button_text = reactive.value("Search Parameters")
+denovo3D_abort_event = False
 
 ui.head_content(ui.tags.title("Helicon denovo3D"))
 helicon.shiny.google_analytics(id="G-FDSYXQNKLX")
@@ -303,7 +314,7 @@ with ui.sidebar(
                     ret,
                     ui.input_task_button(
                         "symmetrization_projection",
-                        "Generate proejction",
+                        "Generate projection",
                         style="margin-bottom: 10px;",
                     ),
                     style="display: flex; flex-direction: column; justify-content: center;",
@@ -324,23 +335,27 @@ with ui.sidebar(
                     allow_multiple_selection=True,
                 )
 
-                @render.download(
-                    label="Download symmetrized input map",
-                    filename="helicon_denovo3d_input_map.mrc",
-                )
-                @reactive.event(map_symmetrized)
-                def download_denovo3D_input_map():
-                    req(map_symmetrized() is not None)
+                with ui.panel_conditional(
+                    "input['is_3d'] || input['input_mode_images'] === 'emdb'"
+                ):
 
-                    import mrcfile
-                    import tempfile
+                    @render.download(
+                        label="Download symmetrized input map",
+                        filename="helicon_denovo3d_input_map.mrc",
+                    )
+                    @reactive.event(map_symmetrized)
+                    def download_denovo3D_input_map():
+                        req(map_symmetrized() is not None)
 
-                    with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
-                        with mrcfile.new(temp.name, overwrite=True) as mrc:
-                            mrc.set_data(map_symmetrized())
-                            mrc.voxel_size = input.output_apix()
-                        with open(temp.name, "rb") as file:
-                            yield file.read()
+                        import mrcfile
+                        import tempfile
+
+                        with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
+                            with mrcfile.new(temp.name, overwrite=True) as mrc:
+                                mrc.set_data(map_symmetrized())
+                                mrc.voxel_size = input.output_apix()
+                            with open(temp.name, "rb") as file:
+                                yield file.read()
 
                 @render.ui
                 @reactive.event(input.show_download_print_buttons, displayed_images)
@@ -372,7 +387,7 @@ with ui.sidebar(
                     "ignore_blank", "Ignore blank input images", value=True
                 )
                 ui.input_checkbox("plot_scores", "Plot scores", value=True)
-                ui.input_checkbox("image_stitching", "Image_stitching", value=False)
+                # ui.input_checkbox("image_stitching", "Image_stitching", value=False)
                 ui.input_checkbox(
                     "show_download_print_buttons",
                     "Show download/print buttons",
@@ -518,6 +533,13 @@ with ui.sidebar(
 
                     "How positive constraint is used for the 3D reconstruction"
 
+                ui.input_radio_buttons(
+                    "input_ui_type",
+                    "Image transformation parameters input type:",
+                    ["Slider", "Input box"],
+                    inline=True,
+                )
+
 title = "Denovo3D: de novo helical indexing and 3D reconstruction"
 ui.h1(title, style="font-weight: bold;")
 
@@ -527,7 +549,7 @@ with ui.div(
 
     @shiny.render.ui
     @reactive.event(
-        selected_images_rotated_shifted, input.image_stitching, ignore_init=False
+        selected_images_rotated_shifted, ignore_init=False  # input.image_stitching,
     )
     def generate_image_gallery_mutiple():
         req(len(displayed_images()))
@@ -590,7 +612,7 @@ with ui.div(
                 id_y_shift = f"t_ui_group_{curr_t_ui_counter}_shift_y"
 
                 @reactive.effect
-                @reactive.event(input.select_image, input.image_stitching)
+                @reactive.event(input.select_image)  # , input.image_stitching)
                 def update_selected_images_orignal():
                     selected_images_rotated_shifted.set(
                         [displayed_images()[i] for i in input.select_image()]
@@ -614,7 +636,8 @@ with ui.div(
                             post_translation=(input[id_y_shift](), 0),
                         )
                     selected_images_rotated_shifted.set(rotated)
-                   #print(f"rot shift {i} done")
+
+                # print(f"rot shift {i} done")
 
                 @reactive.effect
                 @reactive.event(selected_images_rotated_shifted, input[id_x_shift])
@@ -715,7 +738,9 @@ with ui.div(
 
 
 @shiny.render.ui
-@reactive.event(transformed_images_displayed, input.image_stitching, ignore_init=False)
+@reactive.event(
+    transformed_images_displayed, ignore_init=False
+)  # input.image_stitching,
 def image_stitching_transformed():
     req(len(displayed_images()))
     req(0 <= min(input.select_image()))
@@ -742,7 +767,7 @@ def image_stitching_transformed():
 @reactive.event(
     stitched_image_displayed,
     selected_images_original,
-    input.image_stitching,
+    # input.image_stitching,
     ignore_init=False,
 )
 def display_stitched_image():
@@ -815,8 +840,9 @@ with ui.div(
                     step=0.1,
                     update_on="blur",
                 )
+
     @shiny.render.ui
-    @reactive.event(initial_image, ignore_init=False)
+    @reactive.event(initial_image, input.input_ui_type, ignore_init=False)
     def generate_image_transformation_single():
         req(len(initial_image()))
         req(0 <= min(input.select_image()))
@@ -836,45 +862,79 @@ with ui.div(
 with ui.div(
     style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
 ):
-    with ui.card(style="height: 115px"):
-        ui.card_header("Twist (°)")
-        with ui.div(
-            style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
-        ):
-            ui.input_numeric(
-                "twist_min", "min", value=0.1, step=0.1, width="70px", update_on="blur"
-            )
-            ui.input_numeric(
-                "twist_max", "max", value=2.0, step=0.1, width="70px", update_on="blur"
-            )
-            ui.input_numeric(
-                "twist_step",
-                "step",
-                value=0.1,
-                step=0.1,
-                width="70px",
-                update_on="blur",
-            )
-
-    with ui.card(style="height: 115px"):
-        ui.card_header("Rise (Å)")
-        with ui.div(
-            style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
-        ):
-            ui.input_numeric(
-                "rise_min", "min", value=4.75, step=0.1, width="70px", update_on="blur"
-            )
-            ui.input_numeric(
-                "rise_max", "max", value=4.75, step=0.1, width="70px", update_on="blur"
-            )
-            ui.input_numeric(
-                "rise_step",
-                "step",
-                value=0.1,
-                step=0.01,
-                width="70px",
-                update_on="blur",
-            )
+    with ui.tooltip():
+        with ui.card(style="height: 115px"):
+            ui.card_header("Twist (°)")
+            with ui.div(
+                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+            ):
+                ui.input_numeric(
+                    "twist_min",
+                    "min",
+                    value=0.1,
+                    step=0.1,
+                    width="70px",
+                    update_on="blur",
+                )
+                ui.input_numeric(
+                    "twist_max",
+                    "max",
+                    value=2.0,
+                    step=0.1,
+                    width="70px",
+                    update_on="blur",
+                )
+                ui.input_numeric(
+                    "twist_step",
+                    "step",
+                    value=0.1,
+                    step=0.1,
+                    width="70px",
+                    update_on="blur",
+                )
+                with ui.panel_conditional(
+                    "input['twist_min']===input['twist_max'] && input['rise_min']===input['rise_max']"
+                ):
+                    ui.input_radio_buttons(
+                        "twisting_handedness",
+                        "Reconstruct with:",
+                        [
+                            "Left-handed twisting (force negative twist)",
+                            "Right-handed twisting (force positive twist)",
+                        ],
+                    )
+        "Will reconstruct 3D map when min. twist = max twist and min. rise = max rise"
+    with ui.tooltip():
+        with ui.card(style="height: 115px"):
+            ui.card_header("Rise (Å)")
+            with ui.div(
+                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0"
+            ):
+                ui.input_numeric(
+                    "rise_min",
+                    "min",
+                    value=4.75,
+                    step=0.1,
+                    width="70px",
+                    update_on="blur",
+                )
+                ui.input_numeric(
+                    "rise_max",
+                    "max",
+                    value=4.75,
+                    step=0.1,
+                    width="70px",
+                    update_on="blur",
+                )
+                ui.input_numeric(
+                    "rise_step",
+                    "step",
+                    value=0.1,
+                    step=0.01,
+                    width="70px",
+                    update_on="blur",
+                )
+        "Will reconstruct 3D map when min. twist = max twist and min. rise = max rise"
 
     with ui.card(style="height: 115px"):
         ui.card_header("Csym")
@@ -882,15 +942,43 @@ with ui.div(
             "csym", "n", value=1, min=1, step=1, width="70px", update_on="blur"
         )
 
-    ui.input_task_button(
-        "run_denovo3D", label="Reconstruct 3D Map", style="width: 115px; height: 115px;"
-    )
+    @shiny.render.ui
+    def show_run_button():
+        return ui.input_task_button(
+            "run_denovo3D",
+            ui.span(run_button_text(), slot="ready"),
+            # ui.span("Search Parameters", slot="search"),
+            # ui.span("Reconstruct 3D Map", slot="reconstruct"),
+            style="width: 115px; height: 115px;",
+        )
 
-    ui.input_task_button(
-    "stop_denovo3D", label="Stop", style="width: 115px; height: 115px;", label_busy='Stopping...'
-    )
+    with ui.panel_conditional(
+        "input['twist_min']!==input['twist_max'] || input['rise_min']!==input['rise_max']"
+    ):
+        ui.input_task_button(
+            "stop_denovo3D",
+            label="Stop",
+            style="width: 115px; height: 115px;",
+            label_busy="Stopping...",
+        )
 
 
+@reactive.effect
+@reactive.event(
+    input.twist_min, input.twist_max, input.rise_min, input.rise_max, input.select_image
+)
+def update_run_button_label():
+    if input.twist_min() != input.twist_max() or input.rise_min() != input.rise_max():
+        run_button_text.set("Search Parameters")
+        # ui.update_task_button("run_denovo3D", state="search")
+    elif (
+        input.twist_min() == input.twist_max() and input.rise_min() == input.rise_max()
+    ):
+        # ui.update_task_button("run_denovo3D", state="reconstruct")
+        run_button_text.set("Reconstruct 3D map")
+
+
+# with ui.panel_conditional("len(reconstrunction_results)>1"):
 @render_plotly
 @reactive.event(reconstrunction_results)
 def display_denovo3D_scores():
@@ -993,7 +1081,7 @@ def display_denovo3D_scores():
         y = np.array(y)[sort_idx]
 
         # save the curve or map
-        #np.save("/home/daoyi/helicon/data/denovo3D_scores.npy", results)
+        # np.save("/home/lidao/helicon/data/denovo3D_scores.npy", results)
 
         fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
         fig.update_layout(xaxis_title=x_title, yaxis_title=y_title, showlegend=False)
@@ -1114,14 +1202,13 @@ def download_denovo3D_output_map():
         ),
     ) = reconstrunction_results()[0]
 
-    if isinstance(all_images().data,np.ndarray):
+    if isinstance(all_images().data, np.ndarray):
         if len(all_images().data.shape) < 3:
             ny, nx = all_images().data.shape
         else:
             _, ny, nx = all_images().data.shape
     else:
-        ny, nx = all_images().data[int(imageIndex)-1].shape
-
+        ny, nx = all_images().data[int(imageIndex) - 1].shape
 
     if input.img_transpose():
         nx, ny = ny, nx
@@ -1129,7 +1216,7 @@ def download_denovo3D_output_map():
     apix = input_data().apix
     # ny, nx = 200,200
     # apix = 5
-    #print(apix, ny, nx)
+    # print(apix, ny, nx)
     rec3d_map = helicon.apply_helical_symmetry(
         data=rec3d[0],
         apix=apix3d,
@@ -1162,74 +1249,270 @@ ui.HTML(
 
 
 def transformation_ui_single():
-    tui_single = shiny.ui.card(
-        shiny.ui.layout_columns(
-            ui.input_checkbox("img_transpose", "Transpose", False),
-            ui.input_checkbox("img_flip", "Flip", False),
-            ui.input_checkbox("img_negate", "Invert contrast", False),
-            ui.input_slider(
-                "pre_rotation",
-                "Rotation (°)",
-                min=-20,
-                max=20,
-                value=0,
-                step=0.1,
+    if input.input_ui_type() == "Slider":
+        tui_single = shiny.ui.card(
+            shiny.ui.layout_columns(
+                ui.input_checkbox(
+                    "img_transpose", "Transpose", img_transpose_reactive()
+                ),
+                ui.input_checkbox("img_flip", "Flip", img_flip_reactive()),
+                ui.input_checkbox(
+                    "img_negate", "Invert contrast", img_negate_reactive()
+                ),
+                ui.input_slider(
+                    "pre_rotation",
+                    "Rotation (°)",
+                    min=-20,
+                    max=20,
+                    value=pre_rotation_reactive(),
+                    step=0.1,
+                ),
+                ui.input_slider(
+                    "threshold",
+                    "Threshold",
+                    min=threshold_reactive() - 1,
+                    max=threshold_reactive() + 1,
+                    value=threshold_reactive(),
+                    step=0.001,
+                ),
+                ui.input_slider(
+                    "apix",
+                    "Pixel size (Å)",
+                    min=0.0,
+                    max=10.0,
+                    value=apix_reactive(),
+                    step=0.001,
+                ),
+                ui.input_slider(
+                    "shift_y",
+                    "Vertical shift (Å)",
+                    min=-100,
+                    max=100,
+                    value=shift_y_reactive(),
+                    step=0.1,
+                ),
+                ui.input_slider(
+                    "vertical_crop_size",
+                    "Vertical crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=vertical_crop_size_reactive(),
+                    step=2,
+                ),
+                ui.input_slider(
+                    "horizontal_crop_size",
+                    "Horizontal crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=horizontal_crop_size_reactive(),
+                    step=2,
+                ),
+                col_widths=4,
             ),
-            ui.input_slider(
-                "threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.1
+            shiny.ui.layout_columns(
+                ui.input_task_button(
+                    "auto_transform",
+                    label="Auto Transform",
+                    # style="width: 200px; height: 40px;",
+                ),
+                ui.input_task_button(
+                    "reset_transform",
+                    label="Reset Transform",
+                    # style="width: 200px; height: 40px;",
+                ),
+                col_widths=6,
             ),
-            ui.input_slider(
-                "apix", "Pixel size (Å)", min=0.0, max=10.0, value=1.0, step=0.001
-            ),
-            ui.input_slider(
-                "shift_y",
-                "Vertical shift (Å)",
-                min=-100,
-                max=100,
-                value=0,
-                step=0.1,
-            ),
-            ui.input_slider(
-                "vertical_crop_size",
-                "Vertical crop (pixel)",
-                min=32,
-                max=256,
-                value=32,
-                step=2,
-            ),
-            ui.input_slider(
-                "horizontal_crop_size",
-                "Horizontal crop (pixel)",
-                min=32,
-                max=256,
-                value=256,
-                step=2,
-            ),
-            col_widths=4,
-        ),
-        ui.input_task_button(
-            "auto_transform",
-            label="Auto Transform",
-            style="width: 200px; height: 40px;",
-        ),
-        id=f"single_card_ui",
-    )
-
-    apix = round(all_images().apix, 4)
-    ui.update_numeric("apix", value=apix, max=apix * 2)
-    if isinstance(all_images().data, np.ndarray):
-        if len(all_images().data.shape) < 3:
-            ny, nx = all_images().data.shape
-        else:
-            _, ny, nx = all_images().data.shape
+            id=f"single_card_ui",
+        )
     else:
-        imageIndex = selected_images_labels()[0]
-        ny, nx = all_images().data[int(imageIndex)-1].shape
+        tui_single = shiny.ui.card(
+            shiny.ui.layout_columns(
+                ui.input_checkbox(
+                    "img_transpose", "Transpose", img_transpose_reactive()
+                ),
+                ui.input_checkbox("img_flip", "Flip", img_flip_reactive()),
+                ui.input_checkbox(
+                    "img_negate", "Invert contrast", img_negate_reactive()
+                ),
+                ui.input_numeric(
+                    "pre_rotation",
+                    "Rotation (°)",
+                    min=-20,
+                    max=20,
+                    value=pre_rotation_reactive(),
+                    step=0.1,
+                    update_on="blur",
+                ),
+                ui.input_numeric(
+                    "threshold",
+                    "Threshold",
+                    min=threshold_reactive() - 1,
+                    max=threshold_reactive() + 1,
+                    value=threshold_reactive(),
+                    step=0.001,
+                    update_on="blur",
+                ),
+                ui.input_numeric(
+                    "apix",
+                    "Pixel size (Å)",
+                    min=0.0,
+                    max=10.0,
+                    value=apix_reactive(),
+                    step=0.001,
+                    update_on="blur",
+                ),
+                ui.input_numeric(
+                    "shift_y",
+                    "Vertical shift (Å)",
+                    min=-100,
+                    max=100,
+                    value=shift_y_reactive(),
+                    step=0.1,
+                    update_on="blur",
+                ),
+                ui.input_numeric(
+                    "vertical_crop_size",
+                    "Vertical crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=vertical_crop_size_reactive(),
+                    step=2,
+                    update_on="blur",
+                ),
+                ui.input_numeric(
+                    "horizontal_crop_size",
+                    "Horizontal crop (pixel)",
+                    min=32,
+                    max=256,
+                    value=horizontal_crop_size_reactive(),
+                    step=2,
+                    update_on="blur",
+                ),
+                col_widths=4,
+            ),
+            shiny.ui.layout_columns(
+                ui.input_task_button(
+                    "auto_transform",
+                    label="Auto Transform",
+                    # style="width: 200px; height: 40px;",
+                ),
+                ui.input_task_button(
+                    "reset_transform",
+                    label="Reset Transform",
+                    # style="width: 200px; height: 40px;",
+                ),
+                col_widths=6,
+            ),
+            id=f"single_card_ui",
+        )
 
-    if ny > nx:
-        ui.update_checkbox("img_transpose", value=True)
-        ui.update_checkbox("img_negate", value=True)
+    if new_initial_image():
+        # print("new image")
+        # set default parameters for new initial iamge
+        apix = round(all_images().apix, 4)
+        ui.update_numeric("apix", value=apix, max=apix * 2)
+
+        ny, nx = np.shape(initial_image()[0])
+        ui.update_numeric("vertical_crop_size", min=32, max=ny)
+        ui.update_numeric("horizontal_crop_size", min=32, max=nx)
+        ui.update_numeric("shift_y", min=-ny // 2, max=ny // 2)
+        if ny > nx:
+            ui.update_checkbox("img_transpose", value=True)
+            ui.update_checkbox("img_negate", value=True)
+        else:
+            ui.update_checkbox("img_transpose", value=False)
+            ui.update_checkbox("img_negate", value=False)
+        new_initial_image.set(False)
+    else:
+        # print("existing image")
+        # reload parameters range
+        if len(selected_images_thresholded()):
+            # print("existing thresholded")
+            ny, nx = np.shape(selected_images_thresholded()[0])
+        else:
+            # print("existing initial")
+            ny, nx = np.shape(initial_image()[0])
+        ui.update_numeric("vertical_crop_size", min=32, max=ny)
+        ui.update_numeric("horizontal_crop_size", min=32, max=nx)
+        ui.update_numeric("shift_y", min=-ny // 2, max=ny // 2)
+
+        if img_negate_reactive():
+            images = [-img for img in initial_image()]
+        else:
+            images = initial_image()
+        min_val = float(np.min([np.min(img) for img in images]))
+        max_val = float(np.max([np.max(img) for img in images]))
+        step_val = (max_val - min_val) / 100
+        ui.update_numeric(
+            "threshold",
+            min=round(min_val, 3),
+            max=round(max_val, 3),
+            step=round(step_val, 3),
+        )
     return tui_single
+
+
+@reactive.effect
+@reactive.event(input.img_transpose)
+def _():
+    if img_transpose_reactive() != input.img_transpose():
+        img_transpose_reactive.set(input.img_transpose())
+
+
+@reactive.effect
+@reactive.event(input.img_flip)
+def _():
+    if img_flip_reactive() != input.img_flip():
+        img_flip_reactive.set(input.img_flip())
+
+
+@reactive.effect
+@reactive.event(input.img_negate)
+def _():
+    if img_negate_reactive() != input.img_negate():
+        img_negate_reactive.set(input.img_negate())
+
+
+@reactive.effect
+@reactive.event(input.pre_rotation)
+def _():
+    if pre_rotation_reactive() != input.pre_rotation():
+        pre_rotation_reactive.set(input.pre_rotation())
+
+
+@reactive.effect
+@reactive.event(input.threshold)
+def _():
+    if threshold_reactive() != input.threshold():
+        threshold_reactive.set(input.threshold())
+
+
+@reactive.effect
+@reactive.event(input.apix)
+def _():
+    if apix_reactive() != input.apix():
+        apix_reactive.set(input.apix())
+
+
+@reactive.effect
+@reactive.event(input.shift_y)
+def _():
+    if shift_y_reactive() != input.shift_y():
+        shift_y_reactive.set(input.shift_y())
+
+
+@reactive.effect
+@reactive.event(input.vertical_crop_size)
+def _():
+    if vertical_crop_size_reactive() != input.vertical_crop_size():
+        vertical_crop_size_reactive.set(input.vertical_crop_size())
+
+
+@reactive.effect
+@reactive.event(input.horizontal_crop_size)
+def _():
+    if horizontal_crop_size_reactive() != input.horizontal_crop_size():
+        horizontal_crop_size_reactive.set(input.horizontal_crop_size())
 
 
 def transformation_ui_group(prefix, shift_scale=100):
@@ -1290,8 +1573,8 @@ def get_image_from_upload():
     fileinfo = input.upload_images()
     req(fileinfo)
     image_file = fileinfo[0]["datapath"]
-    
-    if image_file.split('.')[-1] == "star":
+
+    if image_file.split(".")[-1] == "star":
         df = helicon.star2dataframe(str(image_file))
         indices = range(len(df))
 
@@ -1300,12 +1583,13 @@ def get_image_from_upload():
             data = []
             import pathlib
             import mrcfile
+
             for i in indices:
                 imageFile = df.loc[i, "rlnHelixImageName"]
                 imageFile = pathlib.Path(imageFile)
 
                 with mrcfile.open(imageFile) as mrc:
-                    apix = round(float(mrc.voxel_size.x),4)
+                    apix = round(float(mrc.voxel_size.x), 4)
                     data.append(mrc.data)
             is_3d = False
             emdb_id = None
@@ -1514,7 +1798,7 @@ def get_displayed_images():
     req(len(all_images().data))
     data = all_images().data
     apix = all_images().apix
-    if isinstance(all_images().data,np.ndarray):
+    if isinstance(all_images().data, np.ndarray):
         if len(data.shape) < 3:
             data = np.expand_dims(data, axis=0)
 
@@ -1581,7 +1865,11 @@ def update_selected_images_orignal_lp():
 
     if do_filtering:
         images = [
-            helicon.low_high_pass_filter(images[i], low_pass_fraction=low_pass_fraction, high_pass_fraction=high_pass_fraction)
+            helicon.low_high_pass_filter(
+                images[i],
+                low_pass_fraction=low_pass_fraction,
+                high_pass_fraction=high_pass_fraction,
+            )
             for i in range(len(input.select_image()))
         ]
 
@@ -1601,6 +1889,7 @@ def set_initial_image():
     # Return None early if condition isn't met
     if n_images_selected == 1:
         initial_image.set(selected_images_original())
+        new_initial_image.set(True)
     else:
 
         initial_image.set([])
@@ -1617,18 +1906,22 @@ def set_initial_image():
 @reactive.event(initial_image, input.img_negate)
 def update_threshold_scale():
     req(len(initial_image()))
+    # print("estimated with negated:"+str(input.img_negate())+" new init image:"+str(new_initial_image()))
     images = initial_image()
     if input.img_negate():
         images = [-img for img in images]
     min_val = float(np.min([np.min(img) for img in images]))
     max_val = float(np.max([np.max(img) for img in images]))
     step_val = (max_val - min_val) / 100
-    prev_thres = input.threshold()
-    if prev_thres is None:
-        prev_thres = 0
+    from skimage.filters import threshold_otsu
+
+    thresh_value = float(np.median([threshold_otsu(img) for img in images]))
+    # prev_thres = input.threshold()
+    # if prev_thres is None:
+    #    prev_thres = 0
     ui.update_numeric(
         "threshold",
-        value=round((min_val+max_val)/2, 3),
+        value=round(thresh_value, 3),
         min=round(min_val, 3),
         max=round(max_val, 3),
         step=round(step_val, 3),
@@ -1639,6 +1932,8 @@ def update_threshold_scale():
 @reactive.event(initial_image, input.threshold, input.img_transpose, input.img_flip)
 def threshold_selected_images():
     req(len(initial_image()))
+    # print("negated:"+str(input.img_negate())+"threshold="+str(input.threshold()))
+    # print(str(input.threshold())+","+str(threshold_reactive()))
 
     images = initial_image()
 
@@ -1709,9 +2004,33 @@ def estimate_helix_rotation_center_diameter(
     return rotation, shift_y, diameter
 
 
+@reactive.effect
+@reactive.event(input.reset_transform)
+def reset_transformation_parameters():
+    req(len(selected_images_thresholded()))
+
+    images = selected_images_thresholded()
+
+    ny = int(np.max([img.shape[0] for img in images]))
+    nx = int(np.max([img.shape[1] for img in images]))
+    ui.update_numeric(
+        "pre_rotation",
+        value=0.0,
+    )
+    ui.update_numeric(
+        "shift_y",
+        value=0.0,
+    )
+    ui.update_numeric(
+        "vertical_crop_size",
+        value=ny // 2 * 2,
+    )
+    ui.update_numeric("horizontal_crop_size", value=nx // 2 * 2)
+
+
 # change from selected_images_thresholded to auto_transform
 @reactive.effect
-@reactive.event(input.auto_transform)
+@reactive.event(input.auto_transform, threshold_reactive)
 def update_selected_image_rotation_shift_diameter():
     req(all_images())
     req(len(selected_images_thresholded()))
@@ -1752,7 +2071,7 @@ def update_selected_image_rotation_shift_diameter():
     ui.update_numeric("pre_rotation", value=round(rotation, 1))
     ui.update_numeric(
         "shift_y",
-        value=shift_y,
+        value=round(shift_y, 1),
         min=-crop_size * apix // 2,
         max=crop_size * apix // 2,
     )
@@ -1894,14 +2213,26 @@ def run_denovo3D_reconstruction():
         verbose=1,
     )
 
-    if input.twist_min() < input.twist_max():
-        twists = np.arange(
-            input.twist_min(),
-            input.twist_max() + input.twist_step() / 2,
-            input.twist_step(),
-        )
+    # limited to single parameter reconstruction only
+    if (
+        input.twisting_handedness() == "Left-handed twisting (force negative twist)"
+        and input.twist_max() == input.twist_min()
+    ):
+        twists = [np.negative(np.abs(input.twist_max()))]
+    elif (
+        input.twisting_handedness() == "Right-handed twisting (force positive twist)"
+        and input.twist_max() == input.twist_min()
+    ):
+        twists = [np.abs(input.twist_max())]
     else:
-        twists = [input.twist_min()]
+        if input.twist_min() < input.twist_max():
+            twists = np.arange(
+                input.twist_min(),
+                input.twist_max() + input.twist_step() / 2,
+                input.twist_step(),
+            )
+        else:
+            twists = [input.twist_min()]
     if input.rise_min() < input.rise_max():
         rises = np.arange(
             input.rise_min(),
@@ -2016,26 +2347,43 @@ def run_denovo3D_reconstruction():
         logger.warning("Nothing to do. I will quit")
         return
 
-    denovo3D_abort_event.clear()
+    # print(reconstruction_task, "reconstruction_task started")
+    reconstruction_task(tasks, cpu)
+
+
+@ui.bind_task_button(button_id="run_denovo3D")
+@reactive.extended_task
+async def reconstruction_task(tasks, cpu):
+
+    global denovo3D_abort_event
+    denovo3D_abort_event = False
+
+    logger = helicon.get_logger(
+        logfile="helicon.denovo3D.log",
+        verbose=1,
+    )
 
     with ui.Progress(min=0, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from time import time
 
         with ThreadPoolExecutor(max_workers=cpu) as executor:
             future_tasks = [
                 executor.submit(compute.process_one_task, *task) for task in tasks
             ]
-            from time import time
 
             t0 = time()
             results = []
             for completed_task in as_completed(future_tasks):
 
-                print(denovo3D_abort_event.is_set())
-                if denovo3D_abort_event.is_set():
-                    logger.warning("User aborted the denovo3D run early.")
+                # print(denovo3D_abort_event)
+                # this is to give a chance to stop the task
+                await asyncio.sleep(0)
+                if denovo3D_abort_event is True:
+                    print("User aborted the denovo3D run early.")
+                    executor.shutdown(wait=False, cancel_futures=True)
                     break
 
                 result = completed_task.result()
@@ -2047,6 +2395,9 @@ def run_denovo3D_reconstruction():
                     message=f"Completed {len(results)}/{len(tasks)}",
                     detail=f"{helicon.timedelta2string(remaining)} remaining",
                 )
+            t_final = time()
+            t_passed = t_final - t0
+            print("reconstruction time: ", t_passed)
 
     results_none = [res for res in results if res is None]
     if len(results_none):
@@ -2116,18 +2467,6 @@ def display_denovo3D_projections():
 
 
 @render.ui
-@reactive.event(reconstrunction_results, input.show_download_print_buttons)
-def toggle_input_map_download_button():
-    if input.show_download_print_buttons() and map_symmetrized() is not None:
-        ret = ui.tags.style(
-            "#download_denovo3D_input_map {visibility: visible; width: 270px;}"
-        )
-    else:
-        ret = ui.tags.style("#download_denovo3D_input_map {visibility: hidden;}")
-    return ret
-
-
-@render.ui
 @reactive.event(reconstrunction_results)
 def toggle_output_map_download_button():
     if len(reconstrunction_results()) == 1:
@@ -2138,8 +2477,9 @@ def toggle_output_map_download_button():
         ret = ui.tags.style("#download_denovo3D_output_map {visibility: hidden;}")
     return ret
 
+
 @reactive.effect
 @reactive.event(input.stop_denovo3D)
 def on_stop_denovo3D():
-    denovo3D_abort_event.set()
-    print('clicked stop button')
+    global denovo3D_abort_event
+    denovo3D_abort_event = True

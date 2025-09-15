@@ -37,4 +37,5 @@ helicon --help
 - **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
 
 ## Documentation
-Read AI-generated documents [Helicon@DeepWiki](https://deepwiki.com/jianglab/helicon).
+- [Helicon@readthedocs](https://helicon.readthedocs.io): for users
+- [Helicon@DeepWiki](https://deepwiki.com/jianglab/helicon): for developers

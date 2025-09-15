@@ -174,10 +174,11 @@ def extract_EPU_old_data_collection_time(filename):
     pattern = r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_(\d{8}_\d{6})_"
     match = re.search(pattern, filename)
     if match:
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         datetime_str = match.group(1)
         datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
+        datetime_obj = datetime_obj.replace(tzinfo=timezone.utc)
         timestamp = datetime_obj.timestamp()
         return timestamp
     else:
@@ -374,6 +375,7 @@ def relion_euler2quaternion(rot, tilt, psi):
 
 def quaternion2euler(q, euler_convention="relion"):
     import quaternionic as qtn
+    from .util import set_angle_range
 
     alpha_beta_gamma = np.rad2deg(qtn.array(q).reshape((-1, 4)).to_euler_angles)
     rot, tilt, psi = (
@@ -937,8 +939,8 @@ def star2dataframe(
             "    Corrupted particle indices:\n%s" % (nans.to_numpy().nonzero()[0])
         )
         if nans.sum() < 100:
-            with pd.option_context("display.max_colwidth", -1):
-                color_print("\n", data[nans == True])
+            # with pd.option_context("display.max_colwidth", None):
+            color_print("\n", data[nans == True])
         data = data[nans == False]
 
     data.attrs["source_path"] = starFile
@@ -1029,7 +1031,7 @@ def cs2dataframe(
     warn_missing_ctf=1,
 ):
     # read CryoSPARC v2/3/4 meta data
-    cs = np.load(csFile)
+    cs = np.load(csFile, allow_pickle=True)
     data = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
     if passthrough_files:
         passthrough_files_final = passthrough_files * 1
@@ -1079,10 +1081,8 @@ def cs2dataframe(
         color_print(
             "    Corrupted particle indices:\n%s" % (nans.to_numpy().nonzero()[0])
         )
-        color_print(
-            "    Sample of a corrupted particle info:\n%s"
-            % (data.iloc[nans.to_numpy().nonzero()[0][0], :])
-        )
+        if nans.sum() < 100:
+            color_print("\n", data[nans == True])
         data = data[nans == False]
     data.attrs["source_path"] = csFile
     data.attrs["convention"] = "cryosparc"

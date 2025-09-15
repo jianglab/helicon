@@ -11,7 +11,7 @@ def main(args):
 
         folder = Path(__file__).parent.parent / "webApps" / "whereIsMyClass"
 
-        cmd = f"shiny run --launch-browser --no-dev-mode --port 0 {folder}/app.py"
+        cmd = f"shiny run --launch-browser --no-dev-mode --port 0 '{folder}/app.py'"
         import subprocess
 
         subprocess.call(cmd, shell=True)
