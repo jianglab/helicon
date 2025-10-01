@@ -35,14 +35,15 @@ def main(args):
 
     if args.verbose:
         image_name = helicon.first_matched_attr(
-            data, attrs="rlnMicrographMovieName rlnMicrographName rlnImageName".split()
+            data, attrs="rlnImageName rlnMicrographName rlnMicrographMovieName".split()
         )
         tmpCol = helicon.unique_attr_name(data, attr_prefix=image_name)
         data[tmpCol] = data[image_name].str.split("@", expand=True).iloc[:, -1]
         nMicrographs = len(data[tmpCol].unique())
-        apix = getPixelSize(data)
+        apixAttr = pixelSizeAttrForImageAttr(image_name)
+        apix = getPixelSize(data, attrs=[apixAttr])
         if apix is not None:
-            apixStr = f" (pixel size={apix:.3f} Å/pixel)"
+            apixStr = f" (pixel size={apix:.3f} Å/pixel from {apixAttr})"
         else:
             apixStr = ""
         if "rlnHelicalTubeID" in data:
@@ -2224,6 +2225,10 @@ def main(args):
             data = data.reset_index(drop=True)  # important to do this
             index_d[option_name] += 1
             if args.verbose > 1:
+                if args.verbose > 1:
+                    import matplotlib
+
+                    matplotlib.use("TkAgg")
                 import matplotlib.pyplot as plt
 
                 fig, axes = plt.subplots(nrows=4, ncols=4, figsize=(18, 14))
@@ -3040,12 +3045,23 @@ def estimate_helicalTube_length(data, inter_segment_distance=-1, verbose=0):
     return data
 
 
+def pixelSizeAttrForImageAttr(imageAttr):
+    mapping = {
+        "rlnImageName": "rlnImagePixelSize",
+        "rlnMicrographName": "rlnMicrographPixelSize",
+        "rlnMicrographMovieName": "rlnMicrographOriginalPixelSize",
+    }
+    if imageAttr in mapping:
+        return mapping[imageAttr]
+    return None
+
+
 def getPixelSize(
     data,
     attrs=[
-        "rlnMicrographOriginalPixelSize",
-        "rlnMicrographPixelSize",
         "rlnImagePixelSize",
+        "rlnMicrographPixelSize",
+        "rlnMicrographOriginalPixelSize",
         "rlnImageName",
         "rlnMicrographName",
     ],
