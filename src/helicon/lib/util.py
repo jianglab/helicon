@@ -584,6 +584,23 @@ def split_array(arr):
     return group1, group2
 
 
+def angular_difference(angle1, angle2, period=360):
+    """
+    Compute the minimal angular difference between two arrays of angles.
+    The result considers wrapping effect and is in the range [-period/2, period/2).
+
+    Parameters:
+        angle1, angle2: numpy arrays or scalars of angles (degrees or radians)
+        period: the period of the angles (default 360 for degrees)
+
+    Returns:
+        numpy array or scalar of minimal angular differences
+    """
+    diff = np.asarray(angle1) - np.asarray(angle2)
+    diff = (diff + period / 2) % period - period / 2
+    return diff
+
+
 def set_angle_range(angle, range=[-180, 180]):
     v0, v1 = range[0], range[-1]
     delta = v1 - v0
