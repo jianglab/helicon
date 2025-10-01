@@ -1973,33 +1973,42 @@ def estimate_helix_rotation_center_diameter(
     if estimate_rotation:
         bw = closing(data > threshold, mode="ignore")
         label_image = label(bw)
-        props = regionprops(label_image=label_image, intensity_image=data)
-        props.sort(key=lambda x: x.area, reverse=True)
-        angle = (
-            np.rad2deg(props[0].orientation) + 90
-        )  # relative to +x axis, counter-clockwise
-        if abs(angle) > 90:
-            angle -= 180
-        rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
-        data_rotated = helicon.transform_image(image=data, rotation=rotation)
+        if label_image.max() > 0:
+            props = regionprops(label_image=label_image, intensity_image=data)
+            props.sort(key=lambda x: x.area, reverse=True)
+            angle = (
+                np.rad2deg(props[0].orientation) + 90
+            )  # relative to +x axis, counter-clockwise
+            if abs(angle) > 90:
+                angle -= 180
+            rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
+            data_rotated = helicon.transform_image(image=data, rotation=rotation)
+        else:
+            rotation = 0.0
+            data_rotated = data
     else:
         rotation = 0.0
         data_rotated = data
 
     bw = closing(data_rotated > threshold, mode="ignore")
-    label_image = label(bw)
+    if label_image.max() > 0:
+        label_image = label(bw)
 
-    props = regionprops(label_image=label_image, intensity_image=data_rotated)
-    props.sort(key=lambda x: x.area, reverse=True)
-    minr, minc, maxr, maxc = props[0].bbox
-    diameter = maxr - minr + 1
+        props = regionprops(label_image=label_image, intensity_image=data_rotated)
+        props.sort(key=lambda x: x.area, reverse=True)
+        minr, minc, maxr, maxc = props[0].bbox
+        diameter = maxr - minr + 1
 
-    if estimate_center:
-        center = props[0].centroid
+        if estimate_center:
+            center = props[0].centroid
+        else:
+            ny, nx = data.shape
+            center = (ny // 2, nx // 2)
+        shift_y = data.shape[0] // 2 - center[0]
     else:
-        ny, nx = data.shape
-        center = (ny // 2, nx // 2)
-    shift_y = data.shape[0] // 2 - center[0]
+        rotation = 0.0
+        shift_y = 0.0
+        diameter = data.shape[0]
 
     return rotation, shift_y, diameter
 
