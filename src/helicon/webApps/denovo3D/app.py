@@ -72,7 +72,6 @@ denovo3D_abort_event = False
 
 ui.head_content(ui.tags.title("Helicon denovo3D"))
 helicon.shiny.google_analytics(id="G-FDSYXQNKLX")
-helicon.shiny.setup_ajdustable_sidebar()
 ui.tags.style(
     """
     * { font-size: 10pt; padding:0; border: 0; margin: 0; }

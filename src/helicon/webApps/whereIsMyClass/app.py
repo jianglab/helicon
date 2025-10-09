@@ -45,7 +45,6 @@ second_point = reactive.Value(None)
 
 ui.head_content(ui.tags.title("Helicon whereIsMyClass"))
 helicon.shiny.google_analytics(id="G-CJC1WDZ58Y")
-helicon.shiny.setup_ajdustable_sidebar(width="25vw")
 ui.tags.style(
     """
     * { font-size: 10pt; padding:0; border: 0; margin: 0; }
