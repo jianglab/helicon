@@ -14,7 +14,7 @@ def main(args):
         ]
         folder = download_files(urls)
 
-        cmd = f"shiny run --launch-browser --no-dev-mode --port 0 {folder}/app.py"
+        cmd = f"shiny run --launch-browser --no-dev-mode --host 0.0.0.0 --port 0 {folder}/app.py"
         import subprocess
 
         subprocess.call(cmd, shell=True)

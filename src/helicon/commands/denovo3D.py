@@ -11,7 +11,7 @@ def main(args):
 
         app_file = Path(__file__).parent.parent / "webApps" / "denovo3D" / "app.py"
 
-        cmd = f'shiny run --launch-browser --no-dev-mode --port 0 "{app_file}"'
+        cmd = f'shiny run --launch-browser --no-dev-mode --host 0.0.0.0 --port 0 "{app_file}"'
         import subprocess
 
         subprocess.call(cmd, shell=True)
