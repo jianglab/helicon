@@ -35,7 +35,7 @@ helicon --help
 - **proc3d**:              A command line tool that anaylzes/transforms 3D maps
 - **procart**:             A Web app that plots cartoon illustration of the residue properties of amyloid atomic models
 - **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
-
+- **HOMcontainer**:        A command line tool for looking at the consistency of helical assignments. Open github issue to update WISHLIST_HOMcontainer.md. 
 ## Documentation
 - [Helicon@readthedocs](https://helicon.readthedocs.io): for users
 - [Helicon@DeepWiki](https://deepwiki.com/jianglab/helicon): for developers
