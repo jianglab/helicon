@@ -1990,8 +1990,8 @@ def estimate_helix_rotation_center_diameter(
         data_rotated = data
 
     bw = closing(data_rotated > threshold, mode="ignore")
+    label_image = label(bw)
     if label_image.max() > 0:
-        label_image = label(bw)
 
         props = regionprops(label_image=label_image, intensity_image=data_rotated)
         props.sort(key=lambda x: x.area, reverse=True)

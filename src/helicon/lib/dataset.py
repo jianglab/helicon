@@ -60,12 +60,49 @@ class EMDB:
             helicon.color_print(e)
             helicon.color_print("WARNING: failed to obtain the list of EMDB entries")
 
-    def get_emdb_map_url(self, emd_id: str):
+    def _validate_emd_id(self, emd_id: str):
         emd_id_input = emd_id
         if not isinstance(emd_id, str):
             emd_id = str(emd_id)
         emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
         assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
+        return emd_id
+
+    def _get_emdb_file(
+        self, emd_id: str, cache_filename: str, mirror_relpath: str, url_method
+    ):
+        emd_id = self._validate_emd_id(emd_id)
+        target_file = self.cache_dir / cache_filename
+        if target_file.exists() and target_file.stat().st_size:
+            return target_file
+
+        if self.local_emdb_mirror:
+            mirror_file = self.local_emdb_mirror / mirror_relpath
+            if not (mirror_file.exists() and mirror_file.stat().st_size):
+                if os.access(self.local_emdb_mirror, os.W_OK):
+                    url = url_method(emd_id)
+                    mirror_file.parent.mkdir(parents=True, exist_ok=True)
+                    helicon.download_file_from_url(
+                        url, target_file_name=str(mirror_file)
+                    )
+
+            if mirror_file.exists() and mirror_file.stat().st_size:
+                target_file.unlink(missing_ok=True)
+                target_file.symlink_to(mirror_file)
+                mtime = target_file.stat().st_mtime
+                os.utime(target_file, (mtime, mtime), follow_symlinks=False)
+                return target_file
+
+        url = url_method(emd_id)
+        downloaded = helicon.download_file_from_url(
+            url, target_file_name=str(target_file), return_filename=True
+        )
+        if downloaded is None:
+            raise IOError(f"ERROR: failed to download {emd_id} from EMDB")
+        return Path(downloaded)
+
+    def get_emdb_map_url(self, emd_id: str):
+        emd_id = self._validate_emd_id(emd_id)
         # server = "https://files.wwpdb.org/pub"    # Rutgers University, USA
         server = "https://ftp.ebi.ac.uk/pub/databases"  # European Bioinformatics Institute, England
         # server = "http://ftp.pdbj.org/pub" # Osaka University, Japan
@@ -73,33 +110,13 @@ class EMDB:
         return url
 
     def get_emdb_map_file(self, emd_id: str):
-        emd_id_input = emd_id
-        if not isinstance(emd_id, str):
-            emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
-        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
-        map_file = self.cache_dir / f"emd_{emd_id}.map.gz"
-        if map_file.exists() and map_file.stat().st_size:
-            return map_file
-        if self.local_emdb_mirror:
-            map_file_mirror = (
-                self.local_emdb_mirror
-                / f"structures/EMD-{emd_id}/map/emd_{emd_id}.map.gz"
-            )
-            if map_file_mirror.exists() and map_file_mirror.stat().st_size:
-                map_file.symlink_to(map_file_mirror)
-                map_file_mtime = map_file.stat().st_mtime
-                os.utime(
-                    map_file, (map_file_mtime, map_file_mtime), follow_symlinks=False
-                )
-                return map_file
-        url = self.get_emdb_map_url(emd_id)
-        map_file = helicon.download_file_from_url(
-            url, target_file_name=str(map_file), return_filename=True
+        emd_id = self._validate_emd_id(emd_id)
+        return self._get_emdb_file(
+            emd_id,
+            cache_filename=f"emd_{emd_id}.map.gz",
+            mirror_relpath=f"structures/EMD-{emd_id}/map/emd_{emd_id}.map.gz",
+            url_method=self.get_emdb_map_url,
         )
-        if map_file is None:
-            raise IOError(f"ERROR: failed to download {emd_id} from EMDB")
-        return Path(map_file)
 
     def download_all_map_files(self, verbose=0):
         for i, emd_id in enumerate(self.emd_ids):
@@ -125,11 +142,7 @@ class EMDB:
         return data, apix
 
     def get_emdb_xml_url(self, emd_id: str):
-        emd_id_input = emd_id
-        if not isinstance(emd_id, str):
-            emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
-        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
+        emd_id = self._validate_emd_id(emd_id)
         # server = "https://files.wwpdb.org/pub"    # Rutgers University, USA
         server = "https://ftp.ebi.ac.uk/pub/databases"  # European Bioinformatics Institute, England
         # server = "http://ftp.pdbj.org/pub" # Osaka University, Japan
@@ -137,31 +150,13 @@ class EMDB:
         return url
 
     def get_emdb_xml_file(self, emd_id: str):
-        emd_id_input = emd_id
-        if not isinstance(emd_id, str):
-            emd_id = str(emd_id)
-        emd_id = emd_id.split(sep="-")[-1].split(sep="_")[-1]
-        assert emd_id in self.emd_ids, f"ERROR: {emd_id_input} is not in EMDB"
-        xml_file = self.cache_dir / f"emd_{emd_id}.xml"
-        if xml_file.exists():
-            return xml_file
-        if self.local_emdb_mirror:
-            xml_file_mirror = (
-                self.local_emdb_mirror
-                / f"structures/EMD-{emd_id}/header/emd-{emd_id}.xml"
-            )
-            if xml_file_mirror.exists() and xml_file_mirror.stat().st_size:
-                xml_file.symlink_to(xml_file_mirror)
-                xml_file_mtime = xml_file.stat().st_mtime
-                os.utime(
-                    xml_file, (xml_file_mtime, xml_file_mtime), follow_symlinks=False
-                )
-                return xml_file
-        url = self.get_emdb_xml_url(emd_id)
-        xml_file = helicon.download_file_from_url(
-            url, target_file_name=str(xml_file), return_filename=True
+        emd_id = self._validate_emd_id(emd_id)
+        return self._get_emdb_file(
+            emd_id,
+            cache_filename=f"emd_{emd_id}.xml",
+            mirror_relpath=f"structures/EMD-{emd_id}/header/emd-{emd_id}.xml",
+            url_method=self.get_emdb_xml_url,
         )
-        return Path(xml_file)
 
     def download_all_xml_files(self, verbose=0):
         for i, emd_id in enumerate(self.emd_ids):
