@@ -572,14 +572,14 @@ def image2dataframe(
             ignore_bad_particle_path,
             ignore_bad_micrograph_path,
         )
-    elif inputFile.endswith(".csv"):  # cryosparc v0.x
+    elif inputFile.endswith(".csv"):  # cryosparc v0, v1
         p = csv2dataframe(
             inputFile,
             alternative_folders,
             ignore_bad_particle_path,
             ignore_bad_micrograph_path,
         )
-    elif inputFile.endswith(".cs"):  # cryosparc v2.x
+    elif inputFile.endswith(".cs"):  # cryosparc v2+
         p = cs2dataframe(
             inputFile,
             csparc_passthrough_files,
@@ -1030,7 +1030,7 @@ def cs2dataframe(
     ignore_bad_micrograph_path=1,
     warn_missing_ctf=1,
 ):
-    # read CryoSPARC v2/3/4 meta data
+    # read CryoSPARC v2+ meta data
     cs = np.load(csFile, allow_pickle=True)
     data = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
     if passthrough_files:
