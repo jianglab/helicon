@@ -32,7 +32,7 @@ def get_image_size(imageFile):
         nz = mrc.header.nz
         ny = mrc.header.ny
         nx = mrc.header.nx
-    return (nx, ny, nz)
+    return (int(nx), int(ny), int(nz))
 
 
 def read_image_2d(imageFile, i):
@@ -123,9 +123,10 @@ def movie_filename_patterns():
     # FoilHole_30593197_Data_30537205_30537207_20230430_084907_fractions_patch_aligned_doseweighted.mrc
     # FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff
     d = dict(
-        EPU_old=r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_\d{8}_\d{6}_",
+        EPU_old=r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_(\d{8}_\d{6})_",
         EPU=r"FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_",
         serialEM_pncc=r"([XY][\+-]\d[XY][\+-]\d-\d)",
+        serialEM_embl_heidelberg=r"\d{6}_.{6}_\d{5}_\d-(\d{1,2})[_\.]",  # 250123_SF0431_01129_1-7.eer
         serialEM_cuhksz=r"_(\d{5})[_\.]",
     )
     return d
@@ -171,7 +172,7 @@ def extract_EPU_data_collection_time(filename):
 def extract_EPU_old_data_collection_time(filename):
     import re
 
-    pattern = r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_(\d{8}_\d{6})_"
+    pattern = movie_filename_patterns()["EPU_old"]
     match = re.search(pattern, filename)
     if match:
         from datetime import datetime, timezone
@@ -190,7 +191,7 @@ def extract_EPU_old_data_collection_time(filename):
 def extract_EPU_beamshift_pos(filename):
     import re
 
-    pattern = r"FoilHole_\d{7,8}_Data_\d{7}_(\d{1,3})_\d{8}_\d{6}_"
+    pattern = movie_filename_patterns()["EPU"]
     match = re.search(pattern, filename)
     if match:
         return match.group(1)
@@ -204,7 +205,7 @@ def extract_EPU_beamshift_pos(filename):
 def extract_serialEM_pncc_beamshift(filename):
     import re
 
-    pattern = r"([XY][\+-]\d[XY][\+-]\d-\d)"
+    pattern = movie_filename_patterns()["serialEM_pncc"]
     match = re.search(pattern, filename)
     if match:
         return match.group(1)
@@ -219,6 +220,20 @@ def extract_serialEM_cuhksz_beamshift(filename):
     import re
 
     pattern = movie_filename_patterns()["serialEM_cuhksz"]
+    match = re.search(pattern, filename)
+    if match:
+        return match.group(1)
+    else:
+        print(filename)
+        print(pattern)
+        raise
+    return 0
+
+
+def extract_serialEM_embl_heidelberg_beamshift(filename):
+    import re
+
+    pattern = movie_filename_patterns()["serialEM_embl_heidelberg"]
     match = re.search(pattern, filename)
     if match:
         return match.group(1)

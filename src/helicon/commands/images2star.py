@@ -2465,7 +2465,7 @@ def main(args):
                     optics_orig["rlnOpticsGroup"].astype(str) == str(ogName)
                 ].last_valid_index()
                 ogData[tmp_col] = ogData.loc[:, image_name].str.extract(pattern)
-                if format in ["EPU"]:
+                if format in ["EPU", "serialEM_embl_heidelberg", "serialEM_cuhksz"]:
                     ogData[tmp_col] = ogData[tmp_col].astype(int)
                 else:
                     ogData[tmp_col] = ogData[tmp_col].astype(str)
