@@ -10,18 +10,25 @@ shiny_commands = ["denovo3D", "helicalPitch", "helicalProjection", "whereIsMyCla
 streamlit_commands = ["ctfSimulation", "helicalLattice", "hi3d", "hill", "procart"]
 
 
+class HeliconArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(2, f"{self.prog}: error: {message}\n")
+
+
 def _get_commands(
     cli_commands: list,
     shiny_commands: list,
     streamlit_commands: list,
     doc_str: str = "",
 ) -> None:
-    parser = argparse.ArgumentParser(description=doc_str, allow_abbrev=True)
+    parser = HeliconArgumentParser(description=doc_str, allow_abbrev=True)
     parser.add_argument(
         "--version", action="version", version="helicon " + helicon.__version__
     )
 
-    subparsers = parser.add_subparsers(title="Choose a command")
+    subparsers = parser.add_subparsers(
+        title="Choose a command", parser_class=HeliconArgumentParser
+    )
     subparsers.required = True
 
     for module_name in sorted(cli_commands + shiny_commands + streamlit_commands):
@@ -58,10 +65,22 @@ def _get_commands(
         args = parser.parse_args()
         if args.check_args_function is not None:
             args = args.check_args_function(args, args.this_parser)
+    except SystemExit as e:
+        if e.code != 0:
+            subparser = sys.argv[1] if len(sys.argv) > 1 else None
+            if subparser and subparser in subparsers.choices:
+                subparsers.choices[subparser].print_help()
+            else:
+                parser.print_usage()
+            sys.exit(-1)
+        else:
+            raise
     except:
         subparser = sys.argv[1] if len(sys.argv) > 1 else None
         if subparser and subparser in subparsers.choices:
             subparsers.choices[subparser].print_help()
+        else:
+            parser.print_usage()
 
         sys.exit(-1)
 
