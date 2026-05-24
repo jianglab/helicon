@@ -1,17 +1,53 @@
+import logging
 import numpy as np
 import helicon
 
+logger = logging.getLogger(__name__)
 
-def calculate_structural_factor(data, apix, thresh=None, mask=None, return_fft=False):
-    """
-    Calculate the 1D structural factor, which is the rotational average of the FFT amplitude squared.
+__all__ = [
+    "calculate_structural_factor",
+    "down_scale",
+    "generate_tapering_filter",
+    "low_high_pass_filter",
+    "match_structural_factors",
+    "normalize_mean_std",
+    "normalize_min_max",
+    "normalize_percentile",
+    "set_structural_factors",
+    "threshold_data",
+]
 
-    Parameters:
-    data (np.ndarray): Input 2D or 3D data array.
 
-    Returns:
-    qbins (np.ndarray): Binned q values.
-    structural_factor (np.ndarray): Rotational average of the FFT amplitude squared.
+def calculate_structural_factor(
+    data: np.ndarray,
+    apix: float,
+    thresh: float | None = None,
+    mask: np.ndarray | None = None,
+    return_fft: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Calculate the 1D structural factor, which is the rotational average of the FFT amplitude squared.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input 2D or 3D data array.
+    apix : float
+        Pixel size.
+    thresh : float, optional
+        Threshold value applied via ``threshold_data`` before calculation.
+    mask : np.ndarray, optional
+        Mask to apply to the data before calculation.
+    return_fft : bool, optional
+        If True, also return the FFT of the data. Defaults to False.
+
+    Returns
+    -------
+    qbins : np.ndarray
+        Binned q values.
+    structural_factor : np.ndarray
+        Rotational average of the FFT amplitude squared.
+    F : np.ndarray, optional
+        FFT of the data. Only returned if ``return_fft`` is True.
     """
 
     if thresh:
@@ -59,19 +95,34 @@ def calculate_structural_factor(data, apix, thresh=None, mask=None, return_fft=F
 
 
 def set_structural_factors(
-    data, apix, target_bins, target_structural_factors, thresh=None, mask=None
-):
-    """
-    Scale the structural factors of the data array to match the target structural factors.
+    data: np.ndarray,
+    apix: float,
+    target_bins: np.ndarray,
+    target_structural_factors: np.ndarray,
+    thresh: float | None = None,
+    mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Scale the structural factors of the data array to match the target structural factors.
 
-    Parameters:
-    data (np.ndarray): The input data array (2D or 3D) whose structural factors will be changed.
-    apix (float): The pixel size of the input data array.
-    target_bins (np.ndarray): The q-value bins for the target structural factors.
-    target_structural_factors (np.ndarray): The target structural factors to use.
+    Parameters
+    ----------
+    data : np.ndarray
+        The input data array (2D or 3D) whose structural factors will be changed.
+    apix : float
+        The pixel size of the input data array.
+    target_bins : np.ndarray
+        The q-value bins for the target structural factors.
+    target_structural_factors : np.ndarray
+        The target structural factors to use.
+    thresh : float, optional
+        Threshold value applied before calculating structural factors.
+    mask : np.ndarray, optional
+        Mask to apply before calculating structural factors.
 
-    Returns:
-    np.ndarray: The modified data after scaling the structural factors of the target structural factors
+    Returns
+    -------
+    np.ndarray
+        The modified data after scaling the structural factors to match the target.
     """
 
     qbins, structural_factor, fft = calculate_structural_factor(
@@ -115,19 +166,37 @@ def set_structural_factors(
 
 
 def match_structural_factors(
-    data, apix, data_target, apix_target, thresh=None, thresh_target=None, mask=None
-):
-    """
-    Scale the structural factors of the data array to match those of the target data array.
+    data: np.ndarray,
+    apix: float,
+    data_target: np.ndarray,
+    apix_target: float,
+    thresh: float | None = None,
+    thresh_target: float | None = None,
+    mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Scale the structural factors of the data array to match those of the target data array.
 
-    Parameters:
-    data (np.ndarray): The input data array (2D or 3D) whose structural factors will be changed.
-    apix (float): The pixel size of the input data array.
-    data_target (np.ndarray): The data array (2D or 3D) whose structural factors will be used as the target.
-    apix_target (float): The pixel size of the target data array.
+    Parameters
+    ----------
+    data : np.ndarray
+        The input data array (2D or 3D) whose structural factors will be changed.
+    apix : float
+        The pixel size of the input data array.
+    data_target : np.ndarray
+        The data array (2D or 3D) whose structural factors will be used as the target.
+    apix_target : float
+        The pixel size of the target data array.
+    thresh : float, optional
+        Threshold value applied to the input data before calculation.
+    thresh_target : float, optional
+        Threshold value applied to the target data before calculation.
+    mask : np.ndarray, optional
+        Mask to apply before calculation.
 
-    Returns:
-    np.ndarray: The modified data after scaling the structural factors of the target array
+    Returns
+    -------
+    np.ndarray
+        The modified data after scaling the structural factors to match the target array.
     """
 
     target_bins, target_structural_factors = calculate_structural_factor(
@@ -138,7 +207,23 @@ def match_structural_factors(
     )
 
 
-def normalize_min_max(data, min=0, max=1):
+def normalize_min_max(data: np.ndarray, min: float = 0, max: float = 1) -> np.ndarray:
+    """Normalize data to a specified range using min-max scaling.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array.
+    min : float, optional
+        Minimum value of the output range. Defaults to 0.
+    max : float, optional
+        Maximum value of the output range. Defaults to 1.
+
+    Returns
+    -------
+    np.ndarray
+        Data scaled to [``min``, ``max``].
+    """
     data_min = data.min()
     data_max = data.max()
     if data_max == data_min:
@@ -146,7 +231,23 @@ def normalize_min_max(data, min=0, max=1):
     return (max - min) * (data - data_min) / (data_max - data_min)
 
 
-def normalize_mean_std(data, mean=0, std=1):
+def normalize_mean_std(data: np.ndarray, mean: float = 0, std: float = 1) -> np.ndarray:
+    """Normalize data to a specified mean and standard deviation.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array.
+    mean : float, optional
+        Desired mean of the output. Defaults to 0.
+    std : float, optional
+        Desired standard deviation of the output. Defaults to 1.
+
+    Returns
+    -------
+    np.ndarray
+        Data normalized to the specified mean and standard deviation.
+    """
     data_std = data.std()
     if data_std == 0:
         return data
@@ -154,7 +255,23 @@ def normalize_mean_std(data, mean=0, std=1):
     return (data - data_mean) / data_std
 
 
-def normalize_percentile(data, percentile=(0, 100)):
+def normalize_percentile(
+    data: np.ndarray, percentile: tuple[float, float] = (0, 100)
+) -> np.ndarray:
+    """Normalize data to [0, 1] using percentile-based clipping.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array.
+    percentile : tuple of float, optional
+        Lower and upper percentile values for clipping. Defaults to ``(0, 100)``.
+
+    Returns
+    -------
+    np.ndarray
+        Data scaled to [0, 1] with outliers clipped at the specified percentiles.
+    """
     p0, p1 = percentile
     vmin, vmax = sorted(np.percentile(data, (p0, p1)))
     if vmax == vmin:
@@ -162,7 +279,27 @@ def normalize_percentile(data, percentile=(0, 100)):
     return (data - vmin) / (vmax - vmin)
 
 
-def threshold_data(data, thresh_fraction=None, thresh_value=None):
+def threshold_data(
+    data: np.ndarray,
+    thresh_fraction: float | None = None,
+    thresh_value: float | None = None,
+) -> np.ndarray:
+    """Apply a threshold to data, zeroing values below the threshold.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array.
+    thresh_fraction : float, optional
+        Threshold as a fraction of the data maximum. Must be >= 0.
+    thresh_value : float, optional
+        Absolute threshold value.
+
+    Returns
+    -------
+    np.ndarray
+        Thresholded data with values below the threshold set to zero.
+    """
     if thresh_fraction is not None and thresh_fraction >= 0:
         thresh = data.max() * thresh_fraction
     elif thresh_value is not None:
@@ -175,7 +312,25 @@ def threshold_data(data, thresh_fraction=None, thresh_value=None):
 
 def low_high_pass_filter(
     data: np.ndarray, low_pass_fraction: float = 0, high_pass_fraction: float = 0
-):
+) -> np.ndarray:
+    """Apply a low-pass and/or high-pass Gaussian filter in Fourier space.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input 2D or 3D data array.
+    low_pass_fraction : float, optional
+        Low-pass cutoff as a fraction of the Nyquist frequency. Defaults to 0
+        (no filtering).
+    high_pass_fraction : float, optional
+        High-pass cutoff as a fraction of the Nyquist frequency. Defaults to 0
+        (no filtering).
+
+    Returns
+    -------
+    np.ndarray
+        Filtered data.
+    """
     if data.ndim not in [2, 3]:
         raise ValueError("Input data must be a 2D or 3D array.")
 
@@ -216,7 +371,24 @@ def low_high_pass_filter(
     return ret
 
 
-def down_scale(data, target_apix, apix_orig):
+def down_scale(data: np.ndarray, target_apix: float, apix_orig: float) -> np.ndarray:
+    """Down-scale an image to a larger pixel size (lower resolution).
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input 2D image.
+    target_apix : float
+        Desired output pixel size.
+    apix_orig : float
+        Original pixel size of the input data.
+
+    Returns
+    -------
+    np.ndarray
+        Down-scaled image with even dimensions. Returns the input unchanged if
+        ``target_apix`` <= ``apix_orig``.
+    """
     if target_apix == apix_orig:
         return data
     elif target_apix > apix_orig:
@@ -231,13 +403,37 @@ def down_scale(data, target_apix, apix_orig):
         data = helicon.pad_to_size(data, shape=(ny, nx))
     else:
         if target_apix < apix_orig:
-            helicon.color_print(
-                f"WARNING: the input image pixel size ({apix_orig}) is larger than --target_apix2d={target_apix}. Down-scaling skipped"
+            logger.warning(
+                "the input image pixel size (%s) is larger than --target_apix2d=%s. Down-scaling skipped",
+                apix_orig,
+                target_apix,
             )
     return data
 
 
-def generate_tapering_filter(image_size, fraction_start=[0.8, 0.8], fraction_slope=0.1):
+def generate_tapering_filter(
+    image_size: tuple[int, int],
+    fraction_start: list[float] = [0.8, 0.8],
+    fraction_slope: float = 0.1,
+) -> np.ndarray:
+    """Generate a cosine-tapering edge filter.
+
+    Parameters
+    ----------
+    image_size : tuple of int
+        ``(ny, nx)`` dimensions of the output filter.
+    fraction_start : list of float, optional
+        ``[fy, fx]`` fractional position where tapering begins along each axis.
+        Defaults to ``[0.8, 0.8]``.
+    fraction_slope : float, optional
+        Width of the cosine falloff as a fraction of the half-axis. Defaults to
+        0.1.
+
+    Returns
+    -------
+    np.ndarray
+        Tapering filter of shape ``image_size`` with values in [0, 1].
+    """
     ny, nx = image_size
     fy, fx = fraction_start
     if not (0 < fy < 1 or 0 < fx < 1):

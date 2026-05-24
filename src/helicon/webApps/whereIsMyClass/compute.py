@@ -8,6 +8,9 @@ import plotly.graph_objects as go
 import mrcfile
 
 import helicon
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def get_project_root_dir(param_file):
@@ -50,7 +53,7 @@ def get_micrograph(filename, target_apix, low_pass_angstrom, high_pass_angstrom)
 def get_class_file(param_file):
     f = pathlib.Path(param_file)
     if param_file.endswith(".star"):
-        if 'Class3D' in f.as_posix():
+        if "Class3D" in f.as_posix():
             class_files = f.parent.glob(f.stem[:10] + "class*.mrc")
             return sorted([f for f in class_files])
         else:
@@ -77,11 +80,13 @@ def select_classes(params, class_indices):
     helices = list(particles.groupby(["rlnMicrographName", "rlnHelicalTubeID"]))
     return helices
 
+
 def select_helices_from_helixID(params, ids):
     mask = params["helixID"].astype(int).isin(ids)
     particles = params.loc[mask, :]
     helices = list(particles.groupby(["rlnMicrographName", "rlnHelicalTubeID"]))
     return helices
+
 
 def compute_pair_distances(helices, lengths=None, target_total_count=-1):
     if lengths is not None:
@@ -123,7 +128,6 @@ def compute_pair_distances(helices, lengths=None, target_total_count=-1):
         return np.sort(dists_same_class), min_len
 
 
-
 def estimate_inter_segment_distance(data):
     # data must have been sorted by micrograph, rlnHelicalTubeID, and rlnHelicalTrackLengthAngst
     helices = data.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False)
@@ -141,11 +145,13 @@ def estimate_inter_segment_distance(data):
     dist_seg = np.median(dists_all)  # Angstrom
     return dist_seg
 
+
 def get_class_abundance(params, nClass):
     abundance = np.zeros(nClass, dtype=int)
     for gn, g in params.groupby("rlnClassNumber"):
         abundance[int(gn) - 1] = len(g)
     return abundance
+
 
 def get_class3d_projections_from_files(classFiles):
     projections = []
@@ -154,33 +160,36 @@ def get_class3d_projections_from_files(classFiles):
         with mrcfile.open(f) as mrc:
             apix = float(mrc.voxel_size.x)
             data = mrc.data
-            nx = mrc.header['nx']
+            nx = mrc.header["nx"]
         img = get_one_map_xyz_projects(data, nx)
         projections.append(img)
 
     return np.array(projections), apix, nx
 
 
-@helicon.cache(expires_after=7, cache_dir=helicon.cache_dir / "whereIsMyClass", verbose=0)
-def get_one_map_xyz_projects(data, nx): 
+@helicon.cache(
+    expires_after=7, cache_dir=helicon.cache_dir / "whereIsMyClass", verbose=0
+)
+def get_one_map_xyz_projects(data, nx):
     min_data = np.min(data)
     max_data = np.max(data)
-    if max_data-min_data != 0:
-        data = (data-min_data)/(max_data-min_data)
-    image = np.zeros((nx,nx*3+2))
-    
-    #image[:,0:nx] = data.sum(axis=0)
-    image[:,0:nx] = data[int(nx/2),:,:]*nx
-    image[:,nx+1:nx*2+1] = data.sum(axis=1)
-    image[:,nx*2+2:nx*3+2] = data.sum(axis=2)
-        
+    if max_data - min_data != 0:
+        data = (data - min_data) / (max_data - min_data)
+    image = np.zeros((nx, nx * 3 + 2))
+
+    # image[:,0:nx] = data.sum(axis=0)
+    image[:, 0:nx] = data[int(nx / 2), :, :] * nx
+    image[:, nx + 1 : nx * 2 + 1] = data.sum(axis=1)
+    image[:, nx * 2 + 2 : nx * 3 + 2] = data.sum(axis=2)
+
     return image
+
 
 def get_class2d_from_file(classFile):
     with mrcfile.open(classFile) as mrc:
         apix = float(mrc.voxel_size.x)
         data = mrc.data
-    print(np.shape(data))
+    logger.debug(np.shape(data))
 
     return data, round(apix, 4)
 
@@ -422,6 +431,7 @@ def draw_distance_measurement(
         if len(other_traces) < len(fig.data):
             fig.data = other_traces
 
+
 def plot_histogram(
     data,
     title,
@@ -515,4 +525,3 @@ def plot_histogram(
             fig.data[0].on_hover(update_vline)
 
     return fig
-

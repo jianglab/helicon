@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -11,7 +12,9 @@ from shiny.express import input, ui, render
 
 import helicon
 
-from . import compute
+from . import pipeline
+
+logger = logging.getLogger(__name__)
 
 input_data = reactive.value(None)
 
@@ -369,7 +372,7 @@ with ui.sidebar(
                                         w.document.write(document.head.outerHTML);
                                         var printContents = document.getElementById('select_image-show_image_gallery').innerHTML;
                                         w.document.write(printContents);
-                                        w.document.write('<script type="text/javascript">window.onload = function() { window.print(); w.close();};</script>');
+                                        w.document.write('<script type="text/javascript">window.onload = function() { window.logger.info(); w.close();};</script>');
                                         w.document.close();
                                         w.focus();
                                     """,
@@ -1159,7 +1162,7 @@ def generate_ui_print_reeconstructed_images():
                         w.document.write(document.head.outerHTML);
                         var printContents = document.getElementById('display_reconstructed_projections-show_image_gallery').innerHTML;
                         w.document.write(printContents);
-                        w.document.write('<script type="text/javascript">window.onload = function() { window.print(); w.close();};</script>');
+                        w.document.write('<script type="text/javascript">window.onload = function() { window.logger.info(); w.close();};</script>');
                         w.document.close();
                         w.focus();
                     """,
@@ -1596,12 +1599,9 @@ def get_image_from_upload():
 
     else:
         try:
-            data, apix = compute.get_images_from_file(image_file)
+            data, apix = pipeline.get_images_from_file(image_file)
         except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            print(e)
+            logger.error("Failed to read uploaded images", exc_info=True)
             data, apix = None, 1
             m = ui.modal(
                 f"failed to read the uploaded 2D images from {fileinfo[0]['name']}",
@@ -1630,12 +1630,9 @@ def get_images_from_url():
     req(len(input.url_images()) > 0)
     url = input.url_images()
     try:
-        data, apix = compute.get_images_from_url(url)
+        data, apix = pipeline.get_images_from_url(url)
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        print(e)
+        logger.error("Failed to download images from URL", exc_info=True)
         data, apix = None, 1
         m = ui.modal(
             f"failed to download 2D images from {input.url_images()}",
@@ -1674,12 +1671,9 @@ def get_images_from_emdb():
     emdb_id = input.emdb_id()
     req(len(emdb_id) > 0)
     try:
-        data, apix = compute.get_images_from_emdb(emdb_id=emdb_id)
+        data, apix = pipeline.get_images_from_emdb(emdb_id=emdb_id)
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        print(e)
+        logger.error("Failed to obtain map from EMDB", exc_info=True)
         data, apix = None, 1
         m = ui.modal(
             f"failed to obtain {emdb_id} map from EMDB",
@@ -1726,7 +1720,7 @@ def get_xyz_projections():
     req(input_data())
     req(len(input_data().data))
     if input_data().is_3d:
-        proj_xyz = compute.generate_xyz_projections(
+        proj_xyz = pipeline.generate_xyz_projections(
             input_data().data,
             is_amyloid=input_data().is_amyloid,
             apix=input_data().apix,
@@ -1742,7 +1736,7 @@ def update_all_images_from_3d_input_data():
     req(input_data())
     req(len(input_data().data))
     req(input_data().is_3d)
-    m = compute.symmetrize_transform_map(
+    m = pipeline.symmetrize_transform_map(
         data=input_data().data,
         apix=input.input_apix(),
         twist_degree=input.input_twist(),
@@ -2187,7 +2181,7 @@ def update_stitched_image_displayed():
                 tmp_imf.save(temp_dir + "/" + str(i) + ".png")
                 tc.write(str(i) + ".png; ; (" + str(i * nx + x_offsets[i]) + ", 0.0)\n")
 
-        result = compute.itk_stitch(temp_dir)
+        result = pipeline.itk_stitch(temp_dir)
 
     result = result.astype(np.float32)
     result = (result - result.mean()) / result.std()
@@ -2379,7 +2373,7 @@ async def reconstruction_task(tasks, cpu):
 
         with ThreadPoolExecutor(max_workers=cpu) as executor:
             future_tasks = [
-                executor.submit(compute.process_one_task, *task) for task in tasks
+                executor.submit(pipeline.process_one_task, *task) for task in tasks
             ]
 
             t0 = time()
@@ -2390,7 +2384,7 @@ async def reconstruction_task(tasks, cpu):
                 # this is to give a chance to stop the task
                 await asyncio.sleep(0)
                 if denovo3D_abort_event is True:
-                    print("User aborted the denovo3D run early.")
+                    logger.warning("User aborted the denovo3D run early.")
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
@@ -2405,7 +2399,7 @@ async def reconstruction_task(tasks, cpu):
                 )
             t_final = time()
             t_passed = t_final - t0
-            print("reconstruction time: ", t_passed)
+            logger.info("reconstruction time: %s", t_passed)
 
     results_none = [res for res in results if res is None]
     if len(results_none):

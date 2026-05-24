@@ -1,7 +1,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
-from itertools import product
 import re
+
+__all__ = [
+    "PointGroup",
+]
 
 
 class PointGroup:
@@ -12,19 +15,30 @@ class PointGroup:
     """
 
     def __init__(self, symbol):
-        """
-        Initialize the point group from a Schoenflies symbol.
-        Supported symbols: Cn, Dn, T, O, I
+        """Initialize the point group from a Schoenflies symbol.
+
+        Parameters
+        ----------
+        symbol : str
+            Schoenflies symmetry symbol (e.g. ``C3``, ``D5``,
+            ``T``, ``O``, ``I1``, ``I2``, ``I3``, ``I4``, ``I_5z2x``).
         """
         self.symbol = symbol
         self.matrices = self._generate_matrices(symbol)
 
     @staticmethod
     def _get_icosahedral_orientation_rotation(symbol):
-        """
-        Return the rotation that transforms the base RELION I1 orientation
-        (2z2x5y: 2-fold on Z, 2-fold on X, 5-fold in YZ plane)
-        to the orientation specified by the Schoenflies symbol.
+        """Return rotation to transform base RELION I1 orientation to a given symbol.
+
+        Parameters
+        ----------
+        symbol : str
+            Icosahedral subgroup symbol.
+
+        Returns
+        -------
+        Rotation
+            Rotation object mapping I1 convention to the target convention.
         """
         phi = (1 + np.sqrt(5)) / 2
 
@@ -71,17 +85,36 @@ class PointGroup:
 
     @staticmethod
     def get_icosahedral_conversion_rotation(from_symbol, to_symbol):
-        """
-        Return the rotation that converts points from 'from_symbol' convention
-        to 'to_symbol' convention.
+        """Return rotation converting between icosahedral conventions.
+
+        Parameters
+        ----------
+        from_symbol : str
+            Source icosahedral convention.
+        to_symbol : str
+            Target icosahedral convention.
+
+        Returns
+        -------
+        Rotation
+            Rotation that maps points from *from_symbol* to *to_symbol*.
         """
         r1 = PointGroup._get_icosahedral_orientation_rotation(from_symbol)
         r2 = PointGroup._get_icosahedral_orientation_rotation(to_symbol)
         return r2 * r1.inv()
 
     def _generate_matrices(self, symbol):
-        """
-        Generate all symmetry operations as 3x3 matrices.
+        """Generate all symmetry operations as 3x3 matrices.
+
+        Parameters
+        ----------
+        symbol : str
+            Schoenflies symmetry symbol.
+
+        Returns
+        -------
+        ndarray of shape (G, 3, 3)
+            Array of G symmetry transformation matrices.
         """
         match = re.match(r"([A-Za-z]+)(\d*)((?:_[a-zA-Z0-9]*)?)", symbol)
         if not match:
@@ -179,10 +212,17 @@ class PointGroup:
         return np.array(ops)
 
     def apply_symmetry_to_points(self, points):
-        """
-        Apply all symmetry operations to a set of points.
-        points: (N, 3) 2D array or (3,) 1D array
-        returns: (G, N, 3) or (G, 3) array where G is group order
+        """Apply all symmetry operations to a set of points.
+
+        Parameters
+        ----------
+        points : ndarray
+            ``(N, 3)`` array of N points or ``(3,)`` single point.
+
+        Returns
+        -------
+        ndarray
+            ``(G, N, 3)`` or ``(G, 3)`` array where G is the group order.
         """
         points = np.asanyarray(points)
         if points.ndim == 1:
@@ -190,12 +230,26 @@ class PointGroup:
         return np.einsum("gij,nj->gni", self.matrices, points)
 
     def distance_of_points(self, points1, points2, metric="mse"):
-        """
-        Compute symmetry-aware distance between two sets of points.
-        Finds the minimum distance among all symmetry-equivalent
-        configurations of points1.
+        """Compute symmetry-aware distance between two sets of points.
 
-        Note: This assumes points1 and points2 are ordered (N points in both).
+        Finds the minimum distance among all symmetry-equivalent
+        configurations of points1. Assumes both arrays are ordered
+        with N corresponding points.
+
+        Parameters
+        ----------
+        points1 : ndarray
+            ``(N, 3)`` array of N points.
+        points2 : ndarray
+            ``(N, 3)`` array of N points.
+        metric : str, optional
+            Distance metric: ``"mse"``, ``"rmse"``, or ``"max"``.
+            Defaults to ``"mse"``.
+
+        Returns
+        -------
+        float
+            Minimum distance across symmetry operations.
         """
         points1 = np.asanyarray(points1)
         points2 = np.asanyarray(points2)
@@ -229,16 +283,27 @@ class PointGroup:
         return np.min(dists)
 
     def get_rotations(self):
-        """
-        Return all symmetry operations as a list of scipy.spatial.transform.Rotation objects.
+        """Return all symmetry operations as Rotation objects.
+
+        Returns
+        -------
+        Rotation
+            ``Rotation`` object containing G symmetry operations.
         """
         return Rotation.from_matrix(self.matrices)
 
     def apply_symmetry_to_rotations(self, rotations):
-        """
-        Apply all symmetry operations to a set of rotations.
-        rotations: scipy.spatial.transform.Rotation object representing N rotations
-        returns: scipy.spatial.transform.Rotation object representing (G * N) rotations
+        """Apply all symmetry operations to a set of rotations.
+
+        Parameters
+        ----------
+        rotations : Rotation
+            ``Rotation`` object representing N rotations.
+
+        Returns
+        -------
+        Rotation
+            ``Rotation`` object representing ``(G * N)`` rotations.
         """
         sym_rots = self.get_rotations()  # (G,)
 
@@ -252,12 +317,25 @@ class PointGroup:
         return Rotation.concatenate(results)
 
     def distance_of_rotations(self, rots1, rots2, metric="geodesic"):
-        """
-        Compute symmetry-aware angular distance between two sets of rotations.
+        """Compute symmetry-aware angular distance between two sets of rotations.
+
         Finds the minimum distance among all symmetry-equivalent
         configurations of rots1.
 
-        metric: 'chordal' (norm of matrix difference) or 'geodesic' (angle)
+        Parameters
+        ----------
+        rots1 : Rotation or ndarray
+            ``Rotation`` object or ``(N, 3, 3)`` matrix array.
+        rots2 : Rotation or ndarray
+            ``Rotation`` object or ``(N, 3, 3)`` matrix array.
+        metric : str, optional
+            Distance metric: ``"geodesic"`` (angle) or ``"chordal"``
+            (Frobenius norm of matrix difference). Defaults to ``"geodesic"``.
+
+        Returns
+        -------
+        float
+            Minimum angular distance across symmetry operations.
         """
         # Ensure rots1 and rots2 are Rotation objects
         if not isinstance(rots1, Rotation):
@@ -300,4 +378,11 @@ class PointGroup:
         return np.min(distances)
 
     def __len__(self):
+        """Return the number of symmetry operations (group order).
+
+        Returns
+        -------
+        int
+            Number of symmetry matrices.
+        """
         return len(self.matrices)

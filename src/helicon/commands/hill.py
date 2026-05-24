@@ -3,9 +3,13 @@
 """A Web app for helical indexing using Fourier layer lines of 2D images"""
 
 import argparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def main(args):
+    """Launch the HILL helical indexing Shiny web app."""
     try:
         urls = [
             "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/app.py",
@@ -18,18 +22,32 @@ def main(args):
         import subprocess
 
         subprocess.call(cmd, shell=True)
-    except:
+    except Exception:
         homephage = "https://jianglab.science.psu.edu/HILL"
-        print(
-            f"ERROR in running a local instance of HILL. Please visit {homephage} to use the Web app instances"
+        logger.error(
+            "ERROR in running a local instance of HILL. Please visit %s to use the Web app instances",
+            homephage,
         )
 
 
 def add_args(parser):
+    """No additional CLI arguments for this web app launcher."""
     return parser
 
 
 def download_files(urls=[]):
+    """Download files from URLs to a temporary directory.
+
+    Parameters
+    ----------
+    urls : list of str
+        URLs to download.
+
+    Returns
+    -------
+    str
+        Path to the temporary directory.
+    """
     import tempfile
     import shutil
     import os

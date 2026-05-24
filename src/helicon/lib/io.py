@@ -1,105 +1,184 @@
-import os, sys
+from __future__ import annotations
+
+import logging, os
 from pathlib import Path
+from typing import Any, Callable
 import numpy as np
 import pandas as pd
+from .exceptions import HeliconIOError, HeliconValueError, HeliconConfigError
 
 pd.options.mode.copy_on_write = True
 
-from .util import color_print, available_cpu
+logger = logging.getLogger(__name__)
+
+from .util import available_cpu
+
+from .io_mrc import get_image_number, get_image_size
+
+__all__ = [
+    "Relion_OpticsGroup_Parameters",
+    "assign_beamshifts_to_cluster",
+    "cistem2dataframe",
+    "connect_cryosparc",
+    "cs2dataframe",
+    "dataframe2cs",
+    "dataframe2file",
+    "dataframe2star",
+    "dataframe_convert",
+    "dataframe_cryosparc_to_relion",
+    "dataframe_guess_data_type",
+    "dataframe_normalize_filename",
+    "eman_astigmatism_to_relion",
+    "get_dataframe_convention",
+    "get_relion_project_folder",
+    "guess_data_type",
+    "image2dataframe",
+    "images2dataframe",
+    "mrc2mrcs",
+    "relion_astigmatism_to_eman",
+    "star2dataframe",
+    "star_build_opticsgroup",
+    "star_dissolve_opticsgroup",
+    "getPixelSize",
+    "setPixelSize",
+    "pixelSizeAttrForImageAttr",
+]
 
 
-def get_image_number(imageFile, as2D=False):
-    if not os.path.exists(imageFile):
-        color_print(f"ERROR: cannot find image file {imageFile}")
-        sys.exit()
-    import mrcfile
+def pixelSizeAttrForImageAttr(imageAttr: str) -> str | None:
+    """Return the corresponding pixel size attribute for an image attribute.
 
-    with mrcfile.open(imageFile, header_only=True) as mrc:
-        if as2D:
-            n = mrc.header.nz
-        else:
-            n = 1
-    return n
+    Parameters
+    ----------
+    imageAttr : str
+        Image attribute name (e.g. ``rlnImageName``).
 
-
-def get_image_size(imageFile):
-    if not os.path.exists(imageFile):
-        color_print(f"ERROR: cannot find image file {imageFile}")
-        sys.exit()
-    import mrcfile
-
-    with mrcfile.open(imageFile, header_only=True) as mrc:
-        nz = mrc.header.nz
-        ny = mrc.header.ny
-        nx = mrc.header.nx
-    return (int(nx), int(ny), int(nz))
+    Returns
+    -------
+    str or None
+        The matching pixel size attribute, or None if not found.
+    """
+    mapping = {
+        "rlnImageName": "rlnImagePixelSize",
+        "rlnMicrographName": "rlnMicrographPixelSize",
+        "rlnMicrographMovieName": "rlnMicrographOriginalPixelSize",
+    }
+    if imageAttr in mapping:
+        return mapping[imageAttr]
+    return None
 
 
-def read_image_2d(imageFile, i):
-    if not os.path.exists(imageFile):
-        color_print(f"ERROR: cannot find image file {imageFile}")
-        sys.exit()
-    i = int(i)
-    import mrcfile
+def getPixelSize(
+    data: pd.DataFrame,
+    attrs: list[str] = [
+        "rlnImagePixelSize",
+        "rlnMicrographPixelSize",
+        "rlnMicrographOriginalPixelSize",
+        "rlnImageName",
+        "rlnMicrographName",
+    ],
+    return_pixelSize_source: bool = False,
+):
+    """Get the pixel size from a DataFrame or its optics group.
 
-    with mrcfile.open(imageFile) as mrc:
-        nz = mrc.header.nz
-        if 0 <= i < nz:
-            return mrc.data[i]
-        else:
-            color_print(
-                f"ERROR: the requested image {i} is out of the valid range [0, {nz}) for image file {imageFile}"
-            )
-            sys.exit()
+    Searches the specified attributes in order, falling back to reading
+    the MRC header if the pixel size is not stored directly.
 
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Input DataFrame with optional ``.attrs["optics"]``.
+    attrs : list of str, optional
+        Attributes to search for pixel size.
+    return_pixelSize_source : bool, optional
+        If True, also return the attribute name used.
 
-def change_map_axes_order(data, header, new_axes=["x", "y", "z"]):
-    import numpy as np
-
-    map_axes = {"x": 0, "y": 1, "z": 2}
+    Returns
+    -------
+    float or (float, str) or None
+        Pixel size value, optionally with the source attribute name.
+    """
     try:
-        current_axes_int = [header.mapc - 1, header.mapr - 1, header.maps - 1]
-    except:
-        current_axes_int = [0, 1, 2]
-    new_axes_int = [map_axes[a] for a in new_axes]
-    data2 = np.moveaxis(data, current_axes_int, new_axes_int)
-    header2 = header.copy()
-    header2.mapc = new_axes_int[0] + 1
-    header2.mapr = new_axes_int[1] + 1
-    header2.maps = new_axes_int[2] + 1
-    return data2, header2
+        sources = [data.attrs["optics"]]
+    except KeyError:
+        sources = []
+    sources += [data]
+    apix = None
+    for source in sources:
+        if source is None:
+            continue
+        for attr in attrs:
+            if attr in source:
+                if attr in ["rlnImageName", "rlnMicrographName"]:
+                    import mrcfile
+
+                    if isinstance(data.attrs["source_path"], list):
+                        folder = Path(data.attrs["source_path"][0])
+                    else:
+                        folder = Path(data.attrs["source_path"])
+                    if folder.is_symlink():
+                        folder = folder.readlink()
+                    folder = folder.resolve().parent
+                    filename = source[attr].iloc[0].split("@")[-1]
+                    filename = str((folder / "../.." / filename).resolve())
+                    try:
+                        with mrcfile.open(filename, header_only=True) as mrc:
+                            apix = float(mrc.voxel_size.x)
+                    except (OSError, ValueError, TypeError):
+                        pass
+                else:
+                    apix = float(source[attr].iloc[0])
+                if apix is not None:
+                    if return_pixelSize_source:
+                        return apix, attr
+                    return apix
+    if return_pixelSize_source:
+        return None, None
+    return None
 
 
-def display_map_orthoslices(data, title, hold=False):
-    if not sys.__stdin__.isatty():
-        return
-    nz, ny, nx = data.shape
-    sz = data[nz // 2, :, :]
-    sy = data[:, ny // 2, :]
-    sx = data[:, :, nx // 2]
-    images = [sx, sy, sz]
-    titles = ["X=%d" % (nx // 2), "Y=%d" % (ny // 2), "Z=%d" % (nz // 2)]
+def setPixelSize(
+    data: pd.DataFrame, apix_new: float, update_defocus: bool = False
+) -> None:
+    """Set the pixel size on a DataFrame and optionally rescale defocus values.
 
-    import matplotlib
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Input DataFrame with optional ``.attrs["optics"]``.
+    apix_new : float
+        New pixel size in Angstroms.
+    update_defocus : bool, optional
+        If True, rescale defocus values by ``(apix_new / apix_old)^2``.
+    """
+    apix_old, pixelSize_source = getPixelSize(data, return_pixelSize_source=True)
+    if update_defocus:
+        for attr in "rlnDefocusU rlnDefocusV".split():
+            if attr in data:
+                data.loc[:, attr] = data.loc[:, attr].astype(float) * (
+                    (apix_new / apix_old) ** 2
+                )
+    try:
+        data.attrs["optics"].loc[:, pixelSize_source] = apix_new
+    except (KeyError, AttributeError):
+        pass
+    if pixelSize_source in data:
+        data.loc[:, pixelSize_source] = apix_new
 
-    matplotlib.use("TkAgg")
-    import matplotlib.pyplot as plt
 
-    fig = plt.figure(figsize=(9, 3.5), facecolor="w", edgecolor="w")
-    fig.suptitle(title, fontsize=16)
-    for i in range(3):
-        sub = fig.add_subplot(1, 3, i + 1)
-        sub.imshow(images[i], cmap="gray", aspect="equal", interpolation="bicubic")
-        sub.set_title(titles[i], fontsize=12)
-    fig.tight_layout()
-    if hold:
-        plt.show()
-    else:
-        plt.draw()
-    plt.pause(0.05)
+def get_relion_project_folder(starFile: str) -> str | None:
+    """Extract the RELION project folder from a STAR file path.
 
+    Parameters
+    ----------
+    starFile : str
+        Path to a STAR file within a RELION project.
 
-def get_relion_project_folder(starFile):
+    Returns
+    -------
+    str or None
+        Absolute path to the project folder, or None if it cannot be determined.
+    """
     filename_abs = os.path.abspath(starFile)
     if filename_abs.find("/job") == -1:
         return None
@@ -117,179 +196,25 @@ def get_relion_project_folder(starFile):
     return proj_folder
 
 
-def movie_filename_patterns():
-    # EPU:
-    # FoilHole_1464933_Data_427288_427290_20250502_213110_Fractions_patch_aligned_doseweighted.mrc
-    # FoilHole_30593197_Data_30537205_30537207_20230430_084907_fractions_patch_aligned_doseweighted.mrc
-    # FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff
-    d = dict(
-        EPU_old=r"FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_(\d{8}_\d{6})_",
-        EPU=r"FoilHole_\d{7,8}_Data_\d{7,8}_(\d{1,3})_\d{8}_\d{6}_",
-        serialEM_pncc=r"([XY][\+-]\d[XY][\+-]\d-\d)",
-        serialEM_embl_heidelberg=r"\d{6}_.{6}_\d{5}_\d-(\d{1,2})[_\.]",  # 250123_SF0431_01129_1-7.eer
-        serialEM_cuhksz=r"_(\d{5})[_\.]",
-    )
-    return d
+def __process_cluster(
+    X: np.ndarray, n_clusters: int, min_cluster_size: int
+) -> tuple[int, float, np.ndarray]:
+    """Cluster data and evaluate with the silhouette score.
 
+    Parameters
+    ----------
+    X : np.ndarray
+        2D array of features to cluster.
+    n_clusters : int
+        Requested number of clusters.
+    min_cluster_size : int
+        Minimum number of samples per cluster.
 
-def guess_data_collection_software(filename):
-    import re
-
-    format = None
-    patterns = movie_filename_patterns()
-    for p in patterns:
-        if re.search(patterns[p], filename) is not None:
-            format = p
-            break
-    return format
-
-
-def verify_data_collection_software(filename, software):
-    import re
-
-    match = re.search(movie_filename_patterns()[software], filename)
-    return match
-
-
-def extract_EPU_data_collection_time(filename):
-    import re
-
-    pattern = r"FoilHole_\d{7,8}_Data_\d{7,8}_\d{1,3}_(\d{8}_\d{6})_"
-    match = re.search(pattern, filename)
-    if match:
-        from datetime import datetime
-
-        datetime_str = match.group(1)
-        datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
-        timestamp = datetime_obj.timestamp()
-        return timestamp
-    else:
-        msg = f"ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
-        color_print(msg)
-    return 0
-
-
-def extract_EPU_old_data_collection_time(filename):
-    import re
-
-    pattern = movie_filename_patterns()["EPU_old"]
-    match = re.search(pattern, filename)
-    if match:
-        from datetime import datetime, timezone
-
-        datetime_str = match.group(1)
-        datetime_obj = datetime.strptime(datetime_str, "%Y%m%d_%H%M%S")
-        datetime_obj = datetime_obj.replace(tzinfo=timezone.utc)
-        timestamp = datetime_obj.timestamp()
-        return timestamp
-    else:
-        msg = f"ERROR: cannot get data collection time for micrograph path: {filename} using pattern '{pattern}'"
-        color_print(msg)
-    return 0
-
-
-def extract_EPU_beamshift_pos(filename):
-    import re
-
-    pattern = movie_filename_patterns()["EPU"]
-    match = re.search(pattern, filename)
-    if match:
-        return match.group(1)
-    else:
-        print(filename)
-        print(pattern)
-        raise
-    return ""
-
-
-def extract_serialEM_pncc_beamshift(filename):
-    import re
-
-    pattern = movie_filename_patterns()["serialEM_pncc"]
-    match = re.search(pattern, filename)
-    if match:
-        return match.group(1)
-    else:
-        print(filename)
-        print(pattern)
-        raise
-    return ""
-
-
-def extract_serialEM_cuhksz_beamshift(filename):
-    import re
-
-    pattern = movie_filename_patterns()["serialEM_cuhksz"]
-    match = re.search(pattern, filename)
-    if match:
-        return match.group(1)
-    else:
-        print(filename)
-        print(pattern)
-        raise
-    return 0
-
-
-def extract_serialEM_embl_heidelberg_beamshift(filename):
-    import re
-
-    pattern = movie_filename_patterns()["serialEM_embl_heidelberg"]
-    match = re.search(pattern, filename)
-    if match:
-        return match.group(1)
-    else:
-        print(filename)
-        print(pattern)
-        raise
-    return 0
-
-
-def EPU_micrograph_path_2_movie_xml_path(micrograph_path, xml_folder=""):
-    if not hasattr(EPU_micrograph_path_2_movie_xml_path, "xml_files"):
-        EPU_micrograph_path_2_movie_xml_path.xml_files = {}
-    xml_files = EPU_micrograph_path_2_movie_xml_path.xml_files
-
-    folder = Path(xml_folder) if xml_folder else Path(micrograph_path).resolve().parent
-    if folder not in xml_files:
-        xml_files[folder] = list(folder.rglob("*.xml"))
-
-    import re
-
-    pattern = r"\d{21}_(FoilHole_\d{7,8}_Data_\d{6,8}_\d{6,8}_\d{8}_\d{6})"
-    match = re.search(pattern, str(micrograph_path))
-    if match:
-        mid = match.group(1)
-        matched_xml_files = [f for f in xml_files[folder] if str(f).find(mid) != -1]
-        if not len(matched_xml_files):
-            pattern_xml = f"*{mid}*.xml"
-            color_print(
-                f"ERROR: cannot find the xml file ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
-            )
-            sys.exit(-1)
-        if len(matched_xml_files) != 1:
-            color_print(
-                f"ERROR: find {len(matched_xml_files)} xml files instead of 1 xml file ({pattern_xml}) in {str(folder)} for {str(micrograph_path)}"
-            )
-            sys.exit(-1)
-        return matched_xml_files[0]
-    else:
-        color_print(
-            f"ERROR: {str(micrograph_path)} filename is inconsistent with EPU output image filename pattern '{pattern}'"
-        )
-        sys.exit(-1)
-
-
-def EPU_xml_2_beamshift(xml_file):
-    import xmltodict
-
-    with open(xml_file, "rb") as fp:
-        xml = xmltodict.parse(fp, dict_constructor=dict)
-    beamshift = xml["MicroscopeImage"]["microscopeData"]["optics"]["BeamShift"]
-    beamshift = (float(beamshift["a:_x"]), float(beamshift["a:_y"]))
-    return beamshift
-
-
-def __process_cluster(X, n_clusters, min_cluster_size):
+    Returns
+    -------
+    tuple of (int, float, np.ndarray)
+        (n_clusters, silhouette_avg, cluster_labels).
+    """
     from sklearn.metrics import silhouette_score
     from .analysis import AgglomerativeClusteringWithMinSize
 
@@ -307,9 +232,32 @@ def __process_cluster(X, n_clusters, min_cluster_size):
 
 
 def assign_beamshifts_to_cluster(
-    beamshifts, min_cluster_size=4, range_n_clusters=range(2, 200), cpu=-1, verbose=2
-):
+    beamshifts: list | np.ndarray,
+    min_cluster_size: int = 4,
+    range_n_clusters: range = range(2, 200),
+    cpu: int = -1,
+    verbose: int = 2,
+) -> np.ndarray:
+    """Find the optimal clustering of beam shift positions using silhouette scores.
 
+    Parameters
+    ----------
+    beamshifts : list or np.ndarray
+        List of beam shift coordinate tuples or array-like.
+    min_cluster_size : int, optional
+        Minimum number of samples per cluster. Defaults to 4.
+    range_n_clusters : range, optional
+        Range of cluster numbers to evaluate. Defaults to range(2, 200).
+    cpu : int, optional
+        Number of CPU workers (-1 for all available). Defaults to -1.
+    verbose : int, optional
+        Verbosity level (0=quiet, 1=result, 2+=per-iteration). Defaults to 2.
+
+    Returns
+    -------
+    np.ndarray
+        1-indexed array of cluster labels for each beam shift.
+    """
     X = np.array(beamshifts)
 
     # Evaluate silhouette scores for different numbers of clusters
@@ -331,7 +279,7 @@ def assign_beamshifts_to_cluster(
             n_clusters, silhouette_avg, cluster_labels = future.result()
 
             if verbose > 2:
-                print(
+                logger.info(
                     f"\t{n_clusters} -> {len(np.unique(cluster_labels))} clusters: silhouette score={silhouette_avg}{' *' if silhouette_avg >= best_score else ''}"
                 )
 
@@ -340,7 +288,7 @@ def assign_beamshifts_to_cluster(
                 best_cluster_labels = cluster_labels
 
     if verbose:
-        print(
+        logger.info(
             f"The optimal number of clusters is {len(np.unique(best_cluster_labels))} with a silhouette score of {best_score:.3f}"
         )
 
@@ -348,141 +296,19 @@ def assign_beamshifts_to_cluster(
     return cluster_labels
 
 
-def euler_relion2eman(rot, tilt, psi):
-    # RELION order of rotations: rot around z, tilt around y, psi around z
-    # EMAN order of rotations: az around z, alt around x, phi around z
-    az = rot + 90.0
-    alt = tilt
-    phi = psi - 90.0
-    return az, alt, phi
-
-
-def euler_eman2relion(az, alt, phi):
-    # RELION order of rotations: rot around z, tilt around y, psi around z
-    # EMAN order of rotations: az around z, alt around x, phi around z
-    rot = az - 90
-    tilt = alt
-    psi = phi + 90
-    return rot, tilt, psi
-
-
-def eman_euler2quaternion(az, alt, phi):
-    import quaternionic as qtn
-
-    alpha_beta_gamma = np.vstack(
-        (np.deg2rad(az - 90), np.deg2rad(alt), np.deg2rad(phi + 90))
-    ).T  # z,y,z convention
-    q = qtn.array.from_euler_angles(alpha_beta_gamma, beta=None, gamma=None).normalized
-    q = np.array(q)  # qtn.array cannot be pickled for joblib Parallel processing
-    return q
-
-
-def relion_euler2quaternion(rot, tilt, psi):
-    import quaternionic as qtn
-
-    alpha_beta_gamma = np.vstack(
-        (np.deg2rad(rot), np.deg2rad(tilt), np.deg2rad(psi))
-    ).T  # z,y,z convention
-    q = qtn.array.from_euler_angles(alpha_beta_gamma, beta=None, gamma=None).normalized
-    q = np.array(q)  # qtn.array cannot be pickled for joblib Parallel processing
-    return q
-
-
-def quaternion2euler(q, euler_convention="relion"):
-    import quaternionic as qtn
-    from .util import set_angle_range
-
-    alpha_beta_gamma = np.rad2deg(qtn.array(q).reshape((-1, 4)).to_euler_angles)
-    rot, tilt, psi = (
-        alpha_beta_gamma[:, 0],
-        alpha_beta_gamma[:, 1],
-        alpha_beta_gamma[:, 2],
-    )
-    if len(q.shape) == 1:
-        rot, tilt, psi = rot[0], tilt[0], psi[0]
-    rot = set_angle_range(rot, range=[-180, 180])
-    tilt = set_angle_range(tilt, range=[-180, 180])
-    psi = set_angle_range(psi, range=[-180, 180])
-    if euler_convention in ["relion"]:
-        return rot, tilt, psi
-    elif euler_convention in ["eman"]:
-        return euler_relion2eman(rot, tilt, psi)
-    raise ValueError
-
-
-# https://github.com/christophhagen/averaging-quaternions
-
-
-# Q is a Nx4 numpy matrix and contains the quaternions to average in the rows.
-# The quaternions are arranged as (w,x,y,z), with w being the scalar
-# The result will be the average quaternion of the input. Note that the signs
-# of the output quaternion can be reversed, since q and -q describe the same orientation
-# The weight vector w must be of the same length as the number of rows in the
-# quaternion maxtrix Q
-def average_quaternions(Q, w=None):
-    # Number of quaternions to average
-    assert w is None or len(w) == Q.shape[0]
-
-    import numpy
-    import numpy.matlib as npm
-
-    M = Q.shape[0]
-    A = npm.zeros(shape=(4, 4))
-    weightSum = 0
-
-    if w is None:
-        w = numpy.ones(M)
-
-    for i in range(0, M):
-        q = Q[i, :]
-        A = w[i] * numpy.outer(q, q) + A
-        weightSum += w[i]
-
-    # scale
-    A = (1.0 / weightSum) * A
-
-    # compute eigenvalues and -vectors
-    eigenValues, eigenVectors = numpy.linalg.eig(A)
-
-    # Sort by largest eigenvalue
-    eigenVectors = eigenVectors[:, eigenValues.argsort()[::-1]]
-
-    # return the real part of the largest eigenvector (has only real part)
-    ret = np.real(eigenVectors[:, 0].A1)
-    ret = ret * 1.0  # ensure contigous array
-    return ret
-
-
-def average_relion_eulers(rot, tilt, psi, weights=None, return_quaternion=False):
-    assert len(rot) == len(tilt) and len(rot) == len(psi)
-    if weights:
-        assert len(weights) == len(rot)
-    Q = relion_euler2quaternion(rot, tilt, psi)
-    qm = average_quaternions(Q, w=weights)
-    if return_quaternion:
-        return qm
-    else:
-        rot_mean, tilt_mean, psi_mean = quaternion2relion_euler(qm)
-        return rot_mean, tilt_mean, psi_mean
-
-
-def angular_distance(rotation_1, rotation_2):
-    # rotation_1/rotation_2: scipy.spatial.transform.Rotation
-    mag = (rotation_1.inv() * rotation_2).magnitude()
-    return np.rad2deg(mag)
-
-
 try:
     from numba import jit, set_num_threads, prange
 except ImportError:
-    color_print(
-        f"WARNING: failed to load numba. The program will run correctly but will be much slower. Run 'pip install numba' to install numba and speed up the program"
+    logger.warning(
+        "failed to load numba. The program will run correctly but will be much slower. Run 'pip install numba' to install numba and speed up the program"
     )
 
-    def jit(*args, **kwargs):
+    def jit(*args: Any, **kwargs: Any) -> Any:
+        """No-op numba.jit fallback when numba is not installed."""
         return lambda f: f
 
-    def set_num_threads(n: int):
+    def set_num_threads(n: int) -> None:
+        """No-op numba.set_num_threads fallback when numba is not installed."""
         return
 
     prange = range
@@ -492,14 +318,39 @@ except ImportError:
 
 
 def images2dataframe(
-    inputFiles,
-    csparc_passthrough_files=[],
-    alternative_folders=[],
-    ignore_bad_particle_path=0,
-    ignore_bad_micrograph_path=1,
-    warn_missing_ctf=1,
-    target_convention=None,
-):
+    inputFiles: str | list[str],
+    csparc_passthrough_files: list[str] = [],
+    alternative_folders: list[str] = [],
+    ignore_bad_particle_path: int = 0,
+    ignore_bad_micrograph_path: int = 1,
+    warn_missing_ctf: int = 1,
+    target_convention: str | None = None,
+) -> pd.DataFrame:
+    """Read one or more image metadata files into a single DataFrame.
+
+    Parameters
+    ----------
+    inputFiles : str or list of str
+        Path to a single file, or a list of file paths.
+    csparc_passthrough_files : list of str, optional
+        List of cryoSPARC passthrough files for v2+.
+    alternative_folders : list of str, optional
+        List of alternative folders to search for paths.
+    ignore_bad_particle_path : int, optional
+        If True, skip particles with missing file paths.
+    ignore_bad_micrograph_path : int, optional
+        If True, skip micrographs with missing file paths.
+    warn_missing_ctf : int, optional
+        If True, warn when CTF parameters are missing.
+    target_convention : str, optional
+        Target Euler angle convention (``"relion"`` or ``"cryosparc"``).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame combining data from all input files, with ``attrs`` containing
+        optics, convention, and source_path metadata.
+    """
     if isinstance(inputFiles, str):
         data = image2dataframe(
             inputFiles,
@@ -528,7 +379,7 @@ def images2dataframe(
         try:
             if p.attrs["optics"] is not None:
                 opticslist.append(p.attrs["optics"])
-        except:
+        except (KeyError, AttributeError):
             pass
 
     convention = None
@@ -565,20 +416,45 @@ def images2dataframe(
 
 
 def image2dataframe(
-    inputFile,
-    csparc_passthrough_files=[],
-    alternative_folders=[],
-    ignore_bad_particle_path=0,
-    ignore_bad_micrograph_path=1,
-    warn_missing_ctf=1,
-):
+    inputFile: str,
+    csparc_passthrough_files: list[str] = [],
+    alternative_folders: list[str] = [],
+    ignore_bad_particle_path: int = 0,
+    ignore_bad_micrograph_path: int = 1,
+    warn_missing_ctf: int = 1,
+) -> pd.DataFrame:
+    """Read a single image metadata file into a DataFrame.
+
+    Supports .star (RELION), .csv (cryoSPARC v0/v1), .cs (cryoSPARC v2+),
+    .db (cisTEM), and MRC/other image formats.
+
+    Parameters
+    ----------
+    inputFile : str
+        Path to the input file. For .db files, the format is
+        ``<image_number>@<filename>.db``.
+    csparc_passthrough_files : list of str, optional
+        List of cryoSPARC passthrough files for v2+.
+    alternative_folders : list of str, optional
+        List of alternative folders to search for paths.
+    ignore_bad_particle_path : int, optional
+        If True, skip particles with missing file paths.
+    ignore_bad_micrograph_path : int, optional
+        If True, skip micrographs with missing file paths.
+    warn_missing_ctf : int, optional
+        If True, warn when CTF parameters are missing.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with particle metadata and a ``source_path`` attribute.
+    """
     if inputFile.endswith(".db"):
         realInputFile = inputFile.split("@")[-1]
     else:
         realInputFile = inputFile
     if not os.path.exists(realInputFile):
-        color_print("ERROR: cannot find file %s" % (realInputFile))
-        sys.exit(-1)
+        raise HeliconIOError("cannot find file %s" % (realInputFile))
 
     if inputFile.endswith(".star"):  # relion
         p = star2dataframe(
@@ -626,12 +502,22 @@ def image2dataframe(
     return p
 
 
-def dataframe2file(data, outputFile):
+def dataframe2file(data: pd.DataFrame, outputFile: str) -> None:
+    """Save a DataFrame to a file in the appropriate format based on extension.
+
+    Supports .star (v3 or old format), .csv, and .cs (cryoSPARC) formats.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame to save.
+    outputFile : str
+        Output file path. The extension determines the format.
+    """
     if len(data) < 1:
-        color_print(
-            f"WARNING: dataframe2file(data, outputFile={outputFile}): data is empty, nothing to save"
+        raise HeliconValueError(
+            f"dataframe2file(data, outputFile={outputFile}): data is empty, nothing to save"
         )
-        sys.exit(-1)
     if outputFile.endswith(".oldformat.star"):
         dataframe2star(data, outputFile, format="old")
     elif outputFile.endswith(".star"):
@@ -641,26 +527,51 @@ def dataframe2file(data, outputFile):
     elif outputFile.endswith(".cs"):
         dataframe2cs(data, outputFile)
     else:
-        color_print(
-            "ERROR: dataframe2file(data, outputFile=%s) is called with a unsupported file format. Only .star and .cs formats are supported"
+        raise HeliconValueError(
+            "dataframe2file(data, outputFile=%s) is called with a unsupported file format. Only .star and .cs formats are supported"
             % (outputFile)
         )
-        sys.exit(-1)
 
 
-def guess_data_type(string):
+def guess_data_type(string: str) -> type:
+    """Guess the Python type of a string value.
+
+    Tries int, then float, and falls back to str.
+
+    Parameters
+    ----------
+    string : str
+        The string to evaluate.
+
+    Returns
+    -------
+    type
+        One of ``int``, ``float``, or ``str``.
+    """
     try:
         v = int(string)
         return int
-    except:
+    except ValueError:
         try:
             v = float(string)
             return float
-        except:
+        except ValueError:
             return str
 
 
-def dataframe_guess_data_type(data):
+def dataframe_guess_data_type(data: pd.DataFrame) -> pd.DataFrame:
+    """Assign appropriate dtypes to DataFrame columns based on known column names.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        pandas DataFrame with cryo-EM metadata columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns cast to int, float, str, or bytes as appropriate.
+    """
     intVars = set(
         "pid ppid frame set class sym helicaltube helicalclass vppid vpppos rlnRandomSubset rlnClassNumber classID rlnHelicalTubeID rlnBeamTiltClass rlnClass3DNumber rlnOpticsGroup rlnImageSize rlnImageDimensionality alignments.model-best.k".split()
     )
@@ -732,15 +643,21 @@ def dataframe_guess_data_type(data):
 
     try:
         data.attrs["optics"] = dataframe_guess_data_type(data.attrs["optics"])
-    except:
+    except (KeyError, AttributeError):
         pass
 
     return data
 
 
-def star_dissolve_opticsgroup(data):
-    """copy parameters from optics block to the main data block.
-    useful for converting a new star file for Relion v3+ to older star file format
+def star_dissolve_opticsgroup(data: pd.DataFrame) -> None:
+    """Copy parameters from the optics block to the main data block.
+
+    Useful for converting a RELION v3+ STAR file to an older format.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame with RELION convention and an ``optics`` attribute.
     """
     assert (
         data.attrs["convention"] == "relion"
@@ -748,17 +665,16 @@ def star_dissolve_opticsgroup(data):
     try:
         optics = data.attrs["optics"]
         optics.loc[:, "rlnOpticsGroup"] = optics.loc[:, "rlnOpticsGroup"].astype(str)
-    except:
+    except (KeyError, AttributeError):
         optics = None
     if optics is not None:
         og_names = set(optics["rlnOpticsGroup"].unique())
         data.loc[:, "rlnOpticsGroup"] = data.loc[:, "rlnOpticsGroup"].astype(str)
         for gn, g in data.groupby("rlnOpticsGroup", sort=False):
             if gn not in og_names:
-                color_print(
-                    f"ERROR: optic group {gn} not available ({sorted(og_names)})"
+                raise HeliconValueError(
+                    f"optic group {gn} not available ({sorted(og_names)})"
                 )
-                sys.exit(-1)
             ptcl_indices = g.index
             og_index = optics["rlnOpticsGroup"] == gn
             if "rlnAmplitudeContrast" in optics:
@@ -793,32 +709,69 @@ def star_dissolve_opticsgroup(data):
 Relion_OpticsGroup_Parameters = "rlnOpticsGroup rlnOpticsGroupName rlnMtfFileName rlnVoltage rlnSphericalAberration rlnAmplitudeContrast rlnMagnification rlnDetectorPixelSize rlnMicrographOriginalPixelSize rlnMicrographPixelSize rlnMicrographBinning rlnImagePixelSize rlnImageSize rlnImageDimensionality rlnBeamTiltX rlnBeamTiltY rlnOddZernike rlnEvenZernike".split()
 
 
-def star_build_opticsgroup(data):
+def star_build_opticsgroup(data: pd.DataFrame) -> None:
+    """Build optics group block from particle data parameters.
+
+    Extracts optics group parameters present in the main data block,
+    groups particles by unique parameter combinations, and creates an
+    optics group DataFrame stored in ``data.attrs["optics"]``.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame with particle data using RELION convention.
+    """
     assert (
         data.attrs["convention"] == "relion"
     ), f"star_build_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
 
-    def remove_invalid_opticsgroup_parameters(data):
-        try:
-            badVars = []
-            if data.attrs["optics"] is not None:
-                badVars = [
-                    v
-                    for v in data.attrs["optics"]
-                    if v not in Relion_OpticsGroup_Parameters
-                ]
-            if "rlnImageName" not in data:
-                badVars += [
-                    v
-                    for v in "rlnImagePixelSize rlnImageSize".split()
-                    if v in data.attrs["optics"]
-                ]
-            if badVars:
-                data.attrs["optics"].drop(badVars, axis=1, inplace=True)
-        except:
-            pass
 
-    def missing_required_opticsgroup_parameters(data):
+def remove_invalid_opticsgroup_parameters(data: pd.DataFrame) -> None:
+    """Remove invalid optics group parameters from the optics group.
+
+    Drops columns from ``data.attrs["optics"]`` that are not
+    recognised RELION optics group parameters.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame containing optics group metadata.
+    """
+    try:
+        badVars = []
+        if data.attrs["optics"] is not None:
+            badVars = [
+                v
+                for v in data.attrs["optics"]
+                if v not in Relion_OpticsGroup_Parameters
+            ]
+        if "rlnImageName" not in data:
+            badVars += [
+                v
+                for v in "rlnImagePixelSize rlnImageSize".split()
+                if v in data.attrs["optics"]
+            ]
+        if badVars:
+            data.attrs["optics"].drop(badVars, axis=1, inplace=True)
+    except (KeyError, AttributeError):
+        pass
+
+    def missing_required_opticsgroup_parameters(data: pd.DataFrame) -> list[str]:
+        """Identify required optics group parameters that are missing.
+
+        Checks the optics group for all required RELION optics group
+        parameters and returns a list of those that are absent.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            DataFrame containing optics group metadata.
+
+        Returns
+        -------
+        list of str
+            List of missing required optics group parameter names.
+        """
         requiredVars = (
             "rlnVoltage rlnSphericalAberration rlnMicrographOriginalPixelSize".split()
         )
@@ -832,7 +785,7 @@ def star_build_opticsgroup(data):
                 missingVars = [v for v in requiredVars if v not in data.attrs["optics"]]
             else:
                 missingVars = requiredVars
-        except:
+        except (KeyError, AttributeError):
             missingVars = requiredVars
         if "rlnImagePixelSize" in missingVars and "rlnImageName" not in data:
             missingVars.remove("rlnImagePixelSize")
@@ -880,18 +833,19 @@ def star_build_opticsgroup(data):
                     optics.loc[:, "rlnImageSize"] = ny
                     optics.loc[:, "rlnImageDimensionality"] = dim
                 else:
-                    color_print(
-                        f"WARNING: failed to obtain rlnImageSize, rlnImageDimensionality from non-existing file{imageFileName}. You should manually add both parameters to the optics group of the star file"
+                    logger.warning(
+                        "failed to obtain rlnImageSize, rlnImageDimensionality from non-existing file %s. You should manually add both parameters to the optics group of the star file",
+                        imageFileName,
                     )
 
         """
         if "rlnMicrographPixelSize" in missingVars and "rlnMicrographPixelSize" not in optics:
             if "rlnMicrographOriginalPixelSize" in optics:
                 optics.loc[:, "rlnMicrographPixelSize"] = optics.loc[:, "rlnMicrographOriginalPixelSize"]
-                color_print(f"WARNING: 'rlnMicrographPixelSize' is copied from 'rlnMicrographOriginalPixelSize'. Please manually edit it if it is incorrect")
+                logger.warning(f"'rlnMicrographPixelSize' is copied from 'rlnMicrographOriginalPixelSize'. Please manually edit it if it is incorrect")
             elif "rlnImagePixelSize" in optics:
                 optics.loc[:, "rlnMicrographPixelSize"] = optics.loc[:, "rlnImagePixelSize"]
-                color_print(f"WARNING: 'rlnMicrographPixelSize' is copied from 'rlnImagePixelSize'. Please manually edit it if it is incorrect")
+                logger.warning(f"'rlnMicrographPixelSize' is copied from 'rlnImagePixelSize'. Please manually edit it if it is incorrect")
         """
         if (
             "rlnMicrographOriginalPixelSize" in missingVars
@@ -901,33 +855,60 @@ def star_build_opticsgroup(data):
                 optics.loc[:, "rlnMicrographOriginalPixelSize"] = optics.loc[
                     :, "rlnMicrographPixelSize"
                 ]
-                color_print(
-                    f"WARNING: 'rlnMicrographOriginalPixelSize' is copied from 'rlnMicrographPixelSize'. Please manually edit it if it is incorrect"
+                logger.warning(
+                    "'rlnMicrographOriginalPixelSize' is copied from 'rlnMicrographPixelSize'. Please manually edit it if it is incorrect"
                 )
             elif "rlnImagePixelSize" in optics:
                 optics.loc[:, "rlnMicrographOriginalPixelSize"] = optics.loc[
                     :, "rlnImagePixelSize"
                 ]
-                color_print(
-                    f"WARNING: 'rlnMicrographOriginalPixelSize' is copied from 'rlnImagePixelSize'. Please manually edit it if it is incorrect"
+                logger.warning(
+                    "'rlnMicrographOriginalPixelSize' is copied from 'rlnImagePixelSize'. Please manually edit it if it is incorrect"
                 )
-    except:
+    except KeyError:
         pass
+
     missingVars = missing_required_opticsgroup_parameters(data)
     if missingVars:
         varval = " ".join([f"{v} <val>" for v in missingVars])
-        color_print(
-            f"WARNING: required OpticsGroup parameters {' '.join(missingVars)} are missing. Use \n\timages2star.py <input.star> <output.star> --setParm {varval}\nto add these parameters"
+        logger.warning(
+            "required OpticsGroup parameters %s are missing. Use \n\timages2star.py <input.star> <output.star> --setParm %s\nto add these parameters",
+            " ".join(missingVars),
+            varval,
         )
 
 
 # https://github.com/dzyla/Follow_Relion_gracefully/blob/main/follow_relion_gracefully_lib.py#L352
 def star2dataframe(
-    starFile,
-    alternative_folders=[],
-    ignore_bad_particle_path=0,
-    ignore_bad_micrograph_path=1,
-):
+    starFile: str,
+    alternative_folders: list[str] = [],
+    ignore_bad_particle_path: int = 0,
+    ignore_bad_micrograph_path: int = 1,
+) -> pd.DataFrame:
+    """Read a RELION .star file into a pandas DataFrame.
+
+    Parses the star file using ``starfile``, selects the first recognised
+    data block (particles, micrographs, movies, or coordinate_files),
+    attaches the optics group block to ``data.attrs["optics"]``, and
+    normalises file paths.
+
+    Parameters
+    ----------
+    starFile : str
+        Path to the .star file.
+    alternative_folders : list of str, optional
+        List of alternative directory paths to search when resolving
+        relative file references.
+    ignore_bad_particle_path : int, optional
+        If non-zero, skip particles whose image path does not exist.
+    ignore_bad_micrograph_path : int, optional
+        If non-zero, skip particles whose micrograph path does not exist.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing the particle/micrograph data.
+    """
     import starfile
 
     data = None
@@ -946,16 +927,19 @@ def star2dataframe(
     data = dataframe_guess_data_type(data)
     nans = data.isnull().any(axis=1)
     if nans.sum() > 0:
-        color_print(
-            "WARNING: %s: %d/%d particle rows are corrupted and thus ignored"
-            % (starFile, nans.sum(), len(data))
+        logger.warning(
+            "%s: %d/%d particle rows are corrupted and thus ignored",
+            starFile,
+            nans.sum(),
+            len(data),
         )
-        color_print(
-            "    Corrupted particle indices:\n%s" % (nans.to_numpy().nonzero()[0])
+        logger.warning(
+            "    Corrupted particle indices:\n%s",
+            nans.to_numpy().nonzero()[0],
         )
         if nans.sum() < 100:
             # with pd.option_context("display.max_colwidth", None):
-            color_print("\n", data[nans == True])
+            logger.warning("\n%s", data[nans == True])
         data = data[nans == False]
 
     data.attrs["source_path"] = starFile
@@ -967,7 +951,63 @@ def star2dataframe(
     return data
 
 
-def dataframe2star(data, starFile, format="v3"):
+def star_to_dataframe(starFile, logger=None):
+    """Convert a RELION STAR file to a DataFrame with image index and filename.
+
+    Parses the STAR file, identifies the image name column
+    (``rlnImageName`` or ``rlnReferenceImage``), splits the ``index@filename``
+    format into separate ``pid`` (0-based) and ``filename`` columns.
+
+    Parameters
+    ----------
+    starFile : str
+        Path to the STAR file.
+    logger : logging.Logger, optional
+        Logger for error messages.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with additional ``pid`` and ``filename`` columns.
+    """
+    df = star2dataframe(starFile=starFile)
+
+    fileNameCol = ""
+    for col in ["rlnImageName", "rlnReferenceImage"]:
+        if col in df:
+            fileNameCol = col
+            break
+    if not fileNameCol:
+        msg = f"ERROR: cannot find 'rlnImageName' or 'rlnReferenceImage' in the input {starFile}"
+        if logger:
+            logger.error(msg)
+        raise KeyError(msg)
+
+    tmp = df[fileNameCol].str.split("@", expand=True)
+    indices, filenames = tmp.iloc[:, 0], tmp.iloc[:, -1]
+    indices = indices.astype(int) - 1
+    df["pid"] = indices
+    df["filename"] = filenames
+    return df
+
+
+def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") -> None:
+    """Write a pandas DataFrame to a RELION .star file.
+
+    Converts the DataFrame to RELION convention, optionally builds or
+    dissolves optics groups depending on the output format version, and
+    writes the result to disk (or a file-like object).
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Input DataFrame (any convention supported by ``dataframe_convert``).
+    starFile : str or file-like
+        Output file path or a file-like object with a ``write`` method.
+    format : str, optional
+        Output star file version. ``"v3"`` or ``"relion3"`` builds an
+        optics group block; any other value dissolves it.
+    """
     data2 = dataframe_convert(data, target="relion")
 
     if "rlnImageName" in data2:
@@ -983,8 +1023,9 @@ def dataframe2star(data, starFile, format="v3"):
                 # https://www2.mrc-lmb.cam.ac.uk/relion/index.php/Conventions_%26_File_formats#Image_I.2FO
                 prefix, suffix = os.path.splitext(mgraphName)
                 if suffix not in [".mrcs", ".mrc", ".tnf", ".spi", ".img", ".hed"]:
-                    color_print(
-                        f"WARNING: RELION does not support image format: {mgraphName}"
+                    logger.warning(
+                        "RELION does not support image format: %s",
+                        mgraphName,
                     )
 
     if format in ["v3", "relion3"]:
@@ -1020,7 +1061,7 @@ def dataframe2star(data, starFile, format="v3"):
                     lines += "\t" + optics[k].astype(str)
             fp.write("\n".join(lines))
             fp.write("\n\n")
-    except:
+    except (KeyError, OSError):
         pass
 
     fp.write(f"\n{data_block_tag}\n\nloop_ \n")
@@ -1038,13 +1079,43 @@ def dataframe2star(data, starFile, format="v3"):
 
 
 def cs2dataframe(
-    csFile,
-    passthrough_files=[],
-    alternative_folders=[],
-    ignore_bad_particle_path=0,
-    ignore_bad_micrograph_path=1,
-    warn_missing_ctf=1,
-):
+    csFile: str,
+    passthrough_files: list[str] = [],
+    alternative_folders: list[str] = [],
+    ignore_bad_particle_path: int = 0,
+    ignore_bad_micrograph_path: int = 1,
+    warn_missing_ctf: int = 1,
+) -> pd.DataFrame:
+    """Read a CryoSPARC v2+ .cs file into a pandas DataFrame.
+
+    Loads the numpy structured array from a CryoSPARC metadata file,
+    optionally merges additional passthrough files on the ``uid`` column,
+    guesses column data types, drops corrupted rows, normalises file
+    paths, and sets the convention to ``"cryosparc"``.
+
+    Parameters
+    ----------
+    csFile : str
+        Path to the .cs file.
+    passthrough_files : list of str, optional
+        List of additional .cs passthrough files to merge. If empty,
+        attempts to auto-discover a matching passthrough file.
+    alternative_folders : list of str, optional
+        Alternative directory paths to search when resolving relative
+        file references.
+    ignore_bad_particle_path : int, optional
+        If non-zero, skip particles whose image path does not exist.
+    ignore_bad_micrograph_path : int, optional
+        If non-zero, skip particles whose micrograph path does not exist.
+    warn_missing_ctf : int, optional
+        If non-zero, print a warning when CTF information is absent
+        (unless the input is a ``templates_selected.cs`` file).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing the CryoSPARC particle/micrograph data.
+    """
     # read CryoSPARC v2+ meta data
     cs = np.load(csFile, allow_pickle=True)
     data = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
@@ -1071,17 +1142,16 @@ def cs2dataframe(
             data = data.merge(extra_df, on="uid", how="left")
         data = data.loc[:, ~data.columns.duplicated()]
     if "blob/path" not in data and "micrograph_blob/path" not in data:
-        color_print(
-            f"ERROR: it appears that you have specified a CryoSPARC v2 passthrough file that does not have particle/micrograph path info. Available parameters are: {data.columns.values}"
+        raise HeliconIOError(
+            f"it appears that you have specified a CryoSPARC v2 passthrough file that does not have particle/micrograph path info. Available parameters are: {data.columns.values}"
         )
-        sys.exit(-1)
     if (
         warn_missing_ctf
         and "ctf/accel_kv" not in data
         and csFile.find("templates_selected.cs") == -1
     ):
-        color_print(
-            "WARNING: CTF info not found. You should also provide the passthrough file that has CTF info"
+        logger.warning(
+            "CTF info not found. You should also provide the passthrough file that has CTF info"
         )
     if "ctf/type" in data:
         data = data.drop("ctf/type", axis=1)
@@ -1089,15 +1159,18 @@ def cs2dataframe(
     data = dataframe_guess_data_type(data)
     nans = data.isnull().any(axis=1)
     if nans.sum() > 0:
-        color_print(
-            "WARNING: %s: %d/%d particle rows are corrupted and thus ignored"
-            % (csFile, nans.sum(), len(data))
+        logger.warning(
+            "%s: %d/%d particle rows are corrupted and thus ignored",
+            csFile,
+            nans.sum(),
+            len(data),
         )
-        color_print(
-            "    Corrupted particle indices:\n%s" % (nans.to_numpy().nonzero()[0])
+        logger.warning(
+            "    Corrupted particle indices:\n%s",
+            nans.to_numpy().nonzero()[0],
         )
         if nans.sum() < 100:
-            color_print("\n", data[nans == True])
+            logger.warning("\n%s", data[nans == True])
         data = data[nans == False]
     data.attrs["source_path"] = csFile
     data.attrs["convention"] = "cryosparc"
@@ -1107,7 +1180,16 @@ def cs2dataframe(
     return data
 
 
-def dataframe2cs(data, csFile):
+def dataframe2cs(data: pd.DataFrame, csFile: str) -> None:
+    """Write a pandas DataFrame to a CryoSPARC .cs file.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        pandas DataFrame with cryosparc-convention columns.
+    csFile : str
+        Path to the output .cs file.
+    """
     structured_array = data.to_records(index=False)
     dtypes = []
     for col_name in structured_array.dtype.names:
@@ -1122,11 +1204,30 @@ def dataframe2cs(data, csFile):
 
 
 def cistem2dataframe(
-    dbFile,
-    alternative_folders=[],
-    ignore_bad_particle_path=0,
-    ignore_bad_micrograph_path=1,
-):
+    dbFile: str,
+    alternative_folders: list[str] = [],
+    ignore_bad_particle_path: int = 0,
+    ignore_bad_micrograph_path: int = 1,
+) -> pd.DataFrame:
+    """Read a cisTEM SQLite database and return a DataFrame in RELION convention.
+
+    Parameters
+    ----------
+    dbFile : str
+        Path to the cisTEM SQLite database. May be prefixed with an
+        iteration number and ``@`` (e.g. ``"3@/path/to/db"``).
+    alternative_folders : list of str, optional
+        Additional folders to search for files.
+    ignore_bad_particle_path : int, optional
+        If 1, skip missing particle files without error.
+    ignore_bad_micrograph_path : int, optional
+        If 1, skip missing micrograph files without error.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with relion-convention column names.
+    """
     import sqlalchemy
 
     if dbFile.find("@") == -1:
@@ -1254,17 +1355,64 @@ def cistem2dataframe(
 
 
 def dataframe_normalize_filename(
-    data,
-    alternative_folders=[],
-    ignore_bad_particle_path=0,
-    ignore_bad_micrograph_path=1,
-):
+    data: pd.DataFrame,
+    alternative_folders: list[str] = [],
+    ignore_bad_particle_path: int = 0,
+    ignore_bad_micrograph_path: int = 1,
+) -> pd.DataFrame:
+    """Normalize filenames in a DataFrame by resolving relative paths.
+
+    For each column containing filenames (e.g. rlnImageName, rlnMicrographName),
+    relative paths are resolved to absolute paths using a variety of search
+    strategies including the source file directory and alternative folders.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame with filename columns to normalize.
+    alternative_folders : list of str, optional
+        Additional folders to search for files.
+    ignore_bad_particle_path : int, optional
+        If >= 2, skip filename normalization entirely.
+    ignore_bad_micrograph_path : int, optional
+        If 1, skip missing micrograph files without error.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with resolved absolute file paths.
+    """
     if ignore_bad_particle_path >= 2:
         return data
 
     def getRealFileName(
-        filename, source_path, alternative_folders=[], ignore_bad_path=0
-    ):
+        filename: str,
+        source_path: str | list[str],
+        alternative_folders: list[str] = [],
+        ignore_bad_path: int = 0,
+    ) -> str:
+        """Resolve a filename to its real absolute path.
+
+        Searches for the file in the source directory, alternative folders,
+        and the RELION project folder. Results are cached in
+        ``getRealFileName.mapping`` to avoid repeated filesystem checks.
+
+        Parameters
+        ----------
+        filename : str
+            The filename to resolve (may be relative).
+        source_path : str or list of str
+            Path to the source file for deriving search folders.
+        alternative_folders : list of str, optional
+            Additional folders to search.
+        ignore_bad_path : int, optional
+            If 1, return the original filename if not found.
+
+        Returns
+        -------
+        str
+            The resolved absolute path to the file.
+        """
         if filename in getRealFileName.mapping:
             return getRealFileName.mapping[filename]
 
@@ -1323,8 +1471,8 @@ def dataframe_normalize_filename(
             if ignore_bad_path:
                 ret = filename
             elif match_link:
-                msg = (
-                    "ERROR: image %s in file %s is found at %s that is a broken link to %s"
+                raise HeliconIOError(
+                    "image %s in file %s is found at %s that is a broken link to %s"
                     % (
                         filename,
                         source_path,
@@ -1332,12 +1480,10 @@ def dataframe_normalize_filename(
                         os.readlink(match_link),
                     )
                 )
-                color_print(msg)
-                sys.exit(-1)
             else:
-                msg = f"ERROR: cannot find image {filename} in file {source_path} after trying these choices: {filenameChoices}"
-                color_print(msg)
-                sys.exit(-1)
+                raise HeliconIOError(
+                    f"cannot find image {filename} in file {source_path} after trying these choices: {filenameChoices}"
+                )
         return ret
 
     getRealFileName.mapping = {}
@@ -1345,8 +1491,26 @@ def dataframe_normalize_filename(
     cache = {}
 
     def buildFileNameCache(
-        filenames, source_path, alternative_folders=[], ignore_bad_path=0
-    ):
+        filenames: Any,
+        source_path: str | list[str],
+        alternative_folders: list[str] = [],
+        ignore_bad_path: int = 0,
+    ) -> None:
+        """Build a filename resolution cache for a list of filenames.
+
+        Populates ``cache`` with the resolved absolute path for each filename.
+
+        Parameters
+        ----------
+        filenames : iterable
+            Iterable of filenames to resolve.
+        source_path : str or list of str
+            Path to the source file for deriving search folders.
+        alternative_folders : list of str, optional
+            Additional folders to search.
+        ignore_bad_path : int, optional
+            If 1, return the original filename if not found.
+        """
         for fi, filename in enumerate(filenames):
             cache[filename] = getRealFileName(
                 filename, source_path, alternative_folders, ignore_bad_path
@@ -1398,7 +1562,25 @@ def dataframe_normalize_filename(
 
 
 # see Figure 1 and Eq 5 of https://doi.org/10.1016/j.jsb.2015.08.008
-def relion_astigmatism_to_eman(rlnDefocusU, rlnDefocusV, rlnDefocusAngle):
+def relion_astigmatism_to_eman(
+    rlnDefocusU: float, rlnDefocusV: float, rlnDefocusAngle: float
+) -> tuple[float, float, float]:
+    """Convert RELION astigmatism parameters to EMAN2 format.
+
+    Parameters
+    ----------
+    rlnDefocusU : float
+        Defocus U in Angstroms (RELION convention).
+    rlnDefocusV : float
+        Defocus V in Angstroms (RELION convention).
+    rlnDefocusAngle : float
+        Defocus angle in degrees (RELION convention).
+
+    Returns
+    -------
+    tuple of (float, float, float)
+        (defocus, dfdiff, dfang) in EMAN2 convention (units of um).
+    """
     rlnDefocusU = float(rlnDefocusU)
     rlnDefocusV = float(rlnDefocusV)
     rlnDefocusAngle = float(rlnDefocusAngle)
@@ -1416,7 +1598,26 @@ def relion_astigmatism_to_eman(rlnDefocusU, rlnDefocusV, rlnDefocusAngle):
     return (defocus, dfdiff, dfang)
 
 
-def eman_astigmatism_to_relion(defocus, dfdiff, dfang):
+def eman_astigmatism_to_relion(
+    defocus: float, dfdiff: float, dfang: float
+) -> tuple[float, float, float]:
+    """Convert EMAN2 astigmatism parameters to RELION format.
+
+    Parameters
+    ----------
+    defocus : float
+        Average defocus in um (EMAN2 convention).
+    dfdiff : float
+        Defocus difference in um (EMAN2 convention).
+    dfang : float
+        Defocus angle in degrees (EMAN2 convention).
+
+    Returns
+    -------
+    tuple of (float, float, float)
+        (rlnDefocusU, rlnDefocusV, rlnDefocusAngle) in RELION convention
+        (Angstroms, degrees).
+    """
     if math.fmod(dfang + 360, 180) < 90:
         rlnDefocusU = defocus - dfdiff
         rlnDefocusV = defocus + dfdiff
@@ -1427,11 +1628,34 @@ def eman_astigmatism_to_relion(defocus, dfdiff, dfang):
     return (rlnDefocusU * 1e4, rlnDefocusV * 1e4, rlnDefocusAngle)
 
 
-def get_dataframe_convention(data):
+def get_dataframe_convention(data: pd.DataFrame) -> str:
+    """Get or guess the naming convention of a DataFrame.
+
+    Checks the ``convention`` attribute first; if not set, guesses based on
+    which column names are present (relion vs cryosparc).
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame to inspect.
+
+    Returns
+    -------
+    str
+        ``"relion"`` or ``"cryosparc"``.
+
+    Raises
+    ------
+    AttributeError
+        If the convention cannot be determined.
+    """
     try:
         c = data.attrs["convention"]  # test if the convention is set
         assert c is not None and len(c) > 0
-    except:  # let's guess the convention if it is not set yet
+    except (
+        KeyError,
+        AssertionError,
+    ):  # let's guess the convention if it is not set yet
         if any(
             k in data
             for k in "rlnImageName rlnMicrographName rlnMicrographMovieName rlnVoltage".split()
@@ -1448,8 +1672,26 @@ def get_dataframe_convention(data):
     return c
 
 
-def dataframe_convert(data, target="relion"):
+def dataframe_convert(data: pd.DataFrame, target: str = "relion") -> pd.DataFrame:
+    """Convert a DataFrame between naming conventions.
 
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame to convert.
+    target : str, optional
+        Target convention, ``"relion"`` or ``"cryosparc"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame in the target convention.
+
+    Raises
+    ------
+    AttributeError
+        If the conversion is not supported.
+    """
     data.attrs["convention"] = get_dataframe_convention(data)
 
     if data.attrs["convention"] == target:
@@ -1470,7 +1712,49 @@ def dataframe_convert(data, target="relion"):
         raise AttributeError(msg)
 
 
-def dataframe_cryosparc_to_relion(data):
+def _electron_wavelength(voltage_kv: float | np.ndarray) -> np.ndarray:
+    """Calculate the relativistic electron wavelength.
+
+    Parameters
+    ----------
+    voltage_kv : float or np.ndarray
+        Acceleration voltage in kV (scalar or array-like).
+
+    Returns
+    -------
+    np.ndarray
+        Wavelength in Angstroms (same shape as input).
+    """
+    h = 6.62607015e-34
+    m_e = 9.1093837e-31
+    e = 1.602176634e-19
+    c = 299792458
+    V = np.asarray(voltage_kv, dtype=float) * 1000.0
+    lam = h / np.sqrt(2 * m_e * e * V * (1 + e * V / (2 * m_e * c**2)))
+    return lam * 1e10
+
+
+def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
+    """Convert a CryoSPARC-convention DataFrame to RELION convention.
+
+    Maps cryosparc column names (e.g. ``blob/path``, ``ctf/df1_A``) to
+    their RELION equivalents (``rlnImageName``, ``rlnDefocusU``, etc.).
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        pandas DataFrame with cryosparc-convention columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        pandas DataFrame with relion-convention column names.
+
+    Raises
+    ------
+    AttributeError
+        If the input is not in cryosparc convention.
+    """
     data.attrs["convention"] = get_dataframe_convention(data)
 
     if data.attrs["convention"] == "relion":
@@ -1541,29 +1825,32 @@ def dataframe_cryosparc_to_relion(data):
         rotvecs = list(data["alignments3D/pose"].values)
         r = R.from_rotvec(rotvecs)
         e = r.as_euler("zyz", degrees=True)
-        ret["rlnAngleRot"] = e[:, 2]
+        ret["rlnAngleRot"] = e[:, 0]
         ret["rlnAngleTilt"] = e[:, 1]
-        ret["rlnAnglePsi"] = e[:, 0]
+        ret["rlnAnglePsi"] = e[:, 2]
 
     if "alignments3D/shift" in data:
         shifts = pd.DataFrame(data["alignments3D/shift"].tolist()).round(2)
         ret["rlnOriginX"] = shifts.iloc[:, 0]
         ret["rlnOriginY"] = shifts.iloc[:, 1]
 
-    if (
-        "location/center_x_frac" in data
-        and "location/center_y_frac" in data
-        and "location/micrograph_shape" in data
-    ):
-        locations = pd.DataFrame(data["location/micrograph_shape"].tolist())
-        my = locations.iloc[:, 0]
-        mx = locations.iloc[:, 1]
-        ret["rlnCoordinateX"] = (
-            (data["location/center_x_frac"] * mx).astype(float).round(2)
-        )
-        ret["rlnCoordinateY"] = (
-            (data["location/center_y_frac"] * my).astype(float).round(2)
-        )
+    if "location/center_x_frac" in data and "location/center_y_frac" in data:
+        if "location/micrograph_shape" in data:
+            loc_shape = data["location/micrograph_shape"]
+        elif "micrograph_blob/shape" in data:
+            loc_shape = data["micrograph_blob/shape"]
+        else:
+            loc_shape = None
+        if loc_shape is not None:
+            shape_df = pd.DataFrame(loc_shape.tolist())
+            my = shape_df.iloc[:, 0]
+            mx = shape_df.iloc[:, 1]
+            ret["rlnCoordinateX"] = (
+                (data["location/center_x_frac"] * mx).astype(float).round(2)
+            )
+            ret["rlnCoordinateY"] = (
+                (data["location/center_y_frac"] * my).astype(float).round(2)
+            )
 
     if "filament/filament_uid" in data:
         if "blob/path" in data:
@@ -1605,9 +1892,39 @@ def dataframe_cryosparc_to_relion(data):
         )
         ret.loc[:, "rlnAnglePsiFlipRatio"] = 0.5
 
-    # TODO: convert high order aberrations: beam tilt, trifoil, tetrafoil, anisomag: 'ctf/tilt_A', 'ctf/trefoil_A', 'ctf/tetra_A', 'ctf/anisomag'
-    # color_print(data.columns)
-    #
+    # High-order aberrations
+    if "ctf/tilt_A" in data and "ctf/accel_kv" in data:
+        bt = pd.DataFrame(data["ctf/tilt_A"].tolist(), columns=["tx", "ty"])
+        if "ctf/cs_mm" in data:
+            cs = data["ctf/cs_mm"].values.astype(float)
+        else:
+            cs = 2.7
+        lam = _electron_wavelength(data["ctf/accel_kv"].values.astype(float))
+        ret["rlnBeamTiltX"] = (bt["tx"].values * 1000.0 / (cs * 1e7 * lam**2)).round(4)
+        ret["rlnBeamTiltY"] = (bt["ty"].values * 1000.0 / (cs * 1e7 * lam**2)).round(4)
+
+    if "ctf/bfactor" in data:
+        ret["rlnCtfBfactor"] = data["ctf/bfactor"]
+
+    if "ctf/scale" in data:
+        ret["rlnCtfScalefactor"] = data["ctf/scale"]
+
+    if "ctf/trefoil_A" in data:
+        tf = pd.DataFrame(
+            data["ctf/trefoil_A"].tolist(), columns=["trefoil_real", "trefoil_imag"]
+        )
+        ret["rlnTrefoilReal"] = tf["trefoil_real"]
+        ret["rlnTrefoilImag"] = tf["trefoil_imag"]
+
+    if "ctf/tetra_A" in data:
+        tetra = pd.DataFrame(data["ctf/tetra_A"].tolist())
+        for i in range(tetra.shape[1]):
+            ret[f"rlnTetrafoil_{i}"] = tetra.iloc[:, i]
+
+    if "ctf/anisomag" in data:
+        am = pd.DataFrame(data["ctf/anisomag"].tolist())
+        for i in range(am.shape[1]):
+            ret[f"rlnAnisoMag_{i}"] = am.iloc[:, i]
 
     # 3D variability introduced in v2.9
     import fnmatch
@@ -1621,22 +1938,37 @@ def dataframe_cryosparc_to_relion(data):
         ret[col_name] = data[col]
 
     if len(ret.columns) == 0:
-        color_print(
-            "ERROR: dataframe_cryosparc_to_relion(): none of the parameters %s is supported"
+        raise HeliconValueError(
+            "dataframe_cryosparc_to_relion(): none of the parameters %s is supported"
             % (list(data.columns))
         )
-        sys.exit(-1)
 
     try:
         ret.attrs["source_path"] = data.attrs["source_path"]
-    except:
+    except KeyError:
         ret.attrs["source_path"] = None
     ret.attrs["convention"] = "relion"
 
     return ret
 
 
-def mrc2mrcs(data):
+def mrc2mrcs(data: pd.DataFrame) -> pd.DataFrame:
+    """Convert .mrc file references in a DataFrame to .mrcs symlinks.
+
+    For each unique .mrc file found, creates a symlink with a .mrcs extension
+    and updates the DataFrame to point to the new symlink.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        pandas DataFrame with a ``filename`` column (or an
+        ``rlnImageName`` column from which the filename is extracted).
+
+    Returns
+    -------
+    pd.DataFrame
+        pandas DataFrame with .mrcs references.
+    """
     if "rlnImageName" in data:  # Relion star file
         tmp = data["rlnImageName"].str.split("@", expand=True)
         pid = tmp.iloc[:, 0]
@@ -1670,8 +2002,30 @@ def mrc2mrcs(data):
 
 
 #####################################################################################
-def connect_cryosparc(cryosparc_server_info_file="$HOME/.cryosparc/cryosparc.toml"):
+def connect_cryosparc(
+    cryosparc_server_info_file: str = "$HOME/.cryosparc/cryosparc.toml",
+) -> Any:
+    """Connect to a CryoSPARC server using credentials from a TOML file.
+
+    Parameters
+    ----------
+    cryosparc_server_info_file : str, optional
+        Path to the TOML file containing server credentials.
+        Defaults to ``~/.cryosparc/cryosparc.toml``.
+
+    Returns
+    -------
+    cryosparc.tools.CryoSPARC
+        Connected CryoSPARC client instance.
+
+    Raises
+    ------
+    HeliconConfigError
+        If the credentials file is missing or has insecure permissions.
+    """
+
     def print_instructions():
+        """Print setup instructions for the CryoSPARC credentials file."""
         info = "To connect to CryoSPARC server, please follow these instructions:\n"
         info += f"1. create a text file {cryosparc_server_info_file}\n"
         info += "2. change its permission to user readable/writable only by running this command:\n"
@@ -1683,17 +2037,18 @@ def connect_cryosparc(cryosparc_server_info_file="$HOME/.cryosparc/cryosparc.tom
         info += 'email = "xxx@yyy.edu"\n'
         info += 'password = "yourpassowrd"\n\n'
         info += "Remember to change the placeholder text to your own information\n\n"
-        color_print(info)
+        logger.info(info)
 
     p = Path(os.path.expandvars(cryosparc_server_info_file))
     if not p.exists():
         print_instructions()
-        sys.exit(-1)
+        raise HeliconConfigError(
+            f"CryoSPARC server info file not found: {cryosparc_server_info_file}"
+        )
     elif oct(p.stat().st_mode)[-3:] != "600":
-        color_print(
+        raise HeliconConfigError(
             f"Please run command 'chmod 600 {cryosparc_server_info_file}' to keep your server info secure"
         )
-        sys.exit(-1)
 
     with open(p, mode="rb") as fp:
         import tomllib

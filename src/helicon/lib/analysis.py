@@ -1,8 +1,37 @@
+from __future__ import annotations
+
 import numpy as np
 import helicon
 
+__all__ = [
+    "calc_fsc",
+    "cosine_similarity",
+    "cross_correlation_coefficient",
+    "estimate_helix_rotation_center_diameter",
+    "find_elbow_point",
+    "get_cylindrical_mask",
+    "is_3d",
+    "is_amyloid",
+    "line_fit_projection",
+    "twist2pitch",
+    "estimate_inter_segment_distance",
+]
 
-def is_3d(data: np.ndarray):
+
+def is_3d(data: np.ndarray) -> bool:
+    """Check if an array represents a 3D volume (cubic or rectangular).
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input array.
+
+    Returns
+    -------
+    bool
+        True if the array is 3D and either cubic (``nz == ny == nx``) or
+        rectangular (``nz > ny == nx``).
+    """
     if data.ndim != 3:
         return False
     nz, ny, nx = data.shape
@@ -13,7 +42,19 @@ def is_3d(data: np.ndarray):
     return False
 
 
-def is_amyloid(emdb_id: str):
+def is_amyloid(emdb_id: str) -> bool:
+    """Check if an EMDB ID corresponds to an amyloid structure.
+
+    Parameters
+    ----------
+    emdb_id : str
+        EMDB entry identifier.
+
+    Returns
+    -------
+    bool
+        True if the EMDB ID is found in the amyloid atlas.
+    """
     if not isinstance(emdb_id, str):
         return False
     emdb = helicon.dataset.EMDB()
@@ -22,7 +63,29 @@ def is_amyloid(emdb_id: str):
     return False
 
 
-def twist2pitch(twist, rise, return_pitch_for_4p75Angstrom_rise=True):
+def twist2pitch(
+    twist: float, rise: float, return_pitch_for_4p75Angstrom_rise: bool = True
+) -> float:
+    """Convert helical twist and rise to pitch.
+
+    When ``return_pitch_for_4p75Angstrom_rise`` is True (default), the
+    calculation is adjusted to a rise near 4.75 Angstroms by scaling the
+    twist and rise to match a single subunit.
+
+    Parameters
+    ----------
+    twist : float
+        Helical twist in degrees.
+    rise : float
+        Helical rise in Angstroms.
+    return_pitch_for_4p75Angstrom_rise : bool, optional
+        If True, adjust to a rise near 4.75 Angstroms. Defaults to True.
+
+    Returns
+    -------
+    float
+        Pitch in Angstroms.
+    """
     if not return_pitch_for_4p75Angstrom_rise:
         return rise * 360 / abs(twist)
 
@@ -40,7 +103,25 @@ def twist2pitch(twist, rise, return_pitch_for_4p75Angstrom_rise=True):
 
 
 # adapted from https://github.com/tdgrant1/denss/blob/3fbbefea45cb6d615e629e672d65440c46ac83da/saxstats/saxstats.py#L2185
-def calc_fsc(map1, map2, apix):
+def calc_fsc(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.ndarray:
+    """Calculate Fourier Shell Correlation between two 3D maps.
+
+    Adapted from https://github.com/tdgrant1/denss.
+
+    Parameters
+    ----------
+    map1 : np.ndarray
+        First 3D map.
+    map2 : np.ndarray
+        Second 3D map.
+    apix : float
+        Pixel size in Angstroms per pixel.
+
+    Returns
+    -------
+    np.ndarray
+        Two-column array with spatial frequency (1/Angstrom) and FSC values.
+    """
     n = map1.shape[0]
     df = 1.0 / (apix * n)
     qx_ = np.fft.fftfreq(n) * n * df
@@ -75,13 +156,36 @@ def calc_fsc(map1, map2, apix):
 
 
 def estimate_helix_rotation_center_diameter(
-    data, estimate_rotation=True, estimate_center=True, threshold=0
-):
-    """
-    Returns:
-        rotation (float): The rotation (degrees) needed to rotate the helix to horizontal direction.
-        shift_y (float): The post-rotation vertical shift (pixels) needed to shift the helix to the box center in vertical direction.
-        diameter (int): The estimated diameter (pixels) of the helix.
+    data: np.ndarray,
+    estimate_rotation: bool = True,
+    estimate_center: bool = True,
+    threshold: float = 0,
+) -> tuple[float, float, int]:
+    """Estimate helix rotation, center, and diameter from a 2D image.
+
+    Uses region labelling on a thresholded image to identify the helix region,
+    then estimates orientation, centroid, and bounding-box diameter.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input 2D image.
+    estimate_rotation : bool, optional
+        Whether to estimate the rotation angle. Defaults to True.
+    estimate_center : bool, optional
+        Whether to estimate the center from the region centroid. If False,
+        the image center is used. Defaults to True.
+    threshold : float, optional
+        Threshold for binarization. Defaults to 0.
+
+    Returns
+    -------
+    rotation : float
+        Rotation (degrees) needed to align the helix to horizontal direction.
+    shift_y : float
+        Vertical shift (pixels) needed to center the helix in the box.
+    diameter : int
+        Estimated diameter (pixels) of the helix.
     """
     from skimage.measure import label, regionprops
     from skimage.morphology import closing
@@ -120,7 +224,37 @@ def estimate_helix_rotation_center_diameter(
     return rotation, shift_y, diameter
 
 
-def get_cylindrical_mask(nz, ny, nx, rmin=0, rmax=-1, return_xyz=False):
+def get_cylindrical_mask(
+    nz: int, ny: int, nx: int, rmin: int = 0, rmax: int = -1, return_xyz: bool = False
+) -> np.ndarray | tuple[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Create a cylindrical mask in a 3D grid.
+
+    The cylinder axis runs along the Z direction.
+
+    Parameters
+    ----------
+    nz : int
+        Size along the Z axis.
+    ny : int
+        Size along the Y axis.
+    nx : int
+        Size along the X axis.
+    rmin : int, optional
+        Inner radius in pixels (excluded). Defaults to 0.
+    rmax : int, optional
+        Outer radius in pixels. Negative values are interpreted as
+        ``ny // 2 - 1``. Defaults to -1.
+    return_xyz : bool, optional
+        If True, also return the meshgrid coordinates. Defaults to False.
+
+    Returns
+    -------
+    mask : np.ndarray
+        Boolean mask of shape ``(nz, ny, nx)``.
+    xyz : tuple of np.ndarray, optional
+        Meshgrid coordinates ``(Z, Y, X)``, only returned if
+        ``return_xyz`` is True.
+    """
     k = np.arange(0, nz, dtype=np.int32) - nz // 2
     j = np.arange(0, ny, dtype=np.int32) - ny // 2
     i = np.arange(0, nx, dtype=np.int32) - nx // 2
@@ -136,7 +270,22 @@ def get_cylindrical_mask(nz, ny, nx, rmin=0, rmax=-1, return_xyz=False):
         return mask
 
 
-def cross_correlation_coefficient(a, b):
+def cross_correlation_coefficient(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute the cross-correlation coefficient between two arrays.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        First array.
+    b : np.ndarray
+        Second array.
+
+    Returns
+    -------
+    float
+        Cross-correlation coefficient in ``[-1, 1]``. Returns 0 if either
+        array is constant (zero variance).
+    """
     mean_a = np.mean(a)
     mean_b = np.mean(b)
     norm = np.sqrt(np.sum((a - mean_a) ** 2) * np.sum((b - mean_b) ** 2))
@@ -146,7 +295,21 @@ def cross_correlation_coefficient(a, b):
         return np.sum((a - mean_a) * (b - mean_b)) / norm
 
 
-def cosine_similarity(a, b):
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute the cosine similarity between two vectors.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        First vector.
+    b : np.ndarray
+        Second vector.
+
+    Returns
+    -------
+    float
+        Cosine similarity in ``[-1, 1]``. Returns 0 if either vector is zero.
+    """
     norm = np.linalg.norm(a) * np.linalg.norm(b)
     if norm == 0:
         return 0
@@ -154,209 +317,23 @@ def cosine_similarity(a, b):
         return np.sum(a * b) / norm
 
 
-def align_images(
-    image_moving,
-    image_ref,
-    scale_range,
-    angle_range,
-    check_polarity=True,
-    check_flip=True,
-    return_aligned_moving_image=False,
-):
-    assert (
-        0 <= scale_range < 1
-    ), f"align_images(): {scale_range=} is out of valid range [0, 1)"
-
-    if check_flip:
-        result = align_images(
-            image_moving=image_moving,
-            image_ref=image_ref,
-            scale_range=scale_range,
-            angle_range=angle_range,
-            check_flip=False,
-            return_aligned_moving_image=return_aligned_moving_image,
-        )
-
-        image_moving_flip = image_moving[::-1, :]
-        result_flip = align_images(
-            image_moving=image_moving_flip,
-            image_ref=image_ref,
-            scale_range=scale_range,
-            angle_range=angle_range,
-            check_flip=False,
-            return_aligned_moving_image=return_aligned_moving_image,
-        )
-        if result_flip[3] > result[3]:
-            return (True, *result_flip)
-        else:
-            return (False, *result)
-
-    from skimage.registration import phase_cross_correlation
-
-    tapering_filter_moving = helicon.generate_tapering_filter(
-        image_size=image_moving.shape, fraction_start=[0.8, 0.8]
-    )
-    padded_tapering_filter_moving = helicon.pad_to_size(
-        tapering_filter_moving, image_ref.shape
-    )
-
-    padded_image_moving = helicon.pad_to_size(image_moving, image_ref.shape)
-
-    padded_image_moving_work = helicon.threshold_data(
-        padded_tapering_filter_moving * padded_image_moving, thresh_fraction=-1.0
-    )
-
-    tapering_filter_ref = helicon.generate_tapering_filter(
-        image_size=image_ref.shape, fraction_start=[0.8, 0.8]
-    )
-    image_ref_work = helicon.threshold_data(
-        tapering_filter_ref * image_ref, thresh_fraction=0.0
-    )
-    # mask_image_ref_work = image_ref_work > 0
-    mask_image_ref_work = None
-
-    mode = "wrap"  # constant wrap
-
-    best = [1e10, 1, 0, 0, None]
-
-    def scale_rotation_score(x, angle0):
-        if isinstance(x, np.ndarray):
-            scale_log, angle = x
-            scale = np.exp(scale_log)
-        else:
-            scale = 1.0
-            angle = x
-        angle += angle0
-
-        rotated_scaled_padded_image_moving = helicon.transform_image(
-            image=padded_image_moving_work, scale=scale, rotation=angle, mode="constant"
-        )
-        # mask_rotated_scaled_padded_image_moving = rotated_scaled_padded_image_moving > 0
-        mask_rotated_scaled_padded_image_moving = None
-
-        shift_cartesian, error, diffphase = phase_cross_correlation(
-            reference_image=image_ref_work,
-            moving_image=rotated_scaled_padded_image_moving,
-            reference_mask=mask_image_ref_work,
-            moving_mask=mask_rotated_scaled_padded_image_moving,
-            overlap_ratio=0.5,
-            disambiguate=False,
-            normalization="phase",  # None,
-        )
-        shifted_rotated_scaled_padded_image_moving = helicon.transform_image(
-            image=padded_image_moving_work,
-            scale=scale,
-            rotation=angle,
-            post_translation=shift_cartesian,
-            mode=mode,
-        )
-        shifted_rotated_scaled_padded_tapering_filter_moving = helicon.transform_image(
-            image=padded_tapering_filter_moving,
-            scale=scale,
-            rotation=angle,
-            post_translation=shift_cartesian,
-            mode=mode,
-        )
-        mask = shifted_rotated_scaled_padded_tapering_filter_moving > 0
-        score = -cross_correlation_coefficient(
-            image_ref_work[mask], shifted_rotated_scaled_padded_image_moving[mask]
-        )
-        if score < best[0]:
-            best[0] = score
-            best[1] = scale
-            best[2] = angle
-            best[3] = shift_cartesian
-            best[4] = shifted_rotated_scaled_padded_image_moving
-        return score
-
-    if scale_range > 0:
-        from scipy.optimize import minimize
-
-        result = minimize(
-            scale_rotation_score,
-            x0=[0, 0],
-            args=(0),
-            bounds=[
-                (-np.log(1 + scale_range), np.log(1 + scale_range)),
-                (-angle_range, angle_range),
-            ],
-            method="Nelder-Mead",
-            options=dict(xatol=0.01),
-        )
-        if check_polarity:
-            minimize(
-                scale_rotation_score,
-                x0=[0, 0],
-                args=(180),
-                bounds=[
-                    (-np.log(1 + scale_range), np.log(1 + scale_range)),
-                    (-angle_range, angle_range),
-                ],
-                method="Nelder-Mead",
-                options=dict(xatol=0.01),
-            )
-    elif angle_range > 0:
-        from scipy.optimize import minimize_scalar
-
-        minimize_scalar(
-            scale_rotation_score,
-            args=(0),
-            bounds=(-angle_range, angle_range),
-            method="bounded",
-        )
-        if check_polarity:
-            minimize_scalar(
-                scale_rotation_score,
-                args=(180),
-                bounds=(-angle_range, angle_range),
-                method="bounded",
-            )
-
-    (
-        _,
-        scale,
-        rotation_angle_degree,
-        shift_cartesian,
-        shifted_rotated_scaled_padded_image_moving,
-    ) = best
-
-    if shifted_rotated_scaled_padded_image_moving is None:
-        shifted_rotated_scaled_padded_image_moving = padded_image_moving_work
-
-    shifted_rotated_scaled_padded_tapering_filter_moving = helicon.transform_image(
-        image=padded_tapering_filter_moving,
-        scale=scale,
-        rotation=rotation_angle_degree,
-        post_translation=shift_cartesian,
-        mode=mode,
-    )
-    mask = shifted_rotated_scaled_padded_tapering_filter_moving > 0
-    similarity_score = cross_correlation_coefficient(
-        image_ref_work[mask], shifted_rotated_scaled_padded_image_moving[mask]
-    )
-
-    shifted_rotated_scaled_padded_image_moving = helicon.transform_image(
-        image=padded_image_moving,
-        scale=scale,
-        rotation=rotation_angle_degree,
-        post_translation=shift_cartesian,
-        mode=mode,
-    )
-
-    if return_aligned_moving_image:
-        return (
-            scale,
-            rotation_angle_degree,
-            shift_cartesian,
-            similarity_score,
-            shifted_rotated_scaled_padded_image_moving,
-        )
-    else:
-        return scale, rotation_angle_degree, shift_cartesian, similarity_score
-
-
 # https://stackoverflow.com/questions/2018178/finding-the-best-trade-off-point-on-a-curve
-def find_elbow_point(curve):
+def find_elbow_point(curve: np.ndarray) -> int:
+    """Find the elbow (knee) point of a curve.
+
+    Uses the maximum distance from the line connecting the first and last
+    points of the curve.
+
+    Parameters
+    ----------
+    curve : np.ndarray
+        1D array of curve values.
+
+    Returns
+    -------
+    int
+        Index of the elbow point.
+    """
     import numpy as np
 
     nPoints = len(curve)
@@ -373,7 +350,41 @@ def find_elbow_point(curve):
     return idxOfBestPoint
 
 
-def line_fit_projection(x, y, w=None, ref_i=0, return_xy_fit=False):
+def line_fit_projection(
+    x: np.ndarray,
+    y: np.ndarray,
+    w: np.ndarray | None = None,
+    ref_i: int = 0,
+    return_xy_fit: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """Project points onto a line fitted by orthogonal distance regression.
+
+    Uses scipy's ODR to fit a line, then projects each point onto the fitted
+    line and returns signed positions relative to a reference point.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        X coordinates of the data points.
+    y : np.ndarray
+        Y coordinates of the data points.
+    w : np.ndarray, optional
+        Weights for the ODR fit (same weights applied to x and y). Defaults
+        to None (uniform weights).
+    ref_i : int, optional
+        Index of the reference point used as the origin for the signed
+        projection. Defaults to 0.
+    return_xy_fit : bool, optional
+        If True, also return the fitted (x, y) coordinates. Defaults to False.
+
+    Returns
+    -------
+    pos : np.ndarray
+        Signed projected position along the fitted line.
+    xy_fit : np.ndarray, optional
+        Fitted ``(x, y)`` coordinates as an ``(N, 2)`` array, only returned
+        if ``return_xy_fit`` is True.
+    """
     import numpy as np
     from scipy import odr
 
@@ -396,65 +407,60 @@ def line_fit_projection(x, y, w=None, ref_i=0, return_xy_fit=False):
         return pos
 
 
-from sklearn.cluster import KMeans, AgglomerativeClustering
+def estimate_inter_segment_distance(
+    data: pd.DataFrame,
+) -> tuple[float | None, float | None, float | None, int | None]:
+    """Estimate the inter-segment distance from helical particle data.
 
+    Computes median, mean, and std of inter-segment distances from the
+    ``rlnHelicalTrackLengthAngst`` column, grouped by micrograph and tube ID.
 
-class AgglomerativeClusteringWithMinSize(AgglomerativeClustering):
-    def __init__(
-        self,
-        min_cluster_size=2,
-        n_clusters=2,
-        metric="euclidean",
-        memory=None,
-        connectivity=None,
-        compute_full_tree="auto",
-        linkage="ward",
-        distance_threshold=None,
-    ):
-        super().__init__(
-            n_clusters=n_clusters,
-            metric=metric,
-            memory=memory,
-            connectivity=connectivity,
-            compute_full_tree=compute_full_tree,
-            linkage=linkage,
-            distance_threshold=distance_threshold,
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data containing ``rlnImageName``, ``rlnHelicalTubeID``,
+        and ``rlnHelicalTrackLengthAngst`` columns.
+
+    Returns
+    -------
+    tuple of (float or None, float or None, float or None, int or None)
+        ``(median, mean, std, n_max)`` where *n_max* is the estimated
+        number of segments. All values are None if required columns are missing.
+    """
+    for attr in ["rlnImageName", "rlnHelicalTubeID", "rlnHelicalTrackLengthAngst"]:
+        if attr not in data:
+            return None, None, None, None
+
+    data, data_orig = data.copy(), data
+    temp = data["rlnImageName"].str.split("@", expand=True)
+    data.loc[:, "pid"] = temp.iloc[:, 0].astype(int)
+    filename = "micrograph"
+    data.loc[:, filename] = temp.iloc[:, 1]
+    data = data.sort_values([filename, "pid"], ascending=True)
+    data.reset_index(drop=True, inplace=True)
+
+    helices = data.groupby([filename, "rlnHelicalTubeID"], sort=False)
+
+    import numpy as np
+
+    dists_all = []
+    lengths = []
+    for _, particles in helices:
+        lengths.append(particles["rlnHelicalTrackLengthAngst"].astype(np.float32).max())
+        if len(particles) < 2:
+            continue
+        dists = np.sort(
+            particles["rlnHelicalTrackLengthAngst"].astype(np.float32).values
         )
-        self.min_cluster_size = min_cluster_size
+        dists = dists[1:] - dists[:-1]
+        dists_all.append(dists)
+    dists_all = np.hstack(dists_all)
+    dist_seg_median = np.median(dists_all)  # Angstrom
+    dist_seg_mean = np.mean(dists_all)  # Angstrom
+    dist_seg_sigma = np.std(dists_all)  # Angstrom
+    n_max = np.sum(np.round(np.array(lengths) / dist_seg_median) + 1).astype(int)
+    return dist_seg_median, dist_seg_mean, dist_seg_sigma, n_max
 
-    def fit(self, X, y=None):
-        super().fit(X, y)
-        labels = self.labels_
 
-        while True:
-            unique, counts = np.unique(labels, return_counts=True)
-            if len(unique) < 3:
-                break
-
-            small_clusters = unique[counts < self.min_cluster_size]
-            if len(small_clusters) == 0:
-                break
-
-            # If all clusters are small, merge the two smallest
-            if len(small_clusters) == len(unique):
-                smallest_two = unique[np.argsort(counts)[:2]]
-                labels[labels == smallest_two[1]] = smallest_two[0]
-                continue
-
-            from sklearn.metrics import pairwise_distances
-
-            distances = pairwise_distances(X)
-            for small_cluster in small_clusters:
-                small_cluster_points = np.where(labels == small_cluster)[0]
-                for point in small_cluster_points:
-                    # Find the nearest point not in a small cluster
-                    valid_points = np.where(~np.isin(labels, small_clusters))[0]
-                    nearest_point = valid_points[
-                        np.argmin(distances[point, valid_points])
-                    ]
-                    labels[point] = labels[nearest_point]
-
-        self.labels_ = labels
-        self.n_clusters_ = len(np.unique(labels))
-
-        return self
+from .clustering import AgglomerativeClusteringWithMinSize  # noqa: F401
+from .alignment import align_images  # noqa: F401

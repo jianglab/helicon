@@ -1,17 +1,24 @@
 #!/usr/bin/env python
 
-"""A command line tool that reassigns particles to C1 poses from two jobs of the same set of particles but with different symmetries."""
+"""A command line tool that reassigns particles to C1 poses from two jobs of the same set of particles but with different symmetries"""
 
 import argparse
-import sys
 import numpy as np
 from pathlib import Path
 from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation as R
+from helicon.lib.exceptions import HeliconError
 import helicon
 
 
 def main(args):
+    """Reassign particle poses between jobs with different symmetries.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    """
     helicon.log_command_line()
 
     cs = None
@@ -26,29 +33,21 @@ def main(args):
         ds1 = load_cryosparc_cs_file(args.input1, args.pass_through1)
         sym1 = args.sym1
         if not sym1:
-            helicon.color_print(
-                "ERROR: --sym1 is required when loading dataset 1 from local file.",
-                color="red",
+            raise HeliconError(
+                "--sym1 is required when loading dataset 1 from local file."
             )
-            sys.exit(-1)
         job1_id = Path(args.input1).stem
         job1 = None
     else:
         if not project or not args.jobID1:
-            helicon.color_print(
-                "ERROR: --projectID and --jobID1 are required if --input1 is not provided.",
-                color="red",
+            raise HeliconError(
+                "--projectID and --jobID1 are required if --input1 is not provided."
             )
-            sys.exit(-1)
         job1 = project.find_job(args.jobID1)
         sym1 = args.sym1 or get_job_symmetry(job1)
         out_name1 = get_particle_output_name(job1)
         if not out_name1:
-            helicon.color_print(
-                f"ERROR: Could not find particle output in job {args.jobID1}",
-                color="red",
-            )
-            sys.exit(-1)
+            raise HeliconError(f"Could not find particle output in job {args.jobID1}")
         print(f"Loading output: {args.jobID1} ({out_name1})")
         ds1 = job1.load_output(out_name1)
         job1_id = args.jobID1
@@ -62,29 +61,21 @@ def main(args):
         ds2 = load_cryosparc_cs_file(args.input2, args.pass_through2)
         sym2 = args.sym2
         if not sym2:
-            helicon.color_print(
-                "ERROR: --sym2 is required when loading dataset 2 from local file.",
-                color="red",
+            raise HeliconError(
+                "--sym2 is required when loading dataset 2 from local file."
             )
-            sys.exit(-1)
         job2_id = Path(args.input2).stem
         job2 = None
     else:
         if not project or not args.jobID2:
-            helicon.color_print(
-                "ERROR: --projectID and --jobID2 are required if --input2 is not provided.",
-                color="red",
+            raise HeliconError(
+                "--projectID and --jobID2 are required if --input2 is not provided."
             )
-            sys.exit(-1)
         job2 = project.find_job(args.jobID2)
         sym2 = args.sym2 or get_job_symmetry(job2)
         out_name2 = get_particle_output_name(job2)
         if not out_name2:
-            helicon.color_print(
-                f"ERROR: Could not find particle output in job {args.jobID2}",
-                color="red",
-            )
-            sys.exit(-1)
+            raise HeliconError(f"Could not find particle output in job {args.jobID2}")
         print(f"Loading output: {args.jobID2} ({out_name2})")
         ds2 = job2.load_output(out_name2)
         job2_id = args.jobID2
@@ -172,10 +163,7 @@ def main(args):
     )
 
     if len(matches) == 0:
-        helicon.color_print(
-            "ERROR: No corresponding particles found between the two jobs.", color="red"
-        )
-        sys.exit(-1)
+        raise HeliconError("No corresponding particles found between the two jobs.")
 
     if args.verbose > 0:
         print(f"Found {len(matches):,} corresponding particles.")
@@ -205,11 +193,7 @@ def main(args):
     )
 
     if not pose_attr1 or not pose_attr2:
-        helicon.color_print(
-            f"ERROR: Could not find pose information in one or both datasets.",
-            color="red",
-        )
-        sys.exit(-1)
+        raise HeliconError("Could not find pose information in one or both datasets.")
 
     R1 = convert_cryosparc_pose_to_scipy_Rotation(ds1[pose_attr1])
     R2 = convert_cryosparc_pose_to_scipy_Rotation(ds2[pose_attr2])
@@ -398,6 +382,20 @@ def main(args):
 
 
 def load_cryosparc_cs_file(cs_file, pass_through_file=None):
+    """Load a CryoSPARC .cs file, optionally merging a pass-through file.
+
+    Parameters
+    ----------
+    cs_file : str
+        Path to the .cs file.
+    pass_through_file : str, optional
+        Path to a pass-through .cs file to merge.
+
+    Returns
+    -------
+    Dataset
+        Loaded cryosparc dataset.
+    """
     from cryosparc.dataset import Dataset
 
     ds = Dataset.load(cs_file)
@@ -411,6 +409,18 @@ def load_cryosparc_cs_file(cs_file, pass_through_file=None):
 
 
 def convert_cryosparc_pose_to_scipy_Rotation(poses):
+    """Convert CryoSPARC pose arrays to scipy Rotation objects.
+
+    Parameters
+    ----------
+    poses : ndarray
+        Pose array of shape ``(N, 3)`` or ``(1, N, 3)``.
+
+    Returns
+    -------
+    Rotation
+        Scipy Rotation object from rotation vectors.
+    """
     if len(poses.shape) == 3:
         poses = np.squeeze(poses)
     assert len(poses.shape) == 2, f"ERROR: {poses.shape=} should be 2 dimensions"
@@ -419,13 +429,38 @@ def convert_cryosparc_pose_to_scipy_Rotation(poses):
 
 
 def convert_euler_angles_to_cryosparc_pose(eulers, convention="ZXZ"):
+    """Convert Euler angles to CryoSPARC pose (rotation vector) format.
+
+    Parameters
+    ----------
+    eulers : ndarray
+        Euler angles array.
+    convention : str, optional
+        Euler angle convention. Defaults to ``"ZXZ"``.
+
+    Returns
+    -------
+    ndarray
+        Rotation vectors (CryoSPARC pose format).
+    """
     r = R.from_euler(seq=convention, angles=eulers, degrees=True)
     poses = r.as_rotvec(degrees=False)
     return poses
 
 
 def get_particle_output_name(job):
-    """Find the first output group name that contains 'particles'."""
+    """Find the first output group name that contains 'particles'.
+
+    Parameters
+    ----------
+    job : object
+        CryoSPARC job object with a ``doc`` attribute.
+
+    Returns
+    -------
+    str or None
+        The matching output group name, or None.
+    """
     for group in job.doc.get("output_result_groups", []):
         if (
             "particles" in group.get("name", "").lower()
@@ -436,23 +471,87 @@ def get_particle_output_name(job):
 
 
 def get_job_symmetry(job):
-    """Attempt to detect symmetry from job parameters."""
+    """Detect symmetry from job parameters, defaulting to C1.
+
+    Parameters
+    ----------
+    job : object
+        CryoSPARC job object with a ``doc`` attribute.
+
+    Returns
+    -------
+    str
+        Symmetry symbol (e.g. ``"C5"``, ``"C1"``).
+    """
     try:
         sym = job.doc["params_spec"]["refine_symmetry"]["value"]
-    except:
+    except Exception:
         sym = "C1"
     return sym
 
 
 def angular_distance(a, b):
+    """Compute the smallest angular distance between two angles in degrees.
+
+    Parameters
+    ----------
+    a : ndarray or float
+        First angle(s) in degrees.
+    b : ndarray or float
+        Second angle(s) in degrees.
+
+    Returns
+    -------
+    ndarray or float
+        Angular distance(s) in [0, 180] degrees.
+    """
     return np.abs((a - b + 180.0) % 360.0 - 180.0)
 
 
 def relative_angle_range(sym1: int, sym2: int):
+    """Compute the relative angle range between two cyclic symmetries.
+
+    Parameters
+    ----------
+    sym1 : int
+        Order of the first symmetry.
+    sym2 : int
+        Order of the second symmetry.
+
+    Returns
+    -------
+    float
+        Relative angle range in degrees.
+    """
     return 360.0 * np.gcd(sym1, sym2) / (sym1 * sym2)
 
 
 def solve_symmetry_mismatch(rot1, rot2, sym1, sym2, num_seed_samples=10, verbose=0):
+    """Solve the symmetry mismatch between two sets of particle rotations.
+
+    Finds the relative rotation angle and unfolds both rotation sets to
+    a common reference frame.
+
+    Parameters
+    ----------
+    rot1 : ndarray
+        Rotations from job 1 (degrees).
+    rot2 : ndarray
+        Rotations from job 2 (degrees).
+    sym1 : int
+        Symmetry order of job 1.
+    sym2 : int
+        Symmetry order of job 2.
+    num_seed_samples : int, optional
+        Number of seed samples for consensus finding. Defaults to 10.
+    verbose : int, optional
+        Verbosity level. Defaults to 0.
+
+    Returns
+    -------
+    tuple
+        ``(estimated_relative_angle, rot1_unfolded, rot2_unfolded)``.
+    """
     import numpy as np
 
     period1 = 360.0 / sym1
@@ -529,18 +628,28 @@ def solve_symmetry_mismatch(rot1, rot2, sym1, sym2, num_seed_samples=10, verbose
 
 
 def find_particle_correspondence(ds1, ds2, dist_tol=None, axis_tol=None, verbose=0):
-    """
-    Find corresponding particles between two datasets based on particle UID (same extraction) or micrograph UID and spatial proximity (different extractions).
-    The poses are then used to select the particles with consistent orientation of the particle's two poses (relative rotation is around an axis close to the +Z axis).
+    """Find corresponding particles between two CryoSPARC datasets.
 
-    Args:
-        ds1: First CryoSPARC Dataset object.
-        ds2: Second CryoSPARC Dataset object.
-        dist_tol: Optional. Spatial distance tolerance in Angstroms.
-        axis_tol: Optional. Tolerance for the angle between the +Z axis and the axis of the relative rotation of a particle's two poses, in degrees.
+    Matches by particle UID (same extraction) or by micrograph UID and
+    spatial proximity (different extractions). Filters by pose axis
+    consistency when *axis_tol* is provided.
 
-    Returns:
-        numpy.ndarray: Array of shape (N, 2) containing matched UIDs (ds1_uid, ds2_uid).
+    Parameters
+    ----------
+    ds1 : Dataset
+        First CryoSPARC dataset.
+    ds2 : Dataset
+        Second CryoSPARC dataset.
+    dist_tol : float, optional
+        Spatial distance tolerance in Angstroms.
+    axis_tol : float, optional
+        Tolerance for the angle between the +Z axis and the relative
+        rotation axis, in degrees.
+
+    Returns
+    -------
+    ndarray of shape (N, 2)
+        Array of matched UIDs ``(ds1_uid, ds2_uid)``.
     """
 
     # Phase 1: Candidate Identification
@@ -687,7 +796,61 @@ def find_particle_correspondence(ds1, ds2, dist_tol=None, axis_tol=None, verbose
     return np.array(matches)
 
 
+def check_args(args, parser):
+    """Validate symmetry_mismatch CLI arguments.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    parser : argparse.ArgumentParser
+        The argument parser.
+
+    Returns
+    -------
+    argparse.Namespace
+        Validated arguments.
+    """
+    has_input1 = args.input1 is not None
+    has_job1 = args.projectID is not None and args.jobID1 is not None
+    if not has_input1 and not has_job1:
+        parser.error(
+            "--input1 or (--projectID and --jobID1) are required for dataset 1"
+        )
+
+    has_input2 = args.input2 is not None
+    has_job2 = args.projectID is not None and args.jobID2 is not None
+    if not has_input2 and not has_job2:
+        parser.error(
+            "--input2 or (--projectID and --jobID2) are required for dataset 2"
+        )
+
+    if has_input1 and args.sym1 is None:
+        parser.error("--sym1 is required when --input1 is provided")
+    if has_input2 and args.sym2 is None:
+        parser.error("--sym2 is required when --input2 is provided")
+
+    if args.outputFile1 and not args.outputFile1.endswith(".cs"):
+        parser.error("--outputFile1 must end with .cs")
+    if args.outputFile2 and not args.outputFile2.endswith(".cs"):
+        parser.error("--outputFile2 must end with .cs")
+
+    if args.dist_tol is not None and args.dist_tol <= 0:
+        parser.error("--dist-tol must be positive")
+    if args.axis_tol is not None and args.axis_tol <= 0:
+        parser.error("--axis-tol must be positive")
+
+    return args
+
+
 def add_args(parser):
+    """Add CLI arguments for the symmetry_mismatch command.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        The argument parser to attach arguments to.
+    """
     parser.add_argument("-p", "--projectID", help="CryoSPARC Project ID (e.g., P407)")
     parser.add_argument(
         "-j1", "--jobID1", help="First input dataset CryoSPARC Job ID (e.g., J100)"

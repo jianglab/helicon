@@ -3,9 +3,13 @@
 """A Web app that helps you compare 2D images with helical structure projections"""
 
 import argparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def main(args):
+    """Launch the helical projection Shiny web app."""
     try:
         urls = [
             "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/app.py",
@@ -17,18 +21,32 @@ def main(args):
         import subprocess
 
         subprocess.call(cmd, shell=True)
-    except:
+    except Exception:
         homephage = "https://jianglab.science.psu.edu/HelicalProjection"
-        print(
-            f"ERROR in running a local instance of HelicalProjection. Please visit {homephage} to use the Web app instances"
+        logger.error(
+            "ERROR in running a local instance of HelicalProjection. Please visit %s to use the Web app instances",
+            homephage,
         )
 
 
 def add_args(parser):
+    """No additional CLI arguments for this web app launcher."""
     return parser
 
 
 def download_files(urls=[]):
+    """Download files from URLs to a temporary directory.
+
+    Parameters
+    ----------
+    urls : list of str
+        URLs to download.
+
+    Returns
+    -------
+    str
+        Path to the temporary directory.
+    """
     import tempfile
     import shutil
     import os

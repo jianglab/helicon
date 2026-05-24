@@ -1,4 +1,3 @@
-import unittest
 import os
 import shutil
 from pathlib import Path
@@ -8,8 +7,8 @@ import pandas as pd
 from helicon.lib.dataset import EMDB
 
 
-class TestEMDBMirror(unittest.TestCase):
-    def setUp(self):
+class TestEMDBMirror(object):
+    def setup_method(self, method):
         self.workspace = Path("test_emdb_mirror_workspace").resolve()
         if self.workspace.exists():
             # Ensure workspace is writable before deleting
@@ -22,7 +21,7 @@ class TestEMDBMirror(unittest.TestCase):
         self.cache_dir.mkdir()
         self.mirror_dir.mkdir()
 
-    def tearDown(self):
+    def teardown_method(self, method):
         if self.workspace.exists():
             # Ensure workspace is writable before deleting
             for root, dirs, files in os.walk(self.workspace):
@@ -50,9 +49,9 @@ class TestEMDBMirror(unittest.TestCase):
         emdb.emd_ids = ["29999"]
 
         xml_file = emdb.get_emdb_xml_file("29999")
-        self.assertTrue(xml_file.is_symlink())
+        assert xml_file.is_symlink()
         mirror_xml = self.mirror_dir / "structures/EMD-29999/header/emd-29999.xml"
-        self.assertEqual(str(xml_file.resolve()), str(mirror_xml.resolve()))
+        assert str(xml_file.resolve()) == str(mirror_xml.resolve())
 
         # Scenario 2: Mirror NOT writable
         # Clear mirror and cache
@@ -64,8 +63,8 @@ class TestEMDBMirror(unittest.TestCase):
         try:
             os.chmod(self.mirror_dir, 0o555)
             xml_file = emdb.get_emdb_xml_file("29999")
-            self.assertFalse(xml_file.is_symlink())
-            self.assertEqual(str(xml_file.parent), str(self.cache_dir))
+            assert not xml_file.is_symlink()
+            assert str(xml_file.parent) == str(self.cache_dir)
         finally:
             os.chmod(self.mirror_dir, 0o775)
 
@@ -76,9 +75,5 @@ class TestEMDBMirror(unittest.TestCase):
 
         mock_download.reset_mock()
         xml_file = emdb.get_emdb_xml_file("29999")
-        self.assertEqual(mock_download.call_count, 0)
-        self.assertEqual(xml_file, xml_cache)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert mock_download.call_count == 0
+        assert xml_file == xml_cache

@@ -4,6 +4,21 @@ from pathlib import Path
 import shiny
 from shiny import reactive
 from shiny.express import ui, module, render, expressify
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+__all__ = [
+    "file_selection_server",
+    "file_selection_ui",
+    "get_client_url",
+    "get_client_url_query_params",
+    "google_analytics",
+    "image_gallery",
+    "image_select",
+    "set_client_url_query_params",
+]
 
 
 def image_gallery(
@@ -23,6 +38,48 @@ def image_gallery(
     initial_selected_indices=reactive.value([]),
     style="",
 ):
+    """Render a gallery of images as a flexbox grid.
+
+    Supports selection, labels, links, and custom styling via Shiny UI.
+
+    Parameters
+    ----------
+    id : str
+        Unique element ID.
+    label : reactive.value, optional
+        Gallery heading label.
+    images : reactive.value, optional
+        List of images (file paths, PIL Images, or 2D numpy arrays).
+    display_image_labels : bool, optional
+        Whether to show image labels. Defaults to True.
+    display_dashed_line : bool, optional
+        Whether to show a dashed midline. Defaults to False.
+    image_labels : reactive.value, optional
+        Labels for each image.
+    image_links : reactive.value, optional
+        Links for each image.
+    image_size : reactive.value, optional
+        Image display size in pixels. Defaults to 128.
+    image_border : int, optional
+        Border width in pixels. Defaults to 2.
+    gap : int, optional
+        Gap between images in pixels. Defaults to 0.
+    justification : str, optional
+        Flexbox justify-content value. Defaults to ``"center"``.
+    enable_selection : bool, optional
+        If True, adds click-to-select behavior. Defaults to False.
+    allow_multiple_selection : bool, optional
+        If True, allows selecting multiple images. Defaults to False.
+    initial_selected_indices : reactive.value, optional
+        Indices of pre-selected images.
+    style : str, optional
+        Additional CSS inline styles.
+
+    Returns
+    -------
+    ui.Tag or tuple
+        UI element(s) for the gallery.
+    """
     if images() is None or len(images()) == 0:
         return None
 
@@ -284,6 +341,22 @@ def image_select(
 # server-side file selection
 @shiny.module.ui
 def file_selection_ui(label="Select a file", value=None, width="100%"):
+    """Shiny UI component for selecting a file via a browse popover.
+
+    Parameters
+    ----------
+    label : str, optional
+        Label for the file selector. Defaults to ``"Select a file"``.
+    value : str, optional
+        Initial file path. Defaults to None.
+    width : str, optional
+        CSS width. Defaults to ``"100%"``.
+
+    Returns
+    -------
+    ui.Tag
+        The file selection UI element.
+    """
     return shiny.ui.div(
         shiny.ui.popover(
             shiny.ui.input_action_button(
@@ -329,6 +402,26 @@ def file_selection_server(
     file_types: Optional[str | list[str]] = None,
     ignore_hidden_files=True,
 ):
+    """Shiny server module for file selection with directory browsing.
+
+    Parameters
+    ----------
+    input : shiny.Inputs
+        Module input.
+    output : shiny.Outputs
+        Module output.
+    session : shiny.Session
+        Module session.
+    file_types : str or list of str, optional
+        Allowed file extensions. If None, all files shown.
+    ignore_hidden_files : bool, optional
+        If True, hide filenames starting with ``.``. Defaults to True.
+
+    Returns
+    -------
+    reactive.value
+        Reactive value with the selected file path.
+    """
     if file_types is None:
         file_types = []
     elif isinstance(file_types, str):
@@ -345,10 +438,12 @@ def file_selection_server(
                 directories = [d for d in directories if d[0] != "."]
             directories = [".", ".."] + directories
             ui.update_select("sub_directory", choices=directories)
-        except Exception as e:
-            import traceback
-
-            print(traceback.format_exc())
+        except Exception:
+            logger.error(
+                "Failed to list sub-directories in %s",
+                input.current_directory(),
+                exc_info=True,
+            )
             m = ui.modal(
                 f"{input.current_directory()}: failed to list sub-directories.",
                 title="Folder access error",
@@ -393,10 +488,12 @@ def file_selection_server(
                 else:
                     selected = files_final[0]
             ui.update_select("file", choices=files_final, selected=selected)
-        except Exception as e:
-            import traceback
-
-            print(traceback.format_exc())
+        except Exception:
+            logger.error(
+                "Failed to list files in %s",
+                str(input.current_directory()),
+                exc_info=True,
+            )
             m = ui.modal(
                 f"{str(input.current_directory())}: failed to list files.",
                 title="Folder access error",
@@ -443,12 +540,39 @@ def google_analytics(id):
 
 
 def get_client_url(input):
+    """Reconstruct the full client URL from Shiny input data.
+
+    Parameters
+    ----------
+    input : shiny.Inputs
+        Shiny input object.
+
+    Returns
+    -------
+    str
+        The full client URL.
+    """
     d = input._map
     url = f"{d['.clientdata_url_protocol']()}//{d['.clientdata_url_hostname']()}:{d['.clientdata_url_port']()}{d['.clientdata_url_pathname']()}{d['.clientdata_url_search']()}"
     return url
 
 
 def get_client_url_query_params(input, keep_list=True):
+    """Parse query parameters from the client URL.
+
+    Parameters
+    ----------
+    input : shiny.Inputs
+        Shiny input object.
+    keep_list : bool, optional
+        If True, keep single-value parameters as lists.
+        Defaults to True.
+
+    Returns
+    -------
+    dict
+        Parsed query parameters.
+    """
     d = input._map
     qs = d[".clientdata_url_search"]().strip("?")
     import urllib.parse
@@ -462,6 +586,18 @@ def get_client_url_query_params(input, keep_list=True):
 
 
 def set_client_url_query_params(query_params):
+    """Update the client URL query parameters without reloading the page.
+
+    Parameters
+    ----------
+    query_params : dict
+        Query parameters to set.
+
+    Returns
+    -------
+    ui.Tag
+        A script tag that updates the browser URL.
+    """
     import urllib.parse
 
     encoded_query_params = urllib.parse.urlencode(query_params, doseq=True)

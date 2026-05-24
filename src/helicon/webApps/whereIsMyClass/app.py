@@ -8,6 +8,10 @@ from shinywidgets import render_plotly, render_widget
 import helicon
 
 from . import compute
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 params = reactive.value(None)
 
@@ -403,7 +407,7 @@ def get_params_from_file():
 
     project_root_dir.set(compute.get_project_root_dir(filepath))
     filepath_classes.set(compute.get_class_file(filepath))
-    print(filepath_classes())
+    logger.info(filepath_classes())
 
     msg = None
     try:
@@ -414,9 +418,9 @@ def get_params_from_file():
             df.loc[helix.index, "length"] = l
             df.loc[helix.index, "helixID"] = hi + 1
         params.set(df)
-    except Exception as e:
-        print(e)
-        msg = str(e)
+    except Exception:
+        logger.error("Failed to get class2d params from file", exc_info=True)
+        msg = ""
 
     if params() is None:
         if msg is None:
@@ -437,15 +441,15 @@ def get_params_from_file():
 @reactive.event(filepath_classes)
 def get_2d_images_from_files():
     req(filepath_classes())
-    print(filepath_classes())
+    logger.info(filepath_classes())
     if type(filepath_classes()) is list:
         data, apix, nx = compute.get_class3d_projections_from_files(filepath_classes())
     else:
         try:
             data, apix = compute.get_class2d_from_file(filepath_classes())
             nx = data.shape[-1]
-        except Exception as e:
-            print(e)
+        except Exception:
+            logger.error("Failed to read 2D class averages", exc_info=True)
             data, apix = None, 0
             nx = 0
             m = ui.modal(
@@ -472,8 +476,8 @@ def get_displayed_class_images():
     try:
         df = params()
         abundance.set(compute.get_class_abundance(df, n))
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.error("Failed to get class abundance", exc_info=True)
         m = ui.modal(
             f"Failed to get class abundance from the provided Class2D parameter and  image files. Make sure that the two files are for the same Class2D job",
             title="Information error",

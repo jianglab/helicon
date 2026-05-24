@@ -1,13 +1,34 @@
 """Entry point for helicon"""
 
 import argparse
+import logging
 import os, sys
 from importlib import import_module
 import helicon
+from helicon.lib.exceptions import HeliconError, HeliconExit
 
-cli_commands = ["cryosparc", "images2star", "proc3d"]
-shiny_commands = ["denovo3D", "helicalPitch", "helicalProjection", "whereIsMyClass"]
-streamlit_commands = ["ctfSimulation", "helicalLattice", "hi3d", "hill", "procart"]
+logger = logging.getLogger(__name__)
+
+cli_commands = [
+    "cryosparc",
+    "images2star",
+    "proc3d",
+    "symmetry_mismatch",
+]
+shiny_commands = [
+    "denovo3D",
+    "helicalPitch",
+    "helicalProjection",
+    "whereIsMyClass",
+]
+streamlit_commands = [
+    "ctfSimulation",
+    "helicalLattice",
+    "hi3d",
+    "hill",
+    "map2seq",
+    "procart",
+]
 
 
 class HeliconArgumentParser(argparse.ArgumentParser):
@@ -75,7 +96,7 @@ def _get_commands(
             sys.exit(-1)
         else:
             raise
-    except:
+    except Exception:
         subparser = sys.argv[1] if len(sys.argv) > 1 else None
         if subparser and subparser in subparsers.choices:
             subparsers.choices[subparser].print_help()
@@ -84,7 +105,20 @@ def _get_commands(
 
         sys.exit(-1)
 
-    args.main_function(args)
+    try:
+        args.main_function(args)
+    except HeliconExit:
+        sys.exit(0)
+    except HeliconError as e:
+        logger.error(f"ERROR: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"UNEXPECTED ERROR: {e}")
+        if helicon.available_cpu() > 1:
+            import traceback
+
+            traceback.print_exc()
+        sys.exit(1)
 
 
 def main():

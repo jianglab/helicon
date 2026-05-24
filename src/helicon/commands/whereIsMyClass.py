@@ -3,9 +3,13 @@
 """A Web app that maps 2D classes to helical tube/filament images"""
 
 import argparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def main(args):
+    """Launch the whereIsMyClass Shiny web app."""
     try:
         from pathlib import Path
 
@@ -15,12 +19,13 @@ def main(args):
         import subprocess
 
         subprocess.call(cmd, shell=True)
-    except:
+    except Exception:
         homephage = "https://jianglab.science.psu.edu/helicon"
-        print(f"Please visit {homephage} for more information")
+        logger.error("Please visit %s for more information", homephage)
 
 
 def add_args(parser):
+    """No additional CLI arguments for this web app launcher."""
     return parser
 
 

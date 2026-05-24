@@ -14,7 +14,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'pylops', 'psutil','rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm', 'uptime']
+dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'pylops', 'psutil', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm', 'uptime']
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -50,6 +50,10 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
+norecursedirs = ["*.egg-info", "__pycache__"]
 
 [tool.setuptools.dynamic]
 version = {attr = "helicon.__version__"}
