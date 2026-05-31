@@ -3,11 +3,15 @@
 """A command line tool that analyzes/transforms dataset(s) and saves the dataset in a RELION star file"""
 
 from __future__ import annotations
-import argparse, logging, math, os, sys
+import argparse, logging, math, sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from helicon.lib.exceptions import HeliconError, HeliconValidationError
+from helicon.lib.exceptions import (
+    HeliconError,
+    HeliconValidationError,
+    HeliconFileExistsError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +128,40 @@ def main(args: argparse.Namespace) -> None:
         if tmpCol in data:
             data.drop(tmpCol, inplace=True, axis=1)
 
+    if args.micrographStar is not None and "rlnMicrographName" in data:
+        import starfile
+
+        ref = starfile.read(args.micrographStar)
+        if isinstance(ref, dict):
+            ref = ref.get(
+                "particles",
+                ref.get("data_particles", ref.get("micrographs", ref)),
+            )
+        if "rlnMicrographName" not in ref:
+            raise HeliconError(
+                f"--micrographStar file {args.micrographStar} has no rlnMicrographName column"
+            )
+        # Build mapping: cleaned CS basename -> reference STAR micrograph path
+        ref_paths = ref["rlnMicrographName"].unique()
+        path_map = {}
+        for p in ref_paths:
+            key = Path(p.split("@")[-1]).name  # strip @ prefix, get basename
+            path_map[key] = p
+
+        # Clean CS micrograph names and map to reference paths
+        def _map_path(cs_path: str) -> str:
+            key = helicon.clean_cs_micrograph_path(cs_path)
+            if key in path_map:
+                return path_map[key]
+            logger.warning(
+                "No matching micrograph in reference STAR for %s (cleaned: %s)",
+                cs_path,
+                key,
+            )
+            return cs_path
+
+        data["rlnMicrographName"] = data["rlnMicrographName"].apply(_map_path)
+
     if len(data) == 0:
         raise HeliconError("nothing to do with 0 particles. I am going to quit")
 
@@ -157,7 +195,7 @@ def main(args: argparse.Namespace) -> None:
         from helicon import get_relion_project_folder, convert_dataframe_file_path
 
         relion_proj_folder = get_relion_project_folder(
-            os.path.abspath(args.output_starFile)
+            str(Path(args.output_starFile).resolve())
         )
         if relion_proj_folder:
             for attr in ["rlnImageName", "rlnMicrographName"]:
@@ -195,7 +233,8 @@ def main(args: argparse.Namespace) -> None:
             for si in range(args.splitNumSets):
                 subsets[si] = list(range(si, len(data), args.splitNumSets))
 
-        prefix, suffix = os.path.splitext(args.output_starFile)
+        prefix = Path(args.output_starFile).stem
+        suffix = Path(args.output_starFile).suffix
         for si, subset in enumerate(subsets):
             if args.splitNumSets == 2 and args.splitMode == "evenodd":
                 imageSubSetFileName = f"{prefix}.{['e', 'o'][si]}{suffix}"
@@ -227,7 +266,7 @@ def main(args: argparse.Namespace) -> None:
                     break
             if filename:
                 filename = data[filename].iloc[0].split("@")[-1]
-                if os.path.exists(filename):
+                if Path(filename).exists():
                     nx, ny, _ = helicon.get_image_size(filename)
                     x, unit = helicon.bytes2units(nx * ny * 4 * len(data))
                     logger.info(
@@ -362,6 +401,17 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=1,
     )
     parser.add_argument(
+        "--micrographStar",
+        metavar="<starfile>",
+        type=str,
+        help=(
+            "Reference RELION STAR file with rlnMicrographName entries. "
+            "CryoSPARC micrograph names are cleaned (hash + _patch_aligned_doseweighted "
+            "stripped) and mapped to matching entries from this STAR file."
+        ),
+        default=None,
+    )
+    parser.add_argument(
         "--force",
         type=int,
         metavar="<0|1>",
@@ -409,7 +459,7 @@ def check_args(
         o
         for o in all_options
         if o
-        not in "cpu first force ignoreBadParticlePath ignoreBadMicrographPath last folder splitNumSets splitMode tag verbose".split()
+        not in "cpu first force ignoreBadParticlePath ignoreBadMicrographPath last folder splitNumSets splitMode micrographStar tag verbose".split()
     ]
 
     if Path(args.output_starFile).suffix not in ".star .cs .csv".split():
@@ -418,15 +468,15 @@ def check_args(
             % (args.output_starFile)
         )
 
-    if os.path.exists(args.output_starFile) and not (
+    if Path(args.output_starFile).exists() and not (
         args.force == 1 or args.splitNumSets > 1
     ):
-        raise HeliconValidationError(
+        raise HeliconFileExistsError(
             "the output file (%s) exists. Use --force=1 to overwrite it"
             % (args.output_starFile)
         )
 
-    if args.setCTF and not os.path.exists(args.setCTF):
+    if args.setCTF and not Path(args.setCTF).exists():
         raise HeliconValidationError(
             'option "--setCTF %s" specifies of a nonexistent file' % (args.setCTF)
         )

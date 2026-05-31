@@ -18,6 +18,7 @@ from .io_mrc import get_image_number, get_image_size
 __all__ = [
     "Relion_OpticsGroup_Parameters",
     "assign_beamshifts_to_cluster",
+    "clean_cs_micrograph_path",
     "cistem2dataframe",
     "connect_cryosparc",
     "cs2dataframe",
@@ -179,7 +180,7 @@ def get_relion_project_folder(starFile: str) -> str | None:
     str or None
         Absolute path to the project folder, or None if it cannot be determined.
     """
-    filename_abs = os.path.abspath(starFile)
+    filename_abs = str(Path(starFile).resolve())
     if filename_abs.find("/job") == -1:
         return None
     parts = filename_abs.split("/")
@@ -187,11 +188,11 @@ def get_relion_project_folder(starFile: str) -> str | None:
         if p.startswith("job"):
             break
     job_folder = "/".join(parts[: pi + 1])
-    if not os.path.exists(os.path.join(job_folder, "default_pipeline.star")):
+    if not Path(job_folder, "default_pipeline.star").exists():
         return None
     pi = max(0, pi - 1)
     proj_folder = "/".join(parts[:pi])
-    if not os.path.exists(os.path.join(proj_folder, "default_pipeline.star")):
+    if not Path(proj_folder, "default_pipeline.star").exists():
         return None
     return proj_folder
 
@@ -453,7 +454,7 @@ def image2dataframe(
         realInputFile = inputFile.split("@")[-1]
     else:
         realInputFile = inputFile
-    if not os.path.exists(realInputFile):
+    if not Path(realInputFile).exists():
         raise HeliconIOError("cannot find file %s" % (realInputFile))
 
     if inputFile.endswith(".star"):  # relion
@@ -642,7 +643,9 @@ def dataframe_guess_data_type(data: pd.DataFrame) -> pd.DataFrame:
         # data[unknown_type_cols] = data[unknown_type_cols].apply(pd.to_numeric)
 
     try:
-        data.attrs["optics"] = dataframe_guess_data_type(data.attrs["optics"])
+        optics_df = data.attrs["optics"]
+        if optics_df is not None:
+            data.attrs["optics"] = dataframe_guess_data_type(optics_df)
     except (KeyError, AttributeError):
         pass
 
@@ -706,7 +709,17 @@ def star_dissolve_opticsgroup(data: pd.DataFrame) -> None:
 
 # all relion variables are defined here:
 # https://github.com/3dem/relion/blob/600499f35c721e2009135ee027078e69414f7edb/src/metadata_label.h
-Relion_OpticsGroup_Parameters = "rlnOpticsGroup rlnOpticsGroupName rlnMtfFileName rlnVoltage rlnSphericalAberration rlnAmplitudeContrast rlnMagnification rlnDetectorPixelSize rlnMicrographOriginalPixelSize rlnMicrographPixelSize rlnMicrographBinning rlnImagePixelSize rlnImageSize rlnImageDimensionality rlnBeamTiltX rlnBeamTiltY rlnOddZernike rlnEvenZernike".split()
+Relion_OpticsGroup_Parameters = (
+    "rlnOpticsGroup rlnOpticsGroupName rlnMtfFileName "
+    "rlnVoltage rlnSphericalAberration rlnAmplitudeContrast "
+    "rlnMagnification rlnDetectorPixelSize "
+    "rlnMicrographOriginalPixelSize rlnMicrographPixelSize rlnMicrographBinning "
+    "rlnImagePixelSize rlnImageSize rlnImageDimensionality "
+    "rlnBeamTiltX rlnBeamTiltY "
+    "rlnOddZernike rlnEvenZernike "
+    "rlnMagMat00 rlnMagMat01 rlnMagMat10 rlnMagMat11 "
+    "rlnCtfDataAreCtfPremultiplied"
+).split()
 
 
 def star_build_opticsgroup(data: pd.DataFrame) -> None:
@@ -724,6 +737,27 @@ def star_build_opticsgroup(data: pd.DataFrame) -> None:
     assert (
         data.attrs["convention"] == "relion"
     ), f"star_build_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
+
+    vars = [
+        v for v in Relion_OpticsGroup_Parameters if v in data and v != "rlnOpticsGroup"
+    ]
+    if not vars:
+        return
+
+    ogp_list = []
+    for gi, g in enumerate(
+        data.groupby(vars if len(vars) > 1 else vars[0], sort=False)
+    ):
+        gn, gdata = g
+        d = {"rlnOpticsGroup": gi + 1, "rlnOpticsGroupName": f"opticsGroup{gi + 1}"}
+        for v in vars:
+            d[v] = gdata[v].values[0]
+        ogp_list.append(d)
+        data.loc[gdata.index, "rlnOpticsGroup"] = gi + 1
+
+    optics = pd.DataFrame(ogp_list)
+    data.attrs["optics"] = optics
+    data.drop(columns=vars, inplace=True)
 
 
 def remove_invalid_opticsgroup_parameters(data: pd.DataFrame) -> None:
@@ -791,8 +825,6 @@ def remove_invalid_opticsgroup_parameters(data: pd.DataFrame) -> None:
             missingVars.remove("rlnImagePixelSize")
         return missingVars
 
-    remove_invalid_opticsgroup_parameters(data)
-
     missingVars = missing_required_opticsgroup_parameters(data)
     if not missingVars:
         return
@@ -827,11 +859,10 @@ def remove_invalid_opticsgroup_parameters(data: pd.DataFrame) -> None:
                 var = "rlnMicrographName"
             if var:
                 imageFileName = data.loc[data.index[0], var].split("@")[-1]
-                if os.path.exists(imageFileName):
+                if Path(imageFileName).exists():
                     nx, ny, nz = get_image_size(imageFileName)
-                    dim = 3 if nz > 1 else 2
                     optics.loc[:, "rlnImageSize"] = ny
-                    optics.loc[:, "rlnImageDimensionality"] = dim
+                    optics.loc[:, "rlnImageDimensionality"] = 2
                 else:
                     logger.warning(
                         "failed to obtain rlnImageSize, rlnImageDimensionality from non-existing file %s. You should manually add both parameters to the optics group of the star file",
@@ -1021,7 +1052,7 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
                 mgraphName, mgraphParticles = mgraph
                 # make sure that the particles are in an image format supported by Relion
                 # https://www2.mrc-lmb.cam.ac.uk/relion/index.php/Conventions_%26_File_formats#Image_I.2FO
-                prefix, suffix = os.path.splitext(mgraphName)
+                suffix = Path(mgraphName).suffix
                 if suffix not in [".mrcs", ".mrc", ".tnf", ".spi", ".img", ".hed"]:
                     logger.warning(
                         "RELION does not support image format: %s",
@@ -1030,6 +1061,7 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
 
     if format in ["v3", "relion3"]:
         star_build_opticsgroup(data2)
+        remove_invalid_opticsgroup_parameters(data2)
         if "rlnImageName" not in data and "rlnMicrographName" in data:
             data_block_tag = "data_micrographs"
         else:
@@ -1046,8 +1078,8 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
         fp = open(starFile, "wt")
 
     try:
-        optics = data2.attrs["optics"]
-        if len(optics) > 0:
+        optics = data2.attrs.get("optics")
+        if optics is not None and len(optics) > 0:
             fp.write("\n# version 30001\n")
             fp.write("\ndata_optics\n\nloop_ \n")
             keys = [k for k in optics.columns if k.startswith("rln")]
@@ -1139,6 +1171,13 @@ def cs2dataframe(
                 pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
             )
         for extra_df in extra_data:
+            # Drop passthrough columns that already exist in the input file
+            # to avoid _x/_y suffix renaming from merge()
+            cols_to_drop = [
+                c for c in extra_df.columns if c != "uid" and c in data.columns
+            ]
+            if cols_to_drop:
+                extra_df = extra_df.drop(columns=cols_to_drop)
             data = data.merge(extra_df, on="uid", how="left")
         data = data.loc[:, ~data.columns.duplicated()]
     if "blob/path" not in data and "micrograph_blob/path" not in data:
@@ -1417,17 +1456,17 @@ def dataframe_normalize_filename(
             return getRealFileName.mapping[filename]
 
         basenames = []
-        if not os.path.isabs(filename):
+        if not Path(filename).is_absolute():
             basenames.append(filename)
-        basenames.append(os.path.basename(filename))
+        basenames.append(Path(filename).name)
 
         basenames += [f[:-4] + ".mrcs" for f in basenames if f.endswith(".mrc")]
 
         folders = [folder for folder in alternative_folders]
         if isinstance(source_path, str):
-            folders += [os.path.dirname(os.path.realpath(source_path))]
+            folders += [str(Path(source_path).resolve().parent)]
         elif isinstance(source_path, (list, tuple, set)):
-            folders += [os.path.dirname(os.path.realpath(sp)) for sp in source_path]
+            folders += [str(Path(sp).resolve().parent) for sp in source_path]
 
         relion_folder = get_relion_project_folder(filename)
         if relion_folder is not None:
@@ -1437,35 +1476,33 @@ def dataframe_normalize_filename(
 
         for basename in basenames:
             for folder in folders:
-                filenameChoices += [os.path.join(folder, basename)]
-                filenameChoices += [os.path.join(folder, "..", basename)]
-                filenameChoices += [os.path.join(folder, "../..", basename)]
+                filenameChoices += [str(Path(folder) / basename)]
+                filenameChoices += [str(Path(folder) / ".." / basename)]
+                filenameChoices += [str(Path(folder) / "../.." / basename)]
 
         match = None
         match_link = None
         for fci, fc in enumerate(filenameChoices):
-            if os.path.isfile(fc):
+            if Path(fc).is_file():
                 match = fc
                 break
-            if os.path.islink(fc):
+            if Path(fc).is_symlink():
                 match_link = fc
 
         if match:
-            ret = os.path.normpath(match)
+            ret = str(Path(match).resolve())
 
             # when a new folder is found to have a matching file, all files of the same file type in the folder
             # will be pre-mapped to avoid multiple file checks later
             import glob
 
-            suffix = os.path.splitext(filename)[-1]
-            filename_dir = os.path.dirname(filename)
-            allfiles = glob.glob(
-                os.path.join(os.path.dirname(match), "*" + os.path.splitext(match)[-1])
-            )
+            suffix = Path(filename).suffix
+            filename_dir = Path(filename).parent
+            allfiles = glob.glob(str(Path(match).parent / ("*" + Path(match).suffix)))
             for f in allfiles:
-                tmp_basename = os.path.splitext(os.path.basename(f))[0] + suffix
-                getRealFileName.mapping[os.path.join(filename_dir, tmp_basename)] = (
-                    os.path.normpath(f)
+                tmp_basename = Path(f).stem + suffix
+                getRealFileName.mapping[str(filename_dir / tmp_basename)] = str(
+                    Path(f).resolve()
                 )
         else:
             if ignore_bad_path:
@@ -1476,7 +1513,7 @@ def dataframe_normalize_filename(
                     % (
                         filename,
                         source_path,
-                        os.path.normpath(match_link),
+                        str(Path(match_link).resolve()),
                         os.readlink(match_link),
                     )
                 )
@@ -1734,11 +1771,36 @@ def _electron_wavelength(voltage_kv: float | np.ndarray) -> np.ndarray:
     return lam * 1e10
 
 
+def clean_cs_micrograph_path(path: str) -> str:
+    """Strip cryoSPARC hash prefix and ``_patch_aligned_doseweighted`` suffix from a micrograph filename.
+
+    Parameters
+    ----------
+    path : str
+        CryoSPARC micrograph path (absolute or relative).
+
+    Returns
+    -------
+    str
+        Cleaned filename with hash and ``_patch_aligned_doseweighted`` removed.
+    """
+    name = Path(path).name
+    parts = name.split("_", 1)
+    if len(parts) == 2 and len(parts[0]) > 10 and parts[0].isdigit():
+        name = parts[1]
+    name = name.replace("_patch_aligned_doseweighted", "")
+    return name
+
+
 def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
     """Convert a CryoSPARC-convention DataFrame to RELION convention.
 
     Maps cryosparc column names (e.g. ``blob/path``, ``ctf/df1_A``) to
     their RELION equivalents (``rlnImageName``, ``rlnDefocusU``, etc.).
+
+    Both CryoSPARC and RELION use top-left origin for particle
+    coordinates in the micrograph, so no Y-axis inversion is applied:
+    ``rlnCoordinateY = center_y_frac * height``.
 
     Parameters
     ----------
@@ -1803,10 +1865,11 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
     # 2D class assignments
     if "alignments2D/class" in data:
         ret["rlnClassNumber"] = data["alignments2D/class"].astype(int) + 1
+    origin_x = origin_y = None
     if "alignments2D/shift" in data:
         shifts = pd.DataFrame(data["alignments2D/shift"].tolist()).round(2)
-        ret["rlnOriginX"] = -shifts.iloc[:, 0]
-        ret["rlnOriginY"] = -shifts.iloc[:, 1]
+        origin_x = -shifts.iloc[:, 0]
+        origin_y = -shifts.iloc[:, 1]
     if "alignments2D/pose" in data:
         ret["rlnAnglePsi"] = -np.rad2deg(data["alignments2D/pose"]).round(2)
 
@@ -1831,8 +1894,14 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
 
     if "alignments3D/shift" in data:
         shifts = pd.DataFrame(data["alignments3D/shift"].tolist()).round(2)
-        ret["rlnOriginX"] = shifts.iloc[:, 0]
-        ret["rlnOriginY"] = shifts.iloc[:, 1]
+        origin_x = shifts.iloc[:, 0]
+        origin_y = shifts.iloc[:, 1]
+
+    # Output Angstrom origins for RELION 3.1+ convention (pixel origins deprecated)
+    if origin_x is not None and "blob/psize_A" in data:
+        apix = data["blob/psize_A"]
+        ret["rlnOriginXAngst"] = (origin_x * apix).round(2)
+        ret["rlnOriginYAngst"] = (origin_y * apix).round(2)
 
     if "location/center_x_frac" in data and "location/center_y_frac" in data:
         if "location/micrograph_shape" in data:
@@ -1845,12 +1914,11 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
             shape_df = pd.DataFrame(loc_shape.tolist())
             my = shape_df.iloc[:, 0]
             mx = shape_df.iloc[:, 1]
+            y_frac = data["location/center_y_frac"]
             ret["rlnCoordinateX"] = (
                 (data["location/center_x_frac"] * mx).astype(float).round(2)
             )
-            ret["rlnCoordinateY"] = (
-                (data["location/center_y_frac"] * my).astype(float).round(2)
-            )
+            ret["rlnCoordinateY"] = (y_frac * my).astype(float).round(2)
 
     if "filament/filament_uid" in data:
         if "blob/path" in data:
@@ -1910,21 +1978,25 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         ret["rlnCtfScalefactor"] = data["ctf/scale"]
 
     if "ctf/trefoil_A" in data:
-        tf = pd.DataFrame(
-            data["ctf/trefoil_A"].tolist(), columns=["trefoil_real", "trefoil_imag"]
+        logger.warning(
+            "ctf/trefoil_A found in cryoSPARC data but not converted to STAR file. "
+            "RELION encodes trefoil via rlnOddZernike in the optics group; "
+            "the conversion is not yet implemented."
         )
-        ret["rlnTrefoilReal"] = tf["trefoil_real"]
-        ret["rlnTrefoilImag"] = tf["trefoil_imag"]
 
     if "ctf/tetra_A" in data:
-        tetra = pd.DataFrame(data["ctf/tetra_A"].tolist())
-        for i in range(tetra.shape[1]):
-            ret[f"rlnTetrafoil_{i}"] = tetra.iloc[:, i]
+        logger.warning(
+            "ctf/tetra_A found in cryoSPARC data but not converted to STAR file. "
+            "RELION encodes tetrafoil via rlnEvenZernike in the optics group; "
+            "the conversion is not yet implemented."
+        )
 
     if "ctf/anisomag" in data:
-        am = pd.DataFrame(data["ctf/anisomag"].tolist())
-        for i in range(am.shape[1]):
-            ret[f"rlnAnisoMag_{i}"] = am.iloc[:, i]
+        logger.warning(
+            "ctf/anisomag found in cryoSPARC data but not converted to STAR file. "
+            "RELION encodes anisotropic magnification via rlnMagMat00-11 in the optics group; "
+            "the conversion is not yet implemented."
+        )
 
     # 3D variability introduced in v2.9
     import fnmatch
@@ -1981,19 +2053,19 @@ def mrc2mrcs(data: pd.DataFrame) -> pd.DataFrame:
     names = set([f for f in names if f.endswith(".mrc")])
     if len(names):
         for name in names:
-            folder = os.path.dirname(name)
-            if not os.access(folder, os.W_OK):
-                folder = "./mrc2mrcs"
-                if not os.path.exists(folder):
-                    os.makedirs(folder)
-            name2 = os.path.basename(name) + "s"
-            name2 = os.path.join(folder, name2)
-            mapping[name] = name2
-            if not os.path.exists(name2):
-                if os.path.islink(name2):
-                    os.remove(name2)
-                name_abs = os.path.abspath(os.path.normpath(name))
-                os.symlink(name_abs, name2)
+            folder = Path(name).parent
+            if not os.access(str(folder), os.W_OK):
+                folder = Path("./mrc2mrcs")
+            if not folder.exists():
+                folder.mkdir(parents=True)
+            name2 = Path(name).name + "s"
+            name2 = folder / name2
+            mapping[name] = str(name2)
+            if not name2.exists():
+                if name2.is_symlink():
+                    name2.unlink()
+                name_abs = str(Path(name).resolve())
+                os.symlink(name_abs, str(name2))
         data.loc[:, "filename"] = data["filename"].map(mapping)
     if "rlnImageName" in data:  # Relion star file
         data.loc[:, "rlnImageName"] = pid.astype(str) + "@" + data["filename"]

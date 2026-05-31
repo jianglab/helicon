@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import helicon
-import os
+from pathlib import Path
 
 
 option_name = "setCTF"
@@ -56,8 +56,7 @@ def handle(data, args, index_d, param):
 
         def setMicrographCTF(mgraphName, mgraphParticles, data, ctfparms):
 
-            mid = os.path.basename(mgraphName)
-            mid = os.path.splitext(mid)[0]
+            mid = Path(mgraphName).stem
             mid2 = mid.split(".")[0]
 
             d = None

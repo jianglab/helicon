@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 from uuid import uuid4
 import sys
-from helicon.lib.exceptions import HeliconError, HeliconValidationError
+from helicon.lib.exceptions import (
+    HeliconError,
+    HeliconValidationError,
+    HeliconFileExistsError,
+)
 
 sys.executable
 
@@ -432,7 +436,7 @@ def HelicalSegmentConsistency(
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if 0:
         OutputFigsDir = "Figs" + stamp
-    if not os.path.isdir(OutputFigsDir):
+    if not Path(OutputFigsDir).is_dir():
         os.mkdir(OutputFigsDir)
 
     logger.info("Output figs dir: %s", OutputFigsDir)
@@ -1101,7 +1105,7 @@ def HelicalSegmentConsistency(
     #
     # Feel free to rerun after editing `plot_one` to use your real data.
 
-    if not os.path.isdir(OutputFigsDir):
+    if not Path(OutputFigsDir).is_dir():
         os.mkdir(OutputFigsDir)
 
     os.chdir(OutputFigsDir)
@@ -1461,7 +1465,7 @@ def _write_star(df: pd.DataFrame, path: str, like: str | None = None):
             "Writing .star requires the 'starfile' package.\n"
             "Install with: pip install starfile"
         )
-    if like and os.path.exists(like):
+    if like and Path(like).exists():
         src = starfile.read(like)
         if isinstance(src, dict) and "data_optics" in src:
             out = dict(src)  # shallow copy optics etc.
@@ -1513,8 +1517,8 @@ def check_args(
     argparse.Namespace
         The validated arguments.
     """
-    if os.path.exists(args.output_star) and not args.force:
-        raise HeliconValidationError(
+    if Path(args.output_star).exists() and not args.force:
+        raise HeliconFileExistsError(
             f"Refusing to overwrite existing file: {args.output_star} (use --force 1)"
         )
     return args

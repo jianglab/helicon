@@ -3,7 +3,7 @@
 from __future__ import annotations
 import helicon
 import pandas as pd
-import os
+from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
@@ -49,16 +49,16 @@ def handle(data, args, index_d, param):
 
         count = 0
 
-        subdir = os.path.splitext(args.output_starFile)[0]
-        if not os.path.isdir(subdir):
-            os.mkdir(subdir)
+        subdir = Path(args.output_starFile).with_suffix("")
+        if not subdir.is_dir():
+            subdir.mkdir()
 
         for mgraphName, mgraphParticles in mgraphs:
-            mgraphName2 = os.path.join(subdir, os.path.basename(mgraphName))
+            mgraphName2 = subdir / Path(mgraphName).name
             n = len(mgraphParticles)
             if not (
-                os.path.exists(mgraphName2)
-                and helicon.EMUtil.get_image_count(mgraphName2) == n
+                mgraphName2.exists()
+                and helicon.EMUtil.get_image_count(str(mgraphName2)) == n
             ):
                 particles_indices = sorted(
                     list(indices.iloc[mgraphParticles.index].astype(int))
@@ -66,11 +66,11 @@ def handle(data, args, index_d, param):
                 for i in range(n):
                     i2 = particles_indices[i] - 1
                     d.read_image(mgraphName, i2)
-                    d.write_image(mgraphName2, i)
+                    d.write_image(str(mgraphName2), i)
             rlnImageName = (
                 pd.Series(list(range(1, n + 1))).map("{:06d}".format)
                 + "@"
-                + mgraphName2
+                + str(mgraphName2)
             )
             data.loc[mgraphParticles.index, "rlnImageName"] = (
                 rlnImageName.values

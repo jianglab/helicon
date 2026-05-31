@@ -32,9 +32,10 @@ def load_h5_file(filepath: str) -> tuple[Any, Any, float, float, float]:
         If the file extension is not .h5.
     """
     # based on empiar-12236 apoferritin ptychography dataset
-    import os, h5py
+    from pathlib import Path
+    import h5py
 
-    extension = os.path.splitext(filepath)[-1].lower()
+    extension = Path(filepath).suffix.lower()
     assert extension == ".h5", f"ERROR: only hdf5 (.h5) files are supported"
 
     file = h5py.File(filepath, "r")
@@ -97,17 +98,15 @@ def reconstruct_ptychography(
     from py4DSTEM.process.phase import Parallax, SingleslicePtychography
     from py4DSTEM.process.calibration import get_probe_size
     from py4DSTEM import DataCube
+    from pathlib import Path
     import numpy as np
-    import os
 
     assert py4DSTEM is not None, "py4DSTEM must be installed to run this function"
     assert (
         isinstance(filepath, str) and len(filepath) > 0
     ), "filepath must be a non-empty string"
-    assert os.path.exists(filepath), f"File {filepath} does not exist"
-    assert (
-        os.path.splitext(filepath)[-1].lower() == ".h5"
-    ), "Only .h5 files are supported"
+    assert Path(filepath).exists(), f"File {filepath} does not exist"
+    assert Path(filepath).suffix.lower() == ".h5", "Only .h5 files are supported"
     assert isinstance(
         defocus_initial_guess, (int, float)
     ), "defocus_initial_guess must be a number"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import helicon
 import pandas as pd
+from pathlib import Path
 import os
 import logging
 
@@ -71,9 +72,9 @@ def handle(data, args, index_d, param):
         for mgraphName, mgraphParticles in mgraphs:
             tmpdata = data.loc[mgraphParticles.index]
             filename = tmpdata["rlnImageName"].iloc[0].split("@")[-1]
-            newfilename = os.path.splitext(filename)[0] + tag + ".mrcs"
-            if not os.access(os.path.dirname(newfilename), os.W_OK):
-                newfilename = os.path.basename(newfilename)
+            newfilename = str(Path(filename).with_suffix("")) + tag + ".mrcs"
+            if not os.access(Path(newfilename).parent, os.W_OK):
+                newfilename = Path(newfilename).name
             pcount = 0
             for ri, row in tmpdata.iterrows():
                 pid, filename = row["rlnImageName"].split("@")

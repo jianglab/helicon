@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 import argparse, logging, sys
-from helicon.lib.exceptions import HeliconError, HeliconValidationError
+from helicon.lib.exceptions import (
+    HeliconError,
+    HeliconValidationError,
+    HeliconFileExistsError,
+)
 from pathlib import Path
 import numpy as np
 import mrcfile
@@ -177,7 +181,7 @@ def check_args(
         args.outputMapFile = Path(args.inputMapFile[0]).with_suffix(".proc3d.mrc")
 
     if args.outputMapFile.exists() and not args.force:
-        raise HeliconValidationError(
+        raise HeliconFileExistsError(
             f"output file {str(args.outputMapFile)} already exists. Use --force to overwrite it"
         )
 

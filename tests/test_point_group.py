@@ -1,10 +1,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
+from pathlib import Path
 import sys
-import os
 
 # Add src to path if needed
-sys.path.append(os.path.abspath("src"))
+sys.path.append(str(Path("src").resolve()))
 
 from helicon.lib.point_group import PointGroup
 

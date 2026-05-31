@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import helicon
-import os
+from pathlib import Path
 
 
 option_name = "path"
@@ -46,11 +46,10 @@ def handle(data, args, index_d, param):
             if attr in data:
                 from helicon import get_relion_project_folder
 
-                relion_proj_folder = get_relion_project_folder(
-                    os.path.abspath(args.output_starFile)
-                )
+                output_star = Path(args.output_starFile).resolve()
+                relion_proj_folder = get_relion_project_folder(str(output_star))
                 relpath_start = (
-                    os.path.dirname(os.path.abspath(args.output_starFile))
+                    str(output_star.parent)
                     if relion_proj_folder is None
                     else relion_proj_folder
                 )

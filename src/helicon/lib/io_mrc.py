@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 import sys
 from typing import Any
 import numpy as np
@@ -32,7 +32,7 @@ def get_image_number(imageFile: str, as2D: bool = False) -> int:
     int
         Number of images in the file.
     """
-    if not os.path.exists(imageFile):
+    if not Path(imageFile).exists():
         raise HeliconIOError(f"cannot find image file {imageFile}")
     import mrcfile
 
@@ -57,7 +57,7 @@ def get_image_size(imageFile: str) -> tuple[int, int, int]:
     tuple of int
         Tuple of (nx, ny, nz) dimensions.
     """
-    if not os.path.exists(imageFile):
+    if not Path(imageFile).exists():
         raise HeliconIOError(f"cannot find image file {imageFile}")
     import mrcfile
 
@@ -83,7 +83,7 @@ def read_image_2d(imageFile: str, i: int) -> np.ndarray:
     np.ndarray
         2D numpy array of the image slice.
     """
-    if not os.path.exists(imageFile):
+    if not Path(imageFile).exists():
         raise HeliconIOError(f"cannot find image file {imageFile}")
     i = int(i)
     import mrcfile

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import helicon
 import pandas as pd
-import os
+from pathlib import Path
 
 
 option_name = "replaceImageName"
@@ -41,7 +41,7 @@ def handle(data, args, index_d, param):
     if param:
         replaceImageName = param
 
-        if not os.path.exists(replaceImageName):
+        if not Path(replaceImageName).exists():
             raise HeliconError("\\tERROR: %s does not exist")
 
         nImage = helicon.EMUtil.get_image_count(replaceImageName)

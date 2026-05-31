@@ -271,12 +271,11 @@ def cs_to_dataframe(cs_file):
         locations = pd.DataFrame(data["location/micrograph_shape"].tolist())
         my = locations.iloc[:, 0]
         mx = locations.iloc[:, 1]
+        y_frac = data["location/center_y_frac"]
         ret["rlnCoordinateX"] = (
             (data["location/center_x_frac"] * mx).astype(float).round(2)
         )
-        ret["rlnCoordinateY"] = (
-            (data["location/center_y_frac"] * my).astype(float).round(2)
-        )
+        ret["rlnCoordinateY"] = (y_frac * my).astype(float).round(2)
 
     # 2D class assignments
     ret["rlnClassNumber"] = data["alignments2D/class"].astype(int) + 1

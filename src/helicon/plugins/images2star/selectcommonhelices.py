@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import helicon
-import os
+from pathlib import Path
 from helicon.lib.exceptions import HeliconError
 import logging
 
@@ -48,7 +48,7 @@ def handle(data, args, index_d, param):
         assert "rlnMicrographName" in data
         assert "rlnHelicalTubeID" in data
 
-        if sf is None or not os.path.exists(sf):
+        if sf is None or not Path(sf).exists():
             raise HeliconError(
                 "\tERROR: option --selectCommonHelices %s has specified a non-existent file %s"
                 % (param, sf)

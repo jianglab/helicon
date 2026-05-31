@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys, os, datetime, logging
+from pathlib import Path
 
 __all__ = [
     "color_print",
@@ -57,7 +58,7 @@ def get_logger(logfile: str = "", verbose: int = 0) -> logging.Logger:
     import logging
 
     if not logfile:
-        logfile = os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".log"
+        logfile = Path(sys.argv[0]).stem + ".log"
 
     logger = logging.getLogger(logfile)
     logger.setLevel(logging.DEBUG)
@@ -87,7 +88,7 @@ def get_logger(logfile: str = "", verbose: int = 0) -> logging.Logger:
 
     logger.addHandler(ch)
     logger.addHandler(fh)
-    if os.path.getsize(logfile) > 0:
+    if Path(logfile).stat().st_size > 0:
         logger.info("%s" % ("#" * 128))
     return logger
 

@@ -41,18 +41,18 @@ def which(program: str, use_current_dir: int = 0) -> str | None:
     """
     location = None
     if program.find(os.sep) != -1:
-        file = os.path.abspath(program)
-        if os.path.exists(file) and os.access(file, os.X_OK):
-            location = os.path.abspath(file)
+        file = Path(program).resolve()
+        if file.exists() and os.access(file, os.X_OK):
+            location = str(file)
     else:
         path = os.environ["PATH"]
         if use_current_dir:
             path = ".:%s" % (path)
         dirs = path.split(":")
         for d in dirs:
-            file = os.path.join(d, program)
-            if os.path.exists(file) and os.access(file, os.X_OK):
-                location = os.path.abspath(file)
+            file = Path(d) / program
+            if file.exists() and os.access(file, os.X_OK):
+                location = str(file.resolve())
                 break
     return location
 
@@ -252,11 +252,9 @@ def is_file_readable(filename: str) -> bool:
     bool
         True if the file exists and is readable, False otherwise.
     """
-    import os
-
-    if not os.path.exists(filename):
+    if not Path(filename).exists():
         return False
-    if os.path.isfile(filename):
+    if Path(filename).is_file():
         return os.access(filename, os.R_OK)
     else:
         return False
@@ -275,16 +273,14 @@ def is_file_writable(filename: str) -> bool:
     bool
         True if the file or its parent directory is writable.
     """
-    import os
-
-    if os.path.exists(filename):
-        if os.path.isfile(filename):
+    if Path(filename).exists():
+        if Path(filename).is_file():
             return os.access(filename, os.W_OK)
         else:
             return False
-    pdir = os.path.dirname(filename)
-    if not pdir:
-        pdir = "."
+    pdir = Path(filename).parent
+    if not str(pdir):
+        pdir = Path(".")
     return os.access(pdir, os.W_OK)
 
 
@@ -312,12 +308,12 @@ def file_ready(
     if type(filenames) == type([]):
         ready = 1
         for f in filenames:
-            if not (os.path.exists(f) and os.path.getsize(f)):
+            if not (Path(f).exists() and Path(f).stat().st_size):
                 ready = 0
                 break
         return ready
     else:
-        ready = os.path.exists(filenames) and os.path.getsize(filenames) > minSize
+        ready = Path(filenames).exists() and Path(filenames).stat().st_size > minSize
     if ready:
         return 1
     elif wait > 0:

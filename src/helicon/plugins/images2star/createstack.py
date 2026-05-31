@@ -5,7 +5,6 @@ import logging
 import helicon
 import numpy as np
 from pathlib import Path
-import os
 from tqdm import tqdm
 import mrcfile
 
@@ -49,7 +48,7 @@ def handle(data, args, index_d, param):
         # outputFile:rescale2size=<n>:float16=<0|1>
         outputFile, param_dict = helicon.parse_param_str(param)
 
-        if os.path.splitext(outputFile)[1] != ".mrcs":
+        if Path(outputFile).suffix != ".mrcs":
             suffix = Path(outputFile).suffix
             logger.error(
                 "a .mrcs file is expected while you have specified %s! I will not do anything",
@@ -74,7 +73,7 @@ def handle(data, args, index_d, param):
 
         force = int(param_dict.get("force", 0))
         if not force:
-            if os.path.exists(outputFile):
+            if Path(outputFile).exists():
                 with mrcfile.open(outputFile, header_only=True) as mrc:
                     if not (
                         mrc.header.nx == newsize

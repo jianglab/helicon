@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
+from pathlib import Path
 import pandas as pd
 from helicon.lib import io
 from helicon.lib.euler import (
@@ -133,20 +134,15 @@ class TestIo(object):
         np.save(self.cs_file, self.cs_array)
 
     def teardown_method(self, method):
-        import os
+        if Path(self.star_file).exists():
+            Path(self.star_file).unlink()
+        if Path(self.cs_file).exists():
+            Path(self.cs_file).unlink()
 
-        if os.path.exists(self.star_file):
-            os.remove(self.star_file)
-        if os.path.exists(self.cs_file):
-            os.remove(self.cs_file)
-
-    @patch("os.path.islink")
-    @patch("os.path.isfile")
-    @patch("os.path.exists")
+    @patch.object(Path, "is_symlink", return_value=False)
+    @patch.object(Path, "is_file", return_value=True)
+    @patch.object(Path, "exists", return_value=True)
     def test_star2dataframe(self, mock_exists, mock_isfile, mock_islink):
-        mock_exists.return_value = True
-        mock_isfile.return_value = True
-        mock_islink.return_value = False
         df = io.star2dataframe(self.star_file)
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 2
@@ -167,17 +163,12 @@ class TestIo(object):
             particles_df = df_read["particles"]
         assert len(particles_df) == 2
         assert "rlnImageName" in particles_df.columns
-        import os
+        Path(output_star_file).unlink()
 
-        os.remove(output_star_file)
-
-    @patch("os.path.islink")
-    @patch("os.path.isfile")
-    @patch("os.path.exists")
+    @patch.object(Path, "is_symlink", return_value=False)
+    @patch.object(Path, "is_file", return_value=True)
+    @patch.object(Path, "exists", return_value=True)
     def test_cs2dataframe(self, mock_exists, mock_isfile, mock_islink):
-        mock_exists.return_value = True
-        mock_isfile.return_value = True
-        mock_islink.return_value = False
         with patch("numpy.load") as mock_load:
             mock_load.return_value = self.cs_array
             df = io.cs2dataframe(
@@ -197,9 +188,7 @@ class TestIo(object):
         cs_read = np.load(output_cs_file, allow_pickle=True)
         assert len(cs_read) == 2
         assert "ctf/accel_kv" in cs_read.dtype.names
-        import os
-
-        os.remove(output_cs_file)
+        Path(output_cs_file).unlink()
 
     def test_dataframe_convert(self):
         # Test CryoSPARC to RELION conversion
@@ -220,3 +209,127 @@ class TestIo(object):
         # Test RELION to CryoSPARC conversion
         with pytest.raises(NameError):
             io.dataframe_convert(relion_df, target="cryosparc")
+
+    def test_mrc2mrcs_preserves_extension(self, tmp_path):
+        mrc_file = tmp_path / "particles.mrc"
+        mrc_file.write_text("")
+        df = pd.DataFrame(
+            {
+                "rlnImageName": [
+                    f"000001@{mrc_file}",
+                    f"000002@{mrc_file}",
+                ]
+            }
+        )
+        result = io.mrc2mrcs(df.copy())
+        assert result["rlnImageName"][0].endswith(".mrcs")
+        assert result["rlnImageName"][1].endswith(".mrcs")
+        name = result["rlnImageName"][0].split("@")[1]
+        assert name.endswith(".mrcs"), f"Expected .mrcs suffix, got: {name}"
+
+    def test_dataframe_convert_coordinates(self):
+        """Test coordinate conversion: both CS and RELION use top-left origin."""
+        cs_df = pd.DataFrame(
+            {
+                "location/center_x_frac": [0.25, 0.5, 0.75],
+                "location/center_y_frac": [0.25, 0.5, 0.75],
+                "location/micrograph_shape": [[4096, 4096], [4096, 4096], [4096, 4096]],
+                "blob/path": ["/a.mrc"] * 3,
+                "blob/idx": [0, 1, 2],
+                "blob/psize_A": [1.0, 1.0, 1.0],
+                "alignments2D/shift": [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        # No Y inversion: center_y_frac * height
+        assert r["rlnCoordinateY"].iloc[0] == 1024.0
+        assert r["rlnCoordinateY"].iloc[1] == 2048.0
+        assert r["rlnCoordinateY"].iloc[2] == 3072.0
+        # X is also center_x_frac * width
+        assert r["rlnCoordinateX"].iloc[0] == 1024.0
+        assert r["rlnCoordinateX"].iloc[2] == 3072.0
+        # Angstrom origins: pixel shift * blob/psize_A, (negated for 2D)
+        assert r["rlnOriginXAngst"].iloc[0] == -1.0
+        assert r["rlnOriginYAngst"].iloc[0] == -2.0
+        assert "rlnOriginX" not in r.columns
+        assert "rlnOriginY" not in r.columns
+
+    def test_dataframe_convert_coordinates_via_dataframe_convert(self):
+        """Test coordinate conversion flows through dataframe_convert."""
+        cs_df = pd.DataFrame(
+            {
+                "location/center_x_frac": [0.25],
+                "location/center_y_frac": [0.75],
+                "location/micrograph_shape": [[4096, 4096]],
+                "blob/path": ["/a.mrc"],
+                "blob/idx": [0],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_convert(cs_df, target="relion")
+        assert r["rlnCoordinateY"].iloc[0] == 3072.0  # 0.75 * 4096
+
+    def test_dataframe_convert_angstrom_origins(self):
+        """Test rlnOriginXAngst/YAngst are computed from pixel shifts * apix."""
+        cs_df = pd.DataFrame(
+            {
+                "alignments2D/shift": [[2.0, 3.0]],
+                "alignments3D/shift": [[4.0, 5.0]],
+                "blob/psize_A": [0.5],
+                "blob/path": ["/a.mrc"],
+                "blob/idx": [0],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        # 3D shift overwrites 2D shift → Angstrom = 4.0 * 0.5 = 2.0
+        assert r["rlnOriginXAngst"].iloc[0] == 2.0
+        assert r["rlnOriginYAngst"].iloc[0] == 2.5
+        assert "rlnOriginX" not in r.columns
+
+    def test_dataframe_convert_coordinates_via_images2dataframe(self):
+        """Test coordinate conversion flows through images2dataframe."""
+        cs_df = pd.DataFrame(
+            {
+                "location/center_x_frac": [0.25],
+                "location/center_y_frac": [0.75],
+                "location/micrograph_shape": [[4096, 4096]],
+                "blob/path": ["/a.mrc"],
+                "blob/idx": [0],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        with patch("helicon.lib.io.image2dataframe", return_value=cs_df):
+            r = io.images2dataframe("input.cs", target_convention="relion")
+        assert r["rlnCoordinateY"].iloc[0] == 3072.0
+
+    def test_clean_cs_micrograph_path(self):
+        """Test stripping cryoSPARC hash and _patch_aligned_doseweighted."""
+        # CS path with hash + _patch_aligned_doseweighted
+        assert (
+            io.clean_cs_micrograph_path(
+                "J298/motioncorrected/004163012191649015490_250123_SF0431_00004_1-4_patch_aligned_doseweighted.mrc"
+            )
+            == "250123_SF0431_00004_1-4.mrc"
+        )
+        # Absolute path
+        assert (
+            io.clean_cs_micrograph_path(
+                "/net/scratch/CS-apoferritin/J298/motioncorrected/004163012191649015490_250123_SF0431_00004_1-4_patch_aligned_doseweighted.mrc"
+            )
+            == "250123_SF0431_00004_1-4.mrc"
+        )
+        # Only _patch_aligned_doseweighted (no hash)
+        assert (
+            io.clean_cs_micrograph_path(
+                "250123_SF0431_00004_1-4_patch_aligned_doseweighted.mrc"
+            )
+            == "250123_SF0431_00004_1-4.mrc"
+        )
+        # Already clean (no hash, no _patch_aligned_doseweighted)
+        assert (
+            io.clean_cs_micrograph_path("250123_SF0431_00004_1-4.mrc")
+            == "250123_SF0431_00004_1-4.mrc"
+        )

@@ -50,7 +50,7 @@ def download_files(urls=[]):
     """
     import tempfile
     import shutil
-    import os
+    from pathlib import Path
 
     temp_folder = tempfile.mkdtemp()
 
@@ -60,7 +60,7 @@ def download_files(urls=[]):
         from contextlib import closing
 
         filename = url.split("/")[-1]
-        local_filename = os.path.join(temp_folder, filename)
+        local_filename = Path(temp_folder) / filename
 
         with closing(urllib.request.urlopen(url)) as r:
             with open(local_filename, "wb") as f:

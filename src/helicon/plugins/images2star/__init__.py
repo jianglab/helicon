@@ -3,7 +3,7 @@
 from __future__ import annotations
 import importlib
 import pkgutil
-import os
+from pathlib import Path
 
 
 # Export helpers for backward compatibility
@@ -13,7 +13,7 @@ import os
 def _discover_plugins():
     """Auto-discover plugin modules and build the registry by option_name."""
     plugins = {}
-    pkg_dir = os.path.dirname(__file__)
+    pkg_dir = Path(__file__).parent
     for importer, modname, ispkg in pkgutil.iter_modules([pkg_dir]):
         if modname.startswith("_") or ispkg:
             continue

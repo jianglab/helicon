@@ -5,7 +5,6 @@ import logging
 import helicon
 import numpy as np
 from pathlib import Path
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +405,7 @@ def handle(data, args, index_d, param):
             axes[1].hist(fractions, bins=50, edgecolor="white", linewidth=1)
             axes[0].set(xlabel="Filament Length (#segments)", ylabel="Fraction")
             axes[1].set(xlabel="Fraction", ylabel="# Filaments")
-            plt.savefig(f"{os.path.splitext(args.output_starFile)[0]}.pdf")
+            plt.savefig(f"{Path(args.output_starFile).with_suffix('')}.pdf")
             plt.show()
 
         index_d[option_name] += 1

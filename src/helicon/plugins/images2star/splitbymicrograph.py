@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import helicon
-import os
+from pathlib import Path
 from helicon.lib.exceptions import HeliconExit
 import logging
 
@@ -52,11 +52,11 @@ def handle(data, args, index_d, param):
 
         count = 0
 
-        prefix = os.path.splitext(args.output_starFile)[0]
+        prefix = Path(args.output_starFile).stem
         for mgraphName, mgraphParticles in mgraphs:
             tmpStarFile = "%s.%s.star" % (
                 prefix,
-                os.path.basename(os.path.splitext(mgraphName)[0]),
+                Path(mgraphName).stem,
             )
             tmpdata = data.loc[mgraphParticles.index]
             helicon.dataframe2file(tmpdata, tmpStarFile)

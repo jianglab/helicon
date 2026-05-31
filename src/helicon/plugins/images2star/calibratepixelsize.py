@@ -3,7 +3,7 @@
 from __future__ import annotations
 import helicon
 import numpy as np
-import os
+from pathlib import Path
 from tqdm import tqdm
 import mrcfile
 from helicon.lib.io import getPixelSize, setPixelSize
@@ -220,10 +220,7 @@ def handle(data, args, index_d, param):
         apix_new = round(apix * target_res / res_peak, 3)  # precision: 0.1%
 
         if args.verbose > 1:
-            outputFile = (
-                os.path.splitext(args.output_starFile)[0]
-                + f".calibrateMag.{pixelSize_source}={apix}.txt"
-            )
+            outputFile = f"{Path(args.output_starFile).with_suffix('')}.calibrateMag.{pixelSize_source}={apix}.txt"
             np.savetxt(
                 outputFile,
                 np.hstack((R.reshape((len(R), 1)), pwr_mean.reshape((len(R), 1)))),
@@ -241,10 +238,7 @@ def handle(data, args, index_d, param):
         if apix_new != apix:
             if args.verbose > 1:
                 R2 = R * apix / apix_new
-                outputFile2 = (
-                    os.path.splitext(args.output_starFile)[0]
-                    + f".calibrateMag.{pixelSize_source}={apix_new}.txt"
-                )
+                outputFile2 = f"{Path(args.output_starFile).with_suffix('')}.calibrateMag.{pixelSize_source}={apix_new}.txt"
                 np.savetxt(
                     outputFile2,
                     np.hstack((R2.reshape((len(R), 1)), pwr_mean.reshape((len(R), 1)))),

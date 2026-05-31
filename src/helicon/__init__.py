@@ -66,6 +66,7 @@ from .lib.groups import (
 from .lib.io import (
     Relion_OpticsGroup_Parameters,
     assign_beamshifts_to_cluster,
+    clean_cs_micrograph_path,
     cistem2dataframe,
     connect_cryosparc,
     cs2dataframe,

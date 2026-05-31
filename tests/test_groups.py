@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 from helicon.lib.groups import (
     combine_groups,
     extract_timestamps,
@@ -109,11 +110,9 @@ class TestExtractTimestamps(object):
 
     def test_mtime_fallback_returns_mtime(self):
         # __file__ exists on disk, so use_mtime_fallback should return its mtime
-        import os
-
         micrographs = [__file__]
         result = extract_timestamps(micrographs, "nonexistent", use_mtime_fallback=True)
-        expected = os.path.getmtime(__file__)
+        expected = Path(__file__).stat().st_mtime
         assert result[__file__] == expected
 
     def test_mtime_fallback_false_defaults_to_inf(self):

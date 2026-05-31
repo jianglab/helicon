@@ -96,6 +96,9 @@ def _get_commands(
             sys.exit(-1)
         else:
             raise
+    except HeliconError as e:
+        logger.error(f"ERROR: {e}")
+        sys.exit(1)
     except Exception:
         subparser = sys.argv[1] if len(sys.argv) > 1 else None
         if subparser and subparser in subparsers.choices:

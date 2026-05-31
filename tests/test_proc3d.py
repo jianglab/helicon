@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import helicon
 from helicon.commands import proc3d
-from helicon.lib.exceptions import HeliconValidationError
+from helicon.lib.exceptions import HeliconValidationError, HeliconFileExistsError
 
 
 class TestProc3dArgs(object):
@@ -49,7 +49,7 @@ class TestProc3dArgs(object):
         parser = argparse.ArgumentParser()
         proc3d.add_args(parser)
         args = parser.parse_args(["input.mrc"])
-        with pytest.raises(HeliconValidationError):
+        with pytest.raises(HeliconFileExistsError):
             proc3d.check_args(args, parser)
 
     @patch("pathlib.Path.exists", return_value=True)

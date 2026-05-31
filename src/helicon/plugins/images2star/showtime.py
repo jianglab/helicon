@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 import helicon
-import os
-import os
+from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
@@ -54,7 +53,7 @@ def handle(data, args, index_d, param):
         timeCol = f"{fileAttr}CreateTime"
         files = data.groupby(tmpCol, sort=False)
         for fileName, fileParticles in files:
-            data.loc[fileParticles.index, timeCol] = os.path.getctime(fileName)
+            data.loc[fileParticles.index, timeCol] = Path(fileName).stat().st_ctime
         data.drop(tmpCol, inplace=True, axis=1)
         if args.verbose > 1:
             logger.info(

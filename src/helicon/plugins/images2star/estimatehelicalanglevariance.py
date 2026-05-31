@@ -3,7 +3,7 @@
 from __future__ import annotations
 import helicon
 import numpy as np
-import os
+from pathlib import Path
 from tqdm import tqdm
 
 
@@ -160,7 +160,7 @@ def handle(data, args, index_d, param):
                     ylabel=f"{angle_str_2} Sigma (°)",
                 )
             plt.savefig(
-                f"{os.path.splitext(args.output_starFile)[0]}.tilt_psi_rot_sigma.pdf"
+                f"{Path(args.output_starFile).with_suffix('')}.tilt_psi_rot_sigma.pdf"
             )
             plt.tight_layout()
             plt.show()

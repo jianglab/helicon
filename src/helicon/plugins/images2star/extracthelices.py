@@ -6,7 +6,6 @@ import helicon
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import os
 import mrcfile
 
 logger = logging.getLogger(__name__)
@@ -63,7 +62,7 @@ def handle(data, args, index_d, param):
         topLengthFraction = param_dict.get("topLengthFraction", None)
         lengthCutoffAngst = param_dict.get("lengthCutoffAngst", None)
 
-        outPath = os.path.abspath(outPath)
+        outPath = str(Path(outPath).resolve())
 
         import starfile
 
@@ -157,8 +156,8 @@ def handle(data, args, index_d, param):
                     o_mrc.set_data(np.array(helix_image, dtype=np.float32))
                     o_mrc.voxel_size = apix
 
-        if not os.path.isdir(outPath):
-            os.makedirs(outPath)
+        if not Path(outPath).is_dir():
+            Path(outPath).mkdir(parents=True)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 

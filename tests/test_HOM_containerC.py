@@ -7,7 +7,7 @@ import pandas as pd
 from pathlib import Path
 from unittest.mock import patch, MagicMock, PropertyMock
 from helicon.commands import HOM_containerC
-from helicon.lib.exceptions import HeliconValidationError
+from helicon.lib.exceptions import HeliconValidationError, HeliconFileExistsError
 
 
 class TestHOMcontainerCArgs(object):
@@ -19,15 +19,15 @@ class TestHOMcontainerCArgs(object):
         missing = expected - actions
         assert not missing, f"Missing args: {missing}"
 
-    @patch("os.path.exists", return_value=True)
+    @patch("pathlib.Path.exists", return_value=True)
     def test_check_args_rejects_existing_output(self, mock_exists):
         parser = argparse.ArgumentParser()
         HOM_containerC.add_args(parser)
         args = parser.parse_args(["in.star", "out.star"])
-        with pytest.raises(HeliconValidationError):
+        with pytest.raises(HeliconFileExistsError):
             HOM_containerC.check_args(args, parser)
 
-    @patch("os.path.exists", return_value=True)
+    @patch("pathlib.Path.exists", return_value=True)
     def test_check_args_force_overwrites_existing(self, mock_exists):
         parser = argparse.ArgumentParser()
         HOM_containerC.add_args(parser)
@@ -103,7 +103,7 @@ class TestHOMcontainerCHelpers(object):
                 HOM_containerC._read_star("dummy.star")
 
     @patch("helicon.commands.HOM_containerC.starfile")
-    @patch("os.path.exists", return_value=True)
+    @patch("pathlib.Path.exists", return_value=True)
     def test_write_star_with_optics(self, mock_exists, mock_starfile):
         particles = pd.DataFrame({"rlnAngleRot": [1.0]})
         optics = pd.DataFrame({"rlnVoltage": [300.0]})
@@ -119,14 +119,14 @@ class TestHOMcontainerCHelpers(object):
         assert mock_starfile.write.call_args[1]["overwrite"] == True
 
     @patch("helicon.commands.HOM_containerC.starfile")
-    @patch("os.path.exists", return_value=False)
+    @patch.object(Path, "exists", return_value=False)
     def test_write_star_single_table(self, mock_exists, mock_starfile):
         df = pd.DataFrame({"rlnAngleRot": [1.0]})
         HOM_containerC._write_star(df, "out.star", like="in.star")
         mock_starfile.write.assert_called_once_with(df, "out.star", overwrite=True)
 
     @patch("helicon.commands.HOM_containerC.starfile")
-    @patch("os.path.exists", return_value=True)
+    @patch.object(Path, "exists", return_value=True)
     def test_write_star_no_like_writes_single(self, mock_exists, mock_starfile):
         mock_starfile.read.return_value = pd.DataFrame({"a": [1]})
         df = pd.DataFrame({"rlnAngleRot": [1.0]})

@@ -5,6 +5,7 @@ __all__ = [
     "HeliconIOError",
     "HeliconTypeError",
     "HeliconValidationError",
+    "HeliconFileExistsError",
     "HeliconConfigError",
     "HeliconDependencyError",
 ]
@@ -37,6 +38,10 @@ class HeliconTypeError(HeliconError, TypeError):
 
 class HeliconValidationError(HeliconError):
     """CLI argument validation error."""
+
+
+class HeliconFileExistsError(HeliconError):
+    """Output file already exists."""
 
 
 class HeliconConfigError(HeliconError):

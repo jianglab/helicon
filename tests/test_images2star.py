@@ -1,8 +1,12 @@
+import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 import helicon
+from helicon.commands import images2star
+from helicon.lib.exceptions import HeliconValidationError, HeliconFileExistsError
 
 
 def _make_optics(n_groups=1):
@@ -394,6 +398,38 @@ class TestImages2starBeamShiftXY(object):
             return False
 
         assert not has_xml(xml_folder="", micrograph_path=micrographs[0])
+
+
+class TestImages2starCheckArgs(object):
+    """Tests for images2star check_args validation."""
+
+    @patch("pathlib.Path.exists", return_value=True)
+    def test_check_args_existing_output_raises_error(self, mock_exists):
+        parser = argparse.ArgumentParser()
+        images2star.add_args(parser)
+        args = parser.parse_args(["input.cs", "x.star"])
+        with pytest.raises(HeliconFileExistsError):
+            images2star.check_args(args, parser)
+
+    @patch("pathlib.Path.exists", return_value=True)
+    def test_check_args_force_overwrites_existing(self, mock_exists):
+        parser = argparse.ArgumentParser()
+        images2star.add_args(parser)
+        args = parser.parse_args(["input.cs", "x.star", "--force", "1"])
+        args = images2star.check_args(args, parser)
+        assert args.output_starFile == "x.star"
+
+    def test_check_args_micrograph_star(self):
+        parser = argparse.ArgumentParser()
+        images2star.add_args(parser)
+        args = parser.parse_args(["input.cs", "x.star", "--micrographStar", "ref.star"])
+        assert args.micrographStar == "ref.star"
+
+    def test_check_args_micrograph_star_default_none(self):
+        parser = argparse.ArgumentParser()
+        images2star.add_args(parser)
+        args = parser.parse_args(["input.cs", "x.star"])
+        assert args.micrographStar is None
 
 
 class TestImages2starResetOpticGroups(object):
