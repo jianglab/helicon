@@ -10,12 +10,14 @@ src/helicon/lib/__pycache__/
 src/helicon/webApps/whereIsMyClass/__pycache__/
 tests/__pycache__/
 Icon_
+Icon
+Icon
 .syncthing.*
 temp/
 .DS_Store
-Icon
 .helicon.txt
 .vscode/
 dist/
 __pycache__
 ~syncthing*
+Icon

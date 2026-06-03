@@ -98,8 +98,6 @@ def handle(
             ]
 
         micrographs = np.unique(data[micrograph_name])
-        from tqdm import tqdm
-
         for mi, m in tqdm(
             enumerate(micrographs),
             total=len(micrographs),
@@ -120,10 +118,7 @@ def handle(
                     m,
                 )
 
-        if len(exp_group_id_names_all) > 1:
-            for attr in exp_group_id_names_all:
-                if attr != exp_group_id_name:
-                    data[attr] = data[exp_group_id_name]
+        helicon.sync_group_columns(data, exp_group_id_name)
 
         group_ids = np.sort(np.unique(data[exp_group_id_name]))
 

@@ -50,7 +50,7 @@ def handle(data, args, index_d, param):
                 "\\tERROR: rlnMicrographName or rlnImageName must be available"
             )
         if "rlnHelicalTubeID" not in data:
-            raise HeliconError("\\tERROR: parameter rlnHelicalTubeID is not available")
+            raise HeliconError("\\trlnHelicalTubeID is not available")
 
         if "@" in data[var].iloc[0]:
             tmp = data.loc[:, var].str.split("@", expand=True)

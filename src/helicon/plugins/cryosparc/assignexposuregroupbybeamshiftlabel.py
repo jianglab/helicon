@@ -70,6 +70,7 @@ def handle(
         (data, output_title, output_slots, index_d) after processing.
     """
     if param is not None and param != "0":
+        source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
         software = helicon.guess_data_collection_software(data[micrograph_name][0])
         if software is None:
@@ -103,19 +104,11 @@ def handle(
         data[exp_group_id_name] = helicon.combine_groups(
             data[exp_group_id_name], np.array(exposure_groups)
         )
-        if len(exp_group_id_names_all) > 1:
-            for attr in exp_group_id_names_all:
-                if attr != exp_group_id_name:
-                    data[attr] = data[exp_group_id_name]
+
+        helicon.sync_group_columns(data, exp_group_id_name)
+        helicon.propagate_ctf_median(data, exp_group_id_name)
 
         group_ids = np.sort(np.unique(data[exp_group_id_name]))
-        for gi in group_ids:
-            mask = np.where(data[exp_group_id_name] == gi)
-            for (
-                col
-            ) in "ctf/cs_mm ctf/phase_shift_rad ctf/shift_A ctf/tilt_A ctf/trefoil_A ctf/tetra_A ctf/anisomag".split():
-                if col in data:
-                    data[col][mask] = np.median(data[col][mask])
 
         output_slots.add(exp_group_id_name.split("/")[0])
         output_title += (
@@ -124,6 +117,6 @@ def handle(
 
         if args.verbose > 1:
             logger.info(
-                f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups stored in {' '.join(exp_group_id_names_all)}"
+                f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups stored in {' '.join(helicon.all_matched_attrs(data, query_str='exp_group_id'))}"
             )
     return data, output_title, output_slots, index_d

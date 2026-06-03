@@ -30,6 +30,7 @@ from .lib.epu import (
     EPU_micrograph_path_2_movie_xml_path,
     EPU_xml_2_beamshift,
     assign_beamshift_groups,
+    check_foilhole_xml_files,
     extract_beamshift,
     extract_data_collection_time,
     guess_data_collection_software,
@@ -59,9 +60,13 @@ from .lib.filters import (
     threshold_data,
 )
 from .lib.groups import (
+    assign_time_groups,
     combine_groups,
     extract_timestamps,
+    per_micrograph_ids,
     per_micrograph_mapping,
+    propagate_ctf_median,
+    sync_group_columns,
 )
 from .lib.io import (
     Relion_OpticsGroup_Parameters,

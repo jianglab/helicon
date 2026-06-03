@@ -42,7 +42,7 @@ def handle(data, args, index_d, param):
         replaceImageName = param
 
         if not Path(replaceImageName).exists():
-            raise HeliconError("\\tERROR: %s does not exist")
+            raise HeliconError("\\t%s does not exist")
 
         nImage = helicon.EMUtil.get_image_count(replaceImageName)
         if nImage != len(data):

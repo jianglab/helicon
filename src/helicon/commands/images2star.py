@@ -35,6 +35,15 @@ def main(args: argparse.Namespace) -> None:
         Parsed CLI arguments.
     """
     helicon.log_command_line()
+    logging.basicConfig(
+        level=(
+            logging.DEBUG
+            if args.verbose > 2
+            else logging.INFO if args.verbose > 0 else logging.ERROR
+        ),
+        format="%(message)s",
+        stream=sys.stdout,
+    )
 
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
@@ -389,9 +398,9 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--verbose",
         type=int,
-        metavar="<0|1>",
-        help="verbose mode. default to 2",
-        default=3,
+        metavar="<0|1|2>",
+        help="verbose mode. default to %(default)s",
+        default=2,
     )
     parser.add_argument(
         "--cpu",

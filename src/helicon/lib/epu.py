@@ -11,6 +11,7 @@ __all__ = [
     "EPU_micrograph_path_2_movie_xml_path",
     "EPU_xml_2_beamshift",
     "assign_beamshift_groups",
+    "check_foilhole_xml_files",
     "extract_beamshift",
     "extract_data_collection_time",
     "guess_data_collection_software",
@@ -232,6 +233,36 @@ def assign_beamshift_groups(
 
     else:
         raise ValueError(f"Software {software!r} not supported for beam shift grouping")
+
+
+def check_foilhole_xml_files(
+    micrograph_paths: list | np.ndarray, xml_folder: str = ""
+) -> None:
+    """Check that FoilHole XML files exist for the given micrographs.
+
+    Parameters
+    ----------
+    micrograph_paths : list or np.ndarray
+        List of micrograph paths to check.
+    xml_folder : str, optional
+        Optional explicit folder containing XML files.
+
+    Raises
+    ------
+    HeliconIOError
+        If no FoilHole XML files are found.
+    """
+    sample = micrograph_paths[0]
+    if xml_folder:
+        xfp = Path(xml_folder)
+        if xfp.exists() and xfp.is_dir() and list(xfp.glob("FoilHole_*.xml")):
+            return
+    if Path(sample).exists() and list(Path(sample).parent.glob("FoilHole_*.xml")):
+        return
+    raise HeliconIOError(
+        f"Cannot find FoilHole XML files for {sample}. "
+        "Specify xml_folder=<path> in the parameter string."
+    )
 
 
 def EPU_micrograph_path_2_movie_xml_path(

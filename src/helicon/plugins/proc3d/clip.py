@@ -90,11 +90,11 @@ def handle(
         center_y = int(param_dict["center_y"])
         center_z = int(param_dict["center_z"])
         if new_nx < 1:
-            raise HeliconError("\\tERROR: new_nx must be >0")
-        if new_ny < 1:
-            raise HeliconError("\\tERROR: new_ny must be >0")
-        if new_nz < 1:
-            raise HeliconError("\\tERROR: new_nz must be >0")
+            raise HeliconError("\\tnew_nx must be >0")
+        if new_ny <= 0:
+            raise HeliconError("\\tnew_ny must be >0")
+        if new_nz <= 0:
+            raise HeliconError("\\tnew_nz must be >0")
 
         data = helicon.get_clip3d(
             data,
