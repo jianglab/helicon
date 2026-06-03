@@ -84,11 +84,11 @@ def handle(
         new_ny = int(param_dict["new_ny"])
         new_nz = int(param_dict["new_nz"])
         if new_nx < 1:
-            raise HeliconError("\\tERROR: new_nx must be >0")
-        if new_ny < 1:
-            raise HeliconError("\\tERROR: new_ny must be >0")
-        if new_nz < 1:
-            raise HeliconError("\\tERROR: new_nz must be >0")
+            raise HeliconError("\\tnew_nx must be >0")
+        if new_ny <= 0:
+            raise HeliconError("\\tnew_ny must be >0")
+        if new_nz <= 0:
+            raise HeliconError("\\tnew_nz must be >0")
 
         if len(set([new_nx / nx, new_ny / ny, new_nz / nz])) > 1:
             msg = f"nx,ny,nz={nx},{ny},{nz} -> {new_nx},{new_ny},{new_nz} FFT-resampling will result in nonuniform pixel size in x/y/z dimensions"

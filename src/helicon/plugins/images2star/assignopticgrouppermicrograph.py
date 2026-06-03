@@ -3,6 +3,7 @@
 from __future__ import annotations
 import helicon
 import pandas as pd
+from helicon.lib.exceptions import HeliconError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -43,10 +44,10 @@ def handle(data, args, index_d, param):
     if param:
         try:
             optics_orig = data.attrs["optics"]
-        except:
+        except Exception:
             optics_orig = None
         if optics_orig is None:
-            raise HeliconError("\\tERROR: data_optics block must be available")
+            raise HeliconError("\tdata_optics block must be available")
 
         image_name = helicon.first_matched_attr(
             data,
@@ -54,30 +55,30 @@ def handle(data, args, index_d, param):
         )
         if image_name is None:
             raise HeliconError(
-                "\\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available"
+                "\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available"
             )
 
         required_cols = "rlnOpticsGroup".split()
         missing_cols = [c for c in required_cols if c not in data]
         if missing_cols:
             raise HeliconError(
-                "\\tERROR: required attrs {' '.join(missing_cols)} must be available"
+                f"\tERROR: required attrs {' '.join(missing_cols)} must be available"
             )
 
-        tmp_col = "TEMP_image_name"
-        data[tmp_col] = data[image_name].str.split("@", expand=True).iloc[:, -1]
-        mgraphs = data.groupby(tmp_col, sort=False)
+        micrograph_names = data[image_name].str.split("@", expand=True).iloc[:, -1]
+        unique_names = micrograph_names.unique()
+        mapping = helicon.per_micrograph_mapping(unique_names)
+        data["rlnOpticsGroup"] = micrograph_names.map(mapping)
 
-        optics = pd.concat([optics_orig.iloc[[0]]] * len(mgraphs), ignore_index=True)
-        for gi, (mgraphName, mgraphData) in enumerate(mgraphs):
-            data.loc[mgraphData.index, "rlnOpticsGroup"] = gi + 1
-            new_row = optics_orig.copy().iloc[0]
+        optics = pd.concat(
+            [optics_orig.iloc[[0]]] * len(unique_names), ignore_index=True
+        )
+        for gi, name in enumerate(unique_names):
             optics.loc[gi, "rlnOpticsGroup"] = gi + 1
             optics.loc[gi, "rlnOpticsGroupName"] = f"opticsGroup{gi+1}"
         data.attrs["optics"] = optics
-        data.drop(tmp_col, axis=1, inplace=True)
         if args.verbose > 1:
             logger.info(
-                f"\t{len(mgraphs)} micrographs -> {len(data.attrs['optics'])} optic groups"
+                f"\t{len(unique_names)} micrographs -> {len(data.attrs['optics'])} optic groups"
             )
     return data, index_d

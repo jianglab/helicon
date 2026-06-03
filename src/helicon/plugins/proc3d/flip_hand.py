@@ -66,7 +66,7 @@ def handle(
     if param:
         axis = param.lower()
         if axis not in ["x", "y", "z"]:
-            raise HeliconError("\\tERROR: invalid axis: {axis}")
+            raise HeliconError("\\tinvalid axis: {axis}")
         data = helicon.flip_hand(data, axis=axis)
     return data, apix, nx, ny, nz
 

@@ -1,4 +1,4 @@
-"""Handler for the assignOpticGroupByBeamShift option."""
+"""Handler for the assignOpticGroupByBeamShiftLabel option."""
 
 from __future__ import annotations
 import helicon
@@ -9,22 +9,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-option_name = "assignOpticGroupByBeamShift"
+option_name = "assignOpticGroupByBeamShiftLabel"
 
 
 def add_args(parser):
     choices = "no auto EPU serialEM_pncc".split()
     parser.add_argument(
-        "--assignOpticGroupByBeamShift",
+        "--assignOpticGroupByBeamShiftLabel",
         choices=choices,
         metavar=f"<{'|'.join(choices)}>",
-        help="assign images to optic groups according to the beam shifts, one group per beam shift position. default to no",
+        help="assign images to optic groups according to beam shift labels in filenames, one group per beam shift position. default to no",
         default="no",
     )
 
 
 def handle(data, args, index_d, param):
-    """Handle the assignOpticGroupByBeamShift option.
+    """Handle the assignOpticGroupByBeamShiftLabel option.
 
     Parameters
     ----------
@@ -49,7 +49,7 @@ def handle(data, args, index_d, param):
         except:
             optics_orig = None
         if optics_orig is None:
-            raise HeliconError("\\tERROR: data_optics block must be available")
+            raise HeliconError("\\tdata_optics block must be available")
 
         image_name = helicon.first_matched_attr(
             data,
@@ -107,7 +107,8 @@ def handle(data, args, index_d, param):
             optics_row_index = optics_orig[
                 optics_orig["rlnOpticsGroup"].astype(str) == str(ogName)
             ].last_valid_index()
-            ogData[tmp_col] = ogData.loc[:, image_name].str.extract(pattern)
+            extracted = ogData.loc[:, image_name].str.extract(pattern)
+            ogData[tmp_col] = extracted.get("beamshift", extracted.iloc[:, 0])
             if format in ["EPU", "serialEM_embl_heidelberg", "serialEM_cuhksz"]:
                 ogData[tmp_col] = ogData[tmp_col].astype(int)
             else:

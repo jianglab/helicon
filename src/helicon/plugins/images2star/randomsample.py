@@ -1,8 +1,10 @@
 """Handler for the randomSample option."""
 
 from __future__ import annotations
-import helicon
+import logging
+import pandas as pd
 
+logger = logging.getLogger(__name__)
 
 option_name = "randomSample"
 
@@ -12,13 +14,15 @@ def add_args(parser):
         "--randomSample",
         metavar="<n>",
         type=int,
-        help="take random n images subset. disabled by default",
+        help="take random n images per rlnRandomSubset. disabled by default",
         default=0,
     )
 
 
 def handle(data, args, index_d, param):
     """Handle the randomSample option.
+
+    Samples *param* particles per ``rlnRandomSubset`` group.
 
     Parameters
     ----------
@@ -37,12 +41,13 @@ def handle(data, args, index_d, param):
         (data, index_d) after processing.
     """
     if 0 < param < len(data):
-        data = data.sample(args.randomSample)
-        data.reset_index(drop=True, inplace=True)
+        idx = []
+        for _, g in data.groupby("rlnRandomSubset", sort=False):
+            n = min(param, len(g))
+            idx.extend(g.sample(n=n).index.tolist())
+        data = data.loc[idx].reset_index(drop=True)
+        n_total = len(data)
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(f"\trandom {param} images per rlnRandomSubset: {n_total} total")
         index_d[option_name] += 1
     return data, index_d
-
-
-import logging
-
-logger = logging.getLogger(__name__)

@@ -1,11 +1,12 @@
 """Handler for the assignOpticGroupByTime option."""
 
 from __future__ import annotations
+
 import logging
 import helicon
+from helicon.lib.exceptions import HeliconError
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,10 @@ def handle(data, args, index_d, param):
     if param > 0:
         try:
             optics_orig = data.attrs["optics"]
-        except:
+        except Exception:
             optics_orig = None
         if optics_orig is None:
-            raise HeliconError("\\tERROR: data_optics block must be available")
+            raise HeliconError("\tdata_optics block must be available")
 
         image_name = helicon.first_matched_attr(
             data,
@@ -56,45 +57,53 @@ def handle(data, args, index_d, param):
         )
         if image_name is None:
             raise HeliconError(
-                "\\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available"
+                "\tERROR: rlnMicrographMovieName, rlnMicrographName or rlnImageName must be available"
             )
 
         software = helicon.guess_data_collection_software(
             filename=data[image_name].iloc[0]
         )
-        if software in ["EPU"]:
+        if software in ["EPU", "EPU_old"]:
             required_cols = "rlnOpticsGroup".split()
             if args.verbose > 2:
                 logger.info(
                     f"\tIt appears that you used EPU to collect the movies. Data collection time will be extracted from the file names specified in the {image_name} column"
                 )
         else:
-            required_cols = "rlnOpticsGroup rlnMicrographMovieName".split()
-            image_name = "rlnMicrographMovieName"
-            if args.verbose > 2:
+            required_cols = "rlnOpticsGroup".split()
+            if "rlnMicrographMovieName" in data:
+                image_name = "rlnMicrographMovieName"
+                if args.verbose > 2:
+                    logger.info(
+                        "Data collection time will use the file modification time of the movie files specified in the rlnMicrographMovieName column. Make sure that the file modification times are indeed the movie collection times"
+                    )
+            elif args.verbose > 2:
                 logger.info(
-                    "Data collection time will use the file modification time of the movie files specified in the rlnMicrographMovieName column. Make sure that the file modification times are indeed the movie collection times"
+                    f"\tData collection time will be extracted from the {image_name} column (rlnMicrographMovieName not available)"
                 )
 
         missing_cols = [c for c in required_cols if c not in data]
         if missing_cols:
+            missing_str = " ".join(missing_cols)
             raise HeliconError(
-                "\\tERROR: required attrs {' '.join(missing_cols)} must be available"
+                f"\tERROR: required attrs {missing_str} must be available. "
+                "This task (by time) can use movie, micrograph or particle filenames. "
+                "The actual time in the filename is the first choice; if not, "
+                "the serial number in filename can be used as the proxy; "
+                "if neither time nor serial number is available, use file modification time."
             )
 
-        movies = data[image_name].unique()
-        if software in ["EPU"]:
-            moive2time = {
-                m: helicon.extract_EPU_data_collection_time(m) for m in movies
-            }
-        else:
-            moive2time = {m: Path(m).resolve().stat().st_mtime for m in movies}
-        from datetime import datetime
+        movies = data[image_name].values
+        source_group_ids = np.sort(data["rlnOpticsGroup"].unique())
+        group_id_lookup = data["rlnOpticsGroup"].values
 
-        moive2time_str = {
-            m: datetime.fromtimestamp(t).strftime("%Y-%m-%d_%H-%M-%S")
-            for m, t in moive2time.items()
-        }
+        _, moive2time, moive2time_str = helicon.assign_time_groups(
+            micrographs=movies,
+            source_group_ids=source_group_ids,
+            group_id_lookup=group_id_lookup,
+            time_group_size=param,
+            verbose=args.verbose,
+        )
 
         optics = optics_orig.copy().iloc[0:0]
 
@@ -105,7 +114,7 @@ def handle(data, args, index_d, param):
                 optics_orig["rlnOpticsGroup"].astype(str) == str(ogName)
             ].last_valid_index()
             times = [moive2time[m] for m in ogData[image_name].unique()]
-            time2group = helicon.assign_to_groups(times, n=param)
+            time2group = helicon.assign_to_groups(times, param)
             movie2group = {
                 m: time2group[moive2time[m]] + og_count
                 for m in ogData[image_name].unique()

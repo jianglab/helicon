@@ -6,8 +6,6 @@ import helicon
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-from helicon.lib.exceptions import HeliconError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -73,45 +71,29 @@ def handle(
         (data, output_title, output_slots, index_d) after processing.
     """
     if param is not None and param != "0":
-
+        source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
         micrographs = np.sort(np.unique(data[micrograph_name]))
 
         _, param_dict = helicon.parse_param_str(param)
         xml_folder = param_dict.get("xml_folder", "")
-
-        def has_xml(xml_folder: str, micrograph_path: str) -> bool:
-            if xml_folder:
-                xfp = Path(xml_folder)
-                if xfp.exists() and xfp.is_dir() and xfp.glob("FoilHole_*.xml"):
-                    return True
-            if Path(micrograph_path).exists():
-                if Path(micrograph_path).parent.glob("FoilHole_*.xml"):
-                    return True
-            return False
-
-        if not has_xml(xml_folder=xml_folder, micrograph_path=micrographs[0]):
-            raise HeliconError(
-                f"Cannot find FoilHole XML files for {micrographs[0]}. Specify xml_folder=<path> in the parameter string."
-            )
-
         min_cluster_size = int(param_dict.get("min_micrographs_per_group", 4))
 
-        from tqdm import tqdm
+        input_project_folder = args.input_project_folder
+
+        helicon.check_foilhole_xml_files(micrographs, xml_folder)
 
         @helicon.cache(
             cache_dir=str(helicon.cache_dir / "cryosparc"),
             expires_after=7,
             verbose=0,
         )
-        def EPU_micrograph_path_2_movie_xml_path(
-            micrograph_path: str | Path, xml_folder: str
-        ) -> Path:
+        def _cached_xml_path(micrograph_path: str | Path, xml_folder: str) -> Path:
             return helicon.EPU_micrograph_path_2_movie_xml_path(
                 micrograph_path=micrograph_path, xml_folder=xml_folder
             )
 
         xml_files_dict = {
-            m: EPU_micrograph_path_2_movie_xml_path(
+            m: _cached_xml_path(
                 micrograph_path=input_project_folder / m,
                 xml_folder=xml_folder,
             )
@@ -128,13 +110,11 @@ def handle(
             expires_after=7,
             verbose=0,
         )
-        def EPU_micrograph_path_2_beamshift(m: str) -> tuple[float, float]:
-            xml_file = xml_files_dict[m]
-            beamshift = helicon.EPU_xml_2_beamshift(xml_file=xml_file)
-            return beamshift
+        def _cached_beamshift(m: str) -> tuple[float, float]:
+            return helicon.EPU_xml_2_beamshift(xml_file=xml_files_dict[m])
 
         micrographs_to_beamshifts = {
-            m: EPU_micrograph_path_2_beamshift(m)
+            m: _cached_beamshift(m)
             for m in tqdm(
                 micrographs,
                 total=len(micrographs),
@@ -149,30 +129,27 @@ def handle(
             expires_after=7,
             verbose=0,
         )
-        def assign_beamshifts_to_cluster(
+        def _cached_cluster(
             beamshifts: list | np.ndarray,
-            range_n_clusters: range,
             min_cluster_size: int,
             cpu: int,
             verbose: int,
         ) -> np.ndarray:
             return helicon.assign_beamshifts_to_cluster(
                 beamshifts=beamshifts,
-                range_n_clusters=range_n_clusters,
+                range_n_clusters=range(2, 200),
                 min_cluster_size=min_cluster_size,
                 cpu=cpu,
                 verbose=verbose,
             )
 
         beamshifts = np.array(list(micrographs_to_beamshifts.values()))
-        beamshift_clusters = assign_beamshifts_to_cluster(
+        beamshift_clusters = _cached_cluster(
             beamshifts=beamshifts,
-            range_n_clusters=range(2, 200),
             min_cluster_size=min_cluster_size,
             cpu=args.cpu,
             verbose=args.verbose,
         )
-        assert len(beamshifts) == len(beamshift_clusters)
         micrograph_to_beamshift_clusters = {
             m: beamshift_clusters[mi]
             for mi, m in enumerate(micrographs_to_beamshifts.keys())
@@ -190,19 +167,11 @@ def handle(
         data[exp_group_id_name] = helicon.combine_groups(
             data[exp_group_id_name], np.array(exposure_groups)
         )
-        if len(exp_group_id_names_all) > 1:
-            for attr in exp_group_id_names_all:
-                if attr != exp_group_id_name:
-                    data[attr] = data[exp_group_id_name]
+
+        helicon.sync_group_columns(data, exp_group_id_name)
+        helicon.propagate_ctf_median(data, exp_group_id_name)
 
         group_ids = np.sort(np.unique(data[exp_group_id_name]))
-        for gi in group_ids:
-            mask = np.where(data[exp_group_id_name] == gi)
-            for (
-                col
-            ) in "ctf/cs_mm ctf/phase_shift_rad ctf/shift_A ctf/tilt_A ctf/trefoil_A ctf/tetra_A ctf/anisomag".split():
-                if col in data:
-                    data[col][mask] = np.median(data[col][mask])
 
         output_slots.add(exp_group_id_name.split("/")[0])
         output_title += (
@@ -211,7 +180,7 @@ def handle(
 
         if args.verbose > 1:
             logger.info(
-                f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups stored in {' '.join(exp_group_id_names_all)}"
+                f"\t{len(source_group_ids)} -> {len(group_ids)} exposure groups stored in {' '.join(helicon.all_matched_attrs(data, query_str='exp_group_id'))}"
             )
 
         if args.verbose > 1:

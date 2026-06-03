@@ -25,6 +25,15 @@ def main(args: argparse.Namespace) -> None:
         Parsed CLI arguments.
     """
     helicon.log_command_line()
+    logging.basicConfig(
+        level=(
+            logging.DEBUG
+            if args.verbose > 2
+            else logging.INFO if args.verbose > 0 else logging.ERROR
+        ),
+        format="%(message)s",
+        stream=sys.stdout,
+    )
 
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
@@ -109,6 +118,9 @@ def main(args: argparse.Namespace) -> None:
         output_project_folder = input_project_folder
         output_job = None
 
+    args.input_project_folder = input_project_folder
+    args.output_project_folder = output_project_folder
+
     data = data_orig.copy()
 
     attrs = "movie_blob/path micrograph_blob/path location/micrograph_path blob/path".split()
@@ -161,7 +173,7 @@ def main(args: argparse.Namespace) -> None:
 
         from helicon.plugins.cryosparc import dispatch
 
-        (data, output_title, output_slots, index_d) = dispatch(
+        data, output_title, output_slots, index_d = dispatch(
             option_name,
             data,
             args,
@@ -239,7 +251,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         metavar="<0|1|2>",
         help="verbose mode. default to %(default)s",
-        default=3,
+        default=2,
     )
 
     from helicon.plugins.cryosparc import add_plugin_args

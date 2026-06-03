@@ -50,107 +50,96 @@ def _make_dataframe(micrographs, optics_groups=None, image_col="rlnMicrographNam
 
 
 class TestImages2starBeamShiftLabel(object):
-    """Tests for assignOpticGroupByBeamShiftLabel handler logic."""
+    """Tests for assignOpticGroupByBeamShiftLabel handler."""
 
-    def _run_option(self, data, format, image_name="rlnMicrographName", verbose=0):
-        """Execute the Label handler code block (images2star.py lines 2396-2484)."""
-        optics_orig = data.attrs["optics"]
-        existing_groups = data["rlnOpticsGroup"].copy()
+    def _make_args(self, verbose=0):
+        return argparse.Namespace(verbose=verbose)
 
-        micrographs = data[image_name].unique()
-        micrograph_to_subgroup = helicon.assign_beamshift_groups(
-            micrographs, format, start_id=1
-        )
-        new_subgroups = data[image_name].map(micrograph_to_subgroup)
+    def test_label_splits_group_by_beam_shift(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftlabel import handle
 
-        data["rlnOpticsGroup"] = helicon.combine_groups(
-            existing_groups.values, new_subgroups.values
-        )
-
-        pairs = pd.DataFrame(
-            {"existing": existing_groups, "combined": data["rlnOpticsGroup"]}
-        ).drop_duplicates()
-        optics = optics_orig.copy().iloc[0:0]
-        for _, pair in pairs.iterrows():
-            parent = (
-                optics_orig[
-                    optics_orig["rlnOpticsGroup"].astype(str) == str(pair["existing"])
-                ]
-                .iloc[[0]]
-                .copy()
-            )
-            parent["rlnOpticsGroup"] = pair["combined"]
-            parent["rlnOpticsGroupName"] = f"opticsGroup{pair['combined']}"
-            optics = pd.concat([optics, parent], ignore_index=True)
-
-        data.attrs["optics"] = optics
-        return data
-
-    @patch("helicon.assign_beamshift_groups")
-    def test_label_splits_group_by_beam_shift(self, mock_assign):
         micros = [
             "FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff",
             "FoilHole_28788144_Data_28764755_47_20240328_192117_fractions.tiff",
         ]
-        mock_assign.return_value = {micros[0]: 1, micros[1]: 2}
         data = _make_dataframe(micros, optics_groups=1)
 
-        data = self._run_option(data, "EPU")
+        result, idx = handle(data, self._make_args(), {}, param="EPU")
 
-        group_ids = sorted(data["rlnOpticsGroup"].unique())
+        group_ids = sorted(result["rlnOpticsGroup"].unique())
         assert len(group_ids) == 2
-        assert len(data.attrs["optics"]) == 2
+        assert len(result.attrs["optics"]) == 2
         for gid in group_ids:
             assert (
-                f"opticsGroup{gid}" in data.attrs["optics"]["rlnOpticsGroupName"].values
+                f"opticsGroup{gid}"
+                in result.attrs["optics"]["rlnOpticsGroupName"].values
             )
 
-    @patch("helicon.assign_beamshift_groups")
-    def test_label_same_shift_no_split(self, mock_assign):
-        micros = ["mg1.mrc", "mg2.mrc"]
-        mock_assign.return_value = {micros[0]: 1, micros[1]: 1}
+    def test_label_same_shift_no_split(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftlabel import handle
+
+        micros = [
+            "250123_SF0431_01129_1-7.eer",
+            "250123_SF0431_01130_1-7.eer",
+        ]
         data = _make_dataframe(micros, optics_groups=1)
 
-        data = self._run_option(data, "serialEM_embl_heidelberg")
+        result, idx = handle(
+            data, self._make_args(), {}, param="serialEM_embl_heidelberg"
+        )
 
-        group_ids = sorted(data["rlnOpticsGroup"].unique())
+        group_ids = sorted(result["rlnOpticsGroup"].unique())
         assert len(group_ids) == 1
-        assert len(data.attrs["optics"]) == 1
+        assert len(result.attrs["optics"]) == 1
 
-    @patch("helicon.assign_beamshift_groups")
-    def test_label_preserves_multiple_existing_groups(self, mock_assign):
-        micros = ["a.mrc", "b.mrc", "c.mrc", "d.mrc"]
-        mock_assign.return_value = {
-            micros[0]: 1,
-            micros[1]: 2,
-            micros[2]: 1,
-            micros[3]: 2,
-        }
+    def test_label_preserves_multiple_existing_groups(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftlabel import handle
+
+        micros = [
+            "FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff",
+            "FoilHole_28788144_Data_28764755_47_20240328_192117_fractions.tiff",
+            "FoilHole_28788144_Data_28764755_48_20240328_192118_fractions.tiff",
+            "FoilHole_28788144_Data_28764755_49_20240328_192119_fractions.tiff",
+        ]
         existing = [1, 1, 2, 2]
         data = _make_dataframe(micros, optics_groups=existing)
 
-        data = self._run_option(data, "EPU")
+        result, idx = handle(data, self._make_args(), {}, param="EPU")
 
-        group_ids = sorted(data["rlnOpticsGroup"].unique())
-        # (1,1), (1,2), (2,1), (2,2) -> 4 combined groups
+        group_ids = sorted(result["rlnOpticsGroup"].unique())
+        # (1,46), (1,47), (2,48), (2,49) -> 4 combined groups
         assert len(group_ids) == 4
-        assert len(data.attrs["optics"]) == 4
-        # Each existing row is cloned: check that optics table has parents
-        optics_parents = data.attrs["optics"]["rlnOpticsGroupName"].values
+        assert len(result.attrs["optics"]) == 4
         for gid in group_ids:
-            assert f"opticsGroup{gid}" in optics_parents
+            assert (
+                f"opticsGroup{gid}"
+                in result.attrs["optics"]["rlnOpticsGroupName"].values
+            )
 
-    @patch("helicon.assign_beamshift_groups")
-    def test_label_optics_table_has_correct_groups(self, mock_assign):
-        micros = ["x.mrc", "y.mrc"]
-        mock_assign.return_value = {micros[0]: 1, micros[1]: 2}
+    def test_label_optics_table_has_correct_groups(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftlabel import handle
+
+        micros = [
+            "FoilHole_28788144_Data_28764755_46_20240328_192116_fractions.tiff",
+            "FoilHole_28788144_Data_28764755_47_20240328_192117_fractions.tiff",
+        ]
         data = _make_dataframe(micros, optics_groups=1)
 
-        data = self._run_option(data, "EPU")
+        result, idx = handle(data, self._make_args(), {}, param="EPU")
 
-        optics = data.attrs["optics"]
+        optics = result.attrs["optics"]
         assert set(optics["rlnOpticsGroup"]) == {1, 2}
         assert set(optics["rlnOpticsGroupName"]) == {"opticsGroup1", "opticsGroup2"}
+
+    def test_label_returns_unchanged_when_param_no(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftlabel import handle
+
+        micros = ["a.mrc", "b.mrc"]
+        data = _make_dataframe(micros, optics_groups=[1, 2])
+
+        result, idx = handle(data, self._make_args(), {}, param="no")
+
+        assert list(result["rlnOpticsGroup"]) == [1, 2]
 
 
 class TestImages2starTime(object):
@@ -262,6 +251,71 @@ class TestImages2starTime(object):
         assert kwargs.get("use_mtime_fallback", False)
 
 
+class TestImages2starTimeHandler(object):
+    """Tests for assignOpticGroupByTime handler via actual handle()."""
+
+    def _make_args(self, verbose=0):
+        return argparse.Namespace(verbose=verbose)
+
+    def test_time_with_micrograph_column_fallback(self):
+        """Non-EPU data with rlnMicrographName (no rlnMicrographMovieName)."""
+        from helicon.plugins.images2star.assignopticgroupbytime import handle
+
+        micros = ["/data/movie1.mrc", "/data/movie2.mrc"]
+        data = _make_dataframe(micros, optics_groups=1)
+
+        with (
+            patch(
+                "helicon.guess_data_collection_software", return_value="serialEM_pncc"
+            ),
+            patch("helicon.assign_time_groups") as mock_atg,
+        ):
+            mock_atg.return_value = (
+                np.array([1, 2]),
+                {m: float(i) for i, m in enumerate(micros)},
+                {m: f"time_{i}" for i, m in enumerate(micros)},
+            )
+            result, idx = handle(data, self._make_args(), {}, param=1)
+
+        group_ids = sorted(result["rlnOpticsGroup"].unique())
+        assert len(group_ids) >= 1
+        assert "rlnMovieCollectionTime" in result
+
+    def test_time_uses_movie_column_when_available(self):
+        """Non-EPU data with rlnMicrographMovieName should use it."""
+        from helicon.plugins.images2star.assignopticgroupbytime import handle
+
+        micros = ["/data/movie1.mrc", "/data/movie2.mrc"]
+        data = _make_dataframe(micros, optics_groups=1)
+        data["rlnMicrographMovieName"] = micros
+
+        with (
+            patch(
+                "helicon.guess_data_collection_software", return_value="serialEM_pncc"
+            ),
+            patch("helicon.assign_time_groups") as mock_atg,
+        ):
+            mock_atg.return_value = (
+                np.array([1, 2]),
+                {m: float(i) for i, m in enumerate(micros)},
+                {m: f"time_{i}" for i, m in enumerate(micros)},
+            )
+            result, idx = handle(data, self._make_args(verbose=3), {}, param=1)
+
+        group_ids = sorted(result["rlnOpticsGroup"].unique())
+        assert len(group_ids) >= 1
+
+    def test_time_returns_unchanged_when_param_negative(self):
+        from helicon.plugins.images2star.assignopticgroupbytime import handle
+
+        micros = ["a.mrc", "b.mrc"]
+        data = _make_dataframe(micros, optics_groups=[1, 2])
+
+        result, idx = handle(data, self._make_args(), {}, param=-1)
+
+        assert list(result["rlnOpticsGroup"]) == [1, 2]
+
+
 class TestImages2starPerMicrograph(object):
     """Tests for assignOpticGroupPerMicrograph handler logic."""
 
@@ -318,86 +372,100 @@ class TestImages2starPerMicrograph(object):
         assert len(data.attrs["optics"]) == 2
 
 
+class TestImages2starResetOpticGroup(object):
+    """Tests for resetOpticGroup handler."""
+
+    def test_resets_all_groups_to_one(self):
+        from helicon.plugins.images2star.resetopticgroup import handle
+
+        micros = ["a.mrc"] * 3 + ["b.mrc"] * 2 + ["c.mrc"] * 2
+        data = _make_dataframe(micros, optics_groups=[1, 1, 1, 2, 2, 3, 3])
+
+        result, idx = handle(data, argparse.Namespace(verbose=0), {}, param=1)
+
+        assert list(result["rlnOpticsGroup"].unique()) == [1]
+        assert len(result["rlnOpticsGroup"]) == 7
+        assert len(result.attrs["optics"]) == 1
+        assert result.attrs["optics"].iloc[0]["rlnOpticsGroup"] == 1
+        assert result.attrs["optics"].iloc[0]["rlnOpticsGroupName"] == "opticsGroup1"
+
+    def test_returns_unchanged_when_param_is_false(self):
+        from helicon.plugins.images2star.resetopticgroup import handle
+
+        micros = ["a.mrc", "b.mrc", "c.mrc"]
+        data = _make_dataframe(micros, optics_groups=[1, 2, 3])
+
+        result, idx = handle(data, argparse.Namespace(verbose=0), {}, param=0)
+
+        assert list(result["rlnOpticsGroup"].unique()) == [1, 2, 3]
+        assert len(result.attrs["optics"]) == 3
+
+    def test_requires_optics_block(self):
+        from helicon.plugins.images2star.resetopticgroup import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = pd.DataFrame({"rlnOpticsGroup": [1, 2]})
+
+        with pytest.raises(HeliconError, match="data_optics"):
+            handle(data, argparse.Namespace(verbose=0), {}, param=1)
+
+
 class TestImages2starBeamShiftXY(object):
-    """Tests for assignOpticGroupByBeamShiftXY handler logic."""
+    """Tests for assignOpticGroupByBeamShiftXY handler."""
 
-    @patch("helicon.EPU_micrograph_path_2_movie_xml_path")
-    @patch("helicon.EPU_xml_2_beamshift")
-    @patch("helicon.assign_beamshifts_to_cluster")
-    def test_xy_splits_groups(self, mock_cluster, mock_beamshift, mock_xml_path):
+    def _make_args(self, verbose=0, cpu=-1):
+        return argparse.Namespace(verbose=verbose, cpu=cpu)
+
+    def test_xy_returns_unchanged_when_param_zero(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftxy import handle
+
+        micros = ["a.mrc", "b.mrc"]
+        data = _make_dataframe(micros, optics_groups=[1, 2])
+
+        result, idx = handle(data, self._make_args(), {}, param="0")
+
+        assert list(result["rlnOpticsGroup"]) == [1, 2]
+
+    def test_xy_splits_groups(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftxy import handle
+
         micros = ["/data/mg1.mrc", "/data/mg2.mrc", "/data/mg3.mrc"]
-        mock_xml_path.side_effect = lambda micrograph_path, xml_folder: (
-            Path(micrograph_path).with_suffix(".xml")
-        )
-        mock_beamshift.side_effect = [(1.0, 2.0), (1.1, 2.1), (5.0, 5.0)]
-        mock_cluster.return_value = np.array([1, 1, 2])
-
         data = _make_dataframe(micros, optics_groups=1)
 
         with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.glob", return_value=["FoilHole_1.xml"]),
+            patch("helicon.check_foilhole_xml_files"),
+            patch(
+                "helicon.EPU_micrograph_path_2_movie_xml_path",
+                side_effect=lambda micrograph_path, xml_folder="": Path(
+                    micrograph_path
+                ).with_suffix(".xml"),
+            ),
+            patch(
+                "helicon.EPU_xml_2_beamshift",
+                side_effect=[(1.0, 2.0), (1.1, 2.1), (5.0, 5.0)],
+            ),
+            patch(
+                "helicon.assign_beamshifts_to_cluster", return_value=np.array([1, 1, 2])
+            ),
         ):
-            _, param_dict = helicon.parse_param_str(
-                "xml_folder=/data:min_micrographs_per_group=4"
-            )
-            xml_folder = param_dict.get("xml_folder", "")
-            min_cluster_size = int(param_dict.get("min_micrographs_per_group", 4))
-            image_name = "rlnMicrographName"
+            result, idx = handle(data, self._make_args(), {}, param="1")
 
-            micrographs = data[image_name].unique()
-            xml_files_dict = {
-                m: helicon.EPU_micrograph_path_2_movie_xml_path(
-                    micrograph_path=m, xml_folder=xml_folder
-                )
-                for m in micrographs
-            }
-            micrographs_to_beamshifts = {
-                m: helicon.EPU_xml_2_beamshift(xml_file=xml_files_dict[m])
-                for m in micrographs
-            }
-            beamshifts = list(micrographs_to_beamshifts.values())
-            beamshift_clusters = helicon.assign_beamshifts_to_cluster(
-                beamshifts=beamshifts,
-                min_cluster_size=min_cluster_size,
-                cpu=1,
-                verbose=0,
-            )
+        group_ids = sorted(result["rlnOpticsGroup"].unique())
+        assert len(group_ids) == 2
 
-            micrograph_to_cluster = {
-                m: beamshift_clusters[mi]
-                for mi, m in enumerate(micrographs_to_beamshifts.keys())
-            }
-            new_subgroups = data[image_name].map(micrograph_to_cluster)
-            existing_groups = data["rlnOpticsGroup"].copy()
-            data["rlnOpticsGroup"] = helicon.combine_groups(
-                existing_groups.values, new_subgroups.values
-            )
+    def test_xy_errors_without_xml_files(self):
+        from helicon.plugins.images2star.assignopticgroupbybeamshiftxy import handle
+        from helicon.lib.exceptions import HeliconIOError
 
-            group_ids = sorted(data["rlnOpticsGroup"].unique())
-            assert len(group_ids) == 2
-
-    @patch("pathlib.Path.exists", return_value=False)
-    @patch("pathlib.Path.glob", return_value=[])
-    def test_xy_errors_without_xml_files(self, mock_glob, mock_exists):
         micros = ["/data/mg1.mrc"]
         data = _make_dataframe(micros, optics_groups=1)
-        optics_orig = data.attrs["optics"]
-        image_name = "rlnMicrographName"
 
-        micrographs = data[image_name].unique()
+        with patch("helicon.check_foilhole_xml_files") as mock_check:
+            mock_check.side_effect = HeliconIOError("no xml files")
+            with pytest.raises(HeliconIOError):
+                handle(data, self._make_args(), {}, param="1")
 
-        def has_xml(xml_folder, micrograph_path):
-            if xml_folder:
-                xfp = Path(xml_folder)
-                if xfp.exists() and xfp.is_dir() and list(xfp.glob("FoilHole_*.xml")):
-                    return True
-            if Path(micrograph_path).exists():
-                if list(Path(micrograph_path).parent.glob("FoilHole_*.xml")):
-                    return True
-            return False
-
-        assert not has_xml(xml_folder="", micrograph_path=micrographs[0])
+        mock_check.assert_called_once()
 
 
 class TestImages2starCheckArgs(object):
@@ -430,24 +498,3 @@ class TestImages2starCheckArgs(object):
         images2star.add_args(parser)
         args = parser.parse_args(["input.cs", "x.star"])
         assert args.micrographStar is None
-
-
-class TestImages2starResetOpticGroups(object):
-    """Tests for resetOpticGroups handler logic."""
-
-    def test_reset_combines_all_groups_into_one(self):
-        micros = ["a.mrc", "b.mrc", "c.mrc"]
-        data = _make_dataframe(micros, optics_groups=[1, 2, 3])
-        optics_orig = data.attrs["optics"]
-
-        data["rlnOpticsGroup"] = 1
-        optics = optics_orig.copy().iloc[0:0]
-        new_row = optics_orig.copy().iloc[[0]]
-        new_row["rlnOpticsGroup"] = 1
-        new_row["rlnOpticsGroupName"] = "opticsGroup1"
-        optics = pd.concat([optics, new_row], ignore_index=True)
-        data.attrs["optics"] = optics
-
-        group_ids = sorted(data["rlnOpticsGroup"].unique())
-        assert group_ids == [1]
-        assert len(data.attrs["optics"]) == 1

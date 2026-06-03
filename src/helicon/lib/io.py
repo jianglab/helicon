@@ -2027,8 +2027,8 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
 def mrc2mrcs(data: pd.DataFrame) -> pd.DataFrame:
     """Convert .mrc file references in a DataFrame to .mrcs symlinks.
 
-    For each unique .mrc file found, creates a symlink with a .mrcs extension
-    and updates the DataFrame to point to the new symlink.
+    For each unique .mrc file, checks for a companion .mrcs that is a
+    symlink or hard link to the same file; if none exists, creates one.
 
     Parameters
     ----------
@@ -2050,22 +2050,35 @@ def mrc2mrcs(data: pd.DataFrame) -> pd.DataFrame:
 
     names = set(data["filename"])
     mapping = {f: f for f in names}
-    names = set([f for f in names if f.endswith(".mrc")])
-    if len(names):
-        for name in names:
-            folder = Path(name).parent
+    mrc_names = [f for f in names if f.endswith(".mrc")]
+    if mrc_names:
+        for name in mrc_names:
+            mrc_path = Path(name)
+            mrc_resolved = mrc_path.resolve()
+            mrcs_path = mrc_path.with_suffix(".mrcs")
+
+            # Check if companion .mrcs already links to the same file
+            if mrcs_path.is_symlink() and mrcs_path.resolve() == mrc_resolved:
+                mapping[name] = str(mrcs_path)
+                continue
+            if (
+                mrcs_path.exists()
+                and mrcs_path.stat().st_ino == mrc_resolved.stat().st_ino
+                and mrcs_path.stat().st_dev == mrc_resolved.stat().st_dev
+            ):
+                mapping[name] = str(mrcs_path)
+                continue
+
+            folder = mrc_path.parent
             if not os.access(str(folder), os.W_OK):
                 folder = Path("./mrc2mrcs")
-            if not folder.exists():
-                folder.mkdir(parents=True)
-            name2 = Path(name).name + "s"
-            name2 = folder / name2
-            mapping[name] = str(name2)
-            if not name2.exists():
-                if name2.is_symlink():
-                    name2.unlink()
-                name_abs = str(Path(name).resolve())
-                os.symlink(name_abs, str(name2))
+                folder.mkdir(parents=True, exist_ok=True)
+                mrcs_path = folder / (mrc_path.name + "s")
+            mapping[name] = str(mrcs_path)
+            if not mrcs_path.exists():
+                if mrcs_path.is_symlink():
+                    mrcs_path.unlink()
+                os.symlink(str(mrc_resolved), str(mrcs_path))
         data.loc[:, "filename"] = data["filename"].map(mapping)
     if "rlnImageName" in data:  # Relion star file
         data.loc[:, "rlnImageName"] = pid.astype(str) + "@" + data["filename"]

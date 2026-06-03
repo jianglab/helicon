@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import helicon
 import numpy as np
-from helicon.lib.exceptions import HeliconError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -72,15 +71,8 @@ def handle(
     if param:
         source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
 
-        micrographs = np.unique(data[micrograph_name])
-        for mi, m in enumerate(micrographs):
-            mask = np.where(data[micrograph_name] == m)
-            data[exp_group_id_name][mask] = mi + 1
-
-        if len(exp_group_id_names_all) > 1:
-            for attr in exp_group_id_names_all:
-                if attr != exp_group_id_name:
-                    data[attr] = data[exp_group_id_name]
+        data[exp_group_id_name] = helicon.per_micrograph_ids(data[micrograph_name])
+        helicon.sync_group_columns(data, exp_group_id_name)
 
         group_ids = np.sort(np.unique(data[exp_group_id_name]))
 

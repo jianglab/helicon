@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import helicon
 import numpy as np
-from helicon.lib.exceptions import HeliconError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -72,10 +71,9 @@ def handle(
     if param:
         source_group_ids = np.sort(np.unique(data[exp_group_id_name]))
         data[exp_group_id_name] = 1
-        if len(exp_group_id_names_all) > 1:
-            for attr in exp_group_id_names_all:
-                if attr != exp_group_id_name:
-                    data[attr] = data[exp_group_id_name]
+
+        helicon.sync_group_columns(data, exp_group_id_name)
+
         group_ids = np.sort(np.unique(data[exp_group_id_name]))
         output_slots.add(exp_group_id_name.split("/")[0])
         output_title += f"->{len(group_ids)} group"

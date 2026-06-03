@@ -90,9 +90,9 @@ def handle(
         rise = float(param_dict["rise"])
         csym = int(param_dict.get("csym", 1))
         if rise <= 0:
-            raise HeliconError("\\tERROR: rise (>0) must be specified")
-        if csym < 1:
-            raise HeliconError("\\tERROR: csym (>0) must be specified")
+            raise HeliconError("\\trise (>0) must be specified")
+        if csym <= 0:
+            raise HeliconError("\\tcsym (>0) must be specified")
         new_apix = float(param_dict.get("new_apix", apix))
         new_nz = int(param_dict["new_nz"])
         new_nxy = int(param_dict["new_nxy"])
