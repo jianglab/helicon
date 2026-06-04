@@ -46,6 +46,48 @@ __all__ = [
 ]
 
 
+def preferred_relion_star_column_order() -> list[str]:
+    """Return the preferred column order for RELION STAR files.
+
+    This order is based on common conventions and may not be strictly defined.
+    Columns not in this list will be appended at the end in their original order.
+
+    Returns
+    -------
+    list of str
+        Preferred column names in order.
+    """
+
+    cols = "rlnAngleRot rlnAngleTilt rlnAnglePsi rlnOriginXAngst rlnOriginYAngst rlnCoordinateX rlnCoordinateY rlnDefocusU rlnDefocusV rlnDefocusAngle rlnPhaseShift rlnCtfBfactor rlnCtfScalefactor rlnLogLikeliContribution rlnRandomSubset rlnClassNumber rlnImageName rlnMicrographName rlnMovieName rlnOpticsGroup".split()
+    return cols
+
+
+def reorder_dataframe_columns(data: pd.DataFrame, column_order: list[str] = None) -> pd.DataFrame:
+    """Reorder the columns of a DataFrame according to a specified order.
+
+    Columns not included in the specified order will be appended at the end
+    in their original order.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Input DataFrame to reorder.
+    column_order : list of str
+        Desired order of columns. Columns not in this list will be appended.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with reordered columns.
+    """
+    if column_order is None:
+        column_order = preferred_relion_star_column_order()
+    existing_columns = [col for col in column_order if col in data.columns]
+    remaining_columns = [col for col in data.columns if col not in existing_columns]
+    new_column_order = existing_columns + remaining_columns
+    return data[new_column_order]
+
+
 def pixelSizeAttrForImageAttr(imageAttr: str) -> str | None:
     """Return the corresponding pixel size attribute for an image attribute.
 
@@ -1887,7 +1929,7 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
 
         rotvecs = list(data["alignments3D/pose"].values)
         r = R.from_rotvec(rotvecs)
-        e = r.as_euler("zyz", degrees=True)
+        e = r.as_euler("ZYZ", degrees=True)
         ret["rlnAngleRot"] = e[:, 0]
         ret["rlnAngleTilt"] = e[:, 1]
         ret["rlnAnglePsi"] = e[:, 2]
@@ -1900,8 +1942,8 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
     # Output Angstrom origins for RELION 3.1+ convention (pixel origins deprecated)
     if origin_x is not None and "blob/psize_A" in data:
         apix = data["blob/psize_A"]
-        ret["rlnOriginXAngst"] = (origin_x * apix).round(2)
-        ret["rlnOriginYAngst"] = (origin_y * apix).round(2)
+        ret["rlnOriginXAngst"] = (origin_x * apix).round(6)
+        ret["rlnOriginYAngst"] = (origin_y * apix).round(6)
 
     if "location/center_x_frac" in data and "location/center_y_frac" in data:
         if "location/micrograph_shape" in data:
@@ -1960,22 +2002,18 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         )
         ret.loc[:, "rlnAnglePsiFlipRatio"] = 0.5
 
-    # High-order aberrations
-    if "ctf/tilt_A" in data and "ctf/accel_kv" in data:
-        bt = pd.DataFrame(data["ctf/tilt_A"].tolist(), columns=["tx", "ty"])
-        if "ctf/cs_mm" in data:
-            cs = data["ctf/cs_mm"].values.astype(float)
-        else:
-            cs = 2.7
-        lam = _electron_wavelength(data["ctf/accel_kv"].values.astype(float))
-        ret["rlnBeamTiltX"] = (bt["tx"].values * 1000.0 / (cs * 1e7 * lam**2)).round(4)
-        ret["rlnBeamTiltY"] = (bt["ty"].values * 1000.0 / (cs * 1e7 * lam**2)).round(4)
-
     if "ctf/bfactor" in data:
         ret["rlnCtfBfactor"] = data["ctf/bfactor"]
 
     if "ctf/scale" in data:
         ret["rlnCtfScalefactor"] = data["ctf/scale"]
+
+    # High-order aberrations
+    if "ctf/tilt_A" in data and "ctf/accel_kv" in data:
+        logger.warning(
+            "ctf/tilt_A found in cryoSPARC data but not converted to STAR file. "
+            "the conversion is not yet implemented."
+        )
 
     if "ctf/trefoil_A" in data:
         logger.warning(
@@ -2015,6 +2053,8 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
             % (list(data.columns))
         )
 
+    ret = reorder_dataframe_columns(ret)
+    
     try:
         ret.attrs["source_path"] = data.attrs["source_path"]
     except KeyError:

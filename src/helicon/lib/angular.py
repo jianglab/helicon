@@ -178,7 +178,7 @@ def eman_euler2quaternion(
     from scipy.spatial.transform import Rotation as R
 
     rot, tilt, psi = az - 90.0, alt, phi + 90.0
-    r = R.from_euler("zyz", np.vstack((rot, tilt, psi)).T, degrees=True)
+    r = R.from_euler("ZYZ", np.vstack((rot, tilt, psi)).T, degrees=True)
     q = r.as_quat()  # scipy: scalar-last (x, y, z, w)
     if q.ndim == 1:
         q = q.reshape((1, 4))
@@ -206,7 +206,7 @@ def relion_euler2quaternion(
     """
     from scipy.spatial.transform import Rotation as R
 
-    r = R.from_euler("zyz", np.vstack((rot, tilt, psi)).T, degrees=True)
+    r = R.from_euler("ZYZ", np.vstack((rot, tilt, psi)).T, degrees=True)
     q = r.as_quat()  # scipy: scalar-last (x, y, z, w)
     if q.ndim == 1:
         q = q.reshape((1, 4))
@@ -238,7 +238,7 @@ def quaternion2euler(
     # Convert scalar-first (w, x, y, z) to scipy scalar-last (x, y, z, w)
     q_scipy = np.hstack((q[:, 1:4], q[:, 0:1]))
     r = R.from_quat(q_scipy)
-    euler = r.as_euler("zyz", degrees=True)
+    euler = r.as_euler("ZYZ", degrees=True)
     rot, tilt, psi = euler[:, 0], euler[:, 1], euler[:, 2]
     rot = set_angle_range(rot, range=(-180, 180))
     tilt = set_angle_range(tilt, range=(-180, 180))

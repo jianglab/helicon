@@ -224,7 +224,7 @@ def transform_map(
         Y = Y * scale
         X = X * scale
     XYZ = np.vstack((X.ravel(), Y.ravel(), Z.ravel())).transpose()
-    xform = R.from_euler("zyz", (psi, tilt, rot), degrees=True)
+    xform = R.from_euler("ZYZ", (rot, tilt, psi), degrees=True)
     xyz = xform.apply(XYZ, inverse=False)
     xyz[:, 0] += nx // 2 - dx
     xyz[:, 1] += ny // 2 - dy
