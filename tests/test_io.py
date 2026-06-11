@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
@@ -304,6 +305,72 @@ class TestIo(object):
         with patch("helicon.lib.io.image2dataframe", return_value=cs_df):
             r = io.images2dataframe("input.cs", target_convention="relion")
         assert r["rlnCoordinateY"].iloc[0] == 3072.0
+
+    def test_dataframe_convert_beamtilt(self):
+        """Test ctf/tilt_A (Å) → rlnBeamTiltX/Y (mrad) via pyem formula."""
+        cs_df = pd.DataFrame(
+            {
+                "ctf/tilt_A": [np.array([1000.0, 500.0]), np.array([-1000.0, 500.0])],
+                "ctf/cs_mm": [2.7, 2.7],
+                "blob/path": ["/a.mrc", "/a.mrc"],
+                "blob/idx": [0, 1],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        expected_x0 = np.arcsin(1000.0 / 2.7e7) * 1e3
+        expected_y0 = np.arcsin(500.0 / 2.7e7) * 1e3
+        expected_x1 = np.arcsin(-1000.0 / 2.7e7) * 1e3
+        expected_y1 = np.arcsin(500.0 / 2.7e7) * 1e3
+        assert abs(r["rlnBeamTiltX"].iloc[0] - expected_x0) < 1e-8
+        assert abs(r["rlnBeamTiltY"].iloc[0] - expected_y0) < 1e-8
+        assert abs(r["rlnBeamTiltX"].iloc[1] - expected_x1) < 1e-8
+        assert abs(r["rlnBeamTiltY"].iloc[1] - expected_y1) < 1e-8
+        assert "rlnBeamTiltX" in r.columns
+        assert "rlnBeamTiltY" in r.columns
+
+    def test_dataframe_convert_anisomag(self):
+        """Test ctf/anisomag → rlnMagMat00-11 direct copy."""
+        cs_df = pd.DataFrame(
+            {
+                "ctf/anisomag": [
+                    np.array([1.0, 0.0, 0.0, 1.0]),
+                    np.array([1.05, 0.02, -0.01, 0.98]),
+                ],
+                "blob/path": ["/a.mrc", "/a.mrc"],
+                "blob/idx": [0, 1],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        assert r["rlnMagMat00"].iloc[0] == 1.0
+        assert r["rlnMagMat01"].iloc[0] == 0.0
+        assert r["rlnMagMat10"].iloc[0] == 0.0
+        assert r["rlnMagMat11"].iloc[0] == 1.0
+        assert r["rlnMagMat00"].iloc[1] == 1.05
+        assert r["rlnMagMat01"].iloc[1] == 0.02
+        assert r["rlnMagMat10"].iloc[1] == -0.01
+        assert r["rlnMagMat11"].iloc[1] == 0.98
+
+    def test_dataframe_convert_highorder_aberrations_preserve_other_cols(self):
+        """Ensure tilt/anisomag conversion doesn't break other column conversions."""
+        cs_df = pd.DataFrame(
+            {
+                "ctf/tilt_A": [np.array([500.0, 300.0])],
+                "ctf/anisomag": [np.array([1.0, 0.0, 0.0, 1.0])],
+                "ctf/df1_A": [10000.0],
+                "ctf/df2_A": [9500.0],
+                "ctf/df_angle_rad": [0.5],
+                "ctf/cs_mm": [2.7],
+                "blob/path": ["/a.mrc"],
+                "blob/idx": [0],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        assert "rlnDefocusU" in r.columns
+        assert "rlnBeamTiltX" in r.columns
+        assert "rlnMagMat00" in r.columns
 
     def test_clean_cs_micrograph_path(self):
         """Test stripping cryoSPARC hash and _patch_aligned_doseweighted."""

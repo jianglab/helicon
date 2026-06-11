@@ -62,7 +62,9 @@ def preferred_relion_star_column_order() -> list[str]:
     return cols
 
 
-def reorder_dataframe_columns(data: pd.DataFrame, column_order: list[str] = None) -> pd.DataFrame:
+def reorder_dataframe_columns(
+    data: pd.DataFrame, column_order: list[str] = None
+) -> pd.DataFrame:
     """Reorder the columns of a DataFrame according to a specified order.
 
     Columns not included in the specified order will be appended at the end
@@ -990,9 +992,18 @@ def star2dataframe(
         if k in ["movies", "micrographs", "particles", "coordinate_files"]:
             data = d[k]
             break
+
+    if "images" in d:
+        if "particles" not in d:
+            data = d["images"]
+        else:
+            logger.warning(
+                f"{starFile} contains both 'images' and 'particles' data blocks. Only 'particles' will be read"
+            )
+    
     assert (
         data is not None
-    ), f"ERROR: {starFile} does not have a required data block (movies, micrographs, or particles)"
+    ), f"ERROR: {starFile} does not have a required data block (movies, micrographs, or particles/images)"
 
     if "optics" in d:
         data.attrs["optics"] = d["optics"]
@@ -2009,32 +2020,46 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         ret["rlnCtfScalefactor"] = data["ctf/scale"]
 
     # High-order aberrations
-    if "ctf/tilt_A" in data and "ctf/accel_kv" in data:
-        logger.warning(
-            "ctf/tilt_A found in cryoSPARC data but not converted to STAR file. "
-            "the conversion is not yet implemented."
-        )
+    # Beam tilt: ctf/tilt_A (Å) → rlnBeamTiltX/Y (mrad)
+    # Using the established formula from pyem:
+    #   tilt_mrad = arcsin(tilt_A / cs_mm * 1e-7) * 1e3
+    # sign convention: positive mrad corresponds to positive Å displacement
+    if "ctf/tilt_A" in data and "ctf/cs_mm" in data:
+        cs_mm = data["ctf/cs_mm"].values
+        tilt_vals = np.stack(data["ctf/tilt_A"].values)
+        tilt_x_A = tilt_vals[:, 0]
+        tilt_y_A = tilt_vals[:, 1]
+        ret["rlnBeamTiltX"] = (np.arcsin(tilt_x_A / cs_mm * 1e-7) * 1e3).round(8)
+        ret["rlnBeamTiltY"] = (np.arcsin(tilt_y_A / cs_mm * 1e-7) * 1e3).round(8)
 
+    # Trefoil: ctf/trefoil_A cannot be reliably converted to RELION's
+    # rlnOddZernike coefficients because the Å-to-Zernike conversion
+    # depends on spatial frequency (not a single constant).
+    # This matches pyem's behaviour (pass / not implemented).
     if "ctf/trefoil_A" in data:
         logger.warning(
             "ctf/trefoil_A found in cryoSPARC data but not converted to STAR file. "
             "RELION encodes trefoil via rlnOddZernike in the optics group; "
-            "the conversion is not yet implemented."
+            "the Å-to-Zernike conversion is frequency-dependent and not yet implemented. "
+            "Run CtfRefine in RELION to fit trefoil from the data."
         )
 
+    # Tetrafoil: ctf/tetra_A cannot be reliably converted (same reason as trefoil).
     if "ctf/tetra_A" in data:
         logger.warning(
             "ctf/tetra_A found in cryoSPARC data but not converted to STAR file. "
             "RELION encodes tetrafoil via rlnEvenZernike in the optics group; "
-            "the conversion is not yet implemented."
+            "the Å-to-Zernike conversion is frequency-dependent and not yet implemented. "
+            "Run CtfRefine in RELION to fit tetrafoil from the data."
         )
 
+    # Anisotropic magnification: direct copy (matches pyem convention)
     if "ctf/anisomag" in data:
-        logger.warning(
-            "ctf/anisomag found in cryoSPARC data but not converted to STAR file. "
-            "RELION encodes anisotropic magnification via rlnMagMat00-11 in the optics group; "
-            "the conversion is not yet implemented."
-        )
+        anisomag_vals = np.stack(data["ctf/anisomag"].values)
+        ret["rlnMagMat00"] = anisomag_vals[:, 0]
+        ret["rlnMagMat01"] = anisomag_vals[:, 1]
+        ret["rlnMagMat10"] = anisomag_vals[:, 2]
+        ret["rlnMagMat11"] = anisomag_vals[:, 3]
 
     # 3D variability introduced in v2.9
     import fnmatch
@@ -2054,7 +2079,7 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         )
 
     ret = reorder_dataframe_columns(ret)
-    
+
     try:
         ret.attrs["source_path"] = data.attrs["source_path"]
     except KeyError:

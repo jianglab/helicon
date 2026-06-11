@@ -42,7 +42,7 @@ def handle(data, args, index_d, param):
         path = param
         from helicon import convert_dataframe_file_path
 
-        for attr in "rlnImageName rlnMicrographName".split():
+        for attr in "rlnImageName rlnMicrographName rlnMovieName".split():
             if attr in data:
                 from helicon import get_relion_project_folder
 
