@@ -15,6 +15,8 @@ for _old, _new in _numba_np_compat.items():
 
 from .lib.analysis import (
     calc_fsc,
+    calc_fsc_from_fft,
+    calc_fsc_per_shell,
     cosine_similarity,
     cross_correlation_coefficient,
     estimate_helix_rotation_center_diameter,

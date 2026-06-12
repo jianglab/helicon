@@ -5,6 +5,8 @@ import helicon
 
 __all__ = [
     "calc_fsc",
+    "calc_fsc_from_fft",
+    "calc_fsc_per_shell",
     "cosine_similarity",
     "cross_correlation_coefficient",
     "estimate_helix_rotation_center_diameter",
@@ -103,10 +105,132 @@ def twist2pitch(
 
 
 # adapted from https://github.com/tdgrant1/denss/blob/3fbbefea45cb6d615e629e672d65440c46ac83da/saxstats/saxstats.py#L2185
-def calc_fsc(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.ndarray:
+def calc_fsc(map1, map2, apix, F1=None, F2=None, shell_flat=None, n=None):
     """Calculate Fourier Shell Correlation between two 3D maps.
 
-    Adapted from https://github.com/tdgrant1/denss.
+    Parameters
+    ----------
+    map1 : np.ndarray or None
+        First 3D map. Ignored if F1 is provided.
+    map2 : np.ndarray or None
+        Second 3D map. Ignored if F2 is provided.
+    apix : float
+        Pixel size in Angstroms per pixel.
+    F1 : np.ndarray, optional
+        Pre-computed rfftn of map1.
+    F2 : np.ndarray, optional
+        Pre-computed rfftn of map2.
+    shell_flat : np.ndarray, optional
+        Pre-computed flattened shell labels. If None, computed from n.
+    n : int, optional
+        Spatial dimension. Inferred from map1 or F1 if None.
+
+    Returns
+    -------
+    np.ndarray
+        Two-column array with spatial frequency (1/Angstrom) and FSC values.
+    """
+    if n is None:
+        n = map1.shape[0] if F1 is None else F1.shape[0]
+    df = 1.0 / (apix * n)
+
+    if shell_flat is None:
+        k2 = np.fft.fftfreq(n) ** 2
+        kr2 = np.fft.rfftfreq(n) ** 2
+        shell = np.round(
+            np.sqrt(k2[:, None, None] + k2[None, :, None] + kr2[None, None, :]) * n
+        ).astype(np.int32)
+        np.clip(shell, 0, n // 2, out=shell)
+        shell_flat = shell.ravel()
+        del shell
+
+    if F1 is None:
+        from scipy.fft import rfftn
+
+        F1 = rfftn(map1, workers=-1)
+    if F2 is None:
+        from scipy.fft import rfftn
+
+        F2 = rfftn(map2, workers=-1)
+
+    num = np.bincount(
+        shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=n // 2 + 1
+    )
+    den1 = np.bincount(
+        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n // 2 + 1
+    )
+    den2 = np.bincount(
+        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n // 2 + 1
+    )
+
+    denom = np.sqrt(den1 * den2)
+    fsc = np.ones(n // 2 + 1, dtype=np.float64)
+    valid = denom > 0
+    fsc[valid] = num[valid] / denom[valid]
+
+    qx_max = np.fft.rfftfreq(n).max()
+    saxis = np.arange(n // 2 + 1) * df
+    idx = np.where(saxis <= qx_max)
+    return np.vstack((saxis[idx], fsc[idx])).T
+
+
+def calc_fsc_from_fft(F1, F2, n, apix):
+    """Calculate FSC directly from pre-computed rfftn results.
+
+    Parameters
+    ----------
+    F1 : np.ndarray
+        rfftn result of first map.
+    F2 : np.ndarray
+        rfftn result of second map.
+    n : int
+        Original spatial dimension (maps are n×n×n).
+    apix : float
+        Pixel size in Angstroms per pixel.
+
+    Returns
+    -------
+    np.ndarray
+        Two-column array with spatial frequency (1/Angstrom) and FSC values.
+    """
+    df = 1.0 / (apix * n)
+    k2 = np.fft.fftfreq(n) ** 2
+    kr2 = np.fft.rfftfreq(n) ** 2
+    shell = np.round(
+        np.sqrt(k2[:, None, None] + k2[None, :, None] + kr2[None, None, :]) * n
+    ).astype(np.int32)
+    np.clip(shell, 0, n // 2, out=shell)
+    shell_flat = shell.ravel()
+    del shell
+
+    num = np.bincount(
+        shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=n // 2 + 1
+    )
+    den1 = np.bincount(
+        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n // 2 + 1
+    )
+    den2 = np.bincount(
+        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n // 2 + 1
+    )
+
+    denom = np.sqrt(den1 * den2)
+    fsc = np.ones(n // 2 + 1, dtype=np.float64)
+    valid = denom > 0
+    fsc[valid] = num[valid] / denom[valid]
+
+    qx_max = np.fft.rfftfreq(n).max()
+    saxis = np.arange(n // 2 + 1) * df
+    idx = np.where(saxis <= qx_max)
+    return np.vstack((saxis[idx], fsc[idx])).T
+
+
+def calc_fsc_per_shell(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.ndarray:
+    """Calculate FSC using per-voxel shell assignment (matching EMAN2).
+
+    Each voxel is assigned to exactly one shell based on its integer
+    distance from the origin, matching the EMAN2
+    ``calc_fourier_shell_correlation`` behavior. Returns a 1D array of
+    length ``n//2+1`` where index 0 is the DC term.
 
     Parameters
     ----------
@@ -120,39 +244,42 @@ def calc_fsc(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Two-column array with spatial frequency (1/Angstrom) and FSC values.
+        FSC values indexed by shell number (0 = DC, 1 = first shell, etc.).
+        Spatial frequency for shell i is ``i / (n * apix)``.
     """
     n = map1.shape[0]
-    df = 1.0 / (apix * n)
-    qx_ = np.fft.fftfreq(n) * n * df
-    qx, qy, qz = np.meshgrid(qx_, qx_, qx_, indexing="ij")
-    qx_max = np.abs(qx).max()
-    qr = np.sqrt(qx**2 + qy**2 + qz**2)
-    qmax = np.max(qr)
-    qstep = np.min(qr[qr > 0])
-    nbins = int(qmax / qstep)
-    qbins = np.linspace(0, nbins * qstep, nbins + 1)
-    qbin_labels = np.searchsorted(qbins, qr, "right")
-    qbin_labels -= 1
-    F1 = np.fft.fftn(map1)
-    F2 = np.fft.fftn(map2)
-    from scipy import ndimage
+    from scipy.fft import fftn
 
-    numerator = ndimage.sum(
-        np.real(F1 * np.conj(F2)),
-        labels=qbin_labels,
-        index=np.arange(0, qbin_labels.max() + 1),
-    )
-    term1 = ndimage.sum(
-        np.abs(F1) ** 2, labels=qbin_labels, index=np.arange(0, qbin_labels.max() + 1)
-    )
-    term2 = ndimage.sum(
-        np.abs(F2) ** 2, labels=qbin_labels, index=np.arange(0, qbin_labels.max() + 1)
-    )
-    denominator = (term1 * term2) ** 0.5
-    FSC = numerator / denominator
-    qidx = np.where(qbins <= qx_max)
-    return np.vstack((qbins[qidx], FSC[qidx])).T
+    F1 = fftn(map1, workers=-1)
+    F2 = fftn(map2, workers=-1)
+
+    kx = np.fft.fftfreq(n)
+    ky = np.fft.fftfreq(n)
+    kz = np.fft.fftfreq(n)
+    KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing="ij")
+    kr = np.sqrt(KX**2 + KY**2 + KZ**2)
+    shell = np.round(kr * n).astype(np.int32)
+    np.clip(shell, 0, n // 2, out=shell)
+
+    nshells = n // 2 + 1
+    num = np.zeros(nshells, dtype=np.float64)
+    den1 = np.zeros(nshells, dtype=np.float64)
+    den2 = np.zeros(nshells, dtype=np.float64)
+
+    flat_shell = shell.ravel()
+    flat_num = np.real(F1 * np.conj(F2)).ravel()
+    flat_den1 = np.abs(F1).ravel() ** 2
+    flat_den2 = np.abs(F2).ravel() ** 2
+
+    np.add.at(num, flat_shell, flat_num)
+    np.add.at(den1, flat_shell, flat_den1)
+    np.add.at(den2, flat_shell, flat_den2)
+
+    denom = np.sqrt(den1 * den2)
+    fsc = np.ones(nshells, dtype=np.float64)
+    valid = denom > 0
+    fsc[valid] = num[valid] / denom[valid]
+    return fsc
 
 
 def estimate_helix_rotation_center_diameter(

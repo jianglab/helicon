@@ -14,6 +14,7 @@ cli_commands = [
     "images2star",
     "proc3d",
     "symmetry_mismatch",
+    "trueFSC",
 ]
 shiny_commands = [
     "denovo3D",

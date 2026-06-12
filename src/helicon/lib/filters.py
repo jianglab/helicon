@@ -13,6 +13,7 @@ __all__ = [
     "normalize_mean_std",
     "normalize_min_max",
     "normalize_percentile",
+    "randomize_phases_lowpass",
     "set_structural_factors",
     "threshold_data",
 ]
@@ -463,3 +464,57 @@ def generate_tapering_filter(
         X[outer] = 0
         filter *= X
     return filter
+
+
+def randomize_phases_lowpass(
+    data: np.ndarray, apix: float, cutoff_res: float, return_fft: bool = False
+):
+    """Randomize Fourier phases below a resolution cutoff (low-pass).
+
+    Implements the phase randomization described in Chen et al. (2013),
+    Ultramicroscopy 135:24-35, equation 4. Phases at resolutions worse
+    (smaller spatial frequency) than ``cutoff_res`` are randomized while
+    preserving the original amplitudes.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input 3D map.
+    apix : float
+        Pixel size in Angstroms.
+    cutoff_res : float
+        Resolution cutoff in Angstroms. Phases at spatial frequencies
+        >= ``apix/cutoff_res`` (normalized) are randomized.
+    return_fft : bool, optional
+        If True, return the rfftn result instead of the real-space map.
+        Useful for computing FSC directly without ifft+fft round-trip.
+        Defaults to False.
+
+    Returns
+    -------
+    np.ndarray
+        Phase-randomized map (if ``return_fft=False``) or its rfftn
+        result (if ``return_fft=True``).
+    """
+    from scipy.fft import rfftn
+
+    F = rfftn(data, workers=-1)
+    amp = np.abs(F)
+    phase = np.angle(F)
+
+    cutoff_freq2 = (apix / cutoff_res) ** 2
+    k = np.fft.fftfreq(data.shape[-1])
+    kr = np.fft.rfftfreq(data.shape[-1])
+    k2 = k * k
+    kr2 = kr * kr
+    mask = (k2[:, None, None] + k2[None, :, None] + kr2[None, None, :]) >= cutoff_freq2
+
+    random_phases = np.exp(1j * np.random.uniform(0, 2 * np.pi, size=phase.shape))
+    phase[mask] = np.angle(random_phases[mask])
+
+    F_randomized = amp * np.exp(1j * phase)
+    if return_fft:
+        return F_randomized
+    from scipy.fft import irfftn
+
+    return irfftn(F_randomized, workers=-1)
