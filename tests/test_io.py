@@ -372,6 +372,79 @@ class TestIo(object):
         assert "rlnBeamTiltX" in r.columns
         assert "rlnMagMat00" in r.columns
 
+    def test_dataframe_convert_exposure_group_to_optics_group(self):
+        """Test ctf/exp_group_id -> rlnOpticsGroup mapping."""
+        cs_df = pd.DataFrame(
+            {
+                "ctf/exp_group_id": [1, 1, 2, 3],
+                "ctf/accel_kv": [300.0, 300.0, 200.0, 300.0],
+                "ctf/cs_mm": [2.7, 2.7, 2.7, 2.7],
+                "blob/path": ["/a.mrc", "/a.mrc", "/b.mrc", "/c.mrc"],
+                "blob/idx": [0, 1, 0, 0],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        assert "rlnOpticsGroup" in r.columns
+        assert list(r["rlnOpticsGroup"]) == [1, 1, 2, 3]
+
+    def test_dataframe_convert_exposure_group_location_fallback(self):
+        """Test location/exp_group_id fallback when ctf/exp_group_id missing."""
+        cs_df = pd.DataFrame(
+            {
+                "location/exp_group_id": [5, 5, 6],
+                "blob/path": ["/a.mrc", "/a.mrc", "/b.mrc"],
+                "blob/idx": [0, 1, 0],
+            }
+        )
+        cs_df.attrs["convention"] = "cryosparc"
+        r = io.dataframe_cryosparc_to_relion(cs_df)
+        assert list(r["rlnOpticsGroup"]) == [5, 5, 6]
+
+    def test_star_build_opticsgroup_uses_existing_opticsgroup(self):
+        """star_build_opticsgroup preserves existing rlnOpticsGroup values."""
+        data = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [10, 10, 20],
+                "rlnVoltage": [300.0, 300.0, 200.0],
+                "rlnSphericalAberration": [2.7, 2.7, 2.7],
+            }
+        )
+        data.attrs["convention"] = "relion"
+        io.star_build_opticsgroup(data)
+        optics = data.attrs["optics"]
+        assert list(optics["rlnOpticsGroup"]) == [10, 20]
+        assert list(optics["rlnVoltage"]) == [300.0, 200.0]
+
+    def test_star_build_opticsgroup_fallback_when_no_existing_group(self):
+        """star_build_opticsgroup creates sequential groups when no rlnOpticsGroup."""
+        data = pd.DataFrame(
+            {
+                "rlnVoltage": [300.0, 300.0, 200.0],
+                "rlnSphericalAberration": [2.7, 2.7, 2.7],
+                "rlnAmplitudeContrast": [0.1, 0.1, 0.1],
+            }
+        )
+        data.attrs["convention"] = "relion"
+        io.star_build_opticsgroup(data)
+        optics = data.attrs["optics"]
+        assert list(optics["rlnOpticsGroup"]) == [1, 2]
+        assert "rlnVoltage" not in data.columns
+
+    def test_star_build_opticsgroup_with_only_opticsgroup_no_params(self):
+        """star_build_opticsgroup returns early when only rlnOpticsGroup exists."""
+        data = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1, 2, 3],
+            }
+        )
+        data.attrs["convention"] = "relion"
+        io.star_build_opticsgroup(data)
+        assert (
+            data.attrs.get("optics") is None
+            or "rlnOpticsGroup" not in data.attrs["optics"].columns
+        )
+
     def test_clean_cs_micrograph_path(self):
         """Test stripping cryoSPARC hash and _patch_aligned_doseweighted."""
         # CS path with hash + _patch_aligned_doseweighted

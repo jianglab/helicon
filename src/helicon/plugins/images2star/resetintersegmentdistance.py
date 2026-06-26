@@ -1,9 +1,11 @@
 """Handler for the resetInterSegmentDistance option."""
 
 from __future__ import annotations
+import logging
 import helicon
-from helicon.lib.analysis import reset_inter_segment_distance
+from helicon.lib.exceptions import HeliconError
 
+logger = logging.getLogger(__name__)
 
 option_name = "resetInterSegmentDistance"
 
@@ -11,7 +13,7 @@ option_name = "resetInterSegmentDistance"
 def add_args(parser):
     parser.add_argument(
         "--resetInterSegmentDistance",
-        metavar="<Å>",
+        metavar="<\u00c5>",
         type=float,
         help="reset inter-segment distance by adding/removing 'particles' with updated 'rlnCoordinateX rlnCoordinateY rlnHelicalTrackLengthAngst' parameters. Warning: the output star file is meaningful only for particle extraction and it should NOT be used for 2d/3d classification or 3d refinement",
         default=0,
@@ -46,7 +48,7 @@ def handle(data, args, index_d, param):
         if badParms:
             s = "s" if len(badParms) > 1 else ""
             raise HeliconError(
-                "\\tERROR: parameter{s} {' '.join(badParms)} do not exist"
+                "\tERROR: parameter%s %s do not exist" % (s, " ".join(badParms))
             )
 
         apix_micrograph = 0
@@ -62,18 +64,13 @@ def handle(data, args, index_d, param):
         finally:
             if apix_micrograph <= 0:
                 raise HeliconError(
-                    "\\tERROR: neither rlnMicrographPixelSize nor rlnMicrographOriginalPixelSize is available"
+                    "\tERROR: neither rlnMicrographPixelSize nor rlnMicrographOriginalPixelSize is available"
                 )
 
-        data = reset_inter_segment_distance(
+        data = helicon.reset_inter_segment_distance(
             data,
             new_inter_segment_distance=param,
             apix_micrograph=apix_micrograph,
             verbose=args.verbose,
         )
     return data, index_d
-
-
-import logging
-
-logger = logging.getLogger(__name__)

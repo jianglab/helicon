@@ -17,6 +17,8 @@ __all__ = [
     "line_fit_projection",
     "twist2pitch",
     "estimate_inter_segment_distance",
+    "reset_inter_segment_distance",
+    "estimate_helicalTube_length",
 ]
 
 
@@ -587,6 +589,174 @@ def estimate_inter_segment_distance(
     dist_seg_sigma = np.std(dists_all)  # Angstrom
     n_max = np.sum(np.round(np.array(lengths) / dist_seg_median) + 1).astype(int)
     return dist_seg_median, dist_seg_mean, dist_seg_sigma, n_max
+
+
+def reset_inter_segment_distance(
+    data: pd.DataFrame,
+    new_inter_segment_distance: float,
+    apix_micrograph: float,
+    current_inter_segment_distance: float = -1,
+    verbose: int = 0,
+) -> pd.DataFrame | None:
+    """Reset inter-segment distance by adding/removing particles.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data with ``rlnHelicalTubeID``, ``rlnCoordinateX``,
+        ``rlnCoordinateY``, and either ``rlnImageName`` or
+        ``rlnMicrographName``.
+    new_inter_segment_distance : float
+        Desired inter-segment distance in Angstroms.
+    apix_micrograph : float
+        Pixel size of the micrograph in Angstroms/pixel.
+    current_inter_segment_distance : float, optional
+        Current inter-segment distance. If <= 0, it will be estimated.
+    verbose : int, optional
+        Verbosity level.
+
+    Returns
+    -------
+    pd.DataFrame or None
+        Updated dataframe, or None if required columns are missing.
+    """
+    if (
+        current_inter_segment_distance > 0
+        and new_inter_segment_distance == current_inter_segment_distance
+    ):
+        return data
+
+    for attr in ["rlnHelicalTubeID", "rlnCoordinateX", "rlnCoordinateY"]:
+        if attr not in data:
+            return None
+    if "rlnImageName" in data:
+        tmp = data.loc[:, "rlnImageName"].str.split("@", expand=True)
+        data.loc[:, "risd_pid"] = tmp.iloc[:, 0].astype(int)
+        data.loc[:, "risd_filename"] = tmp.iloc[:, 1]
+        filename = "risd_filename"
+    else:
+        return None
+
+    if "rlnMicrographName" in data:
+        filename = "rlnMicrographName"
+
+    if current_inter_segment_distance <= 0:
+        current_inter_segment_distance = estimate_inter_segment_distance(data)[0]
+
+    if new_inter_segment_distance == current_inter_segment_distance:
+        data.drop(["risd_filename", "risd_pid"], inplace=True, axis=1)
+        return data
+
+    cdist = current_inter_segment_distance / apix_micrograph
+    ndist = new_inter_segment_distance / apix_micrograph
+
+    from tqdm import tqdm
+
+    data2 = []
+    helices = data.groupby([filename, "rlnHelicalTubeID"], sort=False)
+    for _, particles in tqdm(helices, unit=" helicaltubes", disable=verbose < 1):
+        if len(particles) < 2:
+            data2.append(particles.reset_index(drop=True))
+            continue
+        particles_sorted = particles.sort_values(
+            ["risd_pid"], ascending=True
+        ).reset_index(drop=True)
+        x = particles_sorted.loc[:, "rlnCoordinateX"].astype(float).values
+        y = particles_sorted.loc[:, "rlnCoordinateY"].astype(float).values
+        pos, xy_fit = line_fit_projection(x, y, w=None, ref_i=0, return_xy_fit=True)
+        n0 = len(pos)
+        unit_vec = (xy_fit[-1] - xy_fit[0]) / (pos[-1] - pos[0])
+        right = np.arange(pos[0], pos[-1] + cdist / 2 + 0.1, ndist)
+        left = np.arange(pos[0] - ndist, pos[0] - cdist / 2, -ndist)
+        if len(left):
+            left.sort()
+            pos_new = np.hstack((left, right))
+        else:
+            pos_new = right
+        n = len(pos_new)
+        xy_new = xy_fit[0] + pos_new.reshape((n, 1)) * unit_vec
+        if n <= n0:
+            df_tmp = particles_sorted.iloc[:n].reset_index(drop=True)
+        else:
+            df_tmp = particles_sorted.iloc[:n0].reset_index(drop=True)
+            index_repeat = [df_tmp.index[-1]] * (n - n0)
+            df_tmp = pd.concat([df_tmp, df_tmp.iloc[index_repeat]], ignore_index=True)
+        df_tmp.loc[:, "rlnCoordinateX"] = xy_new[:, 0]
+        df_tmp.loc[:, "rlnCoordinateY"] = xy_new[:, 1]
+        if "rlnHelicalTrackLengthAngst" in df_tmp:
+            df_tmp.loc[:, "rlnHelicalTrackLengthAngst"] = (
+                pos_new - pos_new[0]
+            ) * apix_micrograph
+        data2.append(df_tmp)
+
+    data2 = pd.concat(data2)
+    data2.drop(["risd_filename", "risd_pid"], inplace=True, axis=1)
+
+    try:
+        data2.attrs = data.attrs
+    except Exception:
+        pass
+
+    return data2
+
+
+def estimate_helicalTube_length(
+    data: pd.DataFrame,
+    inter_segment_distance: float = -1,
+    verbose: int = 0,
+) -> pd.DataFrame | None:
+    """Estimate the length of each helical filament/tube.
+
+    Adds a ``rlnHelicalTubeLength`` column to the dataframe.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data with ``rlnHelicalTubeID``, ``rlnCoordinateX``,
+        ``rlnCoordinateY``, and ``rlnImageName``.
+    inter_segment_distance : float, optional
+        Known inter-segment distance. If <= 0, it will be estimated.
+    verbose : int, optional
+        Verbosity level.
+
+    Returns
+    -------
+    pd.DataFrame or None
+        Updated dataframe, or None if required columns are missing.
+    """
+    for attr in ["rlnHelicalTubeID", "rlnCoordinateX", "rlnCoordinateY"]:
+        if attr not in data:
+            return None
+    if "rlnImageName" in data:
+        tmp = data.loc[:, "rlnImageName"].str.split("@", expand=True)
+        data.loc[:, "ehl_pid"] = tmp.iloc[:, 0].astype(int)
+        filename = "ehl_filename"
+        data.loc[:, filename] = tmp.iloc[:, 1]
+    else:
+        return None
+
+    if "rlnMicrographName" in data:
+        filename = "rlnMicrographName"
+
+    if inter_segment_distance <= 0:
+        inter_segment_distance = estimate_inter_segment_distance(data)[0]
+
+    helices = data.groupby([filename, "rlnHelicalTubeID"], sort=False)
+
+    from tqdm import tqdm
+
+    for _, particles in tqdm(helices, unit=" helicaltubes", disable=verbose < 1):
+        if "rlnHelicalTrackLengthAngst" in particles:
+            data.loc[particles.index, "rlnHelicalTubeLength"] = round(
+                particles["rlnHelicalTrackLengthAngst"].max(), 1
+            )
+        else:
+            pids = particles["ehl_pid"].astype(int).values
+            helical_len = (pids.max() - pids.min() + 1) * inter_segment_distance
+            data.loc[particles.index, "rlnHelicalTubeLength"] = round(helical_len, 1)
+
+    data.drop(["ehl_filename", "ehl_pid"], inplace=True, axis=1)
+    return data
 
 
 from .clustering import AgglomerativeClusteringWithMinSize  # noqa: F401

@@ -1,9 +1,11 @@
 """Handler for the estimateHelicalTubeLength option."""
 
 from __future__ import annotations
+import logging
 import helicon
-from helicon.lib.analysis import estimate_helicalTube_length
+from helicon.lib.exceptions import HeliconError
 
+logger = logging.getLogger(__name__)
 
 option_name = "estimateHelicalTubeLength"
 
@@ -46,12 +48,7 @@ def handle(data, args, index_d, param):
         if badParms:
             s = "s" if len(badParms) > 1 else ""
             raise HeliconError(
-                "\\tERROR: parameter{s} {' '.join(badParms)} do not exist"
+                "\tERROR: parameter%s %s do not exist" % (s, " ".join(badParms))
             )
-        data = estimate_helicalTube_length(data, verbose=args.verbose)
+        data = helicon.estimate_helicalTube_length(data, verbose=args.verbose)
     return data, index_d
-
-
-import logging
-
-logger = logging.getLogger(__name__)

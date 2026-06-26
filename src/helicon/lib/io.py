@@ -773,6 +773,10 @@ def star_build_opticsgroup(data: pd.DataFrame) -> None:
     groups particles by unique parameter combinations, and creates an
     optics group DataFrame stored in ``data.attrs["optics"]``.
 
+    If ``rlnOpticsGroup`` already exists in the data (e.g. from a
+    CryoSPARC exposure group mapping), it is used directly instead of
+    generating new sequential IDs from parameter combinations.
+
     Parameters
     ----------
     data : pd.DataFrame
@@ -785,6 +789,21 @@ def star_build_opticsgroup(data: pd.DataFrame) -> None:
     vars = [
         v for v in Relion_OpticsGroup_Parameters if v in data and v != "rlnOpticsGroup"
     ]
+
+    if "rlnOpticsGroup" in data:
+        if not vars:
+            return
+        ogp_list = []
+        for gn, gdata in data.groupby("rlnOpticsGroup", sort=False):
+            d = {"rlnOpticsGroup": gn, "rlnOpticsGroupName": f"opticsGroup{gn}"}
+            for v in vars:
+                d[v] = gdata[v].values[0]
+            ogp_list.append(d)
+        optics = pd.DataFrame(ogp_list)
+        data.attrs["optics"] = optics
+        data.drop(columns=vars, inplace=True)
+        return
+
     if not vars:
         return
 
@@ -1000,7 +1019,7 @@ def star2dataframe(
             logger.warning(
                 f"{starFile} contains both 'images' and 'particles' data blocks. Only 'particles' will be read"
             )
-    
+
     assert (
         data is not None
     ), f"ERROR: {starFile} does not have a required data block (movies, micrographs, or particles/images)"
@@ -2036,22 +2055,28 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
     # rlnOddZernike coefficients because the Å-to-Zernike conversion
     # depends on spatial frequency (not a single constant).
     # This matches pyem's behaviour (pass / not implemented).
+    # Silence the warning when all values are zero (cryoSPARC default).
     if "ctf/trefoil_A" in data:
-        logger.warning(
-            "ctf/trefoil_A found in cryoSPARC data but not converted to STAR file. "
-            "RELION encodes trefoil via rlnOddZernike in the optics group; "
-            "the Å-to-Zernike conversion is frequency-dependent and not yet implemented. "
-            "Run CtfRefine in RELION to fit trefoil from the data."
-        )
+        vals = np.stack(data["ctf/trefoil_A"].values)
+        if not np.allclose(vals, 0):
+            logger.warning(
+                "ctf/trefoil_A found in cryoSPARC data but not converted to STAR file. "
+                "RELION encodes trefoil via rlnOddZernike in the optics group; "
+                "the Å-to-Zernike conversion is frequency-dependent and not yet implemented. "
+                "Run CtfRefine in RELION to fit trefoil from the data."
+            )
 
     # Tetrafoil: ctf/tetra_A cannot be reliably converted (same reason as trefoil).
+    # Silence the warning when all values are zero (cryoSPARC default).
     if "ctf/tetra_A" in data:
-        logger.warning(
-            "ctf/tetra_A found in cryoSPARC data but not converted to STAR file. "
-            "RELION encodes tetrafoil via rlnEvenZernike in the optics group; "
-            "the Å-to-Zernike conversion is frequency-dependent and not yet implemented. "
-            "Run CtfRefine in RELION to fit tetrafoil from the data."
-        )
+        vals = np.stack(data["ctf/tetra_A"].values)
+        if not np.allclose(vals, 0):
+            logger.warning(
+                "ctf/tetra_A found in cryoSPARC data but not converted to STAR file. "
+                "RELION encodes tetrafoil via rlnEvenZernike in the optics group; "
+                "the Å-to-Zernike conversion is frequency-dependent and not yet implemented. "
+                "Run CtfRefine in RELION to fit tetrafoil from the data."
+            )
 
     # Anisotropic magnification: direct copy (matches pyem convention)
     if "ctf/anisomag" in data:
@@ -2060,6 +2085,16 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         ret["rlnMagMat01"] = anisomag_vals[:, 1]
         ret["rlnMagMat10"] = anisomag_vals[:, 2]
         ret["rlnMagMat11"] = anisomag_vals[:, 3]
+
+    # Exposure group → optics group
+    for exp_col in [
+        "ctf/exp_group_id",
+        "location/exp_group_id",
+        "mscope_params/exp_group_id",
+    ]:
+        if exp_col in data:
+            ret["rlnOpticsGroup"] = data[exp_col].astype(int)
+            break
 
     # 3D variability introduced in v2.9
     import fnmatch

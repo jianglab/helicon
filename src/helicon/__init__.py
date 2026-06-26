@@ -27,6 +27,8 @@ from .lib.analysis import (
     line_fit_projection,
     twist2pitch,
     estimate_inter_segment_distance,
+    reset_inter_segment_distance,
+    estimate_helicalTube_length,
 )
 from .lib.epu import (
     EPU_micrograph_path_2_movie_xml_path,
