@@ -85,6 +85,7 @@ class TestProcessOneTask(object):
             interpolation="nn",
             fsc_test=0,
             return_3d=False,
+            score_metric="cosine",
             algorithm=dict(model="lsq"),
             verbose=0,
             logger=self.logger,

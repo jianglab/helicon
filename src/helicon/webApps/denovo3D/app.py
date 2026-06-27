@@ -535,6 +535,20 @@ with ui.sidebar(
 
                     "How positive constraint is used for the 3D reconstruction"
 
+                with ui.tooltip():
+                    ui.input_radio_buttons(
+                        "score_metric",
+                        "Score metric",
+                        {
+                            "cosine": "Cosine similarity",
+                            "frc": "2D FRC",
+                        },
+                        selected="cosine",
+                        inline=True,
+                    )
+
+                    "Metric used to rank reconstruction quality. FRC (Fourier Ring Correlation) may better distinguish high-resolution detail."
+
                 ui.input_radio_buttons(
                     "input_ui_type",
                     "Image transformation parameters input type:",
@@ -2307,6 +2321,8 @@ def run_denovo3D_reconstruction():
             )
             continue
 
+        score_metric = input.score_metric()
+
         tasks.append(
             (
                 ti,
@@ -2339,6 +2355,7 @@ def run_denovo3D_reconstruction():
                 interpolation,
                 fsc_test,
                 return_3d,
+                score_metric,
                 algorithm,
                 verbose,
                 logger,

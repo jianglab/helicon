@@ -14,6 +14,9 @@ __all__ = [
     "validate_param_dict",
     "has_shiny",
     "has_streamlit",
+    "has_curvelet_fdct",
+    "has_curvelet_udct",
+    "has_curvelet_udct_gpu",
     "available_cpu",
     "omp_get_max_threads",
     "omp_set_num_threads",
@@ -145,6 +148,55 @@ def has_streamlit() -> bool:
     """
     try:
         import streamlit
+
+        return True
+    except ImportError:
+        return False
+
+
+def has_curvelet_fdct() -> bool:
+    """Check whether the curvepy-fdct package is available.
+
+    Returns
+    -------
+    bool
+        True if curvepy-fdct can be imported, False otherwise.
+    """
+    try:
+        from curvepy.curvepy import CurveletFrequencyGrid  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def has_curvelet_udct() -> bool:
+    """Check whether the curvelets package is available.
+
+    Returns
+    -------
+    bool
+        True if curvelets can be imported, False otherwise.
+    """
+    try:
+        from curvelets.numpy import UDCT  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def has_curvelet_udct_gpu() -> bool:
+    """Check whether UDCT GPU support is available (curvelets torch + torch).
+
+    Returns
+    -------
+    bool
+        True if curvelets.torch.UDCT and torch can be imported, False otherwise.
+    """
+    try:
+        from curvelets.torch import UDCT  # noqa: F401
+        import torch  # noqa: F401
 
         return True
     except ImportError:

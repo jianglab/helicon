@@ -90,6 +90,7 @@ def process_one_task(
     interpolation,
     fsc_test,
     return_3d,
+    score_metric,
     algorithm,
     verbose,
     logger,
@@ -369,6 +370,8 @@ def process_one_task(
             sym_oversample=sym_oversample,
             interpolation=interpolation,
             fsc_test=fsc_test,
+            score_metric=score_metric,
+            target_apix2d=target_apix2d,
             verbose=verbose,
             algorithm=algorithm,
         )

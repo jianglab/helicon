@@ -1,6 +1,5 @@
 import sys, os, time, datetime, math
 
-
 # Re-export from new sub-modules for backward compatibility
 from .cache import (
     setup_cache_dir,
@@ -47,6 +46,9 @@ from .system import (  # noqa: F401
     validate_param_dict,
     has_shiny,
     has_streamlit,
+    has_curvelet_fdct,
+    has_curvelet_udct,
+    has_curvelet_udct_gpu,
     available_cpu,
     omp_get_max_threads,
     omp_set_num_threads,

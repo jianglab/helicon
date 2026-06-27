@@ -92,8 +92,9 @@ def main(args: argparse.Namespace) -> None:
             apix,
         )
 
-    with mrcfile.new(args.outputMapFile, data=data, overwrite=args.force) as mrc:
-        mrc.set_data(data.astype(np.float32))
+    with mrcfile.new(
+        args.outputMapFile, data=data.astype(np.float32), overwrite=args.force
+    ) as mrc:
         mrc.voxel_size = apix
 
     if args.verbose > 1:

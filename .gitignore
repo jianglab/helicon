@@ -20,4 +20,9 @@ temp/
 dist/
 __pycache__
 ~syncthing*
-Icon
+Icon
+denoised/
+*.so
+*.pyc
+*.so
+helicon.plugins.*.denoisecurvelet*

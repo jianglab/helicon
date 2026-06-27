@@ -47,6 +47,8 @@ def lsq_reconstruct(
     sym_oversample=1,
     interpolation="nn",
     fsc_test=0,
+    score_metric="cosine",
+    target_apix2d=5.0,
     verbose=0,
     algorithm=dict(model="lsq"),
 ):
@@ -93,6 +95,11 @@ def lsq_reconstruct(
         Interpolation method. Defaults to "nn".
     fsc_test : int, optional
         FSC test mode. Defaults to 0 (disabled).
+    score_metric : str, optional
+        Scoring metric for ranking. Options: "cosine" for cosine similarity,
+        "frc" for 2D Fourier Ring Correlation. Defaults to "cosine".
+    target_apix2d : float, optional
+        Target 2D pixel size in Angstroms. Used for FRC scoring. Defaults to 5.0.
     verbose : int, optional
         Verbosity level. Defaults to 0.
     algorithm : dict, optional
@@ -200,6 +207,9 @@ def lsq_reconstruct(
         positive=False,
         algorithm="elasticnet",
         train_fraction=1.0,
+        score_metric="cosine",
+        img_shape_2d=None,
+        target_apix2d=5.0,
         verbose=0,
     ):
         if not (A_hsym is None or b_hsym is None):
@@ -342,6 +352,8 @@ def lsq_reconstruct(
     )
     train_fraction = 1.0
 
+    img_shape_2d = (reconstruct_length_2d_pixel, reconstruct_diameter_2d_pixel)
+
     with helicon.Timer(
         f"solve_equations{' Full' if fsc_test>0 else ''}: {n_eqns:,} equations, {n_unknowns:,} unknowns, {sparsity*100:f}% sparsity",
         verbose=verbose > 10,
@@ -354,6 +366,9 @@ def lsq_reconstruct(
             positive=positive,
             algorithm=algorithm,
             train_fraction=train_fraction,
+            score_metric=score_metric,
+            img_shape_2d=img_shape_2d,
+            target_apix2d=target_apix2d,
             verbose=2 if verbose > 10 else 0,
         )
 
@@ -392,6 +407,9 @@ def lsq_reconstruct(
                     positive=positive,
                     algorithm=algorithm,
                     train_fraction=train_fraction,
+                    score_metric=score_metric,
+                    img_shape_2d=img_shape_2d,
+                    target_apix2d=target_apix2d,
                     verbose=2 if verbose > 10 else 0,
                 )
                 xs.append(x)
@@ -405,12 +423,15 @@ def lsq_reconstruct(
     if np.any([score is None for score in scores]):
         scores = []
         for tmp_A, tmp_b, tmp_x in Abx_data_triplets:
-            if thresh_fraction < 0:
-                scores.append(helicon.cosine_similarity(tmp_A.dot(tmp_x), tmp_b))
+            pred = tmp_A.dot(tmp_x)
+            if thresh_fraction >= 0:
+                pred = np.clip(pred, 0, None)
+            if score_metric == "frc" and img_shape_2d is not None:
+                pred_2d = pred.reshape(img_shape_2d)
+                b_2d = tmp_b.reshape(img_shape_2d)
+                scores.append(helicon.calc_frc_2d(pred_2d, b_2d, target_apix2d))
             else:
-                scores.append(
-                    helicon.cosine_similarity(tmp_A.dot(np.clip(tmp_x, 0, None)), tmp_b)
-                )
+                scores.append(helicon.cosine_similarity(pred, tmp_b))
 
     if len(scores) == 3:
         score = scores[0] / 2 + (scores[1] + scores[2]) / 4

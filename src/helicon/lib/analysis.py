@@ -7,6 +7,7 @@ __all__ = [
     "calc_fsc",
     "calc_fsc_from_fft",
     "calc_fsc_per_shell",
+    "calc_frc_2d",
     "cosine_similarity",
     "cross_correlation_coefficient",
     "estimate_helix_rotation_center_diameter",
@@ -282,6 +283,67 @@ def calc_fsc_per_shell(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.nd
     valid = denom > 0
     fsc[valid] = num[valid] / denom[valid]
     return fsc
+
+
+def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float) -> float:
+    """Compute 2D Fourier Ring Correlation score between two images.
+
+    Calculates the FSC as a single scalar score by averaging the correlation
+    across all spatial frequency shells. This is useful for comparing a
+    reconstructed projection against an input image.
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        First 2D image.
+    img2 : np.ndarray
+        Second 2D image (must have the same shape as img1).
+    apix : float
+        Pixel size in Angstroms per pixel.
+
+    Returns
+    -------
+    float
+        FRC score in ``[-1, 1]``. Returns 0 if either image is zero.
+    """
+    from scipy.fft import fft2
+
+    if img1.shape != img2.shape:
+        raise ValueError(f"Image shapes must match: {img1.shape} vs {img2.shape}")
+
+    n = img1.shape[0]
+
+    F1 = fft2(img1, workers=-1)
+    F2 = fft2(img2, workers=-1)
+
+    kx = np.fft.fftfreq(n) ** 2
+    ky = np.fft.fftfreq(n) ** 2
+    KX, KY = np.meshgrid(kx, ky, indexing="ij")
+    kr = np.sqrt(KX + KY)
+    shell = np.round(kr * n).astype(np.int32)
+    np.clip(shell, 0, n // 2, out=shell)
+    shell_flat = shell.ravel()
+
+    num = np.bincount(
+        shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=n // 2 + 1
+    )
+    den1 = np.bincount(
+        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n // 2 + 1
+    )
+    den2 = np.bincount(
+        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n // 2 + 1
+    )
+
+    denom = np.sqrt(den1 * den2)
+    fsc = np.ones(n // 2 + 1, dtype=np.float64)
+    valid = denom > 0
+    fsc[valid] = num[valid] / denom[valid]
+
+    nshells = n // 2 + 1
+    valid_count = np.sum(valid)
+    if valid_count == 0:
+        return 0.0
+    return float(np.sum(fsc[valid]) / valid_count)
 
 
 def estimate_helix_rotation_center_diameter(

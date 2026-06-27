@@ -914,6 +914,8 @@ def remove_invalid_opticsgroup_parameters(data: pd.DataFrame) -> None:
 
     try:
         optics = data.attrs["optics"]
+        if optics is None:
+            raise KeyError(optics)
         if "rlnImageSize" in missingVars and "rlnImageSize" not in optics:
             var = None
             if "rlnImageName" in data:

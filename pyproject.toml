@@ -40,9 +40,15 @@ streamlit = ['atomium', 'bokeh', 'kneebow', 'numpy', 'psutil', 'qrcode', 'shapel
 
 ptycho = ['py4dstem']
 
+curvelet_fdct = ['curvepy-fdct>=1.0']
+
+curvelet_udct = ['curvelets']
+
 all = [
     "helicon[shiny]",
     "helicon[streamlit]",
+    "helicon[curvelet_fdct]",
+    "helicon[curvelet_udct]",
 ]
 
 [tool.setuptools]

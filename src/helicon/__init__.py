@@ -17,6 +17,7 @@ from .lib.analysis import (
     calc_fsc,
     calc_fsc_from_fft,
     calc_fsc_per_shell,
+    calc_frc_2d,
     cosine_similarity,
     cross_correlation_coefficient,
     estimate_helix_rotation_center_diameter,
@@ -162,6 +163,9 @@ from .lib.util import (
     validate_param_dict,
     has_shiny,
     has_streamlit,
+    has_curvelet_fdct,
+    has_curvelet_udct,
+    has_curvelet_udct_gpu,
     available_cpu,
     omp_get_max_threads,
     omp_set_num_threads,
@@ -175,11 +179,25 @@ from .lib.util import (
     set_to_periodic_range,
 )
 
+from .lib.curvelet import (
+    curvelet_denoise_fdct,
+    curvelet_denoise_batch_fdct,
+    curvelet_denoise_udct,
+    curvelet_denoise_batch_udct,
+    curvelet_denoise_3d_udct,
+    curvelet_denoise_3d_udct_tiled,
+)
+
 cache_dir = setup_cache_dir()
 
 from .lib import dataset
 
 try:
     from .lib import shiny
+except ImportError:
+    pass
+
+try:
+    from .lib import curvelet
 except ImportError:
     pass

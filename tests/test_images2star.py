@@ -699,3 +699,168 @@ class TestImages2starBreakFilaments(object):
         )
 
         assert result["rlnHelicalTubeID"].nunique() == 3
+
+
+class TestImages2starDenoiseCurvelet(object):
+    """Tests for denoiseCurvelet handler."""
+
+    def _make_args(self, verbose=0, cpu=0):
+        return argparse.Namespace(verbose=verbose, cpu=cpu)
+
+    def _make_index_d(self):
+        return {"denoiseCurvelet": 0}
+
+    def _make_data(self):
+        df = pd.DataFrame(
+            {
+                "rlnMicrographName": ["/data/micrograph_0.mrc"],
+            }
+        )
+        df.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        return df
+
+    def _make_data_with_images(self):
+        import tempfile, mrcfile, numpy as np
+
+        tmpdir = Path(tempfile.mkdtemp())
+        stack_path = str(tmpdir / "particles.mrcs")
+        stack_data = np.random.rand(3, 64, 64).astype(np.float32)
+        with mrcfile.new(stack_path, overwrite=True) as mrc:
+            mrc.set_data(stack_data)
+        df = pd.DataFrame(
+            {
+                "rlnMicrographName": ["/data/micrograph_0.mrc"] * 3,
+                "rlnOpticsGroup": [1] * 3,
+                "rlnImageName": [
+                    f"000001@{stack_path}",
+                    f"000002@{stack_path}",
+                    f"000003@{stack_path}",
+                ],
+            }
+        )
+        df.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        return df, tmpdir
+
+    def test_valid_params_passthrough(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data = self._make_data()
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="sigma=0.1:numScales=3",
+        )
+        assert len(result) == len(data)
+
+    def test_valid_params_minimal(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data = self._make_data()
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="sigma=0.1"
+        )
+        assert len(result) == len(data)
+
+    def test_elbow_mode_sigma_nonpositive(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        _, index_d = handle(
+            self._make_data(),
+            self._make_args(),
+            self._make_index_d(),
+            param="sigma=-1",
+        )
+        assert index_d["denoiseCurvelet"] == 1
+
+    def test_error_on_few_scales(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = self._make_data()
+        with pytest.raises(HeliconError, match="numScales"):
+            handle(
+                data,
+                self._make_args(),
+                self._make_index_d(),
+                param="sigma=0.1:numScales=1",
+            )
+
+    def test_registered_in_argparse(self):
+        parser = argparse.ArgumentParser()
+        images2star.add_args(parser)
+        args = parser.parse_args(
+            ["in.star", "out.star", "--denoiseCurvelet", "sigma=0.1"]
+        )
+        assert args.denoiseCurvelet == ["sigma=0.1"]
+
+    def test_transform_fdct_explicit(self):
+        pytest.importorskip("curvepy")
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data, tmpdir = self._make_data_with_images()
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="sigma=0.1:numScales=2:transform=fdct",
+        )
+        assert len(result) == len(data)
+        assert idx["denoiseCurvelet"] == 1
+
+    def test_transform_udct_explicit(self):
+        pytest.importorskip("curvelets")
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data, tmpdir = self._make_data_with_images()
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="sigma=0.1:numScales=2:transform=udct",
+        )
+        assert len(result) == len(data)
+        assert idx["denoiseCurvelet"] == 1
+
+    def test_transform_unknown_errors(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = self._make_data()
+        with pytest.raises(HeliconError, match="unknown transform"):
+            handle(
+                data,
+                self._make_args(),
+                self._make_index_d(),
+                param="sigma=0.1:transform=invalid",
+            )
+
+    def test_bare_flag_defaults_to_udct(self):
+        pytest.importorskip("curvelets")
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data, tmpdir = self._make_data_with_images()
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="",
+        )
+        assert len(result) == len(data)
+        assert idx["denoiseCurvelet"] == 1

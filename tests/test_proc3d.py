@@ -384,3 +384,73 @@ class TestProc3dHandlers(object):
                 ny,
                 nz,
             )
+
+    # --- denoiseCurvelet ---
+
+    def test_denoise_curvelet3d_argparse(self):
+        parser = argparse.ArgumentParser()
+        proc3d.add_args(parser)
+        args = parser.parse_args(
+            ["input.mrc", "--denoiseCurvelet", "sigma=0.1:numScales=2"]
+        )
+        assert args.denoiseCurvelet == "sigma=0.1:numScales=2"
+
+    def test_denoise_curvelet3d_handler_mad(self):
+        pytest.importorskip("curvelets")
+        from helicon.plugins.proc3d.denoiseCurvelet import handle
+
+        data = self.data.copy().astype(np.float64)
+        args = argparse.Namespace(verbose=0)
+        index_d = {"denoiseCurvelet": 0}
+        result, apix, nx, ny, nz = handle(
+            data,
+            args,
+            index_d,
+            "sigma=0.1:numScales=2",
+            self.apix,
+            self.nx,
+            self.ny,
+            self.nz,
+        )
+        assert result.shape == (self.nz, self.ny, self.nx)
+        assert index_d["denoiseCurvelet"] == 1
+        assert np.isfinite(result).all()
+
+    def test_denoise_curvelet3d_handler_elbow(self):
+        pytest.importorskip("curvelets")
+        from helicon.plugins.proc3d.denoiseCurvelet import handle
+
+        data = self.data.copy().astype(np.float64)
+        args = argparse.Namespace(verbose=0)
+        index_d = {"denoiseCurvelet": 0}
+        result, apix, nx, ny, nz = handle(
+            data,
+            args,
+            index_d,
+            "numScales=2",
+            self.apix,
+            self.nx,
+            self.ny,
+            self.nz,
+        )
+        assert result.shape == (self.nz, self.ny, self.nx)
+        assert index_d["denoiseCurvelet"] == 1
+
+    def test_denoise_curvelet3d_few_scales_errors(self):
+        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = self.data.copy()
+        args = argparse.Namespace(verbose=0)
+        index_d = {"denoiseCurvelet": 0}
+        with pytest.raises(HeliconError, match="numScales"):
+            handle(
+                data,
+                args,
+                index_d,
+                "sigma=0.1:numScales=1",
+                self.apix,
+                self.nx,
+                self.ny,
+                self.nz,
+            )
