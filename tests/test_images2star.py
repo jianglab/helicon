@@ -498,3 +498,204 @@ class TestImages2starCheckArgs(object):
         images2star.add_args(parser)
         args = parser.parse_args(["input.cs", "x.star"])
         assert args.micrographStar is None
+
+
+class TestImages2starBreakFilaments(object):
+    """Tests for breakFilaments handler."""
+
+    def _make_args(self, verbose=0):
+        return argparse.Namespace(verbose=verbose)
+
+    def _make_data(self, n_micrographs=1, segments_per_filament=10, n_filaments=3):
+        rows = []
+        for mi in range(n_micrographs):
+            for ti in range(n_filaments):
+                for si in range(segments_per_filament):
+                    rows.append(
+                        {
+                            "rlnMicrographName": f"/data/micrograph_{mi}.mrc",
+                            "rlnHelicalTubeID": ti,
+                            "rlnHelicalTrackLengthAngst": si * 10.0,
+                            "rlnImageName": f"{si + mi * 1000:06d}@/data/particles.mrcs",
+                        }
+                    )
+        df = pd.DataFrame(rows)
+        df.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        return df
+
+    def _make_args(self, verbose=0):
+        return argparse.Namespace(verbose=verbose)
+
+    def _make_index_d(self):
+        return {"breakFilaments": 0}
+
+    def _make_data(self, n_micrographs=1, segments_per_filament=10, n_filaments=3):
+        rows = []
+        for mi in range(n_micrographs):
+            for ti in range(n_filaments):
+                for si in range(segments_per_filament):
+                    rows.append(
+                        {
+                            "rlnMicrographName": f"/data/micrograph_{mi}.mrc",
+                            "rlnHelicalTubeID": ti,
+                            "rlnHelicalTrackLengthAngst": si * 10.0,
+                            "rlnImageName": f"{si + mi * 1000:06d}@/data/particles.mrcs",
+                        }
+                    )
+        df = pd.DataFrame(rows)
+        df.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        return df
+
+    def test_breaks_long_filaments(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        data = self._make_data(
+            n_micrographs=1, segments_per_filament=100, n_filaments=3
+        )
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="maxSegments=30",
+        )
+
+        # 100 segments -> 4 groups (30+30+30+10) per filament, 3 filaments = 12 groups
+        n_new_tubes = result["rlnHelicalTubeID"].nunique()
+        assert n_new_tubes == 12
+        assert result["rlnHelicalTubeIDOriginal"].nunique() == 3
+
+    def test_preserves_short_filaments(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        data = self._make_data(n_micrographs=1, segments_per_filament=10, n_filaments=3)
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="maxSegments=50"
+        )
+
+        assert result["rlnHelicalTubeID"].nunique() == 3
+        # New IDs are assigned per group (each original filament becomes one new group)
+        assert list(result["rlnHelicalTubeID"]) == [0] * 10 + [1] * 10 + [2] * 10
+
+    def test_backs_up_original_tube_id(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        data = self._make_data(
+            n_micrographs=1, segments_per_filament=100, n_filaments=2
+        )
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="maxSegments=30"
+        )
+
+        assert "rlnHelicalTubeIDOriginal" in result.columns
+        assert set(result["rlnHelicalTubeIDOriginal"]) == {0, 1}
+
+    def test_preserves_existing_original_tube_id(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        data = self._make_data(
+            n_micrographs=1, segments_per_filament=100, n_filaments=2
+        )
+        data["rlnHelicalTubeIDOriginal"] = 99
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="maxSegments=30"
+        )
+
+        assert list(result["rlnHelicalTubeIDOriginal"]) == [99] * 200
+
+    def test_handles_multiple_micrographs(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        data = self._make_data(n_micrographs=3, segments_per_filament=75, n_filaments=2)
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="maxSegments=20"
+        )
+
+        # 75 segments -> 4 groups (20+20+20+15) per filament, 2 filaments * 3 micrographs = 24 groups
+        assert result["rlnHelicalTubeID"].nunique() == 24
+
+    def test_maintains_segment_order_by_track_length(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        rows = []
+        for si in range(99, -1, -1):
+            rows.append(
+                {
+                    "rlnMicrographName": "/data/micrograph_0.mrc",
+                    "rlnHelicalTubeID": 0,
+                    "rlnHelicalTrackLengthAngst": float(si),
+                    "rlnImageName": f"{si:06d}@/data/particles.mrcs",
+                }
+            )
+        data = pd.DataFrame(rows)
+        data.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="maxSegments=30"
+        )
+
+        # Each chunk should contain contiguous ranges of track lengths (sorted within chunk)
+        chunk = result[result["rlnHelicalTubeID"] == 0]
+        track_vals = sorted(chunk["rlnHelicalTrackLengthAngst"])
+        assert track_vals == [float(i) for i in range(30)]
+
+    def test_errors_without_helical_tube_id(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = pd.DataFrame({"rlnMicrographName": ["a.mrc", "b.mrc"]})
+        with pytest.raises(HeliconError, match="rlnHelicalTubeID"):
+            handle(
+                data, self._make_args(), self._make_index_d(), param="maxSegments=50"
+            )
+
+    def test_errors_with_bad_max_segments(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = self._make_data()
+        with pytest.raises(HeliconError, match="maxSegments"):
+            handle(data, self._make_args(), self._make_index_d(), param="maxSegments=0")
+
+    def test_registered_in_argparse(self):
+        parser = argparse.ArgumentParser()
+        images2star.add_args(parser)
+        args = parser.parse_args(
+            ["in.star", "out.star", "--breakFilaments", "maxSegments=40"]
+        )
+        assert args.breakFilaments == ["maxSegments=40"]
+
+    def test_default_max_segments_is_50(self):
+        from helicon.plugins.images2star.breakfilaments import handle
+
+        data = self._make_data(
+            n_micrographs=1, segments_per_filament=120, n_filaments=1
+        )
+        # No explicit maxSegments defaults to 50 -> 3 groups (50+50+20)
+        result, idx = handle(
+            data, self._make_args(), self._make_index_d(), param="anything"
+        )
+
+        assert result["rlnHelicalTubeID"].nunique() == 3
