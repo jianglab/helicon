@@ -422,14 +422,44 @@ def lsq_reconstruct(
 
     if np.any([score is None for score in scores]):
         scores = []
+        input_region = projection_image[
+            projection_image.shape[0] // 2
+            - reconstruct_diameter_2d_pixel // 2 : projection_image.shape[0] // 2
+            + reconstruct_diameter_2d_pixel // 2,
+            projection_image.shape[1] // 2
+            - reconstruct_length_2d_pixel // 2 : projection_image.shape[1] // 2
+            + reconstruct_length_2d_pixel // 2,
+        ]
+        needs_2d = score_metric in (
+            "ssim",
+            "ms_ssim",
+            "mutual_information",
+            "composite",
+        )
         for tmp_A, tmp_b, tmp_x in Abx_data_triplets:
             pred = tmp_A.dot(tmp_x)
             if thresh_fraction >= 0:
                 pred = np.clip(pred, 0, None)
-            if score_metric == "frc" and img_shape_2d is not None:
-                pred_2d = pred.reshape(img_shape_2d)
-                b_2d = tmp_b.reshape(img_shape_2d)
-                scores.append(helicon.calc_frc_2d(pred_2d, b_2d, target_apix2d))
+            if score_metric == "composite":
+                parts = [helicon.cosine_similarity(pred, tmp_b)]
+                if img_shape_2d is not None:
+                    pred_2d = np.zeros(img_shape_2d, dtype=np.float32)
+                    pred_2d.ravel()[b_data_pid] = pred
+                    ref_2d = input_region.T
+                    parts.append(helicon.ssim_score(pred_2d, ref_2d))
+                    parts.append(helicon.ms_ssim_score(pred_2d, ref_2d))
+                    parts.append(helicon.mutual_information_score(pred_2d, ref_2d))
+                scores.append(float(np.mean(parts)))
+            elif needs_2d and img_shape_2d is not None:
+                pred_2d = np.zeros(img_shape_2d, dtype=np.float32)
+                pred_2d.ravel()[b_data_pid] = pred
+                ref_2d = input_region.T
+                if score_metric == "ssim":
+                    scores.append(helicon.ssim_score(pred_2d, ref_2d))
+                elif score_metric == "ms_ssim":
+                    scores.append(helicon.ms_ssim_score(pred_2d, ref_2d))
+                elif score_metric == "mutual_information":
+                    scores.append(helicon.mutual_information_score(pred_2d, ref_2d))
             else:
                 scores.append(helicon.cosine_similarity(pred, tmp_b))
 

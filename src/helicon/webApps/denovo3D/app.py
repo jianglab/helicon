@@ -536,24 +536,33 @@ with ui.sidebar(
                     "How positive constraint is used for the 3D reconstruction"
 
                 with ui.tooltip():
-                    ui.input_radio_buttons(
+                    ui.input_select(
                         "score_metric",
                         "Score metric",
                         {
                             "cosine": "Cosine similarity",
-                            "frc": "2D FRC",
+                            "ssim": "SSIM",
+                            "ms_ssim": "MS-SSIM",
+                            "mutual_information": "Mutual information",
+                            "composite": "Composite (mean of all 4)",
                         },
                         selected="cosine",
-                        inline=True,
                     )
 
-                    "Metric used to rank reconstruction quality. FRC (Fourier Ring Correlation) may better distinguish high-resolution detail."
+                    "Metric used to rank reconstruction quality. Composite averages cosine, SSIM, MS-SSIM, and MI for robustness."
 
                 ui.input_radio_buttons(
                     "input_ui_type",
                     "Image transformation parameters input type:",
                     ["Slider", "Input box"],
                     inline=True,
+                )
+
+            with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
+                ui.input_task_button(
+                    "clear_cache",
+                    label="Clear joblib cache",
+                    style="width: 200px;",
                 )
 
 title = "Denovo3D: de novo helical indexing and 3D reconstruction"
@@ -2044,6 +2053,19 @@ def reset_transformation_parameters():
     ui.update_numeric("horizontal_crop_size", value=nx // 2 * 2)
 
 
+@reactive.effect
+@reactive.event(input.clear_cache)
+def clear_joblib_cache():
+    """Clear joblib caches used by denovo3D."""
+    from joblib import Memory
+
+    cache_dir = helicon.cache_dir / "denovo3D"
+    if cache_dir.exists():
+        mem = Memory(location=str(cache_dir), verbose=0)
+        mem.clear()
+        logger.info(f"Cleared joblib cache at {cache_dir}")
+
+
 # change from selected_images_thresholded to auto_transform
 @reactive.effect
 @reactive.event(input.auto_transform, threshold_reactive)
@@ -2424,6 +2446,11 @@ async def reconstruction_task(tasks, cpu):
             f"{len(results_none)}/{len(results)} results are None and thus discarded"
         )
         results = [res for res in results if res is not None]
+
+    print(
+        f"[DEBUG reconstruction_task] n_results={len(results)} first_score={results[0][0] if results else 'N/A'}",
+        flush=True,
+    )
 
     results.sort(key=lambda x: x[0], reverse=True)  # sort from high to low scores
     reconstrunction_results.set(results)

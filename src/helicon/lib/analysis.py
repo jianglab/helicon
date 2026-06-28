@@ -12,14 +12,19 @@ __all__ = [
     "cross_correlation_coefficient",
     "estimate_helix_rotation_center_diameter",
     "find_elbow_point",
+    "frc_score",
     "get_cylindrical_mask",
     "is_3d",
     "is_amyloid",
     "line_fit_projection",
+    "ms_ssim_score",
+    "mutual_information_score",
+    "r_factor_score",
+    "ssim_score",
     "twist2pitch",
     "estimate_inter_segment_distance",
-    "reset_inter_segment_distance",
     "estimate_helicalTube_length",
+    "reset_inter_segment_distance",
 ]
 
 
@@ -285,12 +290,12 @@ def calc_fsc_per_shell(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.nd
     return fsc
 
 
-def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float) -> float:
-    """Compute 2D Fourier Ring Correlation score between two images.
+def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float):
+    """Compute 2D Fourier Ring Correlation curve between two images.
 
-    Calculates the FSC as a single scalar score by averaging the correlation
-    across all spatial frequency shells. This is useful for comparing a
-    reconstructed projection against an input image.
+    Calculates the FSC as an array of correlation values across spatial
+    frequency shells. This is useful for comparing a reconstructed projection
+    against an input image.
 
     Parameters
     ----------
@@ -303,47 +308,338 @@ def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float) -> float:
 
     Returns
     -------
-    float
-        FRC score in ``[-1, 1]``. Returns 0 if either image is zero.
+    tuple of (np.ndarray, np.ndarray)
+        Tuple of (spatial_frequencies, fsc_curve) where both are 1D arrays
+        of the same length. spatial_frequencies is in 1/Angstrom.
+        Returns (None, None) if either image is zero or computation fails.
     """
     from scipy.fft import fft2
 
     if img1.shape != img2.shape:
         raise ValueError(f"Image shapes must match: {img1.shape} vs {img2.shape}")
 
-    n = img1.shape[0]
+    img_h, img_w = img1.shape
+    n_shells = min(img_h, img_w) // 2
 
-    F1 = fft2(img1, workers=-1)
-    F2 = fft2(img2, workers=-1)
+    try:
+        F1 = fft2(img1, workers=-1)
+        F2 = fft2(img2, workers=-1)
+    except TypeError:
+        F1 = fft2(img1)
+        F2 = fft2(img2)
 
-    kx = np.fft.fftfreq(n) ** 2
-    ky = np.fft.fftfreq(n) ** 2
-    KX, KY = np.meshgrid(kx, ky, indexing="ij")
-    kr = np.sqrt(KX + KY)
-    shell = np.round(kr * n).astype(np.int32)
-    np.clip(shell, 0, n // 2, out=shell)
+    kx = np.fft.fftfreq(img_w) ** 2
+    ky = np.fft.fftfreq(img_h) ** 2
+    kr = np.sqrt(ky[:, None] + kx[None, :])
+    shell = np.round(kr * n_shells).astype(np.int32)
+    np.clip(shell, 0, n_shells, out=shell)
     shell_flat = shell.ravel()
 
     num = np.bincount(
-        shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=n // 2 + 1
+        shell_flat,
+        weights=np.real(F1 * np.conj(F2)).ravel(),
+        minlength=n_shells + 1,
     )
     den1 = np.bincount(
-        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n // 2 + 1
+        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n_shells + 1
     )
     den2 = np.bincount(
-        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n // 2 + 1
+        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n_shells + 1
     )
 
     denom = np.sqrt(den1 * den2)
-    fsc = np.ones(n // 2 + 1, dtype=np.float64)
+    fsc = np.ones(n_shells + 1, dtype=np.float64)
     valid = denom > 0
     fsc[valid] = num[valid] / denom[valid]
 
-    nshells = n // 2 + 1
-    valid_count = np.sum(valid)
-    if valid_count == 0:
+    saxis = np.arange(n_shells + 1) / (min(img_h, img_w) * apix)
+    return saxis, fsc
+
+
+def _fit_frc_curve(saxis, fsc, order=4):
+    """Fit a Fermi or Butterworth function to the FRC curve.
+
+    Parameters
+    ----------
+    saxis : np.ndarray
+        Spatial frequency values (1/Angstrom).
+    fsc : np.ndarray
+        FRC values.
+
+    Returns
+    -------
+    tuple of (np.ndarray, np.ndarray)
+        Fitted spatial frequencies and FRC values on a fine grid (500 points).
+    """
+    from scipy.optimize import minimize
+
+    mask = np.isfinite(fsc) & (fsc >= -0.1) & (fsc <= 1.1)
+    s_fit = saxis[mask]
+    f_fit = fsc[mask]
+    if len(s_fit) < 3:
+        return saxis, fsc
+
+    def fermi(mu, T, x):
+        return 1.0 / (np.exp((x - mu) / T) + 1.0)
+
+    def butterworth(omega, n, x):
+        return 1.0 / (1.0 + (x / omega) ** n)
+
+    def fit_score_fermi(params):
+        mu, T = params
+        if T <= 0:
+            return 1e10
+        a = 1.0 / fermi(mu, T, 0.0)
+        pred = a * fermi(mu, T, s_fit)
+        return np.mean(np.abs(f_fit - pred))
+
+    def fit_score_butterworth(params):
+        omega, n = params
+        if omega <= 0 or n <= 0:
+            return 1e10
+        pred = butterworth(omega, n, s_fit)
+        return np.mean(np.abs(f_fit - pred))
+
+    best_error = np.inf
+    best_fitted_fine = f_fit.copy()
+    best_s_fine = s_fit.copy()
+
+    mu0 = s_fit[len(s_fit) // 2]
+    res_fermi = minimize(
+        fit_score_fermi,
+        x0=[mu0, 0.01],
+        method="Nelder-Mead",
+        options={"maxiter": 1000, "xatol": 1e-6},
+    )
+    if res_fermi.fun < best_error:
+        best_error = res_fermi.fun
+        mu, T = res_fermi.x
+        a = 1.0 / fermi(mu, T, 0.0)
+        s_fine = np.linspace(saxis[1], saxis[-1], 500)
+        f_fine = a * fermi(mu, T, s_fine)
+        f_fine = np.clip(f_fine, -1, 1)
+        best_fitted_fine = f_fine
+        best_s_fine = s_fine
+
+    omega0 = s_fit[len(s_fit) // 2]
+    res_bw = minimize(
+        fit_score_butterworth,
+        x0=[omega0, 2.0],
+        method="Nelder-Mead",
+        options={"maxiter": 1000, "xatol": 1e-6},
+    )
+    if res_bw.fun < best_error:
+        omega, n = res_bw.x
+        s_fine = np.linspace(saxis[1], saxis[-1], 500)
+        f_fine = butterworth(omega, n, s_fine)
+        f_fine = np.clip(f_fine, -1, 1)
+        best_fitted_fine = f_fine
+        best_s_fine = s_fine
+
+    return best_s_fine, best_fitted_fine
+
+
+def frc_score(
+    img1: np.ndarray, img2: np.ndarray, apix: float, use_fit: bool = False
+) -> float:
+    """Compute a similarity score from the 2D FRC curve.
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        First 2D image.
+    img2 : np.ndarray
+        Second 2D image (must have the same shape as img1).
+    apix : float
+        Pixel size in Angstroms per pixel.
+    use_fit : bool, optional
+        If True, fit a Fermi or Butterworth curve to the FRC and compute
+        the area under the fitted curve. If False, use the raw FRC curve.
+        Defaults to False.
+
+    Returns
+    -------
+    float
+        FRC score. When use_fit=False, returns the mean of the raw FRC values.
+        When use_fit=True, returns the normalized area under the fitted curve.
+    """
+    saxis, fsc = calc_frc_2d(img1, img2, apix)
+    if saxis is None:
         return 0.0
-    return float(np.sum(fsc[valid]) / valid_count)
+
+    if use_fit:
+        s_fine, f_fine = _fit_frc_curve(saxis, fsc)
+        valid = np.isfinite(f_fine) & (f_fine >= -1) & (f_fine <= 1)
+        if np.sum(valid) == 0:
+            return 0.0
+        area = np.trapz(f_fine[valid], s_fine[valid])
+        freq_range = s_fine[valid][-1] - s_fine[valid][0]
+        if freq_range <= 0:
+            return 0.0
+        return area / freq_range
+    else:
+        valid = np.isfinite(fsc) & (fsc >= -1) & (fsc <= 1)
+        if np.sum(valid) == 0:
+            return 0.0
+        return float(np.mean(fsc[valid]))
+
+
+def ssim_score(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Compute Structural Similarity Index (SSIM) between two 2D images.
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        First 2D image.
+    img2 : np.ndarray
+        Second 2D image (must have the same shape as img1).
+
+    Returns
+    -------
+    float
+        SSIM score in ``[-1, 1]``. Returns 0 if computation fails.
+    """
+    from skimage.metrics import structural_similarity
+
+    if img1.shape != img2.shape:
+        raise ValueError(f"Image shapes must match: {img1.shape} vs {img2.shape}")
+
+    try:
+        data_range = max(img1.max() - img1.min(), img2.max() - img2.min())
+        if data_range == 0:
+            return 0.0
+        return float(structural_similarity(img1, img2, data_range=data_range))
+    except Exception:
+        return 0.0
+
+
+def ms_ssim_score(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Compute Multi-Scale SSIM (MS-SSIM) between two 2D images.
+
+    Computes SSIM at multiple scales by successive downsampling, then
+    combines the results. More robust than single-scale SSIM as it
+    captures structure at different spatial resolutions.
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        First 2D image.
+    img2 : np.ndarray
+        Second 2D image (must have the same shape as img1).
+
+    Returns
+    -------
+    float
+        MS-SSIM score in ``[0, 1]``. Returns 0 if computation fails.
+    """
+    from skimage.metrics import structural_similarity
+    from skimage.transform import rescale
+
+    if img1.shape != img2.shape:
+        raise ValueError(f"Image shapes must match: {img1.shape} vs {img2.shape}")
+
+    try:
+        data_range = max(img1.max() - img1.min(), img2.max() - img2.min())
+        if data_range == 0:
+            return 0.0
+
+        all_weights = np.array([0.0448, 0.2856, 0.3001, 0.2363, 0.1333])
+        min_size = 8
+
+        ssim_values = []
+
+        for i in range(len(all_weights)):
+            h, w = img1.shape
+            if h < min_size or w < min_size:
+                break
+
+            ssim_val = structural_similarity(
+                img1,
+                img2,
+                data_range=data_range,
+            )
+            ssim_values.append(max(ssim_val, 0.0))
+
+            if i < len(all_weights) - 1:
+                img1 = rescale(img1, 0.5, anti_aliasing=True, channel_axis=None)
+                img2 = rescale(img2, 0.5, anti_aliasing=True, channel_axis=None)
+                data_range = max(img1.max() - img1.min(), img2.max() - img2.min())
+                if data_range == 0:
+                    break
+
+        if len(ssim_values) == 0:
+            return 0.0
+
+        weights = all_weights[: len(ssim_values)]
+        weights = weights / weights.sum()
+
+        result = 1.0
+        for s, w in zip(ssim_values, weights):
+            result *= s**w
+
+        return float(result)
+    except Exception:
+        return 0.0
+
+
+def mutual_information_score(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Compute normalized mutual information between two 2D images.
+
+    Uses skimage's normalized_mutual_information (Studholme et al. 1999),
+    rescaled to [0, 1] where 1 = perfectly correlated, 0 = independent.
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        First 2D image.
+    img2 : np.ndarray
+        Second 2D image (must have the same shape as img1).
+
+    Returns
+    -------
+    float
+        Normalized mutual information in ``[0, 1]``. Returns 0 if
+        computation fails.
+    """
+    from skimage.metrics import normalized_mutual_information
+
+    if img1.shape != img2.shape:
+        raise ValueError(f"Image shapes must match: {img1.shape} vs {img2.shape}")
+
+    try:
+        nmi = normalized_mutual_information(img1, img2, bins=64)
+        return float((nmi - 1.0))
+    except Exception:
+        return 0.0
+
+
+def r_factor_score(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Compute R-factor between two arrays.
+
+    Crystallographic R-factor: ``sum(|img1 - img2|) / sum(|img2|)``.
+    Returns ``1/(1+R)`` so that higher = better, bounded in (0, 1].
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        First array (predicted).
+    img2 : np.ndarray
+        Second array (reference, must have the same shape as img1).
+
+    Returns
+    -------
+    float
+        Score in ``(0, 1]`` where 1 = perfect match. Returns 0 if
+        the reference array is zero.
+    """
+    if img1.shape != img2.shape:
+        raise ValueError(f"Shapes must match: {img1.shape} vs {img2.shape}")
+
+    denom = np.sum(np.abs(img2))
+    if denom == 0:
+        return 0.0
+    r = np.sum(np.abs(img1 - img2)) / denom
+    return float(1.0 / (1.0 + r))
 
 
 def estimate_helix_rotation_center_diameter(
