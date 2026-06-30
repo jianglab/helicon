@@ -35,15 +35,21 @@ def main(args: argparse.Namespace) -> None:
         Parsed CLI arguments.
     """
     helicon.log_command_line()
-    logging.basicConfig(
-        level=(
-            logging.DEBUG
-            if args.verbose > 2
-            else logging.INFO if args.verbose > 0 else logging.ERROR
-        ),
-        format="%(message)s",
-        stream=sys.stdout,
-    )
+    if args.verbose <= 0:
+        level = logging.ERROR
+    elif args.verbose == 1:
+        level = logging.WARNING
+    elif args.verbose == 2:
+        level = logging.INFO
+    else:
+        level = logging.DEBUG
+    from rich.logging import RichHandler
+
+    _handler = RichHandler(show_time=False, show_path=False, rich_tracebacks=True)
+    _handler.setLevel(level)
+    logger.addHandler(_handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
 
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
@@ -106,23 +112,31 @@ def main(args: argparse.Namespace) -> None:
                     apixStr,
                 )
             else:
-                logger.info(
-                    "Read in %d segments (extracted with %.2f\u00c5 inter-segment shift) in %d helices from %d micrographs in %d image files%s. Segment distances: %.2f\u00b1%.2f\u00c5. Estimate: ~%.1f%% of all (~%d) segments",
-                    len(data),
-                    dist_seg_median,
-                    nHelices,
-                    nMicrographs,
-                    len(args.input_imageFiles),
-                    apixStr,
-                    dist_seg_mean,
-                    dist_seg_sigma,
+                read_msg = (
+                    "Read in %d segments (extracted with %.2f\u00c5 inter-segment shift) in %d helices from %d micrographs in %d image files%s. Segment distances: %.2f\u00b1%.2f\u00c5."
+                    % (
+                        len(data),
+                        dist_seg_median,
+                        nHelices,
+                        nMicrographs,
+                        len(args.input_imageFiles),
+                        apixStr,
+                        dist_seg_mean,
+                        dist_seg_sigma,
+                    )
+                )
+                estimate_msg = "Estimate: ~%.1f%% of all (~%d) segments" % (
                     len(data) / n_all * 100,
                     n_all,
                 )
+                logger.info(read_msg)
                 if dist_seg_sigma > dist_seg_median:
+                    logger.warning(estimate_msg)
                     logger.warning(
-                        "It appears that the filaments are badly fragmented, probably from Select2D/Select3D jobs. You can avoid filament fragmentation by runing the following command:\nhelicon images2star <input.star> <output.star> --recoverFullFilaments minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]\nafter each Select2D/Select3D job"
+                        "It appears that the filaments are badly fragmented, probably from Select2D/Select3D jobs. You can avoid filament fragmentation by runing the following command:\nhelicon images2star <input.star> <output.star> --recoverFullFilaments minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]\nafter each Select2D/Select3D job",
                     )
+                else:
+                    logger.info(estimate_msg)
         elif (
             "rlnMicrographMovieName" in data
             and "rlnMicrographName" not in data
