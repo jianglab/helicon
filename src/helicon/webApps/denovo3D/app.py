@@ -2246,7 +2246,7 @@ def run_denovo3D_reconstruction():
     imageFile = selected_images_title().strip(":")
     imageIndex = selected_images_labels()[0]
 
-    logger = helicon.get_logger(
+    logger = helicon.getLogger(
         logfile="helicon.denovo3D.log",
         verbose=1,
     )
@@ -2399,7 +2399,7 @@ async def reconstruction_task(tasks, cpu):
     global denovo3D_abort_event
     denovo3D_abort_event = False
 
-    logger = helicon.get_logger(
+    logger = helicon.getLogger(
         logfile="helicon.denovo3D.log",
         verbose=1,
     )

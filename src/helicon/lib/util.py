@@ -9,7 +9,7 @@ from .cache import (
 )  # noqa: F401
 from .logging import (  # noqa: F401
     color_print,
-    get_logger,
+    getLogger,
     log_command_line,
     get_context_function_name,
     timedelta2string,

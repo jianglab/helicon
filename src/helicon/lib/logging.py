@@ -5,7 +5,7 @@ from pathlib import Path
 
 __all__ = [
     "color_print",
-    "get_logger",
+    "getLogger",
     "log_command_line",
     "get_context_function_name",
     "timedelta2string",
@@ -38,7 +38,7 @@ def color_print(*args, **kargs) -> None:
     console.print(*args, style=color, end=end, **kargs)
 
 
-def get_logger(logfile: str = "", verbose: int = 0) -> logging.Logger:
+def getLogger(logfile: str = "", verbose: int = 0) -> logging.Logger:
     """Create and configure a logger with file and stream handlers.
 
     Parameters

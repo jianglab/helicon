@@ -789,18 +789,19 @@ class TestImages2starDenoiseCurvelet(object):
         )
         assert index_d["denoiseCurvelet"] == 1
 
-    def test_error_on_few_scales(self):
+    def test_auto_scales_on_few_scales(self):
         from helicon.plugins.images2star.denoisecurvelet import handle
-        from helicon.lib.exceptions import HeliconError
 
         data = self._make_data()
-        with pytest.raises(HeliconError, match="numScales"):
-            handle(
-                data,
-                self._make_args(),
-                self._make_index_d(),
-                param="sigma=0.1:numScales=1",
-            )
+        result = handle(
+            data,
+            self._make_args(),
+            self._make_index_d(),
+            param="sigma=0.1:numScales=1",
+        )
+        assert result is not None  # handled without error, auto-decides numScales
+        df, index_d = result
+        assert index_d["denoiseCurvelet"] == 1
 
     def test_registered_in_argparse(self):
         parser = argparse.ArgumentParser()
@@ -861,6 +862,62 @@ class TestImages2starDenoiseCurvelet(object):
             self._make_args(verbose=1),
             self._make_index_d(),
             param="",
+        )
+        assert len(result) == len(data)
+        assert idx["denoiseCurvelet"] == 1
+
+    def test_transform_mct_explicit(self):
+        pytest.importorskip("curvelets")
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data, tmpdir = self._make_data_with_images()
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="sigma=0.1:numScales=2:transform=mct",
+        )
+        assert len(result) == len(data)
+        assert idx["denoiseCurvelet"] == 1
+
+    def test_transform_mct_no_gpu(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = self._make_data()
+        with pytest.raises(HeliconError, match="MCT does not support GPU"):
+            handle(
+                data,
+                self._make_args(),
+                self._make_index_d(),
+                param="sigma=0.1:transform=mct:gpu=true",
+            )
+
+    def test_transform_mct_without_curvelets(self):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+        from helicon.lib.exceptions import HeliconError
+
+        data = self._make_data()
+        if helicon.has_curvelet_udct():
+            pytest.skip("curvelets is installed, skipping missing-dependency test")
+        with pytest.raises(HeliconError, match="curvelets package is required"):
+            handle(
+                data,
+                self._make_args(),
+                self._make_index_d(),
+                param="sigma=0.1:transform=mct",
+            )
+
+    def test_transform_mct_elbow_mode(self):
+        pytest.importorskip("curvelets")
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data, tmpdir = self._make_data_with_images()
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="transform=mct",
         )
         assert len(result) == len(data)
         assert idx["denoiseCurvelet"] == 1

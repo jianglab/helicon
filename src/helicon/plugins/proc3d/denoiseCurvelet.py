@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 import argparse
+import logging
+
 import helicon
 import numpy as np
 from helicon.lib.exceptions import HeliconError
 
-logger = helicon.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 option_name = "denoiseCurvelet"
 
@@ -21,10 +23,11 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     """
     parser.add_argument(
         "--denoiseCurvelet",
-        type=str,
-        metavar="<sigma=<float>[:numScales=<3>][:wedgesPerDir=<3>][:gpu=<true|false>][:]tileSize=<int>[:overlap=<32>]>",
-        help="apply UDCT-based denoising to the 3D volume. "
-        "Defaults: elbow mode, numScales=3, wedgesPerDir=3, gpu=false. "
+        nargs="?",
+        const="",
+        metavar="<sigma=<float>[:numScales=<3>][:wedgesPerDir=<3>][:gpu=<true|false>][:transform=<udct|mct>][:]tileSize=<int>[:overlap=<32>]>",
+        help="apply curvelet-based denoising to the 3D volume (UDCT or MCT). "
+        "Defaults: sigma=3.0, numScales=3, wedgesPerDir=3, gpu=false, transform=mct"
         "tileSize=0 auto-detects from available memory. "
         "Requires curvelets package. disabled by default",
         default=None,
@@ -75,10 +78,15 @@ def handle(
             )
 
         _, param_dict = helicon.parse_param_str(param) if param else ({}, {})
+        transform = param_dict.get("transform", "mct")
         sigma = param_dict.get("sigma", None)
         if sigma is not None:
             sigma = float(sigma)
-        num_scales = int(param_dict.get("numScales", 3))
+        else:
+            sigma = 3.0
+        num_scales = param_dict.get("numScales", None)
+        if num_scales is not None:
+            num_scales = int(num_scales)
         wedges_per_dir = int(param_dict.get("wedgesPerDir", 3))
         use_gpu = param_dict.get("gpu", False) in (True, 1, "true", "1", "yes")
         tile_size_str = param_dict.get("tileSize", None)
@@ -96,8 +104,18 @@ def handle(
                 "Install with: pip install torch"
             )
 
-        if num_scales < 2:
-            raise HeliconError("\tERROR: numScales must be >= 2 for --denoiseCurvelet")
+        if transform not in ("udct", "mct"):
+            raise HeliconError(
+                f"\tERROR: unknown transform '{transform}' for --denoiseCurvelet. "
+                "Use 'udct' or 'mct'."
+            )
+
+        if transform == "mct" and use_gpu:
+            logger.warning("\tMCT does not support GPU, falling back to CPU")
+            use_gpu = False
+
+        if num_scales is not None and num_scales < 2:
+            num_scales = None  # values < 2 trigger auto-decide
 
         import psutil
 
@@ -116,22 +134,24 @@ def handle(
 
         if args.verbose:
             mode = "elbow" if (sigma is None or sigma <= 0) else "MAD"
-            device_tag = "GPU" if use_gpu else "CPU"
+            device_tag = "GPU" if use_gpu and transform == "udct" else "CPU"
             ts_tag = (
                 f"tileSize=({tile_size[0]},{tile_size[1]},{tile_size[2]})"
                 if tile_size
                 else "auto-tile"
             )
             use_tiled_tag = "tiled" if use_tiled else "untiled"
+            ns_tag = str(num_scales) if num_scales is not None else "auto"
             logger.info(
-                "\tdenoising 3D volume (%d x %d x %d) with UDCT (%s, %s, numScales=%d, "
+                "\tdenoising 3D volume (%d x %d x %d) with %s (%s, %s, numScales=%s, "
                 "wedgesPerDir=%d, sigma=%s, %s, %s, overlap=%d) ...",
                 nz,
                 ny,
                 nx,
+                transform.upper(),
                 mode,
                 device_tag,
-                num_scales,
+                ns_tag,
                 wedges_per_dir,
                 str(sigma),
                 ts_tag,
@@ -141,24 +161,43 @@ def handle(
 
         if use_tiled:
             n_jobs = helicon.available_cpu(mem_gb_per_cpu=4)
-            data = helicon.curvelet_denoise_3d_udct_tiled(
-                data,
-                sigma=sigma,
-                num_scales=num_scales,
-                wedges_per_dir=wedges_per_dir,
-                tile_size=tile_size,
-                overlap=overlap,
-                use_gpu=use_gpu,
-                n_jobs=n_jobs,
-            )
+            if transform == "mct":
+                data = helicon.curvelet_denoise_3d_mct_tiled(
+                    data,
+                    sigma=sigma,
+                    num_scales=num_scales,
+                    wedges_per_dir=wedges_per_dir,
+                    tile_size=tile_size,
+                    overlap=overlap,
+                    n_jobs=n_jobs,
+                )
+            else:
+                data = helicon.curvelet_denoise_3d_udct_tiled(
+                    data,
+                    sigma=sigma,
+                    num_scales=num_scales,
+                    wedges_per_dir=wedges_per_dir,
+                    tile_size=tile_size,
+                    overlap=overlap,
+                    use_gpu=use_gpu,
+                    n_jobs=n_jobs,
+                )
         else:
-            data = helicon.curvelet_denoise_3d_udct(
-                data,
-                sigma=sigma,
-                num_scales=num_scales,
-                wedges_per_dir=wedges_per_dir,
-                use_gpu=use_gpu,
-            )
+            if transform == "mct":
+                data = helicon.curvelet_denoise_3d_mct(
+                    data,
+                    sigma=sigma,
+                    num_scales=num_scales,
+                    wedges_per_dir=wedges_per_dir,
+                )
+            else:
+                data = helicon.curvelet_denoise_3d_udct(
+                    data,
+                    sigma=sigma,
+                    num_scales=num_scales,
+                    wedges_per_dir=wedges_per_dir,
+                    use_gpu=use_gpu,
+                )
 
     index_d[option_name] += 1
     return data, apix, nx, ny, nz

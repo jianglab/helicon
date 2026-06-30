@@ -72,8 +72,23 @@ def main(args: argparse.Namespace) -> None:
         nMicrographs = len(data[tmpCol].unique())
         apixAttr = pixelSizeAttrForImageAttr(image_name)
         apix = getPixelSize(data, attrs=[apixAttr])
+        infoParts = []
         if apix is not None:
-            apixStr = f" (pixel size={apix:.3f} Å/pixel from {apixAttr})"
+            infoParts.append(f"pixel size={apix:.3f} Å/pixel")
+        try:
+            import mrcfile
+
+            sample_file = data[tmpCol].iloc[0]
+            with mrcfile.open(sample_file, permissive=True) as mrc:
+                if mrc.data.ndim == 2:
+                    ny, nx = mrc.data.shape
+                else:
+                    ny, nx = mrc.data.shape[-2:]
+            infoParts.append(f"image size={nx}x{ny}")
+        except Exception:
+            pass
+        if infoParts:
+            apixStr = " (" + ", ".join(infoParts) + ")"
         else:
             apixStr = ""
         if "rlnHelicalTubeID" in data:

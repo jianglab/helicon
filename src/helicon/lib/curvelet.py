@@ -56,6 +56,13 @@ __all__ = [
     "curvelet_denoise_batch_udct",
     "curvelet_denoise_3d_udct",
     "curvelet_denoise_3d_udct_tiled",
+    "curvelet_denoise_mct",
+    "curvelet_denoise_batch_mct",
+    "curvelet_denoise_udct_tiled",
+    "curvelet_denoise_fdct_tiled",
+    "curvelet_denoise_mct_tiled",
+    "curvelet_denoise_3d_mct",
+    "curvelet_denoise_3d_mct_tiled",
     "has_curvelet_udct_gpu",
 ]
 
@@ -73,6 +80,19 @@ def _get_grid(shape: tuple[int, int], num_scales: int):
     if key not in _GRID_CACHE:
         _GRID_CACHE[key] = CurveletFrequencyGrid(shape[0], shape[1], scales=num_scales)
     return _GRID_CACHE[key]
+
+
+_auto_num_scales_logged: set = set()
+_auto_overlap_logged: set = set()
+
+
+def _auto_num_scales(dim: int) -> int:
+    """Pick a reasonable number of curvelet scales for a given spatial dimension."""
+    result = max(2, min(6, int(np.floor(np.log2(dim)) - 2)))
+    if dim not in _auto_num_scales_logged:
+        _auto_num_scales_logged.add(dim)
+        logger.info("\tauto-decided numScales=%d (from dimension %d px)", result, dim)
+    return result
 
 
 def _mad_std(values: np.ndarray) -> float:
@@ -217,6 +237,8 @@ def curvelet_denoise_fdct(
         image = (image - vmin) / (vmax - vmin)
 
     orig_shape = image.shape
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shape))
 
     grid = _get_grid(orig_shape, num_scales)
     coeffs = grid.forward_transform(image)
@@ -301,6 +323,8 @@ def curvelet_denoise_batch_fdct(
 
     elbow_mode = sigma is None or sigma <= 0
     sigma_scale = sigma if (sigma is not None and sigma > 0) else 1.5
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(images[0].shape))
 
     def _forward(img):
         vmin, vmax = img.min(), img.max()
@@ -561,6 +585,8 @@ def curvelet_denoise_udct(
         image = (image - vmin) / (vmax - vmin)
 
     orig_shape = image.shape
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shape))
     pad_shape = _udct_compatible_shape(orig_shape, num_scales)
     if pad_shape != orig_shape:
         pads = tuple((0, ps - ds) for ds, ps in zip(orig_shape, pad_shape))
@@ -641,6 +667,8 @@ def curvelet_denoise_batch_udct(
     elbow_mode = sigma is None or sigma <= 0
     sigma_scale = sigma if (sigma is not None and sigma > 0) else 1.5
     orig_shapes = [img.shape for img in images]
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shapes[0]))
     pad_shape = _udct_compatible_shape(orig_shapes[0], num_scales)
 
     if use_gpu and max(images[0].shape) < AUTO_GPU_MIN_SIZE:
@@ -748,6 +776,627 @@ def curvelet_denoise_batch_udct(
 
 
 # ---------------------------------------------------------------------------
+# MCT backend (Monogenic Curvelet Transform)
+# ---------------------------------------------------------------------------
+
+# The Monogenic Curvelet Transform (MCT) processes each curvelet sub-band
+# through the Riesz transform to extract local amplitude, then applies
+# soft thresholding to the amplitude only — preserving phase and orientation
+# for cleaner edge reconstruction.
+
+
+def _riesz_transform_x(image: np.ndarray) -> np.ndarray:
+    h, w = image.shape
+    u = np.fft.fftfreq(w)[None, :]
+    v = np.fft.fftfreq(h)[:, None]
+    radius = np.sqrt(u**2 + v**2)
+    radius[0, 0] = 1.0
+    kernel = -1j * u / radius
+    kernel[0, 0] = 0.0
+    return np.fft.ifft2(np.fft.fft2(image) * kernel).real
+
+
+def _riesz_transform_y(image: np.ndarray) -> np.ndarray:
+    h, w = image.shape
+    u = np.fft.fftfreq(w)[None, :]
+    v = np.fft.fftfreq(h)[:, None]
+    radius = np.sqrt(u**2 + v**2)
+    radius[0, 0] = 1.0
+    kernel = -1j * v / radius
+    kernel[0, 0] = 0.0
+    return np.fft.ifft2(np.fft.fft2(image) * kernel).real
+
+
+def _mct_denoise_subband(q0: np.ndarray, T: float) -> np.ndarray:
+    if T <= 0:
+        return q0.copy()
+    q1 = _riesz_transform_x(q0)
+    q2 = _riesz_transform_y(q0)
+    amplitude = np.sqrt(q0**2 + q1**2 + q2**2 + 1e-30)
+    thresholded = np.maximum(amplitude - T, 0.0)
+    atten = np.divide(
+        thresholded, amplitude, out=np.ones_like(amplitude), where=amplitude > 1e-30
+    )
+    return q0 * atten
+
+
+def _mct_apply_threshold_to_wedge(
+    wedge: list[np.ndarray], T: float
+) -> list[np.ndarray]:
+    return [_mct_denoise_subband(sb, T) for sb in wedge]
+
+
+def _mct_threshold_apply_thresholds(
+    coeffs: list, thresholds: list[list[float]]
+) -> list:
+    new_coeffs = []
+    for i, scale in enumerate(coeffs):
+        new_scale = []
+        for w, wedge in enumerate(scale):
+            T = thresholds[i][w]
+            new_scale.append(_mct_apply_threshold_to_wedge(wedge, T))
+        new_coeffs.append(new_scale)
+    return new_coeffs
+
+
+def curvelet_denoise_mct(
+    image: np.ndarray,
+    sigma: float | None = None,
+    num_scales: int = 4,
+    wedges_per_dir: int = 3,
+) -> np.ndarray:
+    """Denoise an image using the Monogenic Curvelet Transform (MCT).
+
+    The MCT approach applies the Riesz transform to each curvelet sub-band
+    to extract monogenic amplitude, phase, and orientation. Thresholding is
+    applied to the amplitude only, preserving the phase (edge locations)
+    for cleaner reconstruction.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        2D input image.
+    sigma : float, optional
+        When ``None`` (default) or ``<= 0``, uses automatic elbow threshold
+        detection per wedge. When positive, used as a scale factor on
+        per-wedge data-derived noise (MAD).
+    num_scales : int, optional
+        Number of curvelet scales. Defaults to 4.
+    wedges_per_dir : int, optional
+        Number of wedges per direction (for UDCT). Defaults to 3.
+
+    Returns
+    -------
+    numpy.ndarray
+        Denoised image with the same shape as the input.
+
+    Raises
+    ------
+    ImportError
+        If the ``curvelets`` package is not installed.
+    """
+    image = np.asarray(image, dtype=np.float64)
+    vmin, vmax = image.min(), image.max()
+    if vmax > vmin:
+        image = (image - vmin) / (vmax - vmin)
+
+    orig_shape = image.shape
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shape))
+    pad_shape = _udct_compatible_shape(orig_shape, num_scales)
+    if pad_shape != orig_shape:
+        pads = tuple((0, ps - ds) for ds, ps in zip(orig_shape, pad_shape))
+        image = np.pad(image, pads, mode="edge")
+
+    grid = _get_udct_grid(pad_shape, num_scales, wedges_per_dir, use_gpu=False)
+    coeffs = grid.forward(image)
+
+    if sigma is None or sigma <= 0:
+        thresholds = _udct_compute_thresholds_elbow(coeffs)
+    else:
+        thresholds = _udct_compute_thresholds_mad(coeffs, sigma)
+
+    new_coeffs = _mct_threshold_apply_thresholds(coeffs, thresholds)
+    result = grid.backward(new_coeffs)
+
+    if pad_shape != orig_shape:
+        result = result[: orig_shape[0], : orig_shape[1]]
+
+    if vmax > vmin:
+        result = result * (vmax - vmin) + vmin
+
+    return result
+
+
+def curvelet_denoise_batch_mct(
+    images: list[np.ndarray],
+    sigma: float | None = None,
+    num_scales: int = 4,
+    wedges_per_dir: int = 3,
+    n_jobs: int = -1,
+) -> list[np.ndarray]:
+    """Denoise a batch of images in parallel using the MCT approach.
+
+    Parameters
+    ----------
+    images : list of numpy.ndarray
+        2D input images. All should have the same shape.
+    sigma : float, optional
+        When ``None`` (default) or ``<= 0``, uses automatic elbow threshold
+        detection per wedge. When positive, used as a scale factor on
+        per-wedge data-derived noise (MAD).
+    num_scales : int, optional
+        Number of curvelet scales. Defaults to 4.
+    wedges_per_dir : int, optional
+        Number of wedges per direction. Defaults to 3.
+    n_jobs : int, optional
+        Number of parallel jobs. ``-1`` uses all CPUs. Defaults to ``-1``.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Denoised images in the same order as the input.
+    """
+    import helicon
+    from joblib import Parallel, delayed
+
+    if n_jobs == -1 or n_jobs is None:
+        n_jobs = helicon.available_cpu()
+
+    elbow_mode = sigma is None or sigma <= 0
+    sigma_scale = sigma if (sigma is not None and sigma > 0) else 1.5
+    orig_shapes = [img.shape for img in images]
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shapes[0]))
+    pad_shape = _udct_compatible_shape(orig_shapes[0], num_scales)
+
+    def _forward(img):
+        vmin, vmax = img.min(), img.max()
+        normalized = img
+        if vmax > vmin:
+            normalized = (img - vmin) / (vmax - vmin)
+        if img.shape != pad_shape:
+            pads = tuple((0, ps - ds) for ds, ps in zip(img.shape, pad_shape))
+            normalized = np.pad(normalized, pads, mode="edge")
+        grid = _get_udct_grid(pad_shape, num_scales, wedges_per_dir, use_gpu=False)
+        coeffs = grid.forward(normalized)
+        return coeffs, vmin, vmax, grid
+
+    fwd_results = Parallel(n_jobs=n_jobs)(delayed(_forward)(img) for img in images)
+    all_coeffs = [r[0] for r in fwd_results]
+
+    if elbow_mode:
+        thresholds = _udct_compute_thresholds_elbow_pooled(all_coeffs)
+    else:
+        thresholds = _udct_compute_thresholds_mad_pooled(all_coeffs, sigma_scale)
+
+    def _apply(img_info):
+        coeffs, vmin, vmax, grid = img_info
+        new_coeffs = _mct_threshold_apply_thresholds(coeffs, thresholds)
+        total, kept = _udct_coeff_stats(new_coeffs)
+        retained_pct = 100.0 * kept / total if total > 0 else 0.0
+        result = grid.backward(new_coeffs)
+        if result.shape != orig_shapes[0]:
+            result = result[: orig_shapes[0][0], : orig_shapes[0][1]]
+        if vmax > vmin and result is not None:
+            result = result * (vmax - vmin) + vmin
+        return result, retained_pct
+
+    results = Parallel(n_jobs=n_jobs)(delayed(_apply)(info) for info in fwd_results)
+
+    denoised = [r for r, _ in results]
+    retained_pcts = [r for _, r in results]
+
+    if retained_pcts:
+        mean_pct = np.mean(retained_pcts)
+        logger.info(
+            "\tretained %.1f%% of curvelet coefficients (min=%.1f%%, max=%.1f%%)",
+            mean_pct,
+            min(retained_pcts),
+            max(retained_pcts),
+        )
+
+    return denoised
+
+
+# ---------------------------------------------------------------------------
+# 2D tiled denoising (parallel within a single large image)
+# ---------------------------------------------------------------------------
+
+
+def _tile_indices_2d(
+    shape: tuple[int, int], tile_size: int, overlap: int
+) -> list[tuple[slice, slice]]:
+    """Generate overlapping 2D tile slices."""
+    ny, nx = shape
+    stride = max(1, tile_size - overlap)
+    y_starts = list(range(0, ny - tile_size + 1, stride)) if tile_size < ny else [0]
+    if y_starts[-1] + tile_size < ny:
+        y_starts.append(ny - tile_size)
+    x_starts = list(range(0, nx - tile_size + 1, stride)) if tile_size < nx else [0]
+    if x_starts[-1] + tile_size < nx:
+        x_starts.append(nx - tile_size)
+    tiles = []
+    for y in y_starts:
+        y_end = min(y + tile_size, ny)
+        for x in x_starts:
+            x_end = min(x + tile_size, nx)
+            tiles.append((slice(y, y_end), slice(x, x_end)))
+    return tiles
+
+
+def _cosine_taper_2d(shape: tuple[int, int], overlap: int) -> np.ndarray:
+    """Generate a 2D cosine taper for feathering tile seams."""
+    ny, nx = shape
+    wy = np.ones(ny)
+    wx = np.ones(nx)
+    if overlap > 0 and ny > 1 and nx > 1:
+        oy = min(overlap, ny)
+        ox = min(overlap, nx)
+        ramp_y = np.sin(np.linspace(0, np.pi / 2, oy)) ** 2
+        wy[:oy] = ramp_y
+        wy[-oy:] = ramp_y[::-1]
+        ramp_x = np.sin(np.linspace(0, np.pi / 2, ox)) ** 2
+        wx[:ox] = ramp_x
+        wx[-ox:] = ramp_x[::-1]
+    return wy[:, None] * wx[None, :]
+
+
+def _denoise_2d_tiled(
+    image: np.ndarray,
+    tile_denoiser,
+    tile_size: int,
+    overlap: int,
+    n_jobs: int,
+) -> tuple[np.ndarray, list[float]]:
+    """Split *image* into overlapping tiles, denoise each, blend with cosine taper.
+
+    *tile_denoiser* may return either an ndarray (denoised tile) or a tuple
+    ``(ndarray, retained_pct: float)``. Returned second element is the list of
+    retained percentages.
+    """
+    from joblib import Parallel, delayed
+
+    tiles = _tile_indices_2d(image.shape, tile_size, overlap)
+
+    def _process(slc_y, slc_x):
+        tile = image[slc_y, slc_x]
+        ret = tile_denoiser(tile)
+        if isinstance(ret, tuple):
+            denoised, retained_pct = ret
+        else:
+            denoised = ret
+            retained_pct = None
+        weight = _cosine_taper_2d(tile.shape, overlap)
+        return denoised, weight, slc_y, slc_x, retained_pct
+
+    if n_jobs == 1 or len(tiles) == 1:
+        results = [_process(slc_y, slc_x) for slc_y, slc_x in tiles]
+    else:
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_process)(slc_y, slc_x) for slc_y, slc_x in tiles
+        )
+
+    output = np.zeros_like(image)
+    weights = np.zeros_like(image)
+    retained_pcts: list[float] = []
+    for item in results:
+        denoised, weight, slc_y, slc_x, retained_pct = item
+        output[slc_y, slc_x] += denoised * weight
+        weights[slc_y, slc_x] += weight
+        if retained_pct is not None:
+            retained_pcts.append(retained_pct)
+
+    mask = weights > 1e-10
+    output[mask] /= weights[mask]
+    return output, retained_pcts
+
+
+def curvelet_denoise_udct_tiled(
+    image: np.ndarray,
+    sigma: float | None = None,
+    num_scales: int = 3,
+    wedges_per_dir: int = 3,
+    tile_size: int = 256,
+    overlap: int = 64,
+    n_jobs: int = -1,
+    use_gpu: bool = False,
+) -> np.ndarray:
+    """Denoise a large image via overlapping tiles using UDCT.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        2D input image.
+    sigma : float, optional
+        MAD noise scaling or ``None`` for elbow detection.
+    num_scales : int, optional
+        Number of curvelet scales per tile. When ``None`` or ``<= 0``,
+        auto-selected from tile size. Defaults to 3.
+    wedges_per_dir : int, optional
+        Number of wedges per direction. Defaults to 3.
+    tile_size : int, optional
+        Edge length of each square tile in pixels. Defaults to 256.
+    overlap : int, optional
+        Overlap between adjacent tiles in pixels. Larger values reduce visible
+        seams. Defaults to 64.
+    n_jobs : int, optional
+        Number of parallel workers. ``-1`` uses all CPUs. Defaults to ``-1``.
+    use_gpu : bool, optional
+        Whether to use GPU acceleration for each tile. Defaults to False.
+
+    Returns
+    -------
+    numpy.ndarray
+        Denoised image of the same shape as the input.
+    """
+    import helicon
+
+    if n_jobs == -1 or n_jobs is None:
+        n_jobs = helicon.available_cpu()
+
+    image = np.asarray(image, dtype=np.float64)
+    vmin, vmax = image.min(), image.max()
+    if vmax > vmin:
+        image = (image - vmin) / (vmax - vmin)
+
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(tile_size)
+    overlap = max(overlap, int(2 * 2 ** (num_scales - 1)))
+    if (num_scales, overlap) not in _auto_overlap_logged:
+        _auto_overlap_logged.add((num_scales, overlap))
+        logger.info(
+            "\toverlap auto-set to %d px (from numScales=%d)", overlap, num_scales
+        )
+
+    grid_cache: dict = {}
+
+    def _tile_denoiser(tile):
+        pad_shape = _udct_compatible_shape(tile.shape, num_scales)
+        if pad_shape != tile.shape:
+            pads = tuple((0, ps - ds) for ds, ps in zip(tile.shape, pad_shape))
+            tile_padded = np.pad(tile, pads, mode="edge")
+        else:
+            tile_padded = tile
+
+        key = (*pad_shape, num_scales, wedges_per_dir, use_gpu)
+        if key not in grid_cache:
+            grid_cache[key] = _get_udct_grid(
+                pad_shape, num_scales, wedges_per_dir, use_gpu
+            )
+            if use_gpu:
+                _move_grid_to_device(grid_cache[key], _get_device())
+
+        grid = grid_cache[key]
+
+        if use_gpu:
+            import torch
+
+            device = _get_device()
+            gpu_dtype = _gpu_dtype(device)
+            tensor = torch.from_numpy(tile_padded).to(device=device, dtype=gpu_dtype)
+            coeffs = grid.forward(tensor)
+            coeffs = _coeffs_to_numpy(coeffs)
+        else:
+            coeffs = grid.forward(tile_padded)
+
+        if sigma is None or sigma <= 0:
+            thresholds = _udct_compute_thresholds_elbow(coeffs)
+        else:
+            thresholds = _udct_compute_thresholds_mad(coeffs, sigma)
+
+        new_coeffs = _udct_threshold_apply_thresholds(coeffs, thresholds)
+
+        total, kept = _udct_coeff_stats(new_coeffs)
+        retained_pct = 100.0 * kept / total if total > 0 else 0.0
+
+        if use_gpu:
+            import torch
+
+            device = _get_device()
+            new_coeffs = _coeffs_from_numpy(new_coeffs, device)
+            result = grid.backward(new_coeffs).cpu().numpy()
+        else:
+            result = grid.backward(new_coeffs)
+
+        if result.shape != tile.shape:
+            result = result[: tile.shape[0], : tile.shape[1]]
+        return result, retained_pct
+
+    result, retained_pcts = _denoise_2d_tiled(
+        image, _tile_denoiser, tile_size, overlap, n_jobs
+    )
+    if retained_pcts:
+        logger.info(
+            "\tretained %.1f%% of curvelet coefficients per tile (min=%.1f%%, max=%.1f%%)",
+            np.mean(retained_pcts),
+            min(retained_pcts),
+            max(retained_pcts),
+        )
+
+    if vmax > vmin:
+        result = result * (vmax - vmin) + vmin
+    return result
+
+
+def curvelet_denoise_fdct_tiled(
+    image: np.ndarray,
+    sigma: float | None = None,
+    num_scales: int = 3,
+    tile_size: int = 256,
+    overlap: int = 64,
+    n_jobs: int = -1,
+) -> np.ndarray:
+    """Denoise a large image via overlapping tiles using FDCT.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        2D input image.
+    sigma : float, optional
+        MAD noise scaling or ``None`` for elbow detection.
+    num_scales : int, optional
+        Number of curvelet scales per tile. Defaults to 3.
+    tile_size : int, optional
+        Edge length of each square tile. Defaults to 256.
+    overlap : int, optional
+        Overlap between adjacent tiles in pixels. Larger values reduce visible
+        seams. Defaults to 64.
+    n_jobs : int, optional
+        Number of parallel workers. ``-1`` uses all CPUs. Defaults to ``-1``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Denoised image of the same shape as the input.
+    """
+    import helicon
+
+    if n_jobs == -1 or n_jobs is None:
+        n_jobs = helicon.available_cpu()
+
+    image = np.asarray(image, dtype=np.float64)
+    vmin, vmax = image.min(), image.max()
+    if vmax > vmin:
+        image = (image - vmin) / (vmax - vmin)
+
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(tile_size)
+    overlap = max(overlap, int(2 * 2 ** (num_scales - 1)))
+    if (num_scales, overlap) not in _auto_overlap_logged:
+        _auto_overlap_logged.add((num_scales, overlap))
+        logger.info(
+            "\toverlap auto-set to %d px (from numScales=%d)", overlap, num_scales
+        )
+
+    def _tile_denoiser(tile):
+        grid = _get_grid(tile.shape, num_scales)
+        coeffs = grid.forward_transform(tile)
+
+        if sigma is None or sigma <= 0:
+            thresholds = _compute_thresholds_elbow(coeffs)
+        else:
+            thresholds = _compute_thresholds_mad(coeffs, sigma)
+
+        result, _ = _denoise(
+            None, grid, sigma_scale=1, thresholds=thresholds, coeffs=coeffs
+        )
+        return result
+
+    result, _retained_pcts = _denoise_2d_tiled(
+        image, _tile_denoiser, tile_size, overlap, n_jobs
+    )
+
+    if vmax > vmin:
+        result = result * (vmax - vmin) + vmin
+    return result
+
+
+def curvelet_denoise_mct_tiled(
+    image: np.ndarray,
+    sigma: float | None = None,
+    num_scales: int = 3,
+    wedges_per_dir: int = 3,
+    tile_size: int = 256,
+    overlap: int = 64,
+    n_jobs: int = -1,
+) -> np.ndarray:
+    """Denoise a large image via overlapping tiles using MCT.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        2D input image.
+    sigma : float, optional
+        MAD noise scaling or ``None`` for elbow detection.
+    num_scales : int, optional
+        Number of curvelet scales per tile. Defaults to 3.
+    wedges_per_dir : int, optional
+        Number of wedges per direction. Defaults to 3.
+    tile_size : int, optional
+        Edge length of each square tile in pixels. Defaults to 256.
+    overlap : int, optional
+        Overlap between adjacent tiles in pixels. Larger values reduce visible
+        seams. Defaults to 64.
+    n_jobs : int, optional
+        Number of parallel workers. ``-1`` uses all CPUs. Defaults to ``-1``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Denoised image of the same shape as the input.
+    """
+    import helicon
+
+    if n_jobs == -1 or n_jobs is None:
+        n_jobs = helicon.available_cpu()
+
+    image = np.asarray(image, dtype=np.float64)
+    vmin, vmax = image.min(), image.max()
+    if vmax > vmin:
+        image = (image - vmin) / (vmax - vmin)
+
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(tile_size)
+    overlap = max(overlap, int(2 * 2 ** (num_scales - 1)))
+    if (num_scales, overlap) not in _auto_overlap_logged:
+        _auto_overlap_logged.add((num_scales, overlap))
+        logger.info(
+            "\toverlap auto-set to %d px (from numScales=%d)", overlap, num_scales
+        )
+
+    grid_cache: dict = {}
+
+    def _tile_denoiser(tile):
+        pad_shape = _udct_compatible_shape(tile.shape, num_scales)
+        if pad_shape != tile.shape:
+            pads = tuple((0, ps - ds) for ds, ps in zip(tile.shape, pad_shape))
+            tile_padded = np.pad(tile, pads, mode="edge")
+        else:
+            tile_padded = tile
+
+        key = (*pad_shape, num_scales, wedges_per_dir, False)
+        if key not in grid_cache:
+            grid_cache[key] = _get_udct_grid(
+                pad_shape, num_scales, wedges_per_dir, use_gpu=False
+            )
+
+        grid = grid_cache[key]
+        coeffs = grid.forward(tile_padded)
+
+        if sigma is None or sigma <= 0:
+            thresholds = _udct_compute_thresholds_elbow(coeffs)
+        else:
+            thresholds = _udct_compute_thresholds_mad(coeffs, sigma)
+
+        new_coeffs = _mct_threshold_apply_thresholds(coeffs, thresholds)
+
+        total, kept = _udct_coeff_stats(new_coeffs)
+        retained_pct = 100.0 * kept / total if total > 0 else 0.0
+
+        result = grid.backward(new_coeffs)
+
+        if result.shape != tile.shape:
+            result = result[: tile.shape[0], : tile.shape[1]]
+        return result, retained_pct
+
+    result, retained_pcts = _denoise_2d_tiled(
+        image, _tile_denoiser, tile_size, overlap, n_jobs
+    )
+    if retained_pcts:
+        logger.info(
+            "\tretained %.1f%% of curvelet coefficients per tile (min=%.1f%%, max=%.1f%%)",
+            np.mean(retained_pcts),
+            min(retained_pcts),
+            max(retained_pcts),
+        )
+
+    if vmax > vmin:
+        result = result * (vmax - vmin) + vmin
+    return result
+
+
+# ---------------------------------------------------------------------------
 # UDCT 3D backend
 # ---------------------------------------------------------------------------
 
@@ -782,6 +1431,8 @@ def curvelet_denoise_3d_udct(
         volume = (volume - vmin) / (vmax - vmin)
 
     orig_shape = volume.shape
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shape))
     pad_shape = _udct_compatible_shape(orig_shape, num_scales)
     if pad_shape != orig_shape:
         pads = tuple((0, ps - ds) for ds, ps in zip(orig_shape, pad_shape))
@@ -816,6 +1467,10 @@ def curvelet_denoise_3d_udct(
                 )
             new_scale.append(new_direction)
         new_coeffs.append(new_scale)
+
+    total, kept = _udct_coeff_stats(new_coeffs)
+    retained_pct = 100.0 * kept / total if total > 0 else 0.0
+    logger.info("\tretained %.1f%% of curvelet coefficients", retained_pct)
 
     if use_gpu:
         import torch
@@ -860,8 +1515,8 @@ def _curvelet_denoise_3d_udct_with_grid(
 
     Returns
     -------
-    np.ndarray
-        Denoised volume (still normalized).
+    tuple[np.ndarray, float]
+        Denoised volume (still normalized) and percentage of retained coefficients.
     """
     if device is not None:
         import torch
@@ -890,6 +1545,9 @@ def _curvelet_denoise_3d_udct_with_grid(
             new_scale.append(new_direction)
         new_coeffs.append(new_scale)
 
+    total, kept = _udct_coeff_stats(new_coeffs)
+    retained_pct = 100.0 * kept / total if total > 0 else 0.0
+
     if device is not None:
         import torch
 
@@ -899,7 +1557,7 @@ def _curvelet_denoise_3d_udct_with_grid(
     else:
         result = grid.backward(new_coeffs)
 
-    return result
+    return result, retained_pct
 
 
 def _get_tile_indices(
@@ -1044,8 +1702,8 @@ def curvelet_denoise_3d_udct_tiled(
     vol = np.asarray(vol, dtype=np.float64)
     if vol.ndim != 3:
         raise ValueError(f"Input must be 3D, got {vol.ndim}D")
-    if num_scales < 1:
-        raise ValueError(f"num_scales must be ≥ 1, got {num_scales}")
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(vol.shape))
     if wedges_per_dir < 3:
         raise ValueError(f"wedges_per_dir must be ≥ 3, got {wedges_per_dir}")
     if overlap < 0:
@@ -1088,6 +1746,7 @@ def curvelet_denoise_3d_udct_tiled(
 
     grid_cache: dict[tuple, Any] = {}
     results = []
+    retained_pcts = []
 
     if n_jobs is None or n_jobs == 1:
         for tile_idx in tiles:
@@ -1113,9 +1772,10 @@ def curvelet_denoise_3d_udct_tiled(
             device = _get_device() if use_gpu else None
             gpu_dtype = _gpu_dtype(device) if use_gpu else None
 
-            denoised = _curvelet_denoise_3d_udct_with_grid(
+            denoised, retained_pct = _curvelet_denoise_3d_udct_with_grid(
                 tile_padded, grid, sigma, device, gpu_dtype
             )
+            retained_pcts.append(retained_pct)
 
             dz = (pad_shape[0] - tile_data.shape[0]) // 2
             dz_end = pad_shape[0] - dz
@@ -1153,7 +1813,7 @@ def curvelet_denoise_3d_udct_tiled(
             device = _get_device() if use_gpu else None
             gpu_dtype = _gpu_dtype(device) if use_gpu else None
 
-            denoised = _curvelet_denoise_3d_udct_with_grid(
+            denoised, retained_pct = _curvelet_denoise_3d_udct_with_grid(
                 tile_padded, grid, sigma, device, gpu_dtype
             )
 
@@ -1166,10 +1826,427 @@ def curvelet_denoise_3d_udct_tiled(
             denoised_cropped = denoised[dz:dz_end, dy:dy_end, dx:dx_end]
 
             weight = _generate_cosine_taper(tile_data.shape, overlap)
-            return denoised_cropped, weight, z_slc, y_slc, x_slc
+            return denoised_cropped, weight, z_slc, y_slc, x_slc, retained_pct
 
-        results = Parallel(n_jobs=n_jobs)(
+        tile_results = Parallel(n_jobs=n_jobs)(
             delayed(process_tile)(tile_idx) for tile_idx in tiles
+        )
+        results = [(r[0], r[1], r[2], r[3], r[4]) for r in tile_results]
+        retained_pcts = [r[5] for r in tile_results]
+
+    output = np.zeros_like(vol_norm)
+    weights = np.zeros_like(vol_norm)
+
+    for denoised_tile, weight_tile, z_slc, y_slc, x_slc in results:
+        z_valid = min(z_slc.stop, nz) - z_slc.start
+        y_valid = min(y_slc.stop, ny) - y_slc.start
+        x_valid = min(x_slc.stop, nx) - x_slc.start
+
+        output[
+            z_slc.start : z_slc.start + z_valid,
+            y_slc.start : y_slc.start + y_valid,
+            x_slc.start : x_slc.start + x_valid,
+        ] += denoised_tile[:z_valid, :y_valid, :x_valid]
+        weights[
+            z_slc.start : z_slc.start + z_valid,
+            y_slc.start : y_slc.start + y_valid,
+            x_slc.start : x_slc.start + x_valid,
+        ] += weight_tile[:z_valid, :y_valid, :x_valid]
+
+    if retained_pcts:
+        logger.info(
+            "\tretained %.1f%% of curvelet coefficients (min=%.1f%%, max=%.1f%%)",
+            np.mean(retained_pcts),
+            min(retained_pcts),
+            max(retained_pcts),
+        )
+
+    mask = weights > 1e-10
+    output[mask] /= weights[mask]
+
+    if outdir is not None:
+        os.makedirs(outdir, exist_ok=True)
+        mmap_path = os.path.join(outdir, "curvelet_denoised_tiled.npy")
+        output_mmap = np.memmap(mmap_path, dtype=np.float64, mode="w+", shape=vol.shape)
+        if vmax > vmin:
+            output_mmap[:] = output * (vmax - vmin) + vmin
+        else:
+            output_mmap[:] = output
+        output_mmap.flush()
+        return output_mmap
+
+    if vmax > vmin:
+        output = output * (vmax - vmin) + vmin
+
+    return output
+
+
+# ---------------------------------------------------------------------------
+# 3D MCT backend (Monogenic Curvelet Transform for volumes)
+# ---------------------------------------------------------------------------
+
+# The 3D MCT extends the 2D monogenic approach by using the 3D Riesz
+# transform (q1, q2, q3 for x, y, z) and thresholding on the 4D
+# monogenic amplitude sqrt(q0^2 + q1^2 + q2^2 + q3^2).
+
+
+def _riesz_transform_3d(voxels: np.ndarray, axis: int) -> np.ndarray:
+    """Apply the Riesz transform to a 3D array along the specified axis.
+
+    Parameters
+    ----------
+    voxels : np.ndarray
+        3D input array.
+    axis : int
+        Axis along which to differentiate (0=z, 1=y, 2=x).
+
+    Returns
+    -------
+    np.ndarray
+        Real-valued Riesz-transformed array.
+    """
+    nz, ny, nx = voxels.shape
+    w = np.fft.fftfreq(nz)[:, None, None]
+    v = np.fft.fftfreq(ny)[None, :, None]
+    u = np.fft.fftfreq(nx)[None, None, :]
+    radius = np.sqrt(u**2 + v**2 + w**2)
+    radius[0, 0, 0] = 1.0
+    if axis == 0:
+        kernel = -1j * w / radius
+    elif axis == 1:
+        kernel = -1j * v / radius
+    else:
+        kernel = -1j * u / radius
+    kernel[0, 0, 0] = 0.0
+    return np.fft.ifftn(np.fft.fftn(voxels) * kernel).real
+
+
+def _mct_threshold_subband_3d(
+    subband: np.ndarray,
+    sigma: float | None = None,
+    scale_idx: int = 0,
+) -> np.ndarray:
+    """Compute a threshold and apply MCT-style amplitude thresholding.
+
+    The threshold is computed from the subband coefficients (same strategy
+    as UDCT). The suppression factor is derived from the 3D monogenic
+    amplitude rather than from the raw coefficients.
+
+    Parameters
+    ----------
+    subband : np.ndarray
+        3D coefficient subband.
+    sigma : float, optional
+        MAD scale factor, or ``None`` for elbow detection.
+    scale_idx : int, optional
+        Scale index (0 = coarse, no thresholding).
+
+    Returns
+    -------
+    np.ndarray
+        Thresholded subband.
+    """
+    T = 0.0
+    if sigma is None or sigma <= 0:
+        if scale_idx > 0:
+            T = _elbow_threshold(subband)
+            T = max(T, 1.0 * _mad_std(subband))
+    else:
+        if scale_idx > 0:
+            noise_std = _mad_std(subband)
+            T = sigma * noise_std
+    if T <= 0:
+        return subband.copy()
+    q1 = _riesz_transform_3d(subband, axis=0)
+    q2 = _riesz_transform_3d(subband, axis=1)
+    q3 = _riesz_transform_3d(subband, axis=2)
+    amplitude = np.sqrt(subband**2 + q1**2 + q2**2 + q3**2 + 1e-30)
+    thresholded = np.maximum(amplitude - T, 0.0)
+    atten = np.divide(
+        thresholded, amplitude, out=np.ones_like(amplitude), where=amplitude > 1e-30
+    )
+    return subband * atten
+
+
+def curvelet_denoise_3d_mct(
+    volume: np.ndarray,
+    sigma: float | None = None,
+    num_scales: int = 4,
+    wedges_per_dir: int = 3,
+) -> np.ndarray:
+    """Denoise a 3D volume using the MCT (Monogenic Curvelet Transform).
+
+    Parameters
+    ----------
+    volume : np.ndarray
+        3D volume to denoise.
+    sigma : float, optional
+        MAD scale factor, or ``None`` for elbow detection.
+    num_scales : int, optional
+        Number of curvelet scales. Defaults to 4.
+    wedges_per_dir : int, optional
+        Wedges per direction. Defaults to 3.
+
+    Returns
+    -------
+    np.ndarray
+        Denoised volume.
+    """
+    volume = np.asarray(volume, dtype=np.float64)
+    vmin, vmax = volume.min(), volume.max()
+    if vmax > vmin:
+        volume = (volume - vmin) / (vmax - vmin)
+
+    orig_shape = volume.shape
+    if num_scales is None or num_scales <= 0:
+        num_scales = _auto_num_scales(min(orig_shape))
+    pad_shape = _udct_compatible_shape(orig_shape, num_scales)
+    if pad_shape != orig_shape:
+        pads = tuple((0, ps - ds) for ds, ps in zip(orig_shape, pad_shape))
+        volume = np.pad(volume, pads, mode="edge")
+
+    grid = _get_udct_grid(pad_shape, num_scales, wedges_per_dir, use_gpu=False)
+    coeffs = grid.forward(volume)
+
+    new_coeffs = []
+    for scale_idx, scale in enumerate(coeffs):
+        new_scale = []
+        for direction in scale:
+            new_direction = []
+            for subband in direction:
+                new_direction.append(
+                    _mct_threshold_subband_3d(subband, sigma=sigma, scale_idx=scale_idx)
+                )
+            new_scale.append(new_direction)
+        new_coeffs.append(new_scale)
+
+    total, kept = _udct_coeff_stats(new_coeffs)
+    retained_pct = 100.0 * kept / total if total > 0 else 0.0
+    logger.info("\tretained %.1f%% of curvelet coefficients", retained_pct)
+
+    result = grid.backward(new_coeffs)
+
+    if pad_shape != orig_shape:
+        result = result[: orig_shape[0], : orig_shape[1], : orig_shape[2]]
+
+    if vmax > vmin:
+        result = result * (vmax - vmin) + vmin
+
+    return result
+
+
+def _curvelet_denoise_3d_mct_with_grid(
+    volume: np.ndarray,
+    grid,
+    sigma: float | None = None,
+    device=None,
+    gpu_dtype=None,
+) -> np.ndarray:
+    """Perform 3D MCT denoising using a pre-computed grid.
+
+    Parameters
+    ----------
+    volume : np.ndarray
+        3D volume to denoise (normalized to ``[0, 1]``).
+    grid : UDCT
+        Pre-computed UDCT grid.
+    sigma : float, optional
+        MAD scale factor, or ``None`` for elbow detection.
+    device : torch.device, optional
+        GPU device (unused — MCT always runs on CPU).
+    gpu_dtype : torch.dtype, optional
+        GPU dtype (unused).
+
+    Returns
+    -------
+    np.ndarray
+        Denoised volume (still normalized).
+    """
+    coeffs = grid.forward(volume)
+
+    new_coeffs = []
+    for scale_idx, scale in enumerate(coeffs):
+        new_scale = []
+        for direction in scale:
+            new_direction = []
+            for subband in direction:
+                new_direction.append(
+                    _mct_threshold_subband_3d(subband, sigma=sigma, scale_idx=scale_idx)
+                )
+            new_scale.append(new_direction)
+        new_coeffs.append(new_scale)
+
+    result = grid.backward(new_coeffs)
+
+    return result
+
+
+def curvelet_denoise_3d_mct_tiled(
+    vol: np.ndarray,
+    sigma: float | None = None,
+    num_scales: int = 3,
+    wedges_per_dir: int = 3,
+    tile_size: tuple[int, ...] | None = None,
+    overlap: int = 32,
+    n_jobs: int | None = None,
+    outdir: str | None = None,
+) -> np.ndarray:
+    """Denoise a 3D volume using MCT with tiling for memory efficiency.
+
+    Parameters
+    ----------
+    vol : np.ndarray
+        3D volume to denoise.
+    sigma : float, optional
+        MAD scale factor, or ``None`` for elbow detection.
+    num_scales : int, optional
+        Number of curvelet scales. Defaults to 3.
+    wedges_per_dir : int, optional
+        Wedges per direction. Defaults to 3.
+    tile_size : tuple[int, ...], optional
+        Size of each tile as ``(nx, ny, nz)``. If ``None``, auto-detects.
+    overlap : int, optional
+        Overlap in voxels. Defaults to 32.
+    n_jobs : int, optional
+        Number of parallel workers. ``None`` uses all CPUs.
+    outdir : str, optional
+        Directory for memory-mapped output.
+
+    Returns
+    -------
+    np.ndarray
+        Denoised volume.
+    """
+    import os
+
+    vol = np.asarray(vol, dtype=np.float64)
+    if vol.ndim != 3:
+        raise ValueError(f"Input must be 3D, got {vol.ndim}D")
+    if num_scales < 1:
+        raise ValueError(f"num_scales must be >= 1, got {num_scales}")
+    if wedges_per_dir < 3:
+        raise ValueError(f"wedges_per_dir must be >= 3, got {wedges_per_dir}")
+    if overlap < 0:
+        raise ValueError(f"overlap must be >= 0, got {overlap}")
+
+    vmin, vmax = vol.min(), vol.max()
+    if vmax > vmin:
+        vol_norm = (vol - vmin) / (vmax - vmin)
+    else:
+        vol_norm = vol.copy()
+
+    nx, ny, nz = vol_norm.shape
+
+    if tile_size is None:
+        try:
+            import psutil
+
+            available_memory = psutil.virtual_memory().available
+        except ImportError:
+            available_memory = 8 * 1024 * 1024 * 1024
+
+        safe_memory = available_memory * 0.8
+        bytes_per_voxel = 8
+        estimated_factor = 300
+
+        max_total_voxels = int(
+            np.floor(safe_memory / bytes_per_voxel / estimated_factor)
+        )
+        target_edge = int(np.floor(max_total_voxels ** (1 / 3)))
+        tile_size = tuple(min(target_edge, d) for d in (nx, ny, nz))
+
+    tile_with_overlap = tuple(
+        min(t + overlap, d) for t, d in zip(tile_size, (nx, ny, nz))
+    )
+
+    tiles = _get_tile_indices((nx, ny, nz), tile_with_overlap, overlap)
+
+    grid_cache: dict[tuple, object] = {}
+    results = []
+    retained_pcts = []
+
+    if n_jobs is None or n_jobs == 1:
+        for tile_idx in tiles:
+            _z_start, _y_start, _x_start, z_slc, y_slc, x_slc = tile_idx
+            tile_data = vol_norm[z_slc, y_slc, x_slc]
+
+            pad_shape = _udct_compatible_shape(tile_data.shape, num_scales)
+            if pad_shape != tile_data.shape:
+                pads = tuple((0, ps - ds) for ds, ps in zip(tile_data.shape, pad_shape))
+                tile_padded = np.pad(tile_data, pads, mode="edge")
+            else:
+                tile_padded = tile_data
+
+            key = (*pad_shape, num_scales, wedges_per_dir, False)
+            if key not in grid_cache:
+                grid_cache[key] = _get_udct_grid(
+                    pad_shape, num_scales, wedges_per_dir, use_gpu=False
+                )
+
+            grid = grid_cache[key]
+            denoised, retained_pct = _curvelet_denoise_3d_mct_with_grid(
+                tile_padded, grid, sigma
+            )
+            retained_pcts.append(retained_pct)
+
+            dz = (pad_shape[0] - tile_data.shape[0]) // 2
+            dz_end = pad_shape[0] - dz
+            dy = (pad_shape[1] - tile_data.shape[1]) // 2
+            dy_end = pad_shape[1] - dy
+            dx = (pad_shape[2] - tile_data.shape[2]) // 2
+            dx_end = pad_shape[2] - dx
+            denoised_cropped = denoised[dz:dz_end, dy:dy_end, dx:dx_end]
+
+            weight = _generate_cosine_taper(tile_data.shape, overlap)
+            results.append((denoised_cropped, weight, z_slc, y_slc, x_slc))
+    else:
+        from joblib import Parallel, delayed
+
+        def process_tile(tile_idx):
+            _z_start, _y_start, _x_start, z_slc, y_slc, x_slc = tile_idx
+            tile_data = vol_norm[z_slc, y_slc, x_slc]
+
+            pad_shape = _udct_compatible_shape(tile_data.shape, num_scales)
+            if pad_shape != tile_data.shape:
+                pads = tuple((0, ps - ds) for ds, ps in zip(tile_data.shape, pad_shape))
+                tile_padded = np.pad(tile_data, pads, mode="edge")
+            else:
+                tile_padded = tile_data
+
+            key = (*pad_shape, num_scales, wedges_per_dir, False)
+            if key not in grid_cache:
+                grid_cache[key] = _get_udct_grid(
+                    pad_shape, num_scales, wedges_per_dir, use_gpu=False
+                )
+
+            grid = grid_cache[key]
+            denoised, retained_pct = _curvelet_denoise_3d_mct_with_grid(
+                tile_padded, grid, sigma
+            )
+
+            dz = (pad_shape[0] - tile_data.shape[0]) // 2
+            dz_end = pad_shape[0] - dz
+            dy = (pad_shape[1] - tile_data.shape[1]) // 2
+            dy_end = pad_shape[1] - dy
+            dx = (pad_shape[2] - tile_data.shape[2]) // 2
+            dx_end = pad_shape[2] - dx
+            denoised_cropped = denoised[dz:dz_end, dy:dy_end, dx:dx_end]
+
+            weight = _generate_cosine_taper(tile_data.shape, overlap)
+            return denoised_cropped, weight, z_slc, y_slc, x_slc, retained_pct
+
+        tile_results = Parallel(n_jobs=n_jobs)(
+            delayed(process_tile)(tile_idx) for tile_idx in tiles
+        )
+        results = [(r[0], r[1], r[2], r[3], r[4]) for r in tile_results]
+        retained_pcts = [r[5] for r in tile_results]
+
+    if retained_pcts:
+        logger.info(
+            "\tretained %.1f%% of curvelet coefficients (min=%.1f%%, max=%.1f%%)",
+            np.mean(retained_pcts),
+            min(retained_pcts),
+            max(retained_pcts),
         )
 
     output = np.zeros_like(vol_norm)
@@ -1196,7 +2273,7 @@ def curvelet_denoise_3d_udct_tiled(
 
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        mmap_path = os.path.join(outdir, "curvelet_denoised_tiled.npy")
+        mmap_path = os.path.join(outdir, "curvelet_denoised_mct_tiled.npy")
         output_mmap = np.memmap(mmap_path, dtype=np.float64, mode="w+", shape=vol.shape)
         if vmax > vmin:
             output_mmap[:] = output * (vmax - vmin) + vmin

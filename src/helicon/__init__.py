@@ -137,7 +137,7 @@ from .lib.util import (
     DummyMemory,
     cache,
     color_print,
-    get_logger,
+    getLogger,
     log_command_line,
     get_context_function_name,
     timedelta2string,
@@ -191,6 +191,13 @@ from .lib.curvelet import (
     curvelet_denoise_batch_udct,
     curvelet_denoise_3d_udct,
     curvelet_denoise_3d_udct_tiled,
+    curvelet_denoise_3d_mct,
+    curvelet_denoise_3d_mct_tiled,
+    curvelet_denoise_mct,
+    curvelet_denoise_batch_mct,
+    curvelet_denoise_udct_tiled,
+    curvelet_denoise_fdct_tiled,
+    curvelet_denoise_mct_tiled,
 )
 
 cache_dir = setup_cache_dir()

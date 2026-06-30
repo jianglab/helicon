@@ -42,15 +42,14 @@ def main(args: argparse.Namespace) -> None:
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
 
-    n_maps = len(args.inputMapFile)
-    with mrcfile.open(args.inputMapFile[0], mode="r") as mrc:
+    with mrcfile.open(args.inputMapFile, mode="r") as mrc:
         data = mrc.data
         nz, ny, nx = data.shape
         apix = round(float(mrc.voxel_size.x), 4)
         if args.verbose > 0:
             logger.info(
                 "Input map: %s\n\tnx,ny,nz=%d,%d,%d pixels\tsampling=%g \u00c5/pixel",
-                args.inputMapFile[0],
+                args.inputMapFile,
                 nx,
                 ny,
                 nz,
@@ -58,9 +57,7 @@ def main(args: argparse.Namespace) -> None:
             )
 
     if args.verbose > 1:
-        title = (
-            f"{args.inputMapFile[0]}: {nx}x{ny}x{nz} pixels | apix={apix}\u00c5/pixel"
-        )
+        title = f"{args.inputMapFile}: {nx}x{ny}x{nz} pixels | apix={apix}\u00c5/pixel"
         helicon.display_map_orthoslices(data, title=title, hold=False)
 
     index_d = {o: 0 for o in args.all_options}
@@ -114,16 +111,24 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "inputMapFile",
         type=str,
         metavar="<inputMapFile>",
-        nargs="+",
-        help="input 3D map file(s) in MRC format",
-        default=[],
+        help="input 3D map file in MRC format",
+    )
+
+    parser.add_argument(
+        "outputMapFile",
+        type=str,
+        nargs="?",
+        metavar="<outputMapFile>",
+        default=None,
+        help="output 3D map file (optional, auto-generated from input if omitted)",
     )
 
     parser.add_argument(
         "--outputMapFile",
         type=str,
+        dest="outputMapFile_opt",
         metavar="<filename>",
-        help="save output map to this file",
+        help=argparse.SUPPRESS,
         default="",
     )
 
@@ -182,13 +187,15 @@ def check_args(
     args.all_options = [
         o
         for o in all_options
-        if o not in "cpu force inputMapFile outputMapFile verbose".split()
+        if o not in "cpu force inputMapFile outputMapFile_opt verbose".split()
     ]
 
-    if args.outputMapFile:
+    if args.outputMapFile is not None:
         args.outputMapFile = Path(args.outputMapFile)
+    elif args.outputMapFile_opt:
+        args.outputMapFile = Path(args.outputMapFile_opt)
     else:
-        args.outputMapFile = Path(args.inputMapFile[0]).with_suffix(".proc3d.mrc")
+        args.outputMapFile = Path(args.inputMapFile).with_suffix(".proc3d.mrc")
 
     if args.outputMapFile.exists() and not args.force:
         raise HeliconFileExistsError(
