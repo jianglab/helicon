@@ -26,3 +26,5 @@ denoised/
 *.pyc
 *.so
 helicon.plugins.*.denoisecurvelet*
+.omo/
+AGENTS.md

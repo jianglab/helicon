@@ -184,21 +184,31 @@ from .lib.util import (
     set_to_periodic_range,
 )
 
-from .lib.curvelet import (
-    curvelet_denoise_fdct,
-    curvelet_denoise_batch_fdct,
-    curvelet_denoise_udct,
-    curvelet_denoise_batch_udct,
-    curvelet_denoise_3d_udct,
-    curvelet_denoise_3d_udct_tiled,
-    curvelet_denoise_3d_mct,
-    curvelet_denoise_3d_mct_tiled,
-    curvelet_denoise_mct,
-    curvelet_denoise_batch_mct,
-    curvelet_denoise_udct_tiled,
-    curvelet_denoise_fdct_tiled,
-    curvelet_denoise_mct_tiled,
-)
+if has_curvelet_fdct():
+    from .lib.curvelet import (
+        curvelet_denoise_fdct,
+        curvelet_denoise_batch_fdct,
+        curvelet_denoise_udct,
+        curvelet_denoise_batch_udct,
+        curvelet_denoise_3d_udct,
+        curvelet_denoise_3d_udct_tiled,
+        curvelet_denoise_3d_mct,
+        curvelet_denoise_3d_mct_tiled,
+        curvelet_denoise_mct,
+        curvelet_denoise_batch_mct,
+        curvelet_denoise_udct_tiled,
+        curvelet_denoise_fdct_tiled,
+        curvelet_denoise_mct_tiled,
+    )
+try:
+    from .lib.gauss import (
+        AnisotropicGaussian,
+        AnisotropicGaussianSet,
+        IsotropicGaussian,
+        IsotropicGaussianSet,
+    )
+except ImportError:
+    pass
 
 cache_dir = setup_cache_dir()
 

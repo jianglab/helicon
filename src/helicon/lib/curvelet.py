@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 
 import numpy as np
 
-from helicon.lib.system import has_curvelet_udct_gpu
+from helicon.lib.system import has_curvelet_fdct, has_curvelet_udct_gpu
 
 try:
     import torch
@@ -70,9 +70,10 @@ _GRID_CACHE: dict[tuple[int, int, int], object] = {}
 
 # curvepy prints "Curvepy accelerated with Cython" at import time;
 # suppress it so it doesn't clutter user output.
-with redirect_stdout(io.StringIO()):
-    from curvepy.curvepy import CurveletFrequencyGrid
-    from curvepy.denoise import soft_threshold
+if has_curvelet_fdct():
+    with redirect_stdout(io.StringIO()):
+        from curvepy.curvepy import CurveletFrequencyGrid
+        from curvepy.denoise import soft_threshold
 
 
 def _get_grid(shape: tuple[int, int], num_scales: int):
@@ -1174,7 +1175,9 @@ def curvelet_denoise_udct_tiled(
 
             device = _get_device()
             gpu_dtype = _gpu_dtype(device)
-            tensor = torch.from_numpy(tile_padded).to(device=device, dtype=gpu_dtype)
+            tensor = torch.from_numpy(tile_padded.copy()).to(
+                device=device, dtype=gpu_dtype
+            )
             coeffs = grid.forward(tensor)
             coeffs = _coeffs_to_numpy(coeffs)
         else:
