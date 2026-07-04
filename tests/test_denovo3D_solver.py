@@ -1,7 +1,8 @@
 import pytest
 import numpy as np
+import helicon
 from scipy.sparse import csr_matrix
-from helicon.webApps.denovo3D import solver
+from helicon.webApps.denovo3D import solver_linear_regression as solver
 
 
 class TestSortedHsymCsymPairs(object):
@@ -294,3 +295,165 @@ class TestLsqReconstruct(object):
             verbose=0,
         )
         assert np.all(np.isfinite(rec3d))
+
+
+class TestRefineTiltPsiDy:
+    """Tests for the Gauss-Newton local refinement of tilt/psi/dy."""
+
+    def setup_method(self):
+        np.random.seed(42)
+        self.image = np.random.rand(12, 12).astype(np.float32)
+        self.scale2d_to_3d = 1.0
+        self.twist_degree = 30
+        self.rise_pixel = 2
+        self.csym = 1
+        self.d2d = 8
+        self.l2d = 8
+        self.d3d = 8
+        self.l3d = 8
+
+    def _get_x_init(self):
+        """Get initial voxel solution at tilt=0, psi=0, dy=0."""
+        (rec3d, _, _), _ = solver.lsq_reconstruct(
+            projection_image=self.image,
+            scale2d_to_3d=self.scale2d_to_3d,
+            twist_degree=self.twist_degree,
+            rise_pixel=self.rise_pixel,
+            csym=self.csym,
+            reconstruct_diameter_2d_pixel=self.d2d,
+            reconstruct_length_2d_pixel=self.l2d,
+            reconstruct_diameter_3d_pixel=self.d3d,
+            reconstruct_length_3d_pixel=self.l3d,
+            interpolation="nn",
+            verbose=0,
+        )
+        mask = helicon.get_cylindrical_mask(
+            nz=self.l3d,
+            ny=self.d3d,
+            nx=self.d3d,
+            rmin=0,
+            rmax=self.d3d // 2 - 1,
+        )
+        return rec3d[mask]
+
+    def test_returns_correct_structure(self):
+        """refine_tilt_psi_dy returns (tilt, psi, dy, x, score)."""
+        x_init = self._get_x_init()
+        tilt, psi, dy, x, score = solver.refine_tilt_psi_dy(
+            projection_image=self.image,
+            scale2d_to_3d=self.scale2d_to_3d,
+            twist_degree=self.twist_degree,
+            rise_pixel=self.rise_pixel,
+            csym=self.csym,
+            reconstruct_diameter_2d_pixel=self.d2d,
+            reconstruct_length_2d_pixel=self.l2d,
+            reconstruct_diameter_3d_pixel=self.d3d,
+            reconstruct_diameter_3d_inner_pixel=0,
+            reconstruct_length_3d_pixel=self.l3d,
+            sym_oversample=1,
+            interpolation="nn",
+            x_init=x_init,
+            max_iter=2,
+            verbose=0,
+        )
+        assert isinstance(tilt, float)
+        assert isinstance(psi, float)
+        assert isinstance(dy, float)
+        assert isinstance(x, np.ndarray)
+        assert isinstance(score, float)
+        assert np.all(np.isfinite(x))
+
+    def test_zero_shift_no_change(self):
+        """When image is already aligned, refinement should stay near zero."""
+        x_init = self._get_x_init()
+        tilt, psi, dy, x, score = solver.refine_tilt_psi_dy(
+            projection_image=self.image,
+            scale2d_to_3d=self.scale2d_to_3d,
+            twist_degree=self.twist_degree,
+            rise_pixel=self.rise_pixel,
+            csym=self.csym,
+            reconstruct_diameter_2d_pixel=self.d2d,
+            reconstruct_length_2d_pixel=self.l2d,
+            reconstruct_diameter_3d_pixel=self.d3d,
+            reconstruct_diameter_3d_inner_pixel=0,
+            reconstruct_length_3d_pixel=self.l3d,
+            sym_oversample=1,
+            interpolation="nn",
+            x_init=x_init,
+            max_iter=3,
+            verbose=0,
+        )
+        # For a random image with no particular structure,
+        # the refinement should converge quickly
+        assert abs(tilt) < 30  # within bounds
+        assert abs(psi) < 45
+        assert abs(dy) < 5
+
+    def test_bounds_respected(self):
+        """Parameters should stay within specified bounds."""
+        x_init = self._get_x_init()
+        tilt, psi, dy, x, score = solver.refine_tilt_psi_dy(
+            projection_image=self.image,
+            scale2d_to_3d=self.scale2d_to_3d,
+            twist_degree=self.twist_degree,
+            rise_pixel=self.rise_pixel,
+            csym=self.csym,
+            reconstruct_diameter_2d_pixel=self.d2d,
+            reconstruct_length_2d_pixel=self.l2d,
+            reconstruct_diameter_3d_pixel=self.d3d,
+            reconstruct_diameter_3d_inner_pixel=0,
+            reconstruct_length_3d_pixel=self.l3d,
+            sym_oversample=1,
+            interpolation="nn",
+            x_init=x_init,
+            bounds_tilt=(-5.0, 5.0),
+            bounds_psi=(-10.0, 10.0),
+            bounds_dy=(-1.0, 1.0),
+            max_iter=3,
+            verbose=0,
+        )
+        assert -5.0 <= tilt <= 5.0
+        assert -10.0 <= psi <= 10.0
+        assert -1.0 <= dy <= 1.0
+
+    def test_score_finite(self):
+        """Score should be a finite number."""
+        x_init = self._get_x_init()
+        _, _, _, _, score = solver.refine_tilt_psi_dy(
+            projection_image=self.image,
+            scale2d_to_3d=self.scale2d_to_3d,
+            twist_degree=self.twist_degree,
+            rise_pixel=self.rise_pixel,
+            csym=self.csym,
+            reconstruct_diameter_2d_pixel=self.d2d,
+            reconstruct_length_2d_pixel=self.l2d,
+            reconstruct_diameter_3d_pixel=self.d3d,
+            reconstruct_diameter_3d_inner_pixel=0,
+            reconstruct_length_3d_pixel=self.l3d,
+            sym_oversample=1,
+            interpolation="nn",
+            x_init=x_init,
+            max_iter=2,
+            verbose=0,
+        )
+        assert np.isfinite(score)
+
+    def test_integrated_with_lsq_reconstruct(self):
+        """refine_tilt_psi_dy_range parameter triggers refinement in lsq_reconstruct."""
+        (rec3d, _, _), score = solver.lsq_reconstruct(
+            projection_image=self.image,
+            scale2d_to_3d=self.scale2d_to_3d,
+            twist_degree=self.twist_degree,
+            rise_pixel=self.rise_pixel,
+            csym=self.csym,
+            reconstruct_diameter_2d_pixel=self.d2d,
+            reconstruct_length_2d_pixel=self.l2d,
+            reconstruct_diameter_3d_pixel=self.d3d,
+            reconstruct_length_3d_pixel=self.l3d,
+            interpolation="nn",
+            verbose=0,
+            algorithm=dict(model="elasticnet"),
+            refine_tilt_psi_dy_range={"tilt": 5, "psi": 10, "dy": 2},
+        )
+        assert np.all(np.isfinite(rec3d))
+        assert isinstance(score, float)

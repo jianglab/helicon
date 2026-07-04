@@ -501,13 +501,13 @@ with ui.sidebar(
                 with ui.tooltip():
                     ui.input_radio_buttons(
                         "lr_algorithm",
-                        "Linear regression algorithm",
-                        "elasticnet lasso ridge lreg lsq".split(),
+                        "Reconstruction algorithm",
+                        "elasticnet lasso ridge lsq".split(),
                         selected="elasticnet",
                         inline=True,
                     )
 
-                    "Choose the algorithm that will be used to solve the linear equations"
+                    "Choose the regularization algorithm for the least-squares reconstruction"
 
             with ui.layout_columns(col_widths=6, style="align-items: flex-end;"):
                 with ui.tooltip():
@@ -851,20 +851,34 @@ with ui.div(
 
         with ui.accordion(id="filtering_options", open=False, width="100%"):
             with ui.accordion_panel(title="Filtering options:"):
-                ui.input_numeric(
-                    "lp_angst",
-                    "Low pass filtering (Å):",
-                    value=-1,
-                    step=0.1,
-                    update_on="blur",
-                )
-                ui.input_numeric(
-                    "hp_angst",
-                    "High pass filtering (Å):",
-                    value=-1,
-                    step=0.1,
-                    update_on="blur",
-                )
+                with ui.tooltip():
+                    ui.input_numeric(
+                        "binning",
+                        "Binning:",
+                        value=1,
+                        min=1,
+                        max=100,
+                        step=1,
+                        update_on="blur",
+                    )
+                    "Default binning makes the image smallest dimension ≤ 128 pixels."
+                with ui.layout_columns(
+                    col_widths=(6, 6), style="align-items: flex-end;"
+                ):
+                    ui.input_numeric(
+                        "lp_angst",
+                        "Low pass filtering (Å):",
+                        value=-1,
+                        step=0.1,
+                        update_on="blur",
+                    )
+                    ui.input_numeric(
+                        "hp_angst",
+                        "High pass filtering (Å):",
+                        value=-1,
+                        step=0.1,
+                        update_on="blur",
+                    )
 
     @shiny.render.ui
     @reactive.event(initial_image, input.input_ui_type, ignore_init=False)
@@ -1854,7 +1868,21 @@ def get_displayed_images():
 
 
 @reactive.effect
-@reactive.event(input.select_image, displayed_images, input.lp_angst, input.hp_angst)
+@reactive.event(displayed_images)
+def update_binning_default():
+    """Set the default binning factor so the smallest image dimension ≤ 256 pixels."""
+    req(len(displayed_images()))
+    all_shapes = [img.shape for img in displayed_images()]
+    max_dim = max([max(s) for s in all_shapes])
+    suggested = max(1, int(np.ceil(max_dim / 256)))
+    if input.binning() != suggested:
+        ui.update_numeric("binning", value=suggested)
+
+
+@reactive.effect
+@reactive.event(
+    input.select_image, displayed_images, input.lp_angst, input.hp_angst, input.binning
+)
 def update_selected_images_orignal_lp():
     req(len(displayed_images()))
     req(input.select_image())
@@ -1867,6 +1895,19 @@ def update_selected_images_orignal_lp():
         apix = input.apix()
     else:
         apix = round(all_images().apix, 4)
+
+    # Apply binning (integer downsampling)
+    binning = input.binning()
+    if binning > 1:
+        from skimage.transform import rescale
+
+        images = [
+            rescale(
+                img, 1.0 / binning, anti_aliasing=True, order=3, preserve_range=True
+            )
+            for img in images
+        ]
+        apix = apix * binning
 
     do_filtering = False
     low_pass_fraction = -1
@@ -1982,49 +2023,55 @@ def estimate_helix_rotation_center_diameter(
         shift_y (float): The post-rotation vertical shift (pixels) needed to shift the helix to the box center in vertical direction.
         diameter (int): The estimated diameter (pixels) of the helix.
     """
-    from skimage.measure import label, regionprops
     from skimage.morphology import closing
     import helicon
 
-    if estimate_rotation:
-        bw = closing(data > threshold, mode="ignore")
-        label_image = label(bw)
-        if label_image.max() > 0:
-            props = regionprops(label_image=label_image, intensity_image=data)
-            props.sort(key=lambda x: x.area, reverse=True)
-            angle = (
-                np.rad2deg(props[0].orientation) + 90
-            )  # relative to +x axis, counter-clockwise
-            if abs(angle) > 90:
-                angle -= 180
-            rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
-            data_rotated = helicon.transform_image(image=data, rotation=rotation)
+    ny, nx = data.shape
+
+    def _weighted_params(mask, intensity):
+        ys, xs = np.where(mask)
+        if len(ys) < 2:
+            return 0.0, 0.0, ny
+        w = intensity[ys, xs].astype(np.float64)
+        w = w - w.min() + 1e-8
+        cw = w.sum()
+        cy = (ys * w).sum() / cw
+        cx = (xs * w).sum() / cw
+        uy = ys - cy
+        ux = xs - cx
+        i_yy = (uy * uy * w).sum() / cw
+        i_xx = (ux * ux * w).sum() / cw
+        i_xy = (uy * ux * w).sum() / cw
+        theta = 0.5 * np.arctan2(2.0 * i_xy, i_yy - i_xx)
+        angle = np.rad2deg(theta) + 90.0
+        if abs(angle) > 90.0:
+            angle -= 180.0
+        diameter = int(ys.max() - ys.min() + 1)
+        if estimate_center:
+            shift = ny // 2 - cy
         else:
-            rotation = 0.0
-            data_rotated = data
+            shift = 0.0
+        return angle, shift, diameter
+
+    bw = closing(data > threshold, mode="ignore")
+    mask = bw > 0
+    if not mask.any():
+        return 0.0, 0.0, ny
+
+    if estimate_rotation:
+        rotation, _, _ = _weighted_params(mask, data)
+        rotation = helicon.set_to_periodic_range(rotation, min=-180, max=180)
+        data_rotated = helicon.transform_image(image=data, rotation=rotation)
     else:
         rotation = 0.0
         data_rotated = data
 
-    bw = closing(data_rotated > threshold, mode="ignore")
-    label_image = label(bw)
-    if label_image.max() > 0:
+    bw_rot = closing(data_rotated > threshold, mode="ignore")
+    mask_rot = bw_rot > 0
+    if not mask_rot.any():
+        return rotation, 0.0, ny
 
-        props = regionprops(label_image=label_image, intensity_image=data_rotated)
-        props.sort(key=lambda x: x.area, reverse=True)
-        minr, minc, maxr, maxc = props[0].bbox
-        diameter = maxr - minr + 1
-
-        if estimate_center:
-            center = props[0].centroid
-        else:
-            ny, nx = data.shape
-            center = (ny // 2, nx // 2)
-        shift_y = data.shape[0] // 2 - center[0]
-    else:
-        rotation = 0.0
-        shift_y = 0.0
-        diameter = data.shape[0]
+    _, shift_y, diameter = _weighted_params(mask_rot, data_rotated)
 
     return rotation, shift_y, diameter
 
@@ -2241,7 +2288,10 @@ def run_denovo3D_reconstruction():
 
     data = data[0]
     ny, nx = data.shape
-    tube_length = nx * input.apix()
+    # Adjust apix for binning — images may have been binned in the filtering step
+    binning_factor = max(1, input.binning())
+    apix_binned = input.apix() * binning_factor
+    tube_length = nx * apix_binned
 
     imageFile = selected_images_title().strip(":")
     imageIndex = selected_images_labels()[0]
@@ -2283,13 +2333,20 @@ def run_denovo3D_reconstruction():
     import itertools
 
     tr_pairs = list(itertools.product(twists, rises))
-    return_3d = len(tr_pairs) == 1
+    n_pairs = len(tr_pairs)
+    return_3d = n_pairs == 1
+    n_cpu = input.cpu()
+    n_threads_per_job = max(1, n_cpu // max(1, n_pairs))
 
-    if input.target_apix2d() > input.apix():
+    tilt_range_val = 0
+    psi_range_val = 0
+    dy_range_val = 0
+
+    if input.target_apix2d() > apix_binned:
         target_apix2d_overwrite = input.target_apix2d()
     else:
         target_apix2d_overwrite = -1
-    if input.target_apix3d() > input.apix():
+    if input.target_apix3d() > apix_binned:
         target_apix3d_overwrite = input.target_apix3d()
     else:
         target_apix3d_overwrite = -1
@@ -2299,10 +2356,10 @@ def run_denovo3D_reconstruction():
         twist, rise = t
         twist = np.round(helicon.set_to_periodic_range(twist, min=-180, max=180), 6)
         csym = input.csym()
-        apix = input.apix()
+        apix = apix_binned
         tilt = 0
-        tilt_min = 0
-        tilt_max = 0
+        tilt_min = -tilt_range_val
+        tilt_max = tilt_range_val
         psi = 0
         dy = 0
         denoise = ""
@@ -2321,7 +2378,6 @@ def run_denovo3D_reconstruction():
         interpolation = input.interpolation()
         fsc_test = 0
         verbose = 2
-        cpu = input.cpu()
 
         algorithm = dict(model=input.lr_algorithm(), l1_ratio=input.lr_l1_ratio())
         if input.lr_alpha() >= 0:
@@ -2359,7 +2415,9 @@ def run_denovo3D_reconstruction():
                 tilt,
                 (tilt_min, tilt_max),
                 psi,
+                psi_range_val,
                 dy,
+                dy_range_val,
                 apix,
                 denoise,
                 low_pass,
@@ -2380,7 +2438,7 @@ def run_denovo3D_reconstruction():
                 score_metric,
                 algorithm,
                 verbose,
-                logger,
+                n_threads_per_job,
             )
         )
 
@@ -2388,8 +2446,7 @@ def run_denovo3D_reconstruction():
         logger.warning("Nothing to do. I will quit")
         return
 
-    # print(reconstruction_task, "reconstruction_task started")
-    reconstruction_task(tasks, cpu)
+    reconstruction_task(tasks, n_cpu)
 
 
 @ui.bind_task_button(button_id="run_denovo3D")
@@ -2407,8 +2464,8 @@ async def reconstruction_task(tasks, cpu):
     with ui.Progress(min=0, max=len(tasks)) as p:
         p.set(message="Calculation in progress", detail="This may take a while ...")
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         from time import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=cpu) as executor:
             future_tasks = [
@@ -2417,9 +2474,10 @@ async def reconstruction_task(tasks, cpu):
 
             t0 = time()
             results = []
+            n_discarded = 0
+            update_interval = max(1, len(tasks) // 20)
             for completed_task in as_completed(future_tasks):
 
-                # print(denovo3D_abort_event)
                 # this is to give a chance to stop the task
                 await asyncio.sleep(0)
                 if denovo3D_abort_event is True:
@@ -2427,32 +2485,38 @@ async def reconstruction_task(tasks, cpu):
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
+                task_index = future_tasks.index(completed_task)
                 result = completed_task.result()
+                if result is None:
+                    n_discarded += 1
+                    continue
+
                 results.append(result)
                 t1 = time()
-                remaining = (len(tasks) - len(results)) / len(results) * (t1 - t0)
+                remaining = (
+                    (len(tasks) - len(results) - n_discarded)
+                    / max(len(results), 1)
+                    * (t1 - t0)
+                )
                 p.set(
-                    len(results),
-                    message=f"Completed {len(results)}/{len(tasks)}",
+                    len(results) + n_discarded,
+                    message=f"Completed {len(results) + n_discarded}/{len(tasks)}",
                     detail=f"{helicon.timedelta2string(remaining)} remaining",
                 )
+
+                if len(results) % update_interval == 0:
+                    results.sort(key=lambda x: x[0], reverse=True)
+                    reconstrunction_results.set(list(results))
+
             t_final = time()
             t_passed = t_final - t0
             logger.info("reconstruction time: %s", t_passed)
 
-    results_none = [res for res in results if res is None]
-    if len(results_none):
-        logger.info(
-            f"{len(results_none)}/{len(results)} results are None and thus discarded"
-        )
-        results = [res for res in results if res is not None]
+    if n_discarded:
+        logger.info(f"{n_discarded}/{len(tasks)} results are None and thus discarded")
 
-    print(
-        f"[DEBUG reconstruction_task] n_results={len(results)} first_score={results[0][0] if results else 'N/A'}",
-        flush=True,
-    )
-
-    results.sort(key=lambda x: x[0], reverse=True)  # sort from high to low scores
+    if results:
+        results.sort(key=lambda x: x[0], reverse=True)  # sort from high to low scores
     reconstrunction_results.set(results)
 
 

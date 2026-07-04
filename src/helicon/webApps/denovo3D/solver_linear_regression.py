@@ -51,6 +51,8 @@ def lsq_reconstruct(
     target_apix2d=5.0,
     verbose=0,
     algorithm=dict(model="lsq"),
+    refine_tilt_psi_dy_range=None,
+    cpu=1,
 ):
     """Build and solve the least-squares reconstruction system.
 
@@ -148,6 +150,7 @@ def lsq_reconstruct(
             ),
             interpolation=interpolation,
             verbose=verbose,
+            cpu=cpu,
         )
 
     with helicon.Timer(
@@ -377,6 +380,64 @@ def lsq_reconstruct(
     xs = [x]
     scores = [score]
 
+    # Local refinement of tilt/psi/dy if requested
+    if refine_tilt_psi_dy_range is not None:
+        r_range = refine_tilt_psi_dy_range
+        has_range = any(
+            v > 0
+            for v in [
+                r_range.get("tilt", 0),
+                r_range.get("psi", 0),
+                r_range.get("dy", 0),
+            ]
+        )
+        if has_range:
+            tilt_opt, psi_opt, dy_opt, x_refined, score_refined = refine_tilt_psi_dy(
+                projection_image=projection_image,
+                scale2d_to_3d=scale2d_to_3d,
+                twist_degree=twist_degree,
+                rise_pixel=rise_pixel,
+                csym=csym,
+                reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel,
+                reconstruct_length_2d_pixel=reconstruct_length_2d_pixel,
+                reconstruct_diameter_3d_pixel=reconstruct_diameter_3d_pixel,
+                reconstruct_diameter_3d_inner_pixel=reconstruct_diameter_3d_inner_pixel,
+                reconstruct_length_3d_pixel=reconstruct_length_3d_pixel,
+                sym_oversample=sym_oversample,
+                interpolation=interpolation,
+                x_init=x,
+                tilt_0=0.0,
+                psi_0=0.0,
+                dy_0=0.0,
+                delta_tilt=r_range.get("delta_tilt", 0.5),
+                delta_psi=r_range.get("delta_psi", 1.0),
+                delta_dy=r_range.get("delta_dy", 0.2),
+                max_iter=r_range.get("max_iter", 5),
+                bounds_tilt=(-r_range.get("tilt", 30.0), r_range.get("tilt", 30.0)),
+                bounds_psi=(-r_range.get("psi", 45.0), r_range.get("psi", 45.0)),
+                bounds_dy=(-r_range.get("dy", 5.0), r_range.get("dy", 5.0)),
+                positive_constraint=positive_constraint,
+                algorithm=algorithm,
+                verbose=verbose,
+                cpu=cpu,
+            )
+            if score_refined is not None and (score is None or score_refined > score):
+                x = x_refined
+                score = score_refined
+                xs = [x]
+                scores = [score]
+                Abx_data_triplets = [(A_data, b_data, x)]
+                # Store refined params for post-reconstruction transform
+                if not hasattr(lsq_reconstruct, "_refined_params"):
+                    lsq_reconstruct._refined_params = {}
+                lsq_reconstruct._refined_params["tilt"] = tilt_opt
+                lsq_reconstruct._refined_params["psi"] = psi_opt
+                lsq_reconstruct._refined_params["dy"] = dy_opt
+                logger.info(
+                    f"  Refined tilt/psi/dy: [{tilt_opt:.3f}, {psi_opt:.3f}, {dy_opt:.3f}] "
+                    f"score {score:.6f}"
+                )
+
     if fsc_test >= 1:
         (A_data_set_1, b_data_set_1), (A_data_set_2, b_data_set_2) = split_A_b(
             A_data, b_data, b_data_pid, mode=fsc_test
@@ -484,6 +545,300 @@ def lsq_reconstruct(
         rec3d_set_1[mask] = xs[1]
         rec3d_set_2[mask] = xs[2]
         return (rec3d, rec3d_set_1, rec3d_set_2), score
+
+
+def refine_tilt_psi_dy(
+    projection_image,
+    scale2d_to_3d,
+    twist_degree,
+    rise_pixel,
+    csym,
+    reconstruct_diameter_2d_pixel,
+    reconstruct_length_2d_pixel,
+    reconstruct_diameter_3d_pixel,
+    reconstruct_diameter_3d_inner_pixel,
+    reconstruct_length_3d_pixel,
+    sym_oversample,
+    interpolation,
+    x_init,
+    tilt_0=0.0,
+    psi_0=0.0,
+    dy_0=0.0,
+    delta_tilt=0.5,
+    delta_psi=1.0,
+    delta_dy=0.2,
+    max_iter=5,
+    tol_tilt=0.05,
+    tol_psi=0.1,
+    tol_dy=0.05,
+    bounds_tilt=(-30.0, 30.0),
+    bounds_psi=(-45.0, 45.0),
+    bounds_dy=(-5.0, 5.0),
+    positive_constraint=-1,
+    algorithm=None,
+    verbose=0,
+    cpu=1,
+):
+    """Refine tilt, psi, dy via Gauss-Newton with finite-difference Jacobian.
+
+    After solving the base LSQ problem at (tilt=0, psi=0, dy=0), this
+    function iteratively refines these geometric parameters by computing
+    the Jacobian via finite differences and solving a 3x3 normal equation.
+
+    Parameters
+    ----------
+    projection_image : ndarray
+        Input 2D projection image.
+    scale2d_to_3d : float
+        Scale factor from 2D to 3D pixel size.
+    twist_degree, rise_pixel, csym : float/int
+        Helical parameters (fixed during refinement).
+    reconstruct_* : int
+        Reconstruction grid dimensions.
+    sym_oversample : int
+        Symmetry oversampling factor.
+    interpolation : str
+        Interpolation method.
+    x_init : ndarray
+        Initial voxel solution from base solve.
+    tilt_0, psi_0, dy_0 : float
+        Initial parameter values (typically 0).
+    delta_tilt, delta_psi, delta_dy : float
+        Finite-difference step sizes.
+    max_iter : int
+        Maximum refinement iterations.
+    tol_tilt, tol_psi, tol_dy : float
+        Convergence tolerances.
+    bounds_tilt, bounds_psi, bounds_dy : tuple
+        Parameter bounds.
+    positive_constraint : int
+        Positive constraint mode.
+    algorithm : dict
+        Solver algorithm configuration.
+    verbose : int
+        Verbosity level.
+
+    Returns
+    -------
+    tuple : (tilt_opt, psi_opt, dy_opt, x_opt, score)
+    """
+    if algorithm is None:
+        algorithm = dict(model="elasticnet")
+
+    t = np.array([tilt_0, psi_0, dy_0])
+    deltas = np.array([delta_tilt, delta_psi, delta_dy])
+    bounds_lo = np.array([bounds_tilt[0], bounds_psi[0], bounds_dy[0]])
+    bounds_hi = np.array([bounds_tilt[1], bounds_psi[1], bounds_dy[1]])
+
+    max_equations = 2**26
+    n_3d_voxels = (
+        reconstruct_diameter_3d_pixel
+        * reconstruct_diameter_3d_pixel
+        * reconstruct_length_3d_pixel
+    )
+    n_2d_pixels = reconstruct_diameter_2d_pixel * reconstruct_length_2d_pixel
+
+    rmin = reconstruct_diameter_3d_inner_pixel / 2
+    rmax = reconstruct_diameter_3d_pixel // 2 - 1
+
+    pitch_pixel = round(rise_pixel * 360 / abs(twist_degree))
+    positive = positive_constraint > 0 or (
+        positive_constraint < 0 and pitch_pixel > round(reconstruct_length_3d_pixel * 2)
+    )
+
+    # Build baseline A_data and solve
+    A_data_0, b_data, b_data_pid = build_A_data_matrix(
+        image=projection_image,
+        scale2d_to_3d=scale2d_to_3d,
+        twist_degree=twist_degree,
+        rise_pixel=rise_pixel,
+        csym=csym,
+        tilt_degree=t[0],
+        psi_degree=t[1],
+        dy_pixel=t[2],
+        reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel,
+        reconstruct_length_2d_pixel=reconstruct_length_2d_pixel,
+        reconstruct_diameter_3d_pixel=reconstruct_diameter_3d_pixel,
+        reconstruct_diameter_3d_inner_pixel=reconstruct_diameter_3d_inner_pixel,
+        reconstruct_length_3d_pixel=reconstruct_length_3d_pixel,
+        min_projection_lines=min(
+            max_equations, int(max(n_2d_pixels, n_3d_voxels) * sym_oversample)
+        ),
+        interpolation=interpolation,
+        verbose=verbose,
+        cpu=cpu,
+    )
+
+    A_hsym, b_hsym = build_A_helical_sym_matrix(
+        nz=reconstruct_length_3d_pixel,
+        ny=reconstruct_diameter_3d_pixel,
+        nx=reconstruct_diameter_3d_pixel,
+        twist_degree=twist_degree,
+        rise_pixel=rise_pixel,
+        csym=csym,
+        rmin=rmin,
+        rmax=rmax,
+        min_sym_pairs=min(
+            max_equations, int(max(n_2d_pixels, n_3d_voxels) * sym_oversample)
+        ),
+        interpolation=interpolation,
+        verbose=verbose,
+    )
+
+    # Solve base system
+    from scipy.sparse import vstack
+
+    A_full_0 = vstack((A_data_0, A_hsym)) if A_hsym is not None else A_data_0
+    b_full_0 = np.concatenate((b_data, b_hsym)) if b_hsym is not None else b_data
+    n_base_rows = A_data_0.shape[0]
+
+    def _solve_system(A_data_cur, b_data_cur):
+        """Solve the combined data + symmetry system."""
+        if A_hsym is not None:
+            A = vstack((A_data_cur, A_hsym))
+            b = np.concatenate((b_data_cur, b_hsym))
+        else:
+            A = A_data_cur
+            b = b_data_cur
+        if positive:
+            from scipy.optimize import lsq_linear
+
+            lb = 0.0
+            ub = np.max(b_data_cur)
+            result = lsq_linear(A, b, bounds=(lb, ub), max_iter=200)
+            return result.x
+        else:
+            from scipy.sparse.linalg import lsqr
+
+            result = lsqr(A, b, atol=1e-6, btol=1e-6)
+            return result[0]
+
+    x_cur = _solve_system(A_data_0, b_data)
+    p_0 = A_data_0 @ x_cur  # baseline prediction
+
+    if verbose:
+        cos_0 = helicon.cosine_similarity(p_0, b_data)
+        logger.info(f"  Refine tilt/psi/dy: baseline cos={cos_0:.6f} at t={t}")
+
+    for iteration in range(max_iter):
+        # Build Jacobian columns via finite differences
+        # Note: different tilt/psi/dy may produce A matrices with different
+        # numbers of rows (different pixels map to voxels). We pad shorter
+        # predictions to match the baseline length.
+        n_base = len(b_data)
+        J_t = np.zeros((n_base, 3), dtype=np.float64)
+
+        for i in range(3):
+            t_pert = t.copy()
+            t_pert[i] += deltas[i]
+            # Clamp to bounds
+            t_pert[i] = np.clip(t_pert[i], bounds_lo[i], bounds_hi[i])
+
+            A_pert, _, _ = build_A_data_matrix(
+                image=projection_image,
+                scale2d_to_3d=scale2d_to_3d,
+                twist_degree=twist_degree,
+                rise_pixel=rise_pixel,
+                csym=csym,
+                tilt_degree=t_pert[0],
+                psi_degree=t_pert[1],
+                dy_pixel=t_pert[2],
+                reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel,
+                reconstruct_length_2d_pixel=reconstruct_length_2d_pixel,
+                reconstruct_diameter_3d_pixel=reconstruct_diameter_3d_pixel,
+                reconstruct_diameter_3d_inner_pixel=reconstruct_diameter_3d_inner_pixel,
+                reconstruct_length_3d_pixel=reconstruct_length_3d_pixel,
+                min_projection_lines=min(
+                    max_equations, int(max(n_2d_pixels, n_3d_voxels) * sym_oversample)
+                ),
+                interpolation=interpolation,
+                verbose=verbose,
+                cpu=cpu,
+            )
+            p_pert = A_pert @ x_cur
+            actual_delta = t_pert[i] - t[i]
+            if abs(actual_delta) > 1e-12:
+                n_pert = len(p_pert)
+                n_common = min(n_base, n_pert)
+                J_t[:n_common, i] = (p_pert[:n_common] - p_0[:n_common]) / actual_delta
+
+        # Gauss-Newton normal equations (3x3 system)
+        r_0 = p_0 - b_data
+        G = J_t.T @ J_t  # 3x3
+        g = J_t.T @ r_0  # 3-vector
+
+        # Regularize if ill-conditioned
+        cond = np.linalg.cond(G) if np.linalg.det(G) != 0 else float("inf")
+        if cond > 1e10:
+            G += 1e-6 * np.diag(np.diag(G))
+
+        try:
+            delta_t = np.linalg.solve(G, -g)
+        except np.linalg.LinAlgError:
+            logger.warning(f"  Refine iter {iteration}: singular system, stopping")
+            break
+
+        # Projected step to respect bounds
+        t_new = np.clip(t + delta_t, bounds_lo, bounds_hi)
+        delta_t_actual = t_new - t
+
+        # Check convergence
+        converged = (
+            abs(delta_t_actual[0]) < tol_tilt
+            and abs(delta_t_actual[1]) < tol_psi
+            and abs(delta_t_actual[2]) < tol_dy
+        )
+
+        if verbose:
+            cos_cur = helicon.cosine_similarity(p_0, b_data)
+            logger.info(
+                f"  Refine iter {iteration}: t=[{t_new[0]:.3f}, {t_new[1]:.3f}, {t_new[2]:.3f}] "
+                f"delta=[{delta_t_actual[0]:.4f}, {delta_t_actual[1]:.4f}, {delta_t_actual[2]:.4f}] "
+                f"cos={cos_cur:.6f} cond={cond:.1e}"
+            )
+
+        t = t_new
+
+        if converged:
+            if verbose:
+                logger.info(f"  Refine converged at iteration {iteration}")
+            break
+
+        # Re-solve with updated parameters
+        A_data_new, _, _ = build_A_data_matrix(
+            image=projection_image,
+            scale2d_to_3d=scale2d_to_3d,
+            twist_degree=twist_degree,
+            rise_pixel=rise_pixel,
+            csym=csym,
+            tilt_degree=t[0],
+            psi_degree=t[1],
+            dy_pixel=t[2],
+            reconstruct_diameter_2d_pixel=reconstruct_diameter_2d_pixel,
+            reconstruct_length_2d_pixel=reconstruct_length_2d_pixel,
+            reconstruct_diameter_3d_pixel=reconstruct_diameter_3d_pixel,
+            reconstruct_diameter_3d_inner_pixel=reconstruct_diameter_3d_inner_pixel,
+            reconstruct_length_3d_pixel=reconstruct_length_3d_pixel,
+            min_projection_lines=min(
+                max_equations, int(max(n_2d_pixels, n_3d_voxels) * sym_oversample)
+            ),
+            interpolation=interpolation,
+            verbose=verbose,
+            cpu=cpu,
+        )
+
+        x_cur = _solve_system(A_data_new, b_data)
+        p_0 = A_data_new @ x_cur
+
+    # Final score
+    final_score = helicon.cosine_similarity(p_0, b_data)
+
+    if verbose:
+        logger.info(
+            f"  Refine final: t=[{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}] score={final_score:.6f}"
+        )
+
+    return t[0], t[1], t[2], x_cur, final_score
 
 
 @helicon.cache(
@@ -944,8 +1299,8 @@ def build_A_helical_sym_matrix(
 
 
 @helicon.cache(
-    cache_dir=cache_dir, ignore=["verbose"], expires_after=7, verbose=0
-)  # 7 days
+    cache_dir=cache_dir, ignore=["verbose", "cpu"], expires_after=7, verbose=0
+)
 def build_A_data_matrix(
     image,
     scale2d_to_3d,
@@ -963,6 +1318,7 @@ def build_A_data_matrix(
     min_projection_lines,
     interpolation,
     verbose=0,
+    cpu=1,
 ):
     """Build the sparse data matrix A and target vector b for least-squares reconstruction.
 
@@ -1213,44 +1569,83 @@ def build_A_data_matrix(
     n = len(hcsyms)
     indices = qmc_method.integers(l_bounds=0, u_bounds=n, n=n)
     hcsyms = [hcsyms[int(i[0])] for i in indices]
-    for hci, (hi, ci) in enumerate(hcsyms):
+
+    def _process_hcsym(hci, hi, ci):
+        """Process a single (h, csym) symmetry combination."""
         angle = twist_degree * hi + 360 * ci / csym
         r = R.from_euler("z", angle, degrees=True)
         coords = r.apply(coords0, inverse=True)
         coords[:, 2] -= hi * rise_pixel
-        X = coords[:, 0].reshape((nz, ny, nx)) + nx // 2  # axes order: z, y, x
-        Y = coords[:, 1].reshape((nz, ny, nx)) + ny // 2  # axes order: z, y, x
-        Z = (
-            coords[:, 2].reshape((nz, ny, nx)) + reconstruct_length_3d_pixel // 2
-        )  # axes order: z, y, x
-
-        csr_row_tmp, csr_col_tmp, csr_data_tmp, b_tmp, b_pid_tmp = loop_kji(
+        X = coords[:, 0].reshape((nz, ny, nx)) + nx // 2
+        Y = coords[:, 1].reshape((nz, ny, nx)) + ny // 2
+        Z = coords[:, 2].reshape((nz, ny, nx)) + reconstruct_length_3d_pixel // 2
+        cr, cc, cd, bt, bpid = loop_kji(
             Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals
         )
-        n_b += len(b_tmp)
-        if verbose > 20:
-            logger.debug(
-                "%s/%s: hi=%s ci=%s +%s %s target_lines=%s",
-                hci + 1,
-                len(hcsyms),
-                hi,
-                ci,
-                f"{len(b_tmp):,}",
-                f"{n_b:,}",
-                f"{min_projection_lines:,}",
+        if len(bt):
+            bt = np.array(bt, dtype=np.float32)
+            csr_At = csr_matrix((cd, (cr, cc)), shape=(len(bt), n_x), dtype=np.float32)
+            return (csr_At, bt, bpid)
+        return None
+
+    n_hcsyms = len(hcsyms)
+    if cpu > 1 and n_hcsyms > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=cpu) as ex:
+            futures = {
+                ex.submit(_process_hcsym, hci, hi, ci): (hci, hi, ci)
+                for hci, (hi, ci) in enumerate(hcsyms)
+            }
+            for f in as_completed(futures):
+                res = f.result()
+                if res is not None:
+                    csr_A_tmp, b_tmp, b_pid_tmp = res
+                    csr_A.append(csr_A_tmp)
+                    csr_b.append(b_tmp)
+                    b_pid.append(b_pid_tmp)
+                    n_b += len(b_tmp)
+                if min_projection_lines > 0 and n_b > min_projection_lines:
+                    for ff in futures:
+                        ff.cancel()
+                    break
+    else:
+        for hci, (hi, ci) in enumerate(hcsyms):
+            angle = twist_degree * hi + 360 * ci / csym
+            r = R.from_euler("z", angle, degrees=True)
+            coords = r.apply(coords0, inverse=True)
+            coords[:, 2] -= hi * rise_pixel
+            X = coords[:, 0].reshape((nz, ny, nx)) + nx // 2
+            Y = coords[:, 1].reshape((nz, ny, nx)) + ny // 2
+            Z = coords[:, 2].reshape((nz, ny, nx)) + reconstruct_length_3d_pixel // 2
+
+            csr_row_tmp, csr_col_tmp, csr_data_tmp, b_tmp, b_pid_tmp = loop_kji(
+                Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals
             )
-        if len(b_tmp):
-            b_tmp = np.array(b_tmp, dtype=np.float32)
-            csr_A_tmp = csr_matrix(
-                (csr_data_tmp, (csr_row_tmp, csr_col_tmp)),
-                shape=(len(b_tmp), n_x),
-                dtype=np.float32,
-            )
-            csr_A.append(csr_A_tmp)
-            csr_b.append(b_tmp)
-            b_pid += [b_pid_tmp]
-        if min_projection_lines > 0 and n_b > min_projection_lines:
-            break
+            n_b += len(b_tmp)
+            if verbose > 20:
+                logger.debug(
+                    "%s/%s: hi=%s ci=%s +%s %s target_lines=%s",
+                    hci + 1,
+                    n_hcsyms,
+                    hi,
+                    ci,
+                    f"{len(b_tmp):,}",
+                    f"{n_b:,}",
+                    f"{min_projection_lines:,}",
+                )
+            if len(b_tmp):
+                b_tmp = np.array(b_tmp, dtype=np.float32)
+                csr_A_tmp = csr_matrix(
+                    (csr_data_tmp, (csr_row_tmp, csr_col_tmp)),
+                    shape=(len(b_tmp), n_x),
+                    dtype=np.float32,
+                )
+                csr_A.append(csr_A_tmp)
+                csr_b.append(b_tmp)
+                b_pid += [b_pid_tmp]
+            if min_projection_lines > 0 and n_b > min_projection_lines:
+                break
     from scipy.sparse import vstack
 
     A = vstack(csr_A)

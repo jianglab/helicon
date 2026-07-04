@@ -162,8 +162,12 @@ def has_curvelet_fdct() -> bool:
     bool
         True if curvepy-fdct can be imported, False otherwise.
     """
+    import io
+    from contextlib import redirect_stdout
+
     try:
-        from curvepy.curvepy import CurveletFrequencyGrid  # noqa: F401
+        with redirect_stdout(io.StringIO()):
+            from curvepy.curvepy import CurveletFrequencyGrid  # noqa: F401
 
         return True
     except ImportError:

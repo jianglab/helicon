@@ -650,8 +650,9 @@ def estimate_helix_rotation_center_diameter(
 ) -> tuple[float, float, int]:
     """Estimate helix rotation, center, and diameter from a 2D image.
 
-    Uses region labelling on a thresholded image to identify the helix region,
-    then estimates orientation, centroid, and bounding-box diameter.
+    Uses the union of all thresholded regions, then computes grayscale-weighted
+    second moments for rotation and centroid.  This avoids the information loss
+    of binary-only regionprops and handles fragmented masks better.
 
     Parameters
     ----------
@@ -674,39 +675,55 @@ def estimate_helix_rotation_center_diameter(
     diameter : int
         Estimated diameter (pixels) of the helix.
     """
-    from skimage.measure import label, regionprops
     from skimage.morphology import closing
     import helicon
 
+    ny, nx = data.shape
+
+    def _weighted_params(mask, intensity):
+        ys, xs = np.where(mask)
+        if len(ys) < 2:
+            return 0.0, 0.0, ny
+        w = intensity[ys, xs].astype(np.float64)
+        w = w - w.min() + 1e-8
+        cw = w.sum()
+        cy = (ys * w).sum() / cw
+        cx = (xs * w).sum() / cw
+        uy = ys - cy
+        ux = xs - cx
+        i_yy = (uy * uy * w).sum() / cw
+        i_xx = (ux * ux * w).sum() / cw
+        i_xy = (uy * ux * w).sum() / cw
+        theta = 0.5 * np.arctan2(2.0 * i_xy, i_yy - i_xx)
+        angle = np.rad2deg(theta) + 90.0
+        if abs(angle) > 90.0:
+            angle -= 180.0
+        diameter = int(ys.max() - ys.min() + 1)
+        if estimate_center:
+            shift = ny // 2 - cy
+        else:
+            shift = 0.0
+        return angle, shift, diameter
+
+    bw = closing(data > threshold, mode="ignore")
+    mask = bw > 0
+    if not mask.any():
+        return 0.0, 0.0, ny
+
     if estimate_rotation:
-        bw = closing(data > threshold, mode="ignore")
-        label_image = label(bw)
-        props = regionprops(label_image=label_image, intensity_image=data)
-        props.sort(key=lambda x: x.area, reverse=True)
-        angle = (
-            np.rad2deg(props[0].orientation) + 90
-        )  # relative to +x axis, counter-clockwise
-        if abs(angle) > 90:
-            angle -= 180
-        rotation = helicon.set_to_periodic_range(angle, min=-180, max=180)
+        rotation, _, _ = _weighted_params(mask, data)
+        rotation = helicon.set_to_periodic_range(rotation, min=-180, max=180)
         data_rotated = helicon.transform_image(image=data, rotation=rotation)
     else:
         rotation = 0.0
         data_rotated = data
 
-    bw = closing(data_rotated > threshold, mode="ignore")
-    label_image = label(bw)
-    props = regionprops(label_image=label_image, intensity_image=data_rotated)
-    props.sort(key=lambda x: x.area, reverse=True)
-    minr, minc, maxr, maxc = props[0].bbox
-    diameter = maxr - minr + 1
+    bw_rot = closing(data_rotated > threshold, mode="ignore")
+    mask_rot = bw_rot > 0
+    if not mask_rot.any():
+        return rotation, 0.0, ny
 
-    if estimate_center:
-        center = props[0].centroid
-    else:
-        ny, nx = data.shape
-        center = (ny // 2, nx // 2)
-    shift_y = data.shape[0] // 2 - center[0]
+    _, shift_y, diameter = _weighted_params(mask_rot, data_rotated)
 
     return rotation, shift_y, diameter
 

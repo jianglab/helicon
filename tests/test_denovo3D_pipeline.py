@@ -31,28 +31,10 @@ class TestGetImagesFromFile(object):
         assert apix == 1.2346
 
 
-class MockLogger:
-    def debug(self, msg, *args, **kwargs):
-        pass
-
-    def info(self, msg, *args, **kwargs):
-        pass
-
-    def warning(self, msg, *args, **kwargs):
-        pass
-
-    def error(self, msg, *args, **kwargs):
-        pass
-
-    def isEnabledFor(self, level):
-        return False
-
-
 class TestProcessOneTask(object):
     def setup_method(self, method):
         np.random.seed(42)
         self.data = np.random.rand(16, 16).astype(np.float32)
-        self.logger = MockLogger()
 
         self.base_params = dict(
             ti=0,
@@ -67,7 +49,9 @@ class TestProcessOneTask(object):
             tilt=0,
             tilt_range=(-5, 5),
             psi=0,
+            psi_range=0,
             dy=0,
+            dy_range=0,
             apix2d_orig=1.0,
             denoise="",
             low_pass=0,
@@ -88,7 +72,6 @@ class TestProcessOneTask(object):
             score_metric="cosine",
             algorithm=dict(model="lsq"),
             verbose=0,
-            logger=self.logger,
         )
 
     def test_returns_tuple(self):

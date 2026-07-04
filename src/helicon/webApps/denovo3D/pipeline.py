@@ -43,7 +43,7 @@ def get_images_from_file(imageFile):
     return data, round(apix, 4)
 
 
-from .solver import lsq_reconstruct
+from .solver_linear_regression import lsq_reconstruct
 from .utils import (
     generate_xyz_projections,
     symmetrize_transform_map,
@@ -53,12 +53,6 @@ from .utils import (
 )
 
 
-@helicon.cache(
-    cache_dir=str(helicon.cache_dir / "denovo3D"),
-    ignore=["ti", "ntasks", "verbose", "logger"],
-    expires_after=7,
-    verbose=0,
-)
 def process_one_task(
     ti,
     ntasks,
@@ -72,7 +66,9 @@ def process_one_task(
     tilt,
     tilt_range,
     psi,
+    psi_range,
     dy,
+    dy_range,
     apix2d_orig,
     denoise,
     low_pass,
@@ -93,7 +89,7 @@ def process_one_task(
     score_metric,
     algorithm,
     verbose,
-    logger,
+    n_cpu=1,
 ):
     """Process a single (image, helical parameters) combination.
 
@@ -107,24 +103,24 @@ def process_one_task(
         Task index.
     ntasks : int
         Total number of tasks.
-    data : ndarray or None
-        Image data (loaded if None).
+    data : numpy.ndarray
+        Input image data.
     imageFile : str
-        Path to the image file.
+        Image file name.
     imageIndex : int
-        1-based image index.
+        Image index.
     twist : float
-        Helical twist in degrees.
+        Helical twist in degrees (unused for LSQ).
     rise : float
         Helical rise in Angstroms.
-    rise_range : tuple of float
-        (min, max) rise values.
+    rise_range : tuple
+        Range of rise values.
     csym : int
         Cyclic symmetry.
     tilt : float
-        Out-of-plane tilt in degrees.
-    tilt_range : tuple of float
-        (min, max) tilt values.
+        Tilt in degrees (unused for LSQ).
+    tilt_range : tuple
+        Range of tilt values.
     psi : float
         In-plane rotation in degrees.
     dy : float
@@ -145,35 +141,11 @@ def process_one_task(
         Target 2D pixel size.
     thresh_fraction : float
         Threshold fraction.
-    positive_constraint : int
-        Positive constraint mode.
-    tube_length : float
-        Tube mask length in Angstroms.
-    tube_diameter : float
-        Tube outer diameter in Angstroms.
-    tube_diameter_inner : float
-        Tube inner diameter in Angstroms.
-    reconstruct_length : float
-        Reconstruction length in Angstroms.
-    sym_oversample : int
-        Symmetry oversampling factor.
-    interpolation : str
-        Interpolation method.
-    fsc_test : int
-        FSC test mode.
-    return_3d : bool
-        Whether to return the 3D volume.
-    algorithm : dict
-        Solver algorithm configuration.
-    verbose : int
-        Verbosity level.
-    logger : logging.Logger
-        Logger instance.
 
     Returns
     -------
-    tuple or None
-        (score, return_data, param_tuple) or None if blank image.
+    tuple
+        (score, return_data, metadata)
     """
 
     def prepare_data(
@@ -347,11 +319,26 @@ def process_one_task(
             f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}"
         )
 
+    solve_fn = lsq_reconstruct
+    label = "lsq_reconstruct"
     with helicon.Timer(
-        f"lsq_reconstruct: {round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å",
+        f"{label}: {round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å",
         verbose=verbose > 10,
     ):
-        (rec3d, rec3d_set_1, rec3d_set_2), score = lsq_reconstruct(
+        # Build refinement range dict for LSQ solver
+        refine_range = None
+        if algorithm.get("model", "lsq") in ("lsq", "elasticnet", "lasso", "ridge"):
+            r_dict = {}
+            if tilt_range[1] > tilt_range[0]:
+                r_dict["tilt"] = max(abs(tilt_range[0]), abs(tilt_range[1]))
+            if psi_range > 0:
+                r_dict["psi"] = psi_range
+            if dy_range > 0:
+                r_dict["dy"] = dy_range
+            if r_dict:
+                refine_range = r_dict
+
+        solve_kwargs = dict(
             projection_image=data,
             scale2d_to_3d=target_apix2d / target_apix3d,
             twist_degree=twist,
@@ -374,8 +361,18 @@ def process_one_task(
             target_apix2d=target_apix2d,
             verbose=verbose,
             algorithm=algorithm,
+            refine_tilt_psi_dy_range=refine_range,
         )
-
+        if algorithm.get("model", "lsq") in (
+            "lsq",
+            "elasticnet",
+            "lasso",
+            "ridge",
+            "ard",
+            "lreg",
+        ):
+            solve_kwargs["cpu"] = n_cpu
+        (rec3d, rec3d_set_1, rec3d_set_2), score = solve_fn(**solve_kwargs)
     with helicon.Timer("apply_helical_symmetry", verbose=verbose > 10):
         twist_degree = twist if abs(twist) < 90 else 180 - abs(twist)
         if abs(twist_degree) > 1e-2:
@@ -398,8 +395,19 @@ def process_one_task(
             new_apix=apix2d_orig,
             cpu=cpu,
         )
+    # Use refined tilt/psi/dy if available from local refinement
+    tilt_viz = tilt
+    psi_viz = psi
+    dy_viz = dy
+    if hasattr(lsq_reconstruct, "_refined_params") and lsq_reconstruct._refined_params:
+        rp = lsq_reconstruct._refined_params
+        tilt_viz = rp.get("tilt", tilt)
+        psi_viz = rp.get("psi", psi)
+        dy_viz = rp.get("dy", dy)
+        lsq_reconstruct._refined_params = {}  # consume once
+
     rec3d_xform_2 = helicon.transform_map(
-        rec3d_xform, scale=1.0, tilt=tilt, psi=psi, dy=dy / apix2d_orig
+        rec3d_xform, scale=1.0, tilt=tilt_viz, psi=psi_viz, dy=dy_viz / apix2d_orig
     )
     rec3d_x_proj = np.sum(rec3d_xform_2, axis=2).T
     rec3d_y_proj = np.sum(rec3d_xform_2, axis=1).T
