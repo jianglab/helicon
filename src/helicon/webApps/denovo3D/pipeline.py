@@ -53,6 +53,35 @@ from .utils import (
 )
 
 
+def _new_tile_merge_image_filter(itk, image_type, accum_type):
+    """Create a TileMergeImageFilter across ITKMontage wrapper versions."""
+    candidate_template_args = [(image_type, accum_type)]
+
+    for interpolator_template in (
+        itk.LinearInterpolateImageFunction,
+        itk.NearestNeighborInterpolateImageFunction,
+    ):
+        for interpolator_args in ((image_type, itk.D), (image_type,)):
+            try:
+                interpolator_type = interpolator_template[interpolator_args]
+            except Exception:
+                continue
+            candidate_template_args.append((image_type, accum_type, interpolator_type))
+
+    errors = []
+    for template_args in candidate_template_args:
+        try:
+            return itk.TileMergeImageFilter[template_args].New()
+        except Exception as exc:
+            message = str(exc).splitlines()[0] if str(exc) else repr(exc)
+            errors.append(f"{template_args}: {message}")
+
+    raise RuntimeError(
+        "Unable to create itk.TileMergeImageFilter with the available ITKMontage "
+        "template wrappers. Tried: " + "; ".join(errors)
+    )
+
+
 def process_one_task(
     ti,
     ntasks,
@@ -558,7 +587,7 @@ def itk_stitch(temp_dir):
     except KeyError:
         accum_type = itk.D  # scalar input / output images
 
-    resampleF = itk.TileMergeImageFilter[type(color_images[0]), accum_type].New()
+    resampleF = _new_tile_merge_image_filter(itk, type(color_images[0]), accum_type)
     resampleF.SetMontageSize(stage_tiles.GetAxisSizes())
     for t in range(stage_tiles.LinearSize()):
         resampleF.SetInputTile(t, color_images[t])
