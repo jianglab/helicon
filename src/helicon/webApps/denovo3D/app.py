@@ -73,6 +73,58 @@ reconstructed_map = reactive.value(None)
 run_button_text = reactive.value("Search Parameters")
 denovo3D_abort_event = False
 
+
+def _image_stitching_x_positions(images, x_offsets=None):
+    if not images:
+        return []
+
+    x_offsets = [] if x_offsets is None else list(x_offsets)
+    positions = []
+    next_x = 0
+    for i, img in enumerate(images):
+        offset = x_offsets[i] if i < len(x_offsets) else 0
+        positions.append(next_x + int(round(offset)))
+        next_x += img.shape[1]
+    return positions
+
+
+def _combine_images_for_display(images, x_offsets=None):
+    if not images:
+        return np.zeros((0, 0), dtype=np.float64)
+
+    x_positions = _image_stitching_x_positions(images, x_offsets)
+    canvas_left = min(0, min(x_positions))
+    canvas_right = max(
+        start_x + img.shape[1] for start_x, img in zip(x_positions, images)
+    )
+    canvas_height = max(img.shape[0] for img in images)
+    canvas_width = max(0, canvas_right - canvas_left)
+
+    sum_image = np.zeros((canvas_height, canvas_width), dtype=np.float64)
+    count_image = np.zeros((canvas_height, canvas_width), dtype=np.uint16)
+
+    for start_x, img in zip(x_positions, images):
+        canvas_start = max(start_x - canvas_left, 0)
+        canvas_end = min(start_x - canvas_left + img.shape[1], canvas_width)
+        if canvas_start >= canvas_end:
+            continue
+
+        img_start = max(0, canvas_left - start_x)
+        img_end = img_start + (canvas_end - canvas_start)
+        img_slice = img[:, img_start:img_end].astype(np.float64)
+
+        img_height = img_slice.shape[0]
+        sum_image[:img_height, canvas_start:canvas_end] += img_slice
+        count_image[:img_height, canvas_start:canvas_end] += 1
+
+    return np.divide(
+        sum_image,
+        count_image,
+        where=(count_image > 0),
+        out=np.zeros_like(sum_image),
+    )
+
+
 ui.head_content(ui.tags.title("Helicon denovo3D"))
 helicon.shiny.google_analytics(id="G-FDSYXQNKLX")
 ui.tags.style(
@@ -676,66 +728,22 @@ with ui.div(
                     images_displayed_links = []
 
                     curr_x_offsets = transformed_images_x_offsets().copy()
-                    ny, nx = np.shape(selected_images_rotated_shifted()[0])
+                    if len(curr_x_offsets) != len(selected_images_rotated_shifted()):
+                        curr_x_offsets = np.zeros(len(selected_images_rotated_shifted()))
 
-                    # Initialize sum and count arrays for averaging
-                    total_width = nx * len(selected_images_rotated_shifted())
-                    sum_image = np.zeros(
-                        (ny, total_width), dtype=np.float64
-                    )  # Use float for precision
-                    count_image = np.zeros(
-                        (ny, total_width), dtype=np.uint8
-                    )  # Track overlaps
-
-                    for img_i, transformed_img in enumerate(
-                        selected_images_rotated_shifted()
-                    ):
-                        # if img_i == x_shift_i:
-                        #    shift = input[id_x_shift]()  # Get the user-defined shift value
-                        #    start_col = nx * img_i + shift  # Shifted start column
-                        #    curr_x_offsets[x_shift_i] = shift
-                        # else:
-                        #    start_col = nx * img_i  # Default start column
-
+                    for img_i in range(len(selected_images_rotated_shifted())):
                         if img_i == x_shift_i:
                             shift = input[
                                 id_x_shift
                             ]()  # Get the user-defined shift value
-                            start_col = nx * img_i + shift  # Shifted start column
                             curr_x_offsets[x_shift_i] = shift
                         else:
-                            start_col = (
-                                nx * img_i + input[f"t_ui_group_{img_i}_shift_x"]()
-                            )  # Default start column
+                            curr_x_offsets[img_i] = input[
+                                f"t_ui_group_{img_i}_shift_x"
+                            ]()
 
-                        # Calculate the region where the image will be placed
-                        end_col = start_col + nx
-
-                        # Clip to canvas boundaries to avoid out-of-bounds errors
-                        canvas_start = max(start_col, 0)
-                        canvas_end = min(end_col, total_width)
-
-                        # Adjust the image slice if part of it is outside the canvas
-                        img_start = max(
-                            0, -start_col
-                        )  # Offset if shifted left beyond canvas
-                        img_end = img_start + (canvas_end - canvas_start)
-
-                        # Extract the valid part of the image to place
-                        img_slice = transformed_img[:, img_start:img_end].astype(
-                            np.float64
-                        )
-
-                        # Add to sum and increment count for averaging
-                        sum_image[:, canvas_start:canvas_end] += img_slice
-                        count_image[:, canvas_start:canvas_end] += 1
-
-                    # Compute the averaged image (avoid division by zero)
-                    image_work = np.divide(
-                        sum_image,
-                        count_image,
-                        where=(count_image > 0),
-                        out=np.zeros_like(sum_image),
+                    image_work = _combine_images_for_display(
+                        selected_images_rotated_shifted(), curr_x_offsets
                     )
 
                     images_displayed.append(image_work)
@@ -2222,11 +2230,7 @@ def update_transformed_images_displayed():
     images_displayed_labels = []
     images_displayed_links = []
 
-    ny, nx = np.shape(selected_images_rotated_shifted()[0])
-
-    image_work = np.zeros((ny, nx * len(selected_images_rotated_shifted())))
-    for i, transformed_img in enumerate(selected_images_rotated_shifted()):
-        image_work[:, nx * i : nx * (i + 1)] = transformed_img
+    image_work = _combine_images_for_display(selected_images_rotated_shifted())
 
     images_displayed.append(image_work)
     images_displayed_labels.append(f"Selected images:")
@@ -2245,9 +2249,10 @@ def update_stitched_image_displayed():
     images_displayed = []
     images_displayed_labels = []
     images_displayed_links = []
-    ny, nx = np.shape(selected_images_rotated_shifted()[0])
-
     x_offsets = transformed_images_x_offsets()
+    x_positions = _image_stitching_x_positions(
+        selected_images_rotated_shifted(), x_offsets
+    )
 
     from PIL import Image
     import tempfile
@@ -2262,7 +2267,7 @@ def update_stitched_image_displayed():
                 tmp = np.uint8((tmp - np.min(tmp)) / (np.max(tmp) - np.min(tmp)) * 255)
                 tmp_imf = Image.fromarray(tmp, "L")
                 tmp_imf.save(temp_dir + "/" + str(i) + ".png")
-                tc.write(str(i) + ".png; ; (" + str(i * nx + x_offsets[i]) + ", 0.0)\n")
+                tc.write(str(i) + ".png; ; (" + str(x_positions[i]) + ", 0.0)\n")
 
         result = pipeline.itk_stitch(temp_dir)
 

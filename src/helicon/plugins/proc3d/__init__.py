@@ -10,7 +10,8 @@ def _discover_plugins():
     """Auto-discover plugin modules and build the registry by option_name."""
     plugins = {}
     pkg_dir = Path(__file__).parent
-    for importer, modname, ispkg in pkgutil.iter_modules([pkg_dir]):
+    #for importer, modname, ispkg in pkgutil.iter_modules([pkg_dir]):
+    for importer, modname, ispkg in pkgutil.iter_modules([str(pkg_dir)]):
         if modname.startswith("_") or ispkg:
             continue
         try:
