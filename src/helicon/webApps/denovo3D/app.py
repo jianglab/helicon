@@ -1897,6 +1897,10 @@ def update_selected_images_orignal_lp():
     req(0 <= min(input.select_image()))
     req(max(input.select_image()) < len(displayed_images()))
 
+    stitched_image_displayed.set([])
+    stitched_image_labels.set([])
+    stitched_image_links.set([])
+
     images = [displayed_images()[i] for i in input.select_image()]
 
     if "apix" in input:
@@ -1946,25 +1950,19 @@ def update_selected_images_orignal_lp():
 
 
 @reactive.effect
-@reactive.event(selected_images_original)
+@reactive.event(selected_images_original, stitched_image_displayed, ignore_init=False)
 def set_initial_image():
     req(len(selected_images_original()))
     n_images_selected = len(selected_images_original())
 
-    # Return None early if condition isn't met
     if n_images_selected == 1:
         initial_image.set(selected_images_original())
         new_initial_image.set(True)
     else:
-
-        initial_image.set([])
-
-        @reactive.effect
-        @reactive.event(stitched_image_displayed, input.threshold)
-        def set_stitched_image_initial():
-            req(len(stitched_image_displayed()))
-
+        if len(stitched_image_displayed()):
             initial_image.set(stitched_image_displayed())
+        else:
+            initial_image.set([])
 
 
 @reactive.effect
