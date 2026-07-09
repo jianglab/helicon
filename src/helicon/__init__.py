@@ -188,6 +188,10 @@ if has_curvelet_fdct():
     from .lib.curvelet import (
         curvelet_denoise_fdct,
         curvelet_denoise_batch_fdct,
+        curvelet_denoise_fdct_tiled,
+    )
+if has_curvelet_udct():
+    from .lib.curvelet import (
         curvelet_denoise_udct,
         curvelet_denoise_batch_udct,
         curvelet_denoise_3d_udct,
@@ -197,7 +201,6 @@ if has_curvelet_fdct():
         curvelet_denoise_mct,
         curvelet_denoise_batch_mct,
         curvelet_denoise_udct_tiled,
-        curvelet_denoise_fdct_tiled,
         curvelet_denoise_mct_tiled,
     )
 try:

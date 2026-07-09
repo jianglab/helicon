@@ -18,7 +18,8 @@ def add_args(parser):
         const="",
         metavar="[transform=<mct|udct|fdct>[:sigma=<float>][:numScales=<auto>][:wedgesPerDir=<3>][:gpu=<true|false>][:tileSize=<N>][:overlap=<N>][:outdir=<path>]]",
         action="append",
-        help="apply curvelet-based denoising to particle images in parallel. "
+        help="apply curvelet-based denoising to particle images in parallel, "
+        "or micrographs when rlnImageName is absent. "
         "Transform defaults to MCT. "
         "Use tileSize=N to enable tiled processing (parallel within each large image). "
         "Defaults: transform=mct, sigma=3, numScales=auto, wedgesPerDir=3, gpu=false, "
@@ -49,42 +50,17 @@ def handle(data, args, index_d, param):
         overlap = int(param_dict.get("overlap", 32))
         outdir = param_dict.get("outdir", None) or "./denoised/"
 
-        if transform == "fdct":
-            if not helicon.has_curvelet_fdct():
-                raise HeliconError(
-                    "\tERROR: curvepy-fdct is required for --denoiseCurvelet transform=fdct. "
-                    "Install with: pip install curvepy-fdct"
+        has_image_col = "rlnImageName" in data
+        has_micrograph_col = "rlnMicrographName" in data
+        if not has_image_col and not has_micrograph_col:
+            if args.verbose:
+                logger.info(
+                    "\tdenoiseCurvelet: no rlnImageName or rlnMicrographName column in data, skipping"
                 )
-            if use_gpu:
-                raise HeliconError(
-                    "\tERROR: FDCT does not support GPU. Use transform=udct for GPU."
-                )
-        elif transform == "udct":
-            if not helicon.has_curvelet_udct():
-                raise HeliconError(
-                    "\tERROR: curvelets package is required for --denoiseCurvelet transform=udct. "
-                    "Install with: pip install curvelets"
-                )
-            if use_gpu and not helicon.has_curvelet_udct_gpu():
-                raise HeliconError(
-                    "\tERROR: UDCT GPU support requires torch. "
-                    "Install with: pip install torch"
-                )
-        elif transform == "mct":
-            if not helicon.has_curvelet_udct():
-                raise HeliconError(
-                    "\tERROR: curvelets package is required for --denoiseCurvelet transform=mct. "
-                    "Install with: pip install curvelets"
-                )
-            if use_gpu:
-                raise HeliconError(
-                    "\tERROR: MCT does not support GPU. Use transform=udct for GPU."
-                )
-        else:
-            raise HeliconError(
-                f"\tERROR: unknown transform '{transform}' for --denoiseCurvelet. "
-                "Use 'fdct', 'udct', or 'mct'."
-            )
+            index_d[option_name] += 1
+            return data, index_d
+
+        _check_transform_dependencies(transform, use_gpu)
 
         if num_scales is not None and num_scales < 2:
             num_scales = None  # values < 2 trigger auto-decide
@@ -93,10 +69,9 @@ def handle(data, args, index_d, param):
         if n_jobs < 1:
             n_jobs = helicon.available_cpu()
 
-        if "rlnImageName" in data:
+        if has_image_col:
             import mrcfile
             import numpy as np
-            from joblib import Parallel, delayed
 
             outdir = str(Path(outdir).resolve())
             Path(outdir).mkdir(parents=True, exist_ok=True)
@@ -106,7 +81,6 @@ def handle(data, args, index_d, param):
             data[tmp_col] = data[image_col].str.split("@", expand=True).iloc[:, -1]
 
             unique_stacks = data[tmp_col].unique()
-            new_paths = []
             images = []
             for stack_path in unique_stacks:
                 with mrcfile.open(stack_path, permissive=True) as mrc:
@@ -131,57 +105,24 @@ def handle(data, args, index_d, param):
                 )
 
             if tile_size is not None:
-                if transform == "fdct":
-                    denoise_fn = lambda img: helicon.curvelet_denoise_fdct_tiled(
+                denoised = [
+                    _denoise_tiled(
                         img,
-                        sigma=sigma,
-                        num_scales=num_scales,
-                        tile_size=tile_size,
-                        overlap=overlap,
-                        n_jobs=n_jobs,
+                        transform,
+                        sigma,
+                        num_scales,
+                        wedges_per_dir,
+                        tile_size,
+                        overlap,
+                        n_jobs,
+                        use_gpu,
                     )
-                elif transform == "mct":
-                    denoise_fn = lambda img: helicon.curvelet_denoise_mct_tiled(
-                        img,
-                        sigma=sigma,
-                        num_scales=num_scales,
-                        wedges_per_dir=wedges_per_dir,
-                        tile_size=tile_size,
-                        overlap=overlap,
-                        n_jobs=n_jobs,
-                    )
-                else:
-                    denoise_fn = lambda img: helicon.curvelet_denoise_udct_tiled(
-                        img,
-                        sigma=sigma,
-                        num_scales=num_scales,
-                        wedges_per_dir=wedges_per_dir,
-                        tile_size=tile_size,
-                        overlap=overlap,
-                        n_jobs=n_jobs,
-                        use_gpu=use_gpu,
-                    )
-                denoised = []
-                for img in images:
-                    denoised.append(denoise_fn(img))
-            elif transform == "fdct":
-                denoised = helicon.curvelet_denoise_batch_fdct(
-                    images,
-                    sigma=sigma,
-                    num_scales=num_scales,
-                    n_jobs=n_jobs,
-                )
-            elif transform == "mct":
-                denoised = helicon.curvelet_denoise_batch_mct(
-                    images,
-                    sigma=sigma,
-                    num_scales=num_scales,
-                    wedges_per_dir=wedges_per_dir,
-                    n_jobs=n_jobs,
-                )
+                    for img in images
+                ]
             else:
-                denoised = helicon.curvelet_denoise_batch_udct(
+                denoised = _denoise_batch(
                     images,
+                    transform,
                     sigma=sigma,
                     num_scales=num_scales,
                     wedges_per_dir=wedges_per_dir,
@@ -229,9 +170,202 @@ def handle(data, args, index_d, param):
                     outdir,
                 )
 
-        elif args.verbose:
-            logger.info("\tdenoiseCurvelet: no rlnImageName column in data, skipping")
+        elif has_micrograph_col:
+            import mrcfile
+            import numpy as np
+
+            outdir = str(Path(outdir).resolve())
+            Path(outdir).mkdir(parents=True, exist_ok=True)
+
+            image_col = "rlnMicrographName"
+            unique_micrographs = data[image_col].unique()
+            images = []
+            voxel_sizes = {}
+            for micrograph_path in unique_micrographs:
+                with mrcfile.open(micrograph_path, permissive=True) as mrc:
+                    micrograph_data = mrc.data
+                    if micrograph_data.ndim != 2:
+                        raise HeliconError(
+                            "\tERROR: --denoiseCurvelet micrograph fallback expects "
+                            f"2D MRC files in rlnMicrographName. {micrograph_path} "
+                            f"has {micrograph_data.ndim} dimensions."
+                        )
+                    images.append(np.asarray(micrograph_data, dtype=np.float64).copy())
+                    voxel_sizes[micrograph_path] = (
+                        float(mrc.voxel_size.x),
+                        float(mrc.voxel_size.y),
+                        float(mrc.voxel_size.z),
+                    )
+
+            if args.verbose > 1:
+                device_tag = "GPU" if use_gpu else "CPU"
+                logger.info(
+                    "\tdenoising %d micrographs with %d workers (%s on %s) ...",
+                    len(images),
+                    n_jobs,
+                    transform.upper(),
+                    device_tag,
+                )
+
+            if tile_size is not None:
+                denoised = [
+                    _denoise_tiled(
+                        img,
+                        transform,
+                        sigma,
+                        num_scales,
+                        wedges_per_dir,
+                        tile_size,
+                        overlap,
+                        n_jobs,
+                        use_gpu,
+                    )
+                    for img in images
+                ]
+            else:
+                denoised = _denoise_batch(
+                    images,
+                    transform,
+                    sigma,
+                    num_scales,
+                    wedges_per_dir,
+                    n_jobs,
+                    use_gpu,
+                )
+
+            new_micrographs = {}
+            for micrograph_path, denoised_micrograph in zip(
+                unique_micrographs, denoised
+            ):
+                out_micrograph = str(Path(outdir) / Path(micrograph_path).name)
+                new_micrographs[micrograph_path] = out_micrograph
+                with mrcfile.new(out_micrograph, overwrite=True) as mrc:
+                    mrc.set_data(denoised_micrograph.astype(np.float32))
+                    mrc.voxel_size = voxel_sizes[micrograph_path]
+
+            data[image_col] = data[image_col].map(new_micrographs)
+
+            if args.verbose > 1:
+                logger.info(
+                    "\tdenoised %d micrographs written to %s",
+                    len(denoised),
+                    outdir,
+                )
 
         index_d[option_name] += 1
 
     return data, index_d
+
+
+def _check_transform_dependencies(transform, use_gpu):
+    if transform == "fdct":
+        if not helicon.has_curvelet_fdct():
+            raise HeliconError(
+                "\tERROR: curvepy-fdct is required for --denoiseCurvelet transform=fdct. "
+                "Install with: pip install curvepy-fdct"
+            )
+        if use_gpu:
+            raise HeliconError(
+                "\tERROR: FDCT does not support GPU. Use transform=udct for GPU."
+            )
+    elif transform == "udct":
+        if not helicon.has_curvelet_udct():
+            raise HeliconError(
+                "\tERROR: curvelets package is required for --denoiseCurvelet transform=udct. "
+                "Install with: pip install curvelets"
+            )
+        if use_gpu and not helicon.has_curvelet_udct_gpu():
+            raise HeliconError(
+                "\tERROR: UDCT GPU support requires torch. Install with: pip install torch"
+            )
+    elif transform == "mct":
+        if not helicon.has_curvelet_udct():
+            raise HeliconError(
+                "\tERROR: curvelets package is required for --denoiseCurvelet transform=mct. "
+                "Install with: pip install curvelets"
+            )
+        if use_gpu:
+            raise HeliconError(
+                "\tERROR: MCT does not support GPU. Use transform=udct for GPU."
+            )
+    else:
+        raise HeliconError(
+            f"\tERROR: unknown transform '{transform}' for --denoiseCurvelet. "
+            "Use 'fdct', 'udct', or 'mct'."
+        )
+
+
+def _denoise_tiled(
+    img,
+    transform,
+    sigma,
+    num_scales,
+    wedges_per_dir,
+    tile_size,
+    overlap,
+    n_jobs,
+    use_gpu,
+):
+    if transform == "fdct":
+        return helicon.curvelet_denoise_fdct_tiled(
+            img,
+            sigma=sigma,
+            num_scales=num_scales,
+            tile_size=tile_size,
+            overlap=overlap,
+            n_jobs=n_jobs,
+        )
+    if transform == "mct":
+        return helicon.curvelet_denoise_mct_tiled(
+            img,
+            sigma=sigma,
+            num_scales=num_scales,
+            wedges_per_dir=wedges_per_dir,
+            tile_size=tile_size,
+            overlap=overlap,
+            n_jobs=n_jobs,
+        )
+    return helicon.curvelet_denoise_udct_tiled(
+        img,
+        sigma=sigma,
+        num_scales=num_scales,
+        wedges_per_dir=wedges_per_dir,
+        tile_size=tile_size,
+        overlap=overlap,
+        n_jobs=n_jobs,
+        use_gpu=use_gpu,
+    )
+
+
+def _denoise_batch(
+    images,
+    transform,
+    sigma,
+    num_scales,
+    wedges_per_dir,
+    n_jobs,
+    use_gpu,
+):
+    if transform == "fdct":
+        return helicon.curvelet_denoise_batch_fdct(
+            images,
+            sigma=sigma,
+            num_scales=num_scales,
+            n_jobs=n_jobs,
+        )
+    if transform == "mct":
+        return helicon.curvelet_denoise_batch_mct(
+            images,
+            sigma=sigma,
+            num_scales=num_scales,
+            wedges_per_dir=wedges_per_dir,
+            n_jobs=n_jobs,
+        )
+    return helicon.curvelet_denoise_batch_udct(
+        images,
+        sigma=sigma,
+        num_scales=num_scales,
+        wedges_per_dir=wedges_per_dir,
+        n_jobs=n_jobs,
+        use_gpu=use_gpu,
+    )

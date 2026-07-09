@@ -727,6 +727,19 @@ class TestImages2starDenoiseCurvelet(object):
         )
         return df
 
+    def _make_data_without_image_columns(self):
+        df = pd.DataFrame({"rlnOpticsGroup": [1]})
+        df.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        return df
+
     def _make_data_with_images(self):
         import tempfile, mrcfile, numpy as np
 
@@ -757,10 +770,56 @@ class TestImages2starDenoiseCurvelet(object):
         )
         return df, tmpdir
 
+    def _make_data_with_micrographs(self, tmp_path, ndim=2, duplicate=False):
+        import mrcfile, numpy as np
+
+        micrograph_path = tmp_path / "micrograph_0.mrc"
+        micrograph_data = (
+            np.random.rand(32, 32).astype(np.float32)
+            if ndim == 2
+            else np.random.rand(2, 32, 32).astype(np.float32)
+        )
+        with mrcfile.new(micrograph_path, overwrite=True) as mrc:
+            mrc.set_data(micrograph_data)
+            mrc.voxel_size = 1.5
+
+        paths = (
+            [str(micrograph_path), str(micrograph_path)]
+            if duplicate
+            else [str(micrograph_path)]
+        )
+        df = pd.DataFrame(
+            {
+                "rlnMicrographName": paths,
+                "rlnOpticsGroup": [1] * len(paths),
+            }
+        )
+        df.attrs["optics"] = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [1],
+                "rlnOpticsGroupName": ["opticsGroup1"],
+                "rlnVoltage": [300.0],
+                "rlnSphericalAberration": [2.7],
+                "rlnAmplitudeContrast": [0.1],
+            }
+        )
+        return df, micrograph_data
+
+    def _patch_mct(self, monkeypatch, calls=None):
+        def denoise(images, **kwargs):
+            if calls is not None:
+                calls.append(len(images))
+            return [img + 1 for img in images]
+
+        monkeypatch.setattr(helicon, "has_curvelet_udct", lambda: True)
+        monkeypatch.setattr(
+            helicon, "curvelet_denoise_batch_mct", denoise, raising=False
+        )
+
     def test_valid_params_passthrough(self):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
-        data = self._make_data()
+        data = self._make_data_without_image_columns()
         result, idx = handle(
             data,
             self._make_args(verbose=1),
@@ -772,7 +831,7 @@ class TestImages2starDenoiseCurvelet(object):
     def test_valid_params_minimal(self):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
-        data = self._make_data()
+        data = self._make_data_without_image_columns()
         result, idx = handle(
             data, self._make_args(), self._make_index_d(), param="sigma=0.1"
         )
@@ -782,7 +841,7 @@ class TestImages2starDenoiseCurvelet(object):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
         _, index_d = handle(
-            self._make_data(),
+            self._make_data_without_image_columns(),
             self._make_args(),
             self._make_index_d(),
             param="sigma=-1",
@@ -792,7 +851,7 @@ class TestImages2starDenoiseCurvelet(object):
     def test_auto_scales_on_few_scales(self):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
-        data = self._make_data()
+        data = self._make_data_without_image_columns()
         result = handle(
             data,
             self._make_args(),
@@ -811,39 +870,53 @@ class TestImages2starDenoiseCurvelet(object):
         )
         assert args.denoiseCurvelet == ["sigma=0.1"]
 
-    def test_transform_fdct_explicit(self):
-        pytest.importorskip("curvepy")
+    def test_transform_fdct_explicit(self, monkeypatch):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
         data, tmpdir = self._make_data_with_images()
+        monkeypatch.chdir(tmpdir)
+        monkeypatch.setattr(helicon, "has_curvelet_fdct", lambda: True)
+        monkeypatch.setattr(
+            helicon,
+            "curvelet_denoise_batch_fdct",
+            lambda images, **kwargs: images,
+            raising=False,
+        )
         result, idx = handle(
             data,
             self._make_args(verbose=1),
             self._make_index_d(),
-            param="sigma=0.1:numScales=2:transform=fdct",
+            param="sigma=0.1:numScales=2:transform=fdct:outdir=denoised",
         )
         assert len(result) == len(data)
         assert idx["denoiseCurvelet"] == 1
 
-    def test_transform_udct_explicit(self):
-        pytest.importorskip("curvelets")
+    def test_transform_udct_explicit(self, monkeypatch):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
         data, tmpdir = self._make_data_with_images()
+        monkeypatch.chdir(tmpdir)
+        monkeypatch.setattr(helicon, "has_curvelet_udct", lambda: True)
+        monkeypatch.setattr(
+            helicon,
+            "curvelet_denoise_batch_udct",
+            lambda images, **kwargs: images,
+            raising=False,
+        )
         result, idx = handle(
             data,
             self._make_args(verbose=1),
             self._make_index_d(),
-            param="sigma=0.1:numScales=2:transform=udct",
+            param="sigma=0.1:numScales=2:transform=udct:outdir=denoised",
         )
         assert len(result) == len(data)
         assert idx["denoiseCurvelet"] == 1
 
-    def test_transform_unknown_errors(self):
+    def test_transform_unknown_errors(self, tmp_path):
         from helicon.plugins.images2star.denoisecurvelet import handle
         from helicon.lib.exceptions import HeliconError
 
-        data = self._make_data()
+        data, _ = self._make_data_with_micrographs(tmp_path)
         with pytest.raises(HeliconError, match="unknown transform"):
             handle(
                 data,
@@ -852,11 +925,12 @@ class TestImages2starDenoiseCurvelet(object):
                 param="sigma=0.1:transform=invalid",
             )
 
-    def test_bare_flag_defaults_to_udct(self):
-        pytest.importorskip("curvelets")
+    def test_bare_flag_defaults_to_mct(self, monkeypatch):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
         data, tmpdir = self._make_data_with_images()
+        monkeypatch.chdir(tmpdir)
+        self._patch_mct(monkeypatch)
         result, idx = handle(
             data,
             self._make_args(verbose=1),
@@ -866,25 +940,27 @@ class TestImages2starDenoiseCurvelet(object):
         assert len(result) == len(data)
         assert idx["denoiseCurvelet"] == 1
 
-    def test_transform_mct_explicit(self):
-        pytest.importorskip("curvelets")
+    def test_transform_mct_explicit(self, monkeypatch):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
         data, tmpdir = self._make_data_with_images()
+        monkeypatch.chdir(tmpdir)
+        self._patch_mct(monkeypatch)
         result, idx = handle(
             data,
             self._make_args(verbose=1),
             self._make_index_d(),
-            param="sigma=0.1:numScales=2:transform=mct",
+            param="sigma=0.1:numScales=2:transform=mct:outdir=denoised",
         )
         assert len(result) == len(data)
         assert idx["denoiseCurvelet"] == 1
 
-    def test_transform_mct_no_gpu(self):
+    def test_transform_mct_no_gpu(self, monkeypatch):
         from helicon.plugins.images2star.denoisecurvelet import handle
         from helicon.lib.exceptions import HeliconError
 
         data = self._make_data()
+        monkeypatch.setattr(helicon, "has_curvelet_udct", lambda: True)
         with pytest.raises(HeliconError, match="MCT does not support GPU"):
             handle(
                 data,
@@ -908,11 +984,12 @@ class TestImages2starDenoiseCurvelet(object):
                 param="sigma=0.1:transform=mct",
             )
 
-    def test_transform_mct_elbow_mode(self):
-        pytest.importorskip("curvelets")
+    def test_transform_mct_elbow_mode(self, monkeypatch):
         from helicon.plugins.images2star.denoisecurvelet import handle
 
         data, tmpdir = self._make_data_with_images()
+        monkeypatch.chdir(tmpdir)
+        self._patch_mct(monkeypatch)
         result, idx = handle(
             data,
             self._make_args(verbose=1),
@@ -921,3 +998,83 @@ class TestImages2starDenoiseCurvelet(object):
         )
         assert len(result) == len(data)
         assert idx["denoiseCurvelet"] == 1
+
+    def test_micrograph_fallback_writes_2d_outputs(self, monkeypatch, tmp_path):
+        import mrcfile
+
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        monkeypatch.chdir(tmp_path)
+        self._patch_mct(monkeypatch)
+        data, micrograph_data = self._make_data_with_micrographs(tmp_path)
+
+        result, idx = handle(
+            data,
+            self._make_args(verbose=1),
+            self._make_index_d(),
+            param="transform=mct:outdir=denoised",
+        )
+
+        expected_path = str((tmp_path / "denoised" / "micrograph_0.mrc").resolve())
+        assert result["rlnMicrographName"].tolist() == [expected_path]
+        assert idx["denoiseCurvelet"] == 1
+        with mrcfile.open(expected_path, permissive=True) as mrc:
+            assert mrc.data.ndim == 2
+            assert np.allclose(mrc.data, micrograph_data + 1)
+            assert float(mrc.voxel_size.x) == pytest.approx(1.5)
+
+    def test_micrograph_fallback_denoises_duplicate_path_once(
+        self, monkeypatch, tmp_path
+    ):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        calls = []
+        monkeypatch.chdir(tmp_path)
+        self._patch_mct(monkeypatch, calls=calls)
+        data, _ = self._make_data_with_micrographs(tmp_path, duplicate=True)
+
+        result, idx = handle(
+            data,
+            self._make_args(),
+            self._make_index_d(),
+            param="transform=mct:outdir=denoised",
+        )
+
+        assert calls == [1]
+        assert result["rlnMicrographName"].nunique() == 1
+        assert idx["denoiseCurvelet"] == 1
+
+    def test_particle_column_wins_over_micrograph_fallback(self, monkeypatch):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+
+        data, tmpdir = self._make_data_with_images()
+        monkeypatch.chdir(tmpdir)
+        self._patch_mct(monkeypatch)
+        original_micrographs = data["rlnMicrographName"].copy()
+
+        result, idx = handle(
+            data,
+            self._make_args(),
+            self._make_index_d(),
+            param="transform=mct:outdir=denoised",
+        )
+
+        assert result["rlnMicrographName"].equals(original_micrographs)
+        assert result["rlnImageName"].str.contains("denoised").all()
+        assert idx["denoiseCurvelet"] == 1
+
+    def test_micrograph_fallback_rejects_3d_mrc(self, monkeypatch, tmp_path):
+        from helicon.plugins.images2star.denoisecurvelet import handle
+        from helicon.lib.exceptions import HeliconError
+
+        monkeypatch.chdir(tmp_path)
+        self._patch_mct(monkeypatch)
+        data, _ = self._make_data_with_micrographs(tmp_path, ndim=3)
+
+        with pytest.raises(HeliconError, match="2D MRC"):
+            handle(
+                data,
+                self._make_args(),
+                self._make_index_d(),
+                param="transform=mct:outdir=denoised",
+            )
