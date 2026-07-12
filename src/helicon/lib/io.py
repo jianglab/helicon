@@ -1184,6 +1184,231 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
     fp.write("\n")
 
 
+def _detect_cs_import_origin(csFile: str) -> tuple:
+    """Detect if a .cs file originated from a RELION STAR import.
+
+    Reads the first ``blob/path`` to extract the import job name, then
+    checks for ``{project_dir}/{import_job}/particles.star`` and
+    ``{project_dir}/{import_job}/imported_particles.cs``.
+
+    Returns
+    -------
+    tuple
+        ``(detected, import_star_path, import_uids, uid_to_row)``.
+        When *detected* is ``False``, the remaining entries are
+        ``("", [], {})``.
+    """
+    try:
+        cs_path = Path(csFile).resolve()
+        cs = np.load(str(cs_path), allow_pickle=True)
+        cs_dtype = cs.dtype
+
+        if cs_dtype.names is None or "blob/path" not in cs_dtype.names or len(cs) == 0:
+            return (False, "", [], {})
+
+        raw_path = cs[0]["blob/path"]
+        first_path = raw_path.decode() if isinstance(raw_path, bytes) else str(raw_path)
+
+        first_slash = first_path.find("/")
+        if first_slash < 0:
+            return (False, "", [], {})
+        import_job = first_path[:first_slash]
+
+        project_dir = str(cs_path.parent.parent)
+        import_star_path = f"{project_dir}/{import_job}/particles.star"
+        import_cs_path = f"{project_dir}/{import_job}/imported_particles.cs"
+
+        if not (Path(import_star_path).exists() and Path(import_cs_path).exists()):
+            return (False, "", [], {})
+
+        # Read imported_particles.cs to get uid→row mapping
+        cs_imp = np.load(import_cs_path, allow_pickle=True)
+        if cs_imp.dtype.names is None or "uid" not in cs_imp.dtype.names:
+            return (False, "", [], {})
+
+        import_uids = [int(row["uid"]) for row in cs_imp]
+        uid_to_row = {uid: i for i, uid in enumerate(import_uids)}
+
+        logger.info(
+            "Detected .cs from RELION import. Using original STAR: %s "
+            "(total=%d, selected=%d)",
+            import_star_path,
+            len(import_uids),
+            len(cs),
+        )
+        return (True, import_star_path, import_uids, uid_to_row)
+
+    except Exception:
+        return (False, "", [], {})
+
+
+def _cs2dataframe_from_star_import(
+    csFile: str,
+    passthrough_files: list[str],
+    import_star_path: str,
+    import_uids: list,
+    uid_to_row: dict,
+    alternative_folders: list[str],
+    ignore_bad_particle_path: int,
+    ignore_bad_micrograph_path: int,
+) -> pd.DataFrame:
+    """Convert a .cs file using the original RELION STAR as data source.
+
+    The .cs file's particles are a subset of the original STAR's particles.
+    The original STAR file is used as the data source (preserving all original
+    RELION fields) and the .cs file as a subset selector via uid matching.
+    CryoSPARC-refined fields from the .cs file (class, alignments, CTF) are
+    overlaid on the selected particles.
+
+    Parameters
+    ----------
+    csFile : str
+        Path to the .cs file (subset selector + overlay fields).
+    passthrough_files : list of str
+        CryoSPARC passthrough .cs files (currently unused in this path;
+        the target .cs supplies overlay fields directly).
+    import_star_path : str
+        Path to the original imported RELION STAR file.
+    import_uids : list of int
+        UIDs from ``imported_particles.cs``, in row order (same as STAR rows).
+    uid_to_row : dict
+        Mapping uid → row index in *import_uids*.
+    alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path
+        Forwarded to ``dataframe_normalize_filename``.
+    """
+    import starfile
+
+    # 1. Read target .cs (overlay fields + selected uids)
+    cs = np.load(csFile, allow_pickle=True)
+    cs_df = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
+    selected_uids = set(int(uid) for uid in cs_df["uid"]) if "uid" in cs_df else set()
+
+    # 2. Read original STAR file via star2dataframe (handles optics, typing, etc.)
+    # Pass ignore_bad_*=2 to skip path resolution: the original STAR's
+    # rlnImageName paths are RELION-relative and may not exist on the current
+    # filesystem.  The actual image paths come from the .cs blob/path, which
+    # is resolved separately through the CryoSPARC project structure.
+    star_data = star2dataframe(
+        import_star_path,
+        alternative_folders,
+        ignore_bad_particle_path=2,
+        ignore_bad_micrograph_path=2,
+    )
+
+    # 3. Validate sizes
+    if len(star_data) != len(import_uids):
+        logger.warning(
+            "%s: STAR has %d rows but imported_particles.cs has %d uids. Truncating.",
+            csFile,
+            len(star_data),
+            len(import_uids),
+        )
+        min_len = min(len(star_data), len(import_uids))
+        star_data = star_data.iloc[:min_len].reset_index(drop=True)
+        import_uids = import_uids[:min_len]
+        uid_to_row = {uid: i for i, uid in enumerate(import_uids)}
+
+    # 4. Filter STAR data to selected uids
+    if not selected_uids:
+        logger.warning("%s: no uid field, returning original STAR data as-is", csFile)
+        return star_data
+
+    star_data["_uid"] = import_uids
+    data = star_data[star_data["_uid"].isin(selected_uids)].copy()
+
+    if len(data) == 0:
+        raise HeliconIOError(
+            f"_cs2dataframe_from_star_import: no matching uids in {csFile}"
+        )
+
+    uids_in_data = list(data["_uid"])
+    data.drop(columns=["_uid"], inplace=True)
+    data.reset_index(drop=True, inplace=True)
+
+    # 5. Overlay CryoSPARC-refined fields
+    cs_by_uid = cs_df.set_index("uid")
+
+    if "alignments2D/class" in cs.dtype.names:
+        cls_map = {}
+        for uid in uids_in_data:
+            try:
+                cls_map[uid] = int(cs_by_uid.loc[uid, "alignments2D/class"]) + 1
+            except (KeyError, TypeError, ValueError):
+                pass
+        if cls_map:
+            data["rlnClassNumber"] = data.index.to_series().map(
+                lambda i: cls_map.get(uids_in_data[i])
+            )
+
+    if "alignments2D/shift" in cs.dtype.names:
+        sx_map, sy_map = {}, {}
+        for uid in uids_in_data:
+            try:
+                shift = np.atleast_1d(
+                    np.asarray(cs_by_uid.loc[uid, "alignments2D/shift"], dtype=float)
+                )
+                sx = float(shift[0])
+                sy = float(shift[1]) if len(shift) > 1 else 0.0
+                apix = 1.0
+                if "blob/psize_A" in cs.dtype.names:
+                    try:
+                        apix = float(cs_by_uid.loc[uid, "blob/psize_A"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                sx_map[uid] = (-sx) * apix
+                sy_map[uid] = (-sy) * apix
+            except (KeyError, TypeError, ValueError):
+                pass
+        if sx_map:
+            data["rlnOriginXAngst"] = data.index.to_series().map(
+                lambda i: sx_map.get(uids_in_data[i])
+            )
+            data["rlnOriginYAngst"] = data.index.to_series().map(
+                lambda i: sy_map.get(uids_in_data[i])
+            )
+
+    if "alignments2D/pose" in cs.dtype.names:
+        psi_map = {}
+        for uid in uids_in_data:
+            try:
+                psi = float(cs_by_uid.loc[uid, "alignments2D/pose"])
+                psi_map[uid] = -psi * (180.0 / np.pi)
+            except (KeyError, TypeError, ValueError):
+                pass
+        if psi_map:
+            data["rlnAnglePsi"] = data.index.to_series().map(
+                lambda i: psi_map.get(uids_in_data[i])
+            )
+
+    # CTF overlay (overrides original values with CryoSPARC-refined ones)
+    ctf_overlays = [
+        ("ctf/df1_A", "rlnDefocusU", 1.0),
+        ("ctf/df2_A", "rlnDefocusV", 1.0),
+        ("ctf/df_angle_rad", "rlnDefocusAngle", 180.0 / np.pi),
+        ("ctf/phase_shift_rad", "rlnPhaseShift", 1.0),
+        ("ctf/bfactor", "rlnCtfBfactor", 1.0),
+        ("ctf/scale", "rlnCtfScalefactor", 1.0),
+    ]
+    for cs_field, rln_name, mul in ctf_overlays:
+        if cs_field not in cs.dtype.names:
+            continue
+        val_map = {}
+        for uid in uids_in_data:
+            try:
+                val_map[uid] = float(cs_by_uid.loc[uid, cs_field]) * mul
+            except (KeyError, TypeError, ValueError):
+                pass
+        if val_map:
+            data[rln_name] = data.index.to_series().map(
+                lambda i: val_map.get(uids_in_data[i])
+            )
+
+    # 6. Final cleanup: remove NaN overlay entries (where .cs lacked a value)
+    data.attrs["source_path"] = csFile
+    data.attrs["convention"] = "relion"
+    return data
+
+
 def cs2dataframe(
     csFile: str,
     passthrough_files: list[str] = [],
@@ -1222,6 +1447,23 @@ def cs2dataframe(
     pd.DataFrame
         DataFrame containing the CryoSPARC particle/micrograph data.
     """
+    # Auto-detect if this .cs file originated from a RELION STAR import.
+    # If so, use the original STAR file as data source (preserving all original
+    # RELION fields) with the .cs as subset selector, overlaying CryoSPARC-
+    # refined fields (class, alignments, CTF) on the selected particles.
+    _detected, _star_path, _uids, _uid_row = _detect_cs_import_origin(csFile)
+    if _detected:
+        return _cs2dataframe_from_star_import(
+            csFile,
+            passthrough_files,
+            _star_path,
+            _uids,
+            _uid_row,
+            alternative_folders,
+            ignore_bad_particle_path,
+            ignore_bad_micrograph_path,
+        )
+
     # read CryoSPARC v2+ meta data
     cs = np.load(csFile, allow_pickle=True)
     data = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
