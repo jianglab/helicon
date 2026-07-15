@@ -6,51 +6,36 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-try:
-    from PySide6.QtWidgets import (
-        QWidget,
-        QTreeView,
-        QVBoxLayout,
-        QHBoxLayout,
-        QLabel,
-        QLineEdit,
-        QToolButton,
-        QHeaderView,
-    )
-    from PySide6.QtGui import QStandardItemModel, QStandardItem
-    from PySide6.QtCore import (
-        QModelIndex,
-        Signal,
-        Qt,
-        QDir,
-        QFileInfo,
-        QThread,
-        QObject,
-    )
-except ImportError:
-    try:
-        from PyQt5.QtWidgets import (
-            QWidget,
-            QTreeView,
-            QVBoxLayout,
-            QHBoxLayout,
-            QLabel,
-            QLineEdit,
-            QToolButton,
-            QHeaderView,
-        )
-        from PyQt5.QtGui import QStandardItemModel, QStandardItem
-        from PyQt5.QtCore import (
-            QModelIndex,
-            pyqtSignal as Signal,
-            Qt,
-            QDir,
-            QFileInfo,
-            QThread,
-            QObject,
-        )
-    except ImportError:
-        raise ImportError("Qt widgets require PySide6 or PyQt5")
+from PySide6.QtWidgets import (
+    QWidget,
+    QTreeView,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QToolButton,
+    QHeaderView,
+    QMenu,
+    QApplication,
+)
+from PySide6.QtGui import (
+    QStandardItemModel,
+    QStandardItem,
+    QKeySequence,
+    QShortcut,
+    QAction,
+)
+from PySide6.QtCore import (
+    QModelIndex,
+    Signal,
+    Qt,
+    QDir,
+    QFileInfo,
+    QThread,
+    QObject,
+    QSettings,
+    QTimer,
+)
 
 __all__ = ["FolderBrowserWidget"]
 
@@ -66,6 +51,8 @@ _IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
     ".sqlite",
+    ".html",
+    ".htm",
 }
 
 
@@ -80,11 +67,19 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
 
-def _get_file_info(filepath: str) -> tuple[str, str]:
-    """Returns (info, n_images) tuple."""
+def _get_file_info(filepath: str) -> tuple[str, str, str]:
+    """Returns (info, n_images, pixel_size) tuple."""
+    name = Path(filepath).name.lower()
+    if name.endswith(".star") and any(
+        name.endswith(s) for s in _METADATA_STAR_SUFFIXES
+    ):
+        # Pipeline/optimiser/model/sampling/job star files describe metadata,
+        # not image data; show them as plain entries (opened as text).
+        return "", "", ""
     ext = Path(filepath).suffix.lower()
     info = ""
     n_images = ""
+    pixel_size = ""
 
     if ext in (".mrc", ".mrcs", ".map"):
         try:
@@ -94,6 +89,9 @@ def _get_file_info(filepath: str) -> tuple[str, str]:
                 nx = int(mrc.header.nx)
                 ny = int(mrc.header.ny)
                 nz = int(mrc.header.nz)
+                apix = float(mrc.voxel_size.x)
+                if apix > 0:
+                    pixel_size = f"{apix:.2f} Å"
                 if ext == ".mrcs":
                     n_images = str(nz) if nz > 1 else "1"
                     info = f"{nz}×{nx}×{ny}" if nz > 1 else f"{nx}×{ny}"
@@ -132,43 +130,58 @@ def _get_file_info(filepath: str) -> tuple[str, str]:
             import starfile
 
             df = starfile.read(filepath, always_dict=True)
-            for val in df.values():
-                if hasattr(val, "shape"):
-                    n_images = str(val.shape[0])
-                    image_name_col = None
-                    for col in val.columns:
-                        if "ImageName" in col or "MicrographName" in col:
-                            image_name_col = col
-                            break
-                    if image_name_col:
-                        first_name = str(val[image_name_col].iloc[0])
-                        if "@" in first_name:
-                            img_path = first_name.split("@")[-1]
-                        else:
-                            img_path = first_name
-                        if Path(img_path).is_file():
-                            img_ext = Path(img_path).suffix.lower()
-                            if img_ext in (".mrc", ".mrcs", ".map"):
-                                import mrcfile
+            star_dir = Path(filepath).parent
+            for block_name, val in df.items():
+                if block_name == "optics":
+                    continue
+                if not hasattr(val, "shape"):
+                    continue
 
-                                with mrcfile.open(img_path, header_only=True) as mrc:
-                                    nx = int(mrc.header.nx)
-                                    ny = int(mrc.header.ny)
-                                    nz = int(mrc.header.nz)
-                                    if nz == 1:
-                                        info = f"{nx}×{ny}"
-                                    else:
-                                        info = f"{nx}×{ny}×{nz}"
-                            else:
-                                from PIL import Image
+                n_images = str(val.shape[0])
+                image_name_col = None
+                for col in val.columns:
+                    if "ImageName" in col or "MicrographName" in col:
+                        image_name_col = col
+                        break
 
-                                with Image.open(img_path) as img:
-                                    info = f"{img.width}×{img.height}"
-                        else:
-                            info = f"{val.shape[0]} rows"
+                if image_name_col:
+                    first_name = str(val[image_name_col].iloc[0])
+                    if "@" in first_name:
+                        img_path = first_name.split("@")[-1]
                     else:
-                        info = f"{val.shape[0]} rows"
-                    break
+                        img_path = first_name
+
+                    img_path_resolved = None
+                    for ancestor in [star_dir] + list(star_dir.parents):
+                        candidate = ancestor / img_path
+                        if candidate.is_file():
+                            img_path_resolved = candidate
+                            break
+
+                    if img_path_resolved is not None:
+                        img_ext = img_path_resolved.suffix.lower()
+                        if img_ext in (".mrc", ".mrcs", ".map"):
+                            import mrcfile
+
+                            with mrcfile.open(
+                                str(img_path_resolved), header_only=True
+                            ) as mrc:
+                                nx = int(mrc.header.nx)
+                                ny = int(mrc.header.ny)
+                                nz = int(mrc.header.nz)
+                                apix = float(mrc.voxel_size.x)
+                                if apix > 0:
+                                    pixel_size = f"{apix:.2f} Å"
+                                if img_ext == ".mrcs" or nz == 1:
+                                    info = f"{nx}×{ny}"
+                                else:
+                                    info = f"{nx}×{ny}×{nz}"
+                        else:
+                            from PIL import Image
+
+                            with Image.open(str(img_path_resolved)) as img:
+                                info = f"{img.width}×{img.height}"
+                break
         except Exception:
             pass
 
@@ -184,6 +197,9 @@ def _get_file_info(filepath: str) -> tuple[str, str]:
         except Exception:
             pass
 
+    elif ext in (".html", ".htm"):
+        pass
+
     elif ext == ".cs":
         try:
             import numpy as np
@@ -196,27 +212,38 @@ def _get_file_info(filepath: str) -> tuple[str, str]:
         except Exception:
             pass
 
-    return info, n_images
+    return info, n_images, pixel_size
 
 
 COL_NAME = 0
 COL_SIZE = 1
 COL_TYPE = 2
-COL_INFO = 3
-COL_IMAGES = 4
-COL_MODIFIED = 5
-NUM_COLUMNS = 6
+COL_IMAGES = 3
+COL_INFO = 4
+COL_PIXELSIZE = 5
+COL_MODIFIED = 6
+NUM_COLUMNS = 7
 ROLE_SORT = Qt.ItemDataRole.UserRole + 1
+
+# Star files that describe pipelines/optimisation rather than image data.
+# Must stay in sync with _METADATA_STAR_SUFFIXES in commands/display.py.
+_METADATA_STAR_SUFFIXES = (
+    "pipeline.star",
+    "optimiser.star",
+    "model.star",
+    "sampling.star",
+    "job.star",
+)
 
 
 class FileBrowserModel(QStandardItemModel):
     def __init__(self, root_path: str, parent=None):
         super().__init__(0, NUM_COLUMNS, parent)
         self.setHorizontalHeaderLabels(
-            ["Name", "Size", "Type", "Dimension", "Images", "Modified"]
+            ["Name", "Size", "Type", "Images", "Dimension", "Pixel Size", "Modified"]
         )
         self._root_path = root_path
-        self._file_infos: dict[str, tuple[str, str]] = {}
+        self._file_infos: dict[str, tuple[str, str, str]] = {}
         self._sorting = False
         self._filter_pattern = "*"
         self._use_regex = False
@@ -274,6 +301,8 @@ class FileBrowserModel(QStandardItemModel):
             info_item.setData("", ROLE_SORT)
             images_item = QStandardItem("")
             images_item.setData(0, ROLE_SORT)
+            apix_item = QStandardItem("")
+            apix_item.setData("", ROLE_SORT)
             mod_item = QStandardItem("")
             mod_item.setData("", ROLE_SORT)
         else:
@@ -285,7 +314,7 @@ class FileBrowserModel(QStandardItemModel):
             type_item = QStandardItem(ext.lstrip(".").upper() if ext else "File")
             type_item.setData(ext, ROLE_SORT)
 
-            info, n_images = self._get_or_cache_info(str(path))
+            info, n_images, pixel_size = self._get_or_cache_info(str(path))
             info_item = QStandardItem(info)
             info_item.setData(info, ROLE_SORT)
 
@@ -295,6 +324,14 @@ class FileBrowserModel(QStandardItemModel):
             except ValueError:
                 images_item.setData(0, ROLE_SORT)
 
+            apix_item = QStandardItem(pixel_size)
+            try:
+                apix_item.setData(
+                    float(pixel_size.split()[0]) if pixel_size else 0, ROLE_SORT
+                )
+            except (ValueError, IndexError):
+                apix_item.setData(0, ROLE_SORT)
+
             mtime = datetime.fromtimestamp(path.stat().st_mtime)
             mod_item = QStandardItem(mtime.strftime("%Y-%m-%d %H:%M"))
             mod_item.setData(mtime.isoformat(), ROLE_SORT)
@@ -302,9 +339,17 @@ class FileBrowserModel(QStandardItemModel):
         name_item.setDragEnabled(False)
         name_item.setDropEnabled(False)
 
-        return [name_item, size_item, type_item, info_item, images_item, mod_item]
+        return [
+            name_item,
+            size_item,
+            type_item,
+            images_item,
+            info_item,
+            apix_item,
+            mod_item,
+        ]
 
-    def _get_or_cache_info(self, filepath: str) -> tuple[str, str]:
+    def _get_or_cache_info(self, filepath: str) -> tuple[str, str, str]:
         if filepath not in self._file_infos:
             self._file_infos[filepath] = _get_file_info(filepath)
         return self._file_infos[filepath]
@@ -456,6 +501,15 @@ class FolderBrowserWidget(QWidget):
         self._tree.setSortingEnabled(True)
         self._tree.sortByColumn(COL_NAME, Qt.SortOrder.AscendingOrder)
 
+        self._tree.setSelectionBehavior(QTreeView.SelectionBehavior.SelectItems)
+        self._tree.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
+
+        copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self._tree)
+        copy_sc.activated.connect(self._copy_selection)
+
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._show_context_menu)
+
         header = self._tree.header()
         header.setStretchLastSection(False)
         header.setSectionsMovable(False)
@@ -464,9 +518,21 @@ class FolderBrowserWidget(QWidget):
         header.resizeSection(COL_NAME, 200)
         header.resizeSection(COL_SIZE, 70)
         header.resizeSection(COL_TYPE, 50)
-        header.resizeSection(COL_INFO, 80)
         header.resizeSection(COL_IMAGES, 50)
+        header.resizeSection(COL_INFO, 80)
+        header.resizeSection(COL_PIXELSIZE, 70)
         header.resizeSection(COL_MODIFIED, 120)
+
+        # Restore previously saved column widths (persisted between launches).
+        # Done before connecting sectionResized so the initial programmatic
+        # resizes above don't trigger a redundant save.
+        self._restore_col_widths()
+
+        # Persist column widths as the user drags dividers (debounced).
+        self._col_save_timer = QTimer(self)
+        self._col_save_timer.setSingleShot(True)
+        self._col_save_timer.timeout.connect(self._save_col_widths)
+        header.sectionResized.connect(lambda *a: self._col_save_timer.start(300))
 
         self._tree.setAnimated(True)
         self._tree.setIndentation(20)
@@ -530,13 +596,6 @@ class FolderBrowserWidget(QWidget):
     def _on_double_clicked(self, index: QModelIndex) -> None:
         path = self._model.file_path(index)
         if path and not self._model.is_dir(index):
-            try:
-                from PySide6.QtCore import Qt
-                from PySide6.QtWidgets import QApplication
-            except ImportError:
-                from PyQt5.QtCore import Qt
-                from PyQt5.QtWidgets import QApplication
-
             if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.file_selected_new_window.emit(path)
             else:
@@ -585,5 +644,83 @@ class FolderBrowserWidget(QWidget):
         use_regex = self._regex_cb.isChecked()
         self._model.set_filter(pattern, use_regex)
 
+    def _copy_selection(self) -> None:
+        indexes = self._tree.selectionModel().selectedIndexes()
+        if not indexes:
+            return
+
+        rows = sorted(set(idx.row() for idx in indexes))
+        cols = sorted(set(idx.column() for idx in indexes))
+
+        lines = []
+        for row in rows:
+            cells = []
+            for col in cols:
+                idx = self._model.index(row, col)
+                text = self._model.data(idx, Qt.ItemDataRole.DisplayRole) or ""
+                cells.append(text)
+            lines.append("\t".join(cells))
+
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _show_context_menu(self, pos):
+        index = self._tree.indexAt(pos)
+        if not index.isValid():
+            return
+
+        file_path = self._model.file_path(index)
+        if not file_path:
+            return
+
+        menu = QMenu(self._tree)
+
+        copy_path_action = QAction("Copy Path", self._tree)
+        copy_path_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(file_path)
+        )
+        menu.addAction(copy_path_action)
+
+        copy_name_action = QAction("Copy Name", self._tree)
+        copy_name_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(Path(file_path).name)
+        )
+        menu.addAction(copy_name_action)
+
+        menu.exec_(self._tree.viewport().mapToGlobal(pos))
+
     def set_root_path(self, path: str | Path) -> None:
         self._navigate_to(str(path))
+
+    def _restore_col_widths(self) -> None:
+        """Restore column widths saved from a previous launch.
+
+        Stored as a comma-separated string under the same QSettings group as
+        the window geometry (``helicon`` / ``display``). Only columns that
+        still exist are applied, so adding/removing columns later is safe.
+        """
+        try:
+            settings = QSettings("helicon", "display")
+            raw = settings.value("browser_colwidths")
+            if not raw:
+                return
+            widths = [int(x) for x in str(raw).split(",") if x.strip()]
+            header = self._tree.header()
+            for col, w in enumerate(widths):
+                if col < NUM_COLUMNS and w > 0:
+                    header.resizeSection(col, w)
+        except (TypeError, ValueError, RuntimeError):
+            pass
+
+    def _save_col_widths(self) -> None:
+        """Persist current column widths to QSettings."""
+        try:
+            header = self._tree.header()
+            widths = [header.sectionSize(col) for col in range(NUM_COLUMNS)]
+            settings = QSettings("helicon", "display")
+            settings.setValue("browser_colwidths", ",".join(str(w) for w in widths))
+        except RuntimeError:
+            pass
+
+    def closeEvent(self, event) -> None:
+        self._save_col_widths()
+        super().closeEvent(event)

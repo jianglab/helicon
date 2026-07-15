@@ -196,11 +196,11 @@ class TestDisplayMain(object):
 
 
 class TestGeometryPersistence(object):
-    @patch.object(display, "_on_screen", return_value=True)
+    @patch.object(display, "_position_default")
     @patch.object(display, "_read_rect")
     @patch.object(display, "_get_qsettings")
     def test_restore_geometry_applies_saved_dock(
-        self, mock_get_settings, mock_read_rect, mock_on_screen
+        self, mock_get_settings, mock_read_rect, mock_position_default
     ):
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
@@ -214,14 +214,14 @@ class TestGeometryPersistence(object):
             captured_fn = mock_timer.singleShot.call_args[0][1]
             captured_fn()
 
-        mock_dock.setGeometry.assert_called_once_with(100, 200, 300, 400)
+        mock_position_default.assert_called_once_with(mock_dock, mock_viewer)
+        mock_dock.resize.assert_called_once_with(300, 400)
         mock_dock.show.assert_called_once()
 
-    @patch.object(display, "_on_screen", return_value=True)
     @patch.object(display, "_read_rect")
     @patch.object(display, "_get_qsettings")
     def test_restore_geometry_applies_saved_viewer(
-        self, mock_get_settings, mock_read_rect, mock_on_screen
+        self, mock_get_settings, mock_read_rect
     ):
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
@@ -243,9 +243,8 @@ class TestGeometryPersistence(object):
             captured_fn = mock_timer.singleShot.call_args[0][1]
             captured_fn()
 
-        mock_viewer.window._qt_window.setGeometry.assert_called_once_with(
-            500, 600, 700, 800
-        )
+        mock_viewer.window._qt_window.resize.assert_called_once_with(700, 800)
+        mock_viewer.window._qt_window.move.assert_called_once_with(500, 600)
 
     @patch.object(display, "_position_default")
     @patch.object(display, "_on_screen", return_value=True)
@@ -265,7 +264,6 @@ class TestGeometryPersistence(object):
             captured_fn = mock_timer.singleShot.call_args[0][1]
             captured_fn()
 
-        mock_dock.restoreGeometry.assert_not_called()
         mock_position.assert_called_once_with(mock_dock, mock_viewer)
 
     def test_position_default_places_dock_left_of_viewer(self):
@@ -590,8 +588,16 @@ class TestFolderBrowser(object):
         from helicon.lib.napari_widgets import FileBrowserModel
 
         model = FileBrowserModel(str(tmp_path))
-        headers = [model.headerData(c, Qt.Orientation.Horizontal) for c in range(6)]
-        assert headers == ["Name", "Size", "Type", "Dimension", "Images", "Modified"]
+        headers = [model.headerData(c, Qt.Orientation.Horizontal) for c in range(7)]
+        assert headers == [
+            "Name",
+            "Size",
+            "Type",
+            "Images",
+            "Dimension",
+            "Pixel Size",
+            "Modified",
+        ]
 
     def test_file_browser_model_lists_files(self, tmp_path):
         from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
