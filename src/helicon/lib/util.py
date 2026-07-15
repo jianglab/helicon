@@ -46,6 +46,7 @@ from .system import (  # noqa: F401
     validate_param_dict,
     has_shiny,
     has_streamlit,
+    has_napari,
     has_curvelet_fdct,
     has_curvelet_udct,
     has_curvelet_udct_gpu,

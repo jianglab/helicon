@@ -25,6 +25,7 @@ helicon --help
 - **ctfSimulation**:       A Web app that simulates 1D/2D TEM contrast transfer function (CTF)
 - **denovo3D**:            A Web app for de novo helical indexing and 3D reconstruction from a single 2D image
 - **denovo3DBatch**:       A command line tool for de novo helical indexing and 3D reconstruction from a single 2D image
+- **display**:             A napari viewer with a docked folder browser for viewing images, volumes, PDFs, and text files
 - **helicalLattice**:      A Web app that illustrates the interconversion of 2D Lattice ⇔ Helical Lattice
 - **helicalPitch**:        A Web app that helps you determine helical pitch/twist using 2D Classification info
 - **helicalProjection**:   A Web app that helps you compare 2D images with helical structure projections

@@ -154,6 +154,22 @@ def has_streamlit() -> bool:
         return False
 
 
+def has_napari() -> bool:
+    """Check whether napari is available.
+
+    Returns
+    -------
+    bool
+        True if napari can be imported, False otherwise.
+    """
+    try:
+        import napari
+
+        return True
+    except ImportError:
+        return False
+
+
 def has_curvelet_fdct() -> bool:
     """Check whether the curvepy-fdct package is available.
 

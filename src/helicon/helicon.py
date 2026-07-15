@@ -16,6 +16,9 @@ cli_commands = [
     "symmetry_mismatch",
     "trueFSC",
 ]
+napari_commands = [
+    "display",
+]
 shiny_commands = [
     "denovo3D",
     "helicalPitch",
@@ -39,6 +42,7 @@ class HeliconArgumentParser(argparse.ArgumentParser):
 
 def _get_commands(
     cli_commands: list,
+    napari_commands: list,
     shiny_commands: list,
     streamlit_commands: list,
     doc_str: str = "",
@@ -53,8 +57,12 @@ def _get_commands(
     )
     subparsers.required = True
 
-    for module_name in sorted(cli_commands + shiny_commands + streamlit_commands):
-        if module_name in shiny_commands and not helicon.has_shiny():
+    for module_name in sorted(
+        cli_commands + napari_commands + shiny_commands + streamlit_commands
+    ):
+        if module_name in napari_commands and not helicon.has_napari():
+            continue
+        elif module_name in shiny_commands and not helicon.has_shiny():
             continue
         elif module_name in streamlit_commands and not helicon.has_streamlit():
             continue
@@ -128,6 +136,7 @@ def _get_commands(
 def main():
     _get_commands(
         cli_commands=cli_commands,
+        napari_commands=napari_commands,
         shiny_commands=shiny_commands,
         streamlit_commands=streamlit_commands,
         doc_str="helicon commands",

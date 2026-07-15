@@ -38,6 +38,8 @@ shiny = ['ipyfilechooser', 'ipywidgets', 'itk-montage', 'jupyter_bokeh', 'plotly
 
 streamlit = ['atomium', 'bokeh', 'kneebow', 'numpy', 'psutil', 'qrcode', 'shapely', 'st-clickable-images', 'streamlit', 'streamlit-bokeh', 'streamlit-drawable-canvas', 'trackpy', 'uptime', 'xmltodict']
 
+napari = ['napari', 'PySide6']
+
 ptycho = ['py4dstem']
 
 curvelet_fdct = ['curvepy-fdct>=1.0']
@@ -47,6 +49,7 @@ curvelet_udct = ['curvelets']
 all = [
     "helicon[shiny]",
     "helicon[streamlit]",
+    "helicon[napari]",
     "helicon[curvelet_fdct]",
     "helicon[curvelet_udct]",
 ]
