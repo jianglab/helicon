@@ -476,6 +476,73 @@ class TestOpenFile(object):
         assert "contrast_limits" in call_kwargs
         assert len(call_kwargs["contrast_limits"]) == 2
 
+    def test_ndisplay_resets_for_new_file(self):
+        import numpy as np
+
+        # A fake viewer that records dims.ndisplay and supports layer removal,
+        # so we can assert the 2D/3D mode is reset per file.
+        class FakeDims:
+            ndisplay = 2
+            current_step = (0,)
+
+        class FakeLayer:
+            def __init__(self, name):
+                self.name = name
+                self.visible = True
+
+        class FakeViewer:
+            def __init__(self):
+                self.layers = []
+                self.dims = FakeDims()
+                self.window = MagicMock()
+                self.window._qt_window = MagicMock()
+                self.reset_calls = 0
+
+            def add_image(self, data, **kwargs):
+                layer = FakeLayer(kwargs.get("name", "layer"))
+                self.layers.append(layer)
+                return layer
+
+            def reset_view(self):
+                self.reset_calls += 1
+
+        # Mock mrcfile so the volume open doesn't hit real file I/O.
+        mock_mrc = MagicMock()
+        test_data = np.zeros((4, 8, 8), dtype=np.float32)
+        mock_mrc.data = test_data
+        mock_mrc.voxel_size.x = 1.5
+        mock_mrc.header.nz = 4
+        mock_mrc.header.mapc = 1
+        mock_mrc.header.mapr = 2
+        mock_mrc.header.maps = 3
+        mock_mrcfile = MagicMock()
+        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
+        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
+        # helicon.change_map_axes_order is only called for ndim>=3 & nz>1.
+        with (
+            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
+            patch.object(
+                display.helicon, "change_map_axes_order", lambda d, h: (d, None)
+            ),
+        ):
+            # First open a 3D volume (ndisplay forced to 3)...
+            vol_viewer = FakeViewer()
+            display._open_file(vol_viewer, "/d/map.mrc", mode="volume")
+            assert vol_viewer.dims.ndisplay == 3
+
+            # ...then a 2D image stack. The stale 3D mode must not
+            # persist: ndisplay is reset to 2 and only the new file shows
+            # (previous layers are removed so reset_view fits just the new file).
+            img_viewer = FakeViewer()
+            img_viewer.dims.ndisplay = 3  # simulate leftover state
+            old_layer = FakeLayer("old.mrc")
+            img_viewer.layers.append(old_layer)
+            display._open_file(img_viewer, "/d/stack.mrcs", mode="slice")
+            assert img_viewer.dims.ndisplay == 2
+            assert len(img_viewer.layers) == 1  # old removed, new added
+            assert img_viewer.layers[0].name == "stack.mrcs"
+            assert img_viewer.reset_calls == 1  # reset_view called once
+
     def test_open_tif_file_uses_viewer_open(self):
         mock_viewer = MagicMock()
         display._open_file(mock_viewer, "/path/to/test.tif")

@@ -640,6 +640,7 @@ def _open_pdf(viewer, path: str) -> None:
     )
     _enable_continuous_auto_contrast(layer, viewer)
     layer.contrast_limits_range = (float(data.min()), float(data.max()))
+    _reset_view(viewer)
 
 
 def _open_eps(viewer, path: str) -> None:
@@ -715,6 +716,7 @@ def _open_eps(viewer, path: str) -> None:
             float(composite.min()),
             float(composite.max()),
         )
+        _reset_view(viewer)
     except (subprocess.CalledProcessError, OSError) as exc:  # pragma: no cover
         print(f"[helicon] failed to display EPS {path}: {exc}")
     finally:
@@ -768,6 +770,7 @@ def _open_bild(viewer, path: str) -> None:
         edge_color=edge_colors,
     )
     viewer.dims.ndisplay = 3
+    _reset_view(viewer)
 
 
 def _patch_napari_value_bug() -> None:
@@ -853,12 +856,59 @@ def _is_metadata_star(path: str) -> bool:
     return any(name.endswith(suffix) for suffix in _METADATA_STAR_SUFFIXES)
 
 
+def _set_ndisplay(viewer, value: int) -> None:
+    """Set the viewer's 2D/3D display dimension, tolerating empty dims.
+
+    Setting ``dims.ndisplay`` before any layer exists (or on a mock
+    viewer in tests) is harmless; guard so a transient state never
+    raises and aborts the open.
+    """
+    try:
+        viewer.dims.ndisplay = value
+    except (AttributeError, RuntimeError, ValueError):
+        pass
+
+
+def _reset_view(viewer) -> None:
+    """Recenter/zoom the camera to fit the current layers ("home" view).
+
+    Called after a new file's layer is added so the incoming file is
+    framed correctly rather than left at the previous file's camera pose.
+    Guarded so a mock viewer in tests (or a transient state) never
+    raises and aborts the open.
+    """
+    try:
+        viewer.reset_view()
+    except (AttributeError, RuntimeError, ValueError):
+        pass
+
+
 def _open_file(viewer, path: str, mode: str | None = None) -> None:
     from pathlib import Path
 
     qt_window = viewer.window._qt_window
     if hasattr(qt_window, "_text_overlay") and qt_window._text_overlay.isVisible():
         qt_window._text_overlay.hide()
+
+    # Reset the viewer to the mode expected for THIS file before any
+    # layer is added. Otherwise a stale ndisplay (e.g. a 3D volume
+    # view left over from the previous file) persists and produces a
+    # wrong/empty view for the incoming file. Drop the previous
+    # layers so reset_view() below fits only the new file.
+    try:
+        old_layers = list(viewer.layers)
+    except (TypeError, AttributeError):
+        old_layers = []
+    for layer in old_layers:
+        try:
+            viewer.layers.remove(layer)
+        except Exception:
+            pass
+    if mode == "volume":
+        _set_ndisplay(viewer, 3)
+    else:
+        # 2D slice / image stack / general / text / pdf / eps -> 2D.
+        _set_ndisplay(viewer, 2)
 
     # When a display mode is forced (button bar), the *.mrc / *.map volume
     # branch must show as a 3D volume (ndisplay=3) or a 2D slice stack
@@ -873,6 +923,7 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
 
     if ext == ".star" and _is_metadata_star(path) and mode != "general":
         _open_text(viewer, path)
+        _reset_view(viewer)
         return
 
     if ext == ".star" and mode != "general":
@@ -967,6 +1018,7 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
         step = list(viewer.dims.current_step)
         step[0] = 0
         viewer.dims.current_step = step
+        _reset_view(viewer)
         return
 
     if ext == ".bild":
@@ -1040,11 +1092,14 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
                     viewer.dims.ndisplay = (
                         3 if dims[0] * dims[1] * dims[2] < 512**3 else 2
                     )
+        _reset_view(viewer)
+        return
     else:
         n_before = len(viewer.layers)
         viewer.open(path)
         for layer in viewer.layers[n_before:]:
             _enable_continuous_auto_contrast(layer, viewer)
+        _reset_view(viewer)
 
 
 def _run_standalone() -> None:
