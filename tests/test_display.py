@@ -481,10 +481,125 @@ class TestOpenFile(object):
         display._open_file(mock_viewer, "/path/to/test.tif")
         mock_viewer.open.assert_called_once_with("/path/to/test.tif")
 
+    def test_open_data_star_uses_lazy_stack(self):
+        import numpy as np
+        import pandas as pd
+
+        # Referenced mrc file must "exist" for path resolution to succeed.
+        with patch("pathlib.Path.is_file", return_value=True):
+            stack = np.stack(
+                [np.full((4, 4), float(i + 1), dtype=np.float32) for i in range(3)]
+            )
+
+            class _FakeMRC:
+                def __init__(self, data, apix=2.0):
+                    self.data = data
+                    self._apix = apix
+
+                    class _H:
+                        nx = data.shape[-1]
+                        ny = data.shape[-2]
+                        nz = 1 if data.ndim == 2 else data.shape[0]
+                        cella = type("C", (), {"x": apix})()
+                        mapc = 1
+                        mapr = 2
+                        maps = 3
+
+                    self.header = _H()
+
+                    class _V:
+                        x = apix
+
+                    self.voxel_size = _V()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            mock_mrcfile = MagicMock()
+            mock_mrcfile.open.return_value = _FakeMRC(stack, apix=2.0)
+
+            mock_starfile = MagicMock()
+            mock_starfile.read.return_value = {
+                "particles": pd.DataFrame(
+                    {"ImageName": ["1@/x.mrcs", "2@/x.mrcs", "3@/x.mrcs"]}
+                )
+            }
+
+            mock_viewer = MagicMock()
+            mock_viewer.dims.current_step = [0]
+
+            old_mrc = sys.modules.get("mrcfile")
+            old_sf = sys.modules.get("starfile")
+            sys.modules["mrcfile"] = mock_mrcfile
+            sys.modules["starfile"] = mock_starfile
+            try:
+                display._open_file(mock_viewer, "/path/to/data.star", mode="slice")
+            finally:
+                if old_mrc is not None:
+                    sys.modules["mrcfile"] = old_mrc
+                else:
+                    del sys.modules["mrcfile"]
+                if old_sf is not None:
+                    sys.modules["starfile"] = old_sf
+                else:
+                    del sys.modules["starfile"]
+
+            mock_viewer.add_image.assert_called_once()
+            args, kwargs = mock_viewer.add_image.call_args
+            # Lazy loading: a _LazyStarStack is passed, not a materialised array.
+            assert type(args[0]).__name__ == "_LazyStarStack"
+            # Contrast limits derived from the first frame only, so napari does
+            # not scan the whole stack (which would load every referenced image).
+            assert "contrast_limits" in kwargs
+            assert kwargs["scale"] == (1.0, 2.0, 2.0)
+
     def test_open_png_file_uses_viewer_open(self):
         mock_viewer = MagicMock()
         display._open_file(mock_viewer, "/path/to/test.png")
         mock_viewer.open.assert_called_once_with("/path/to/test.png")
+
+    def test_open_eps_rasterizes_with_ghostscript(self, qapp, tmp_path):
+        import shutil
+
+        from PySide6.QtGui import QImage
+
+        # Build a real PNG that the gs mock will "produce" as its output.
+        src_png = tmp_path / "rendered.png"
+        img = QImage(16, 16, QImage.Format.Format_ARGB32)
+        img.fill(0xFFFFFFFF)
+        img.save(str(src_png))
+
+        def fake_run(args, **kwargs):
+            # gs is asked to write to -sOutputFile=<out>; copy our PNG there.
+            out = next(a for a in args if a.startswith("-sOutputFile=")).split("=", 1)[
+                1
+            ]
+            shutil.copy(str(src_png), out)
+            return type("R", (), {"returncode": 0})()
+
+        with (
+            patch("subprocess.run", fake_run),
+            patch("shutil.which", return_value="/usr/bin/gs"),
+        ):
+            mock_viewer = MagicMock()
+            display._open_eps(mock_viewer, "/d/fig.eps")
+
+        mock_viewer.add_image.assert_called_once()
+        args, kwargs = mock_viewer.add_image.call_args
+        assert kwargs["name"] == "fig.eps"
+
+    def test_open_eps_without_ghostscript_prints_message(self):
+        with (
+            patch("shutil.which", return_value=None),
+            patch.object(display, "print") as mock_print,
+        ):
+            mock_viewer = MagicMock()
+            display._open_eps(mock_viewer, "/d/fig.eps")
+        mock_viewer.add_image.assert_not_called()
+        assert any("Ghostscript" in str(c.args) for c in mock_print.call_args_list)
 
 
 class TestAutoContrast(object):
@@ -752,6 +867,190 @@ class TestFolderBrowser(object):
         assert len(new_window_results) == 1
         assert "image.mrc" in new_window_results[0]
 
+    def test_is_image_stack_classification(self):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        assert FolderBrowserWidget._is_image_stack(None, "/d/particles.mrcs")
+        assert FolderBrowserWidget._is_image_stack(None, "/d/data.star")
+        # Metadata star files are not image stacks.
+        assert not FolderBrowserWidget._is_image_stack(None, "/d/run1_optimiser.star")
+        # Volumes keep the "Image Slice" label, so are not image stacks.
+        assert not FolderBrowserWidget._is_image_stack(None, "/d/map.mrc")
+        assert not FolderBrowserWidget._is_image_stack(None, "/d/map.map")
+
+    def test_slice_button_label_for_image_stack(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
+        (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        def select(name):
+            idx = None
+            for r in range(widget._model.rowCount()):
+                if widget._model.file_path(widget._model.index(r, 0)).endswith(name):
+                    idx = widget._model.index(r, 0)
+                    break
+            assert idx is not None
+            widget._tree.selectionModel().select(
+                idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+            )
+
+        select("particles.mrcs")
+        assert widget._btn_slice.text() == "2D Image"
+
+        select("volume.mrc")
+        assert widget._btn_slice.text() == "2D Slice"
+
+    def test_chimerax_button_shown_for_volumes(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+        (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        def select(name):
+            idx = None
+            for r in range(widget._model.rowCount()):
+                if widget._model.file_path(widget._model.index(r, 0)).endswith(name):
+                    idx = widget._model.index(r, 0)
+                    break
+            assert idx is not None
+            widget._tree.selectionModel().select(
+                idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+            )
+
+        select("volume.mrc")
+        assert not widget._btn_chimerax.isHidden()
+        assert widget._btn_chimerax.text() == "ChimeraX"
+
+        # Image stacks must not offer the ChimeraX button.
+        select("particles.mrcs")
+        assert widget._btn_chimerax.isHidden()
+
+    def test_chimerax_button_shown_for_bild(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        (tmp_path / "plot.bild").write_bytes(b"\x00" * 64)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        idx = widget._model.index(0, 0)
+        widget._tree.selectionModel().select(
+            idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+        )
+        # bild files get a ChimeraX button (renders cylinders/spheres natively)
+        # alongside the general image display.
+        assert not widget._btn_chimerax.isHidden()
+        assert widget._btn_chimerax.text() == "ChimeraX"
+        assert not widget._btn_general.isHidden()
+
+    def test_launch_chimerax_invokes_executable(self, tmp_path):
+        import subprocess
+
+        from helicon.lib import napari_widgets
+
+        called = {}
+
+        def fake_find():
+            return "/fake/ChimeraX"
+
+        def fake_popen(args):
+            called["args"] = list(args)
+            return object()
+
+        with (
+            patch.object(napari_widgets, "_find_chimerax", fake_find),
+            patch.object(subprocess, "Popen", fake_popen),
+        ):
+            display._launch_chimerax("/d/map.mrc")
+
+        assert called["args"] == ["/fake/ChimeraX", "/d/map.mrc"]
+
+    def test_chimerax_button_disabled_when_not_installed(self, tmp_path, qapp):
+        from helicon.lib import napari_widgets
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        with patch.object(napari_widgets, "_find_chimerax", lambda: None):
+            (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+            widget = FolderBrowserWidget(start_dir=str(tmp_path))
+            idx = widget._model.index(0, 0)
+            widget._tree.selectionModel().select(
+                idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+            )
+            assert not widget._btn_chimerax.isHidden()
+            assert not widget._btn_chimerax.isEnabled()
+            assert "not found" in widget._btn_chimerax.toolTip().lower()
+
+    def test_chimerax_button_enabled_when_installed(self, tmp_path, qapp):
+        from helicon.lib import napari_widgets
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        with patch.object(napari_widgets, "_find_chimerax", lambda: "/x/ChimeraX"):
+            (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+            widget = FolderBrowserWidget(start_dir=str(tmp_path))
+            idx = widget._model.index(0, 0)
+            widget._tree.selectionModel().select(
+                idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+            )
+            assert widget._btn_chimerax.isEnabled()
+            assert "Open this file" in widget._btn_chimerax.toolTip()
+
+    def test_stats_button_for_data_star_only(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        (tmp_path / "data.star").write_text("_data_\n")
+        (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
+        (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        def select(name):
+            idx = None
+            for r in range(widget._model.rowCount()):
+                if widget._model.file_path(widget._model.index(r, 0)).endswith(name):
+                    idx = widget._model.index(r, 0)
+                    break
+            assert idx is not None
+            widget._tree.selectionModel().select(
+                idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+            )
+
+        # Shown and disabled (not implemented) for data.star.
+        select("data.star")
+        assert not widget._btn_stats.isHidden()
+        assert not widget._btn_stats.isEnabled()
+        assert "not implemented" in widget._btn_stats.toolTip().lower()
+
+        # Not shown for image stacks or volumes.
+        select("particles.mrcs")
+        assert widget._btn_stats.isHidden()
+        select("volume.mrc")
+        assert widget._btn_stats.isHidden()
+
+    def test_eps_label_and_mode(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        (tmp_path / "fig.eps").write_bytes(b"\x00" * 16)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        from PySide6.QtCore import QItemSelectionModel
+
+        idx = None
+        for r in range(widget._model.rowCount()):
+            if widget._model.file_path(widget._model.index(r, 0)).endswith("fig.eps"):
+                idx = widget._model.index(r, 0)
+                break
+        assert idx is not None
+        widget._tree.selectionModel().select(
+            idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+        )
+        assert widget._btn_general.text() == "EPS"
+        # EPS is a single general image (no slice/volume/chimerax modes).
+        assert widget._display_modes_for(str(tmp_path / "fig.eps")) == ["general"]
+
     def test_file_browser_model_filter_wildcard(self, tmp_path):
         from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
 
@@ -801,3 +1100,132 @@ class TestFolderBrowser(object):
         assert "mydir/" in names
         assert "file.mrc" in names
         assert "file.txt" not in names
+
+
+class TestAsyncFileInfo(object):
+    def test_async_columns_start_empty(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import (
+            COL_IMAGES,
+            COL_INFO,
+            COL_PIXELSIZE,
+            FolderBrowserWidget,
+        )
+
+        (tmp_path / "a.mrc").write_bytes(b"\x00" * 1024)
+        (tmp_path / "b.mrc").write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        # Dimension / Images / Pixel Size are intentionally empty until the
+        # background worker fills them, so the folder opens without blocking.
+        for row in range(widget._model.rowCount()):
+            assert widget._model.item(row, COL_INFO).text() == ""
+            assert widget._model.item(row, COL_IMAGES).text() == ""
+            assert widget._model.item(row, COL_PIXELSIZE).text() == ""
+
+    def test_apply_file_info_updates_text_sort_and_cache(self, tmp_path):
+        from helicon.lib.napari_widgets import (
+            COL_INFO,
+            COL_PIXELSIZE,
+            FileBrowserModel,
+            ROLE_SORT,
+        )
+
+        (tmp_path / "a.mrc").write_bytes(b"\x00" * 1024)
+        model = FileBrowserModel(str(tmp_path))
+        row = 0
+        filepath = model.file_path(model.index(row, 0))
+        model.apply_file_info(row, "100x100", "1", "1.50 Å")
+        assert model.item(row, COL_INFO).text() == "100x100"
+        assert model.item(row, COL_INFO).data(ROLE_SORT) == "100x100"
+        assert model.item(row, COL_PIXELSIZE).data(ROLE_SORT) == 1.5
+        # Result is cached so subsequent synchronous reads reuse it.
+        assert filepath in model._file_infos
+        assert model._file_infos[filepath] == ("100x100", "1", "1.50 Å")
+
+    def test_epoch_bumps_on_reload(self, tmp_path):
+        from helicon.lib.napari_widgets import FileBrowserModel
+
+        (tmp_path / "a.mrc").write_bytes(b"\x00" * 1024)
+        model = FileBrowserModel(str(tmp_path))
+        first = model.current_epoch()
+        model.set_filter("*")  # triggers a directory reload -> epoch bump
+        assert model.current_epoch() == first + 1
+
+    def test_populate_fills_columns_async(self, tmp_path, qapp):
+        from PySide6.QtWidgets import QApplication
+
+        from helicon.lib import napari_widgets
+        from helicon.lib.napari_widgets import (
+            COL_IMAGES,
+            COL_INFO,
+            COL_PIXELSIZE,
+            FolderBrowserWidget,
+        )
+
+        # Use fake metadata so the test does not depend on real file parsing.
+        def fake_info(filepath):
+            name = filepath.rsplit("/", 1)[-1]
+            n = int("".join(c for c in name if c.isdigit()) or "1")
+            return f"{n*10}x{n*10}", str(n), f"{n}.00 Å"
+
+        with patch.object(napari_widgets, "_get_file_info", fake_info):
+            for i in range(1, 6):
+                (tmp_path / f"img_{i}.mrc").write_bytes(b"\x00" * 512)
+            widget = FolderBrowserWidget(start_dir=str(tmp_path))
+            widget._populate_file_info_async()
+            # Drive the event loop so the queued info_ready/finished signals
+            # from the worker threads are processed (blocking wait() would
+            # deadlock, since finished -> quit needs the main thread).
+            import time
+
+            deadline = time.time() + 10
+            while any(t.isRunning() for t in widget._info_threads) and (
+                time.time() < deadline
+            ):
+                QApplication.processEvents()
+            # Drain once more: a worker's final info_ready can still be queued
+            # after it reports not-running. The real app's live event loop
+            # covers this; here we flush explicitly.
+            QApplication.processEvents()
+
+        for row in range(widget._model.rowCount()):
+            info = widget._model.item(row, COL_INFO).text()
+            assert info != ""  # each row now has resolved dimensions
+            assert widget._model.item(row, COL_IMAGES).text() != ""
+            assert widget._model.item(row, COL_PIXELSIZE).text() != ""
+
+    def test_initial_directory_populates_on_construction(self, tmp_path, qapp):
+        from PySide6.QtWidgets import QApplication
+
+        from helicon.lib import napari_widgets
+        from helicon.lib.napari_widgets import (
+            COL_IMAGES,
+            COL_INFO,
+            COL_PIXELSIZE,
+            FolderBrowserWidget,
+        )
+
+        # The initial directory shown by the widget must be populated in the
+        # background without any navigation/refresh; otherwise the columns
+        # stay empty (the bug that motivated async loading).
+        def fake_info(filepath):
+            name = filepath.rsplit("/", 1)[-1]
+            n = int("".join(c for c in name if c.isdigit()) or "1")
+            return f"{n*10}x{n*10}", str(n), f"{n}.00 Å"
+
+        with patch.object(napari_widgets, "_get_file_info", fake_info):
+            for i in range(1, 4):
+                (tmp_path / f"img_{i}.mrc").write_bytes(b"\x00" * 512)
+            widget = FolderBrowserWidget(start_dir=str(tmp_path))
+            import time
+
+            deadline = time.time() + 10
+            while any(t.isRunning() for t in widget._info_threads) and (
+                time.time() < deadline
+            ):
+                QApplication.processEvents()
+            QApplication.processEvents()
+
+        for row in range(widget._model.rowCount()):
+            assert widget._model.item(row, COL_INFO).text() != ""
+            assert widget._model.item(row, COL_IMAGES).text() != ""
+            assert widget._model.item(row, COL_PIXELSIZE).text() != ""

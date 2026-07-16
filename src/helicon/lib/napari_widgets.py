@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMenu,
     QApplication,
+    QPushButton,
+    QCheckBox,
 )
 from PySide6.QtGui import (
     QStandardItemModel,
@@ -65,6 +67,82 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _is_text_file(path: str) -> bool:
+    """Check if a file is a text file by attempting UTF-8 decode."""
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(8192)
+        if b"\x00" in chunk:
+            return False
+        chunk.decode("utf-8")
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
+# Extensions with dedicated handlers/labels.  Everything else falls back
+# to a UTF-8 decode test (_is_text_file) before being labelled "unknown".
+_KNOWN_EXTENSIONS = frozenset(
+    {
+        ".mrc",
+        ".mrcs",
+        ".map",
+        ".star",
+        ".bild",
+        ".pdf",
+        ".eps",
+        ".cs",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".jpg",
+        ".jpeg",
+        ".html",
+        ".htm",
+    }
+)
+
+
+def _get_file_type_label(filepath: str) -> str:
+    """Return a human-readable type label for the file browser.
+
+    Detection order:
+    1. Known file types by suffix (.mrc, .mrcs, .star, .bild, etc.)
+    2. Pure-text fallback via UTF-8 decode -> "Text"
+    3. Anything else -> uppercased extension (or "File" if no extension)
+    """
+    name = Path(filepath).name.lower()
+    ext = Path(filepath).suffix.lower()
+
+    if ext == ".star":
+        if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
+            return "Metadata"
+        return "STAR"
+
+    if ext == ".bild":
+        return "3D Plot"
+
+    if ext == ".cs":
+        return "CryoSPARC"
+
+    if ext in (".html", ".htm"):
+        return "Browser"
+
+    if ext == ".pdf":
+        return "PDF"
+
+    if ext == ".eps":
+        return "EPS"
+
+    if ext in _KNOWN_EXTENSIONS:
+        return ext.lstrip(".").upper()
+
+    if _is_text_file(filepath):
+        return "Text"
+
+    return ext.lstrip(".").upper() if ext else "File"
 
 
 def _get_file_info(filepath: str) -> tuple[str, str, str]:
@@ -247,6 +325,10 @@ class FileBrowserModel(QStandardItemModel):
         self._sorting = False
         self._filter_pattern = "*"
         self._use_regex = False
+        # Bumped on every directory (re)load; in-flight async info workers from
+        # a previous load are discarded via this epoch so stale results never
+        # land in the new model.
+        self._epoch = 0
         self._load_directory(root_path)
 
     def _matches_filter(self, name: str) -> bool:
@@ -265,6 +347,7 @@ class FileBrowserModel(QStandardItemModel):
             return fnmatch.fnmatch(name, self._filter_pattern)
 
     def _load_directory(self, path: str) -> None:
+        self._epoch += 1
         self.removeRows(0, self.rowCount())
         try:
             entries = sorted(
@@ -310,27 +393,21 @@ class FileBrowserModel(QStandardItemModel):
             size_item = QStandardItem(_format_size(size_bytes))
             size_item.setData(size_bytes, ROLE_SORT)
 
-            ext = path.suffix.lower()
-            type_item = QStandardItem(ext.lstrip(".").upper() if ext else "File")
-            type_item.setData(ext, ROLE_SORT)
+            type_label = _get_file_type_label(str(path))
+            type_item = QStandardItem(type_label)
+            type_item.setData(type_label.lower(), ROLE_SORT)
 
-            info, n_images, pixel_size = self._get_or_cache_info(str(path))
-            info_item = QStandardItem(info)
-            info_item.setData(info, ROLE_SORT)
+            # Dimension / Images / Pixel Size are filled asynchronously after
+            # the directory is shown (see FolderBrowserWidget._populate_file_info_async)
+            # so that opening a large folder stays responsive. They start empty.
+            info_item = QStandardItem("")
+            info_item.setData("", ROLE_SORT)
 
-            images_item = QStandardItem(n_images)
-            try:
-                images_item.setData(int(n_images) if n_images else 0, ROLE_SORT)
-            except ValueError:
-                images_item.setData(0, ROLE_SORT)
+            images_item = QStandardItem("")
+            images_item.setData(0, ROLE_SORT)
 
-            apix_item = QStandardItem(pixel_size)
-            try:
-                apix_item.setData(
-                    float(pixel_size.split()[0]) if pixel_size else 0, ROLE_SORT
-                )
-            except (ValueError, IndexError):
-                apix_item.setData(0, ROLE_SORT)
+            apix_item = QStandardItem("")
+            apix_item.setData(0, ROLE_SORT)
 
             mtime = datetime.fromtimestamp(path.stat().st_mtime)
             mod_item = QStandardItem(mtime.strftime("%Y-%m-%d %H:%M"))
@@ -353,6 +430,65 @@ class FileBrowserModel(QStandardItemModel):
         if filepath not in self._file_infos:
             self._file_infos[filepath] = _get_file_info(filepath)
         return self._file_infos[filepath]
+
+    def current_epoch(self) -> int:
+        """Return the epoch of the current directory load.
+
+        Async info workers capture this value and only apply results whose
+        epoch matches, so results from a superseded directory are ignored.
+        """
+        return self._epoch
+
+    def file_rows(self) -> list[tuple[int, str]]:
+        """Return ``(row, filepath)`` pairs for every non-directory row.
+
+        Used by the asynchronous info populator to know which rows still need
+        their Dimension / Images / Pixel Size columns filled.
+        """
+        rows: list[tuple[int, str]] = []
+        for row in range(self.rowCount()):
+            name_index = self.index(row, COL_NAME)
+            filepath = self.data(name_index, Qt.ItemDataRole.UserRole)
+            if filepath and not self.is_dir(self.index(row, COL_NAME)):
+                rows.append((row, filepath))
+        return rows
+
+    def apply_file_info(
+        self, row: int, info: str, n_images: str, pixel_size: str
+    ) -> None:
+        """Fill the Dimension / Images / Pixel Size columns for ``row``.
+
+        Updates the cached info and the per-column sort roles so subsequent
+        sorting by those columns reflects the now-known values.
+        """
+        if row < 0 or row >= self.rowCount():
+            return
+        filepath = self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
+        if filepath:
+            self._file_infos[filepath] = (info, n_images, pixel_size)
+
+        info_item = self.item(row, COL_INFO)
+        if info_item is not None:
+            info_item.setText(info)
+            info_item.setData(info, ROLE_SORT)
+
+        images_item = self.item(row, COL_IMAGES)
+        if images_item is not None:
+            images_item.setText(n_images)
+            try:
+                images_item.setData(int(n_images) if n_images else 0, ROLE_SORT)
+            except ValueError:
+                images_item.setData(0, ROLE_SORT)
+
+        apix_item = self.item(row, COL_PIXELSIZE)
+        if apix_item is not None:
+            apix_item.setText(pixel_size)
+            try:
+                apix_item.setData(
+                    float(pixel_size.split()[0]) if pixel_size else 0, ROLE_SORT
+                )
+            except (ValueError, IndexError):
+                apix_item.setData(0, ROLE_SORT)
 
     def refresh(self) -> None:
         self._file_infos.clear()
@@ -407,6 +543,29 @@ class FileBrowserModel(QStandardItemModel):
             self.appendRow(row_items)
 
 
+class InfoWorker(QThread):
+    """Compute file metadata off the GUI thread.
+
+    Each worker runs its own thread and is handed a slice of
+    ``(row, filepath)`` pairs; it emits ``info_ready`` per file as it resolves
+    the metadata. The blocking file reads (mrcfile / PIL / starfile / PDF)
+    therefore never stall the UI. ``finished`` is emitted once the slice is
+    exhausted so the owner can clean up and re-sort if needed.
+    """
+
+    info_ready = Signal(int, str, str, str, int)  # row, info, n_images, apix, epoch
+
+    def __init__(self, tasks: list[tuple[int, str]], epoch: int) -> None:
+        super().__init__()
+        self._tasks = tasks
+        self._epoch = epoch
+
+    def run(self) -> None:
+        for row, filepath in self._tasks:
+            info, n_images, pixel_size = _get_file_info(filepath)
+            self.info_ready.emit(row, info, n_images, pixel_size, self._epoch)
+
+
 class FolderBrowserWidget(QWidget):
     """A folder browser widget for selecting image and volume files.
 
@@ -429,6 +588,8 @@ class FolderBrowserWidget(QWidget):
 
     file_selected = Signal(str)
     file_selected_new_window = Signal(str)
+    # (path, mode, new_window) where mode is "slice", "volume", or "general".
+    display_requested = Signal(str, str, bool)
 
     def __init__(self, start_dir: str | Path | None = None, parent=None):
         super().__init__(parent)
@@ -490,6 +651,11 @@ class FolderBrowserWidget(QWidget):
         layout.addLayout(filter_layout)
 
         self._model = FileBrowserModel(start_dir)
+
+        # Active background info-population threads. Cleared (and quit) whenever
+        # the directory is reloaded so superseded workers don't write to the
+        # new model.
+        self._info_threads: list[QThread] = []
 
         self._history = [start_dir]
         self._history_index = 0
@@ -585,13 +751,85 @@ class FolderBrowserWidget(QWidget):
             QToolButton:hover {
                 background-color: #4a6fa5;
             }
+            QCheckBox {
+                color: #e8e8e8;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #888888;
+                border-radius: 3px;
+                background-color: #3c3c3c;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #3c3c3c;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4a6fa5;
+                border: 1px solid #6f9bd6;
+                image: none;
+            }
+            QCheckBox::indicator:checked:hover {
+                background-color: #5a82c4;
+            }
             """
         )
 
         layout.addWidget(self._tree)
 
+        # Bottom bar: contextual display-mode buttons + "new window" toggle.
+        # Hidden unless exactly one file (not a directory) is selected.
+        self._action_bar = QWidget()
+        self._action_bar.setContentsMargins(4, 4, 4, 4)
+        action_layout = QHBoxLayout(self._action_bar)
+        action_layout.setContentsMargins(4, 4, 4, 4)
+        action_layout.setSpacing(4)
+
+        self._btn_slice = QPushButton("Image Slice")
+        self._btn_volume = QPushButton("3D Volume")
+        self._btn_chimerax = QPushButton("ChimeraX")
+        self._btn_chimerax.setToolTip("Open this file in ChimeraX")
+        self._btn_stats = QPushButton("Stats")
+        self._btn_general = QPushButton("General Display")
+        self._btn_general_default = "General Display"
+        self._new_window_cb = QCheckBox("New display window")
+        for btn in (
+            self._btn_slice,
+            self._btn_volume,
+            self._btn_chimerax,
+            self._btn_stats,
+            self._btn_general,
+        ):
+            btn.setFixedHeight(26)
+            action_layout.addWidget(btn)
+        action_layout.addStretch(1)
+        action_layout.addWidget(self._new_window_cb)
+        self._action_bar.hide()
+
+        self._btn_slice.clicked.connect(lambda: self._emit_display("slice"))
+        self._btn_volume.clicked.connect(lambda: self._emit_display("volume"))
+        self._btn_chimerax.clicked.connect(lambda: self._emit_display("chimerax"))
+        self._btn_stats.clicked.connect(lambda: self._emit_display("stats"))
+        self._btn_general.clicked.connect(lambda: self._emit_display("general"))
+
+        layout.addWidget(self._action_bar)
+
+        sel_model = self._tree.selectionModel()
+        sel_model.selectionChanged.connect(self._on_selection_changed)
+
         self._tree.doubleClicked.connect(self._on_double_clicked)
         self._tree.clicked.connect(self._on_clicked)
+
+        # Disabled widgets do not receive hover events, so Qt will not show
+        # the ChimeraX "not found" tooltip on its own. This filter surfaces it
+        # manually when the cursor is over the (disabled) button.
+        self.installEventFilter(self)
+
+        # Fill Dimension / Images / Pixel Size for the initial directory in
+        # the background so the browser opens instantly (these columns start
+        # empty and are populated by worker threads).
+        self._populate_file_info_async()
 
     def _on_double_clicked(self, index: QModelIndex) -> None:
         path = self._model.file_path(index)
@@ -607,6 +845,161 @@ class FolderBrowserWidget(QWidget):
             if path:
                 self._navigate_to(path)
 
+    def _display_modes_for(self, path: str) -> list[str]:
+        """Return the applicable display modes for a single file.
+
+        Detection order mirrors _get_file_type_label:
+        1. Known file types by suffix
+        2. Pure-text fallback via UTF-8 decode -> ["general"]
+        3. Unknown binary -> []
+        """
+        from pathlib import Path
+
+        try:
+            if Path(path).stat().st_size == 0:
+                return []
+        except OSError:
+            return []
+
+        ext = Path(path).suffix.lower()
+        if ext == ".star":
+            name = Path(path).name
+            if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
+                return ["general"]
+            return ["slice", "stats"]
+        if ext == ".mrcs":
+            return ["slice"]
+        if ext in (".mrc", ".map"):
+            return ["slice", "volume", "chimerax"]
+        if ext == ".bild":
+            # 3D plot file: shown as a general image and also openable in
+            # ChimeraX, which renders the cylinders/spheres natively.
+            return ["general", "chimerax"]
+        if ext in _KNOWN_EXTENSIONS:
+            return ["general"]
+
+        if _is_text_file(path):
+            return ["general"]
+
+        return []
+
+    def _is_image_stack(self, path: str) -> bool:
+        """Return True for files that are stacks of 2D images.
+
+        This covers ``.mrcs`` particle stacks and data ``.star`` files (which
+        reference many individual 2D images). Volumes such as ``.mrc`` /
+        ``.map`` are not stacks and keep the "Image Slice" label instead.
+        """
+        from pathlib import Path
+
+        ext = Path(path).suffix.lower()
+        if ext == ".mrcs":
+            return True
+        if ext == ".star":
+            name = Path(path).name
+            if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
+                return False
+            return True
+        return False
+
+    def _is_volume(self, path: str) -> bool:
+        """Return True for 3D volume files (``.mrc`` / ``.map``).
+
+        These expose both a 2D-slice mode and a 3D-volume mode; the slice
+        button is labelled "2D Slice" to distinguish it from a 2D image.
+        """
+        from pathlib import Path
+
+        return Path(path).suffix.lower() in (".mrc", ".map")
+
+    def _on_selection_changed(self, selected, deselected) -> None:
+        indexes = self._tree.selectionModel().selectedIndexes()
+        # selectedIndexes() returns one index per column; collapse to rows.
+        rows = sorted({idx.row() for idx in indexes})
+        if len(rows) != 1:
+            self._action_bar.hide()
+            return
+        index = self._model.index(rows[0], 0)
+        path = self._model.file_path(index)
+        if not path or self._model.is_dir(index):
+            self._action_bar.hide()
+            return
+        modes = self._display_modes_for(str(path))
+        if not modes:
+            self._action_bar.hide()
+            return
+        self._btn_slice.setVisible("slice" in modes)
+        self._btn_volume.setVisible("volume" in modes)
+        self._btn_chimerax.setVisible("chimerax" in modes)
+        self._btn_stats.setVisible("stats" in modes)
+        if "chimerax" in modes:
+            if _find_chimerax() is None:
+                self._btn_chimerax.setEnabled(False)
+                # Explicit disabled styling so the button is unambiguously
+                # greyed-out regardless of the active Qt theme.
+                self._btn_chimerax.setStyleSheet(
+                    "QPushButton:disabled { color: #7a7a7a; "
+                    "background-color: #2b2b2b; border: 1px solid #444; }"
+                )
+                self._btn_chimerax.setToolTip(
+                    "ChimeraX not found. Install it from "
+                    "https://www.cgl.ucsf.edu/chimerax/ or add it to your PATH."
+                )
+            else:
+                self._btn_chimerax.setEnabled(True)
+                self._btn_chimerax.setStyleSheet("")
+                self._btn_chimerax.setToolTip("Open this file in ChimeraX")
+        if "stats" in modes:
+            # Stats view is not implemented yet; the button stays disabled
+            # with an explanatory tooltip.
+            self._btn_stats.setEnabled(False)
+            self._btn_stats.setStyleSheet(
+                "QPushButton:disabled { color: #7a7a7a; "
+                "background-color: #2b2b2b; border: 1px solid #444; }"
+            )
+            self._btn_stats.setToolTip("Stats view is not implemented yet.")
+        self._btn_general.setVisible("general" in modes)
+        # Label the slice button by what it actually opens: a 2D image for
+        # image stacks, a 2D slice through a volume for volumes, otherwise a
+        # generic image slice.
+        if self._is_image_stack(str(path)):
+            self._btn_slice.setText("2D Image")
+        elif self._is_volume(str(path)):
+            self._btn_slice.setText("2D Slice")
+        else:
+            self._btn_slice.setText("Image Slice")
+        if "general" in modes:
+            self._btn_general.setText(_get_file_type_label(str(path)))
+        else:
+            self._btn_general.setText(self._btn_general_default)
+        self._current_path = str(path)
+        self._action_bar.show()
+
+    def _emit_display(self, mode: str) -> None:
+        if not getattr(self, "_current_path", None):
+            return
+        self.display_requested.emit(
+            self._current_path, mode, self._new_window_cb.isChecked()
+        )
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QToolTip
+
+        # Disabled buttons do not emit hover events, so Qt will not show
+        # their tooltips on its own. Surface them manually on mouse-move.
+        if event.type() == QEvent.MouseMove:
+            for btn in (self._btn_chimerax, self._btn_stats):
+                if not btn.isEnabled() and btn.isVisible():
+                    local = btn.mapFromGlobal(QCursor.pos())
+                    if btn.rect().contains(local):
+                        QToolTip.showText(QCursor.pos(), btn.toolTip(), btn)
+                        break
+            else:
+                QToolTip.hideText()
+        return False
+
     def _navigate_to(self, path: str) -> None:
         path = str(Path(path).resolve())
         if self._history_index < len(self._history) - 1:
@@ -615,6 +1008,7 @@ class FolderBrowserWidget(QWidget):
         self._history_index = len(self._history) - 1
         self._model.set_root_path(path)
         self._path_edit.setText(path)
+        self._populate_file_info_async()
 
     def _go_up(self) -> None:
         current = self._model._root_path
@@ -628,6 +1022,7 @@ class FolderBrowserWidget(QWidget):
             path = self._history[self._history_index]
             self._model.set_root_path(path)
             self._path_edit.setText(path)
+            self._populate_file_info_async()
 
     def _go_to_path(self) -> None:
         path = self._path_edit.text().strip()
@@ -636,6 +1031,56 @@ class FolderBrowserWidget(QWidget):
 
     def _refresh(self) -> None:
         self._model.refresh()
+        self._populate_file_info_async()
+
+    def _populate_file_info_async(self) -> None:
+        """Fill Dimension / Images / Pixel Size columns in background threads.
+
+        The model rows are created synchronously with those columns empty so
+        the folder opens instantly; this method then resolves the per-file
+        metadata off the GUI thread using a small pool of worker threads. Old
+        workers from a previous directory load are dropped (their results are
+        discarded via the epoch guard and they self-delete on finish), and
+        every result carries the model epoch so stale results are ignored.
+        """
+        # Stop tracking any in-flight workers from a previous load.
+        self._info_threads.clear()
+
+        tasks = self._model.file_rows()
+        if not tasks:
+            return
+
+        epoch = self._model.current_epoch()
+        num_workers = min(4, len(tasks))
+        chunks = [tasks[i::num_workers] for i in range(num_workers)]
+        chunks = [c for c in chunks if c]
+
+        pending = len(chunks)
+        sort_col = self._tree.header().sortIndicatorSection()
+        re_sort_needed = sort_col in (COL_IMAGES, COL_INFO, COL_PIXELSIZE)
+
+        def on_info_ready(row, info, n_images, pixel_size, result_epoch):
+            if result_epoch != self._model.current_epoch():
+                return  # directory was reloaded; ignore stale result
+            self._model.apply_file_info(row, info, n_images, pixel_size)
+
+        def on_worker_finished():
+            nonlocal pending
+            pending -= 1
+            if pending == 0 and re_sort_needed:
+                self._model.sort(sort_col, self._tree.header().sortIndicatorOrder())
+
+        for chunk in chunks:
+            worker = InfoWorker(chunk, epoch)
+            worker.info_ready.connect(on_info_ready)
+            # Defer deletion until after any still-queued info_ready events
+            # from this worker have been delivered to the GUI thread.
+            worker.finished.connect(
+                lambda w=worker: QTimer.singleShot(0, w.deleteLater)
+            )
+            worker.finished.connect(on_worker_finished)
+            self._info_threads.append(worker)
+            worker.start()
 
     def _apply_filter(self) -> None:
         pattern = self._filter_edit.text().strip()
@@ -643,6 +1088,7 @@ class FolderBrowserWidget(QWidget):
             pattern = "*"
         use_regex = self._regex_cb.isChecked()
         self._model.set_filter(pattern, use_regex)
+        self._populate_file_info_async()
 
     def _copy_selection(self) -> None:
         indexes = self._tree.selectionModel().selectedIndexes()
@@ -724,3 +1170,28 @@ class FolderBrowserWidget(QWidget):
     def closeEvent(self, event) -> None:
         self._save_col_widths()
         super().closeEvent(event)
+
+
+def _find_chimerax() -> str | None:
+    """Locate the ChimeraX executable.
+
+    Checks common install locations on each platform, then falls back to the
+    ``PATH``. Returns the executable path or ``None`` if not found.
+    """
+    import shutil
+
+    candidates = [
+        "ChimeraX",
+        "chimerax",
+        "/opt/UCSF/ChimeraX/bin/chimerax",
+        "/Applications/ChimeraX.app/Contents/MacOS/ChimeraX",
+        "/usr/bin/chimerax",
+        "/usr/local/bin/chimerax",
+        r"C:\Program Files\ChimeraX\bin\ChimeraX.exe",
+        r"C:\Program Files\UCSF\ChimeraX\ChimeraX.exe",
+    ]
+    for cand in candidates:
+        found = shutil.which(cand) or (cand if os.path.isfile(cand) else None)
+        if found:
+            return found
+    return None

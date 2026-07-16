@@ -427,8 +427,110 @@ def _enable_continuous_auto_contrast(layer, viewer) -> None:
         pass
 
 
+def _launch_chimerax(path: str) -> None:
+    """Open ``path`` in an external ChimeraX process.
+
+    ChimeraX is launched detached so it runs independently of the helicon
+    process. A clear message is printed if ChimeraX cannot be found.
+    """
+    import subprocess
+
+    from helicon.lib.napari_widgets import _find_chimerax
+
+    exe = _find_chimerax()
+    if exe is None:
+        print(
+            "[helicon] ChimeraX not found. Install it from "
+            "https://www.cgl.ucsf.edu/chimerax/ or put it on your PATH."
+        )
+        return
+    try:
+        subprocess.Popen([exe, path])
+        print(f"[helicon] launched ChimeraX with {path}")
+    except Exception as exc:  # pragma: no cover - environment dependent
+        print(f"[helicon] failed to launch ChimeraX: {exc}")
+
+
+def _hide_layer_panels(viewer) -> None:
+    """Hide the left-side layer list and layer controls dock widgets.
+
+    The display command shows the floating folder browser as the primary
+    navigation surface, so the napari layer panel is hidden by default in
+    both the main and any new display window. A middle-click on the canvas
+    toggles it back.
+    """
+    try:
+        from unittest.mock import MagicMock
+
+        if isinstance(viewer.window, MagicMock):
+            return
+        qv = viewer.window._qt_viewer
+        qv.dockLayerList.hide()
+        qv.dockLayerControls.hide()
+    except Exception:
+        pass
+
+
+def _install_panel_toggle(viewer) -> None:
+    """Install a middle-click handler that toggles the layer panel.
+
+    Middle-clicking the canvas shows/hides the left-side layer list and
+    layer controls. Installed on every viewer (main window and any new
+    display window) so the toggle works uniformly.
+    """
+    try:
+        from unittest.mock import MagicMock
+
+        from PySide6.QtCore import QEvent, QObject, Qt
+
+        if isinstance(viewer.window, MagicMock):
+            return
+        qv = viewer.window._qt_viewer
+        layer_list = qv.dockLayerList
+        layer_controls = qv.dockLayerControls
+
+        class _MiddleClickFilter(QObject):
+            def __init__(self, layer_list, layer_controls, parent=None):
+                super().__init__(parent)
+                self._layer_list = layer_list
+                self._layer_controls = layer_controls
+
+            def eventFilter(self, obj, event):
+                if (
+                    event.type() == QEvent.MouseButtonPress
+                    and event.button() == Qt.MouseButton.MiddleButton
+                ):
+                    if self._layer_list.isVisible():
+                        self._layer_list.hide()
+                        self._layer_controls.hide()
+                    else:
+                        self._layer_list.show()
+                        self._layer_controls.show()
+                    # Consume so the camera does not also pan in 3D.
+                    return True
+                return False
+
+        # 3D: VisPy canvas consumes the middle button for camera panning,
+        # which stops propagation to the ancestor qt_viewer filter. Install
+        # on the canvas native QWidget (the leaf that gets the event first)
+        # so the toggle fires in both 2D and 3D.
+        canvas_native = getattr(getattr(qv, "canvas", None), "native", None)
+        if isinstance(canvas_native, QObject):
+            mf = _MiddleClickFilter(layer_list, layer_controls, parent=canvas_native)
+            canvas_native.installEventFilter(mf)
+        else:
+            mf = _MiddleClickFilter(layer_list, layer_controls, parent=qv)
+            qv.installEventFilter(mf)
+    except Exception:
+        pass
+
+
 def _is_text_file(path: str) -> bool:
-    """Check if a file is a text file by attempting UTF-8 decode."""
+    """Check if a file is a text file by attempting UTF-8 decode.
+
+    Called only after known-type suffix checks have failed, so this is the
+    fallback that distinguishes pure-text files from unknown binary.
+    """
     try:
         with open(path, "rb") as f:
             chunk = f.read(8192)
@@ -538,6 +640,88 @@ def _open_pdf(viewer, path: str) -> None:
     )
     _enable_continuous_auto_contrast(layer, viewer)
     layer.contrast_limits_range = (float(data.min()), float(data.max()))
+
+
+def _open_eps(viewer, path: str) -> None:
+    """Open an EPS (PostScript) file by rasterizing it with Ghostscript.
+
+    Qt has no PostScript interpreter, so EPS cannot be read by QPdfDocument
+    or QImageReader. We shell out to ``gs`` to render the EPS to a PNG and
+    then display that image, reusing the same white-background compositing
+    and contrast logic as the PDF viewer.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    import numpy as np
+    from PySide6.QtGui import QImage
+
+    gs = shutil.which("gs") or shutil.which("ghostscript")
+    if gs is None:
+        print(
+            "[helicon] Ghostscript (gs) is required to display EPS files but "
+            "was not found on your PATH."
+        )
+        return
+
+    tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tmp_png.close()
+    out_path = tmp_png.name
+
+    try:
+        subprocess.run(
+            [
+                gs,
+                "-dQUIET",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-dEPSCrop",
+                "-sDEVICE=png16m",
+                "-r150",
+                f"-sOutputFile={out_path}",
+                path,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        img = QImage(out_path)
+        if img.isNull():
+            print(f"[helicon] failed to render EPS: {path}")
+            return
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+        ptr = img.bits()
+        arr = np.frombuffer(bytes(ptr), dtype=np.uint8).reshape(
+            img.height(), img.width(), 4
+        )
+        rgb = arr[:, :, 2::-1].astype(np.float32)  # BGRA -> RGB float
+        alpha = arr[:, :, 3:4].astype(np.float32) / 255.0
+        # Composite onto white background
+        composite = alpha * rgb + (1.0 - alpha) * 255.0
+
+        from pathlib import Path as _Path
+
+        name = _Path(path).name
+        contrast = _auto_contrast(composite)
+        layer = viewer.add_image(
+            composite,
+            name=name,
+            contrast_limits=contrast,
+        )
+        _enable_continuous_auto_contrast(layer, viewer)
+        layer.contrast_limits_range = (
+            float(composite.min()),
+            float(composite.max()),
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:  # pragma: no cover
+        print(f"[helicon] failed to display EPS {path}: {exc}")
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
 
 
 def _open_bild(viewer, path: str) -> None:
@@ -669,20 +853,29 @@ def _is_metadata_star(path: str) -> bool:
     return any(name.endswith(suffix) for suffix in _METADATA_STAR_SUFFIXES)
 
 
-def _open_file(viewer, path: str) -> None:
+def _open_file(viewer, path: str, mode: str | None = None) -> None:
     from pathlib import Path
 
     qt_window = viewer.window._qt_window
     if hasattr(qt_window, "_text_overlay") and qt_window._text_overlay.isVisible():
         qt_window._text_overlay.hide()
 
+    # When a display mode is forced (button bar), the *.mrc / *.map volume
+    # branch must show as a 3D volume (ndisplay=3) or a 2D slice stack
+    # (ndisplay=2) instead of the auto-chosen default.
+    force_ndisplay = None
+    if mode == "volume":
+        force_ndisplay = 3
+    elif mode == "slice":
+        force_ndisplay = 2
+
     ext = Path(path).suffix.lower()
 
-    if ext == ".star" and _is_metadata_star(path):
+    if ext == ".star" and _is_metadata_star(path) and mode != "general":
         _open_text(viewer, path)
         return
 
-    if ext == ".star":
+    if ext == ".star" and mode != "general":
         import starfile
         import mrcfile
 
@@ -750,20 +943,23 @@ def _open_file(viewer, path: str) -> None:
         with mrcfile.open(entries[0][1], permissive=True) as mrc:
             frame = mrc.data[entries[0][0]] if mrc.data.ndim >= 3 else mrc.data
             dtype = frame.dtype
+            # Contrast limits from the first frame only. Passing explicit
+            # contrast_limits stops napari from scanning the entire stack to
+            # compute a global range (which would force every referenced
+            # image to load). Continuous auto-contrast below keeps each
+            # navigated slice contrasted independently, so only the visible
+            # frame is read -- the lazy behaviour we want.
+            contrast = _auto_contrast(frame)
 
         stack_shape = (n,) + first_shape
         lazy = _LazyStarStack(entries, stack_shape, dtype)
 
-        # Continuous auto-contrast: napari recomputes contrast limits from the
-        # currently displayed slice on every navigation, so each frame is
-        # contrasted independently and only the visible frame is read (lazy).
-        # We deliberately do NOT pass contrast_limits -- setting it flips
-        # napari's _keep_auto_contrast off and disables continuous mode.
         name = Path(path).name
         layer = viewer.add_image(
             lazy,
             name=name,
             scale=(1.0,) + (first_apix,) * len(first_shape),
+            contrast_limits=contrast,
         )
         _enable_continuous_auto_contrast(layer, viewer)
         viewer.dims.ndisplay = 2
@@ -781,6 +977,10 @@ def _open_file(viewer, path: str) -> None:
         _open_pdf(viewer, path)
         return
 
+    if ext == ".eps":
+        _open_eps(viewer, path)
+        return
+
     if ext in (".html", ".htm"):
         _open_html(viewer, path)
         return
@@ -789,7 +989,7 @@ def _open_file(viewer, path: str) -> None:
         _open_text(viewer, path)
         return
 
-    if ext in _MRC_EXTENSIONS:
+    if ext in _MRC_EXTENSIONS and mode != "general":
         import mrcfile
         import numpy as np
 
@@ -833,13 +1033,48 @@ def _open_file(viewer, path: str) -> None:
                 step = list(viewer.dims.current_step)
                 step[0] = data.shape[0] // 2
                 viewer.dims.current_step = tuple(step)
-                dims = data.shape
-                viewer.dims.ndisplay = 3 if dims[0] * dims[1] * dims[2] < 512**3 else 2
+                if force_ndisplay is not None:
+                    viewer.dims.ndisplay = force_ndisplay
+                else:
+                    dims = data.shape
+                    viewer.dims.ndisplay = (
+                        3 if dims[0] * dims[1] * dims[2] < 512**3 else 2
+                    )
     else:
         n_before = len(viewer.layers)
         viewer.open(path)
         for layer in viewer.layers[n_before:]:
             _enable_continuous_auto_contrast(layer, viewer)
+
+
+def _run_standalone() -> None:
+    """Open a single file in a fresh napari viewer (separate process).
+
+    Used by the "New display window" feature. Running the second viewer in
+    its own process gives it a clean OpenGL context and avoids the VisPy/
+    Qt-Wayland segfault that occurs when a second napari canvas is created
+    inside an already-running viewer's event loop (fine on macOS, fatal
+    under WSLg Wayland).
+
+    Expects ``sys.argv[1]`` = file path and optional ``sys.argv[2]`` = mode.
+    """
+    import os
+
+    import napari
+
+    _patch_napari_value_bug()
+
+    path = sys.argv[1]
+    mode = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+
+    viewer = napari.Viewer(title=os.path.basename(path))
+    _hide_layer_panels(viewer)
+    _install_panel_toggle(viewer)
+    try:
+        _open_file(viewer, path, mode=mode)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        print(f"[helicon] failed to display {path}: {exc}")
+    napari.run()
 
 
 def main(args: argparse.Namespace) -> None:
@@ -870,6 +1105,8 @@ def main(args: argparse.Namespace) -> None:
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QWidget, QApplication
     from PySide6.QtGui import QShortcut, QKeySequence
+
+    app = QApplication.instance() or QApplication(sys.argv)
 
     import napari
 
@@ -951,71 +1188,78 @@ def main(args: argparse.Namespace) -> None:
     except Exception:
         pass
 
-    try:
-        from unittest.mock import MagicMock
-
-        if not isinstance(viewer.window, MagicMock):
-            qv = viewer.window._qt_viewer
-            layer_list = qv.dockLayerList
-            layer_controls = qv.dockLayerControls
-            layer_list.hide()
-            layer_controls.hide()
-
-            from PySide6.QtCore import QEvent, QObject
-
-            class _MiddleClickFilter(QObject):
-                def __init__(self, layer_list, layer_controls, parent=None):
-                    super().__init__(parent)
-                    self._layer_list = layer_list
-                    self._layer_controls = layer_controls
-
-                def eventFilter(self, obj, event):
-                    if (
-                        event.type() == QEvent.MouseButtonPress
-                        and event.button() == Qt.MouseButton.MiddleButton
-                    ):
-                        if self._layer_list.isVisible():
-                            self._layer_list.hide()
-                            self._layer_controls.hide()
-                        else:
-                            self._layer_list.show()
-                            self._layer_controls.show()
-                        # Consume so the camera does not also pan in 3D.
-                        return True
-                    return False
-
-            qt_viewer = viewer.window._qt_viewer
-
-            # 3D: VisPy canvas consumes the middle button for camera panning,
-            # which stops propagation to the ancestor qt_viewer filter. Install
-            # on the canvas native QWidget (the leaf that gets the event first)
-            # so the toggle fires in both 2D and 3D.
-            canvas_native = getattr(getattr(qt_viewer, "canvas", None), "native", None)
-            if isinstance(canvas_native, QObject):
-                mf = _MiddleClickFilter(
-                    layer_list, layer_controls, parent=canvas_native
-                )
-                canvas_native.installEventFilter(mf)
-            else:
-                mf = _MiddleClickFilter(layer_list, layer_controls, parent=qt_viewer)
-                qt_viewer.installEventFilter(mf)
-    except Exception:
-        pass
+    _hide_layer_panels(viewer)
+    _install_panel_toggle(viewer)
 
     def _on_file_selected(path):
         if _active_viewer[0] is not None:
             _open_file(_active_viewer[0], path)
 
+    def _spawn_viewer_and_open(path, mode=None):
+        """Open ``path`` in a new napari viewer.
+
+        On macOS multiple in-process napari viewers coexist safely, so the
+        new window is opened in-process and tracked by the focus logic
+        (``_viewers`` / ``_active_viewer``), giving the same behaviour as
+        the main viewer.
+
+        On every other platform (notably Linux/Wayland), creating a second
+        in-process napari viewer segfaults (VisPy's QOpenGLWidget crashes
+        in glFlush of the 2nd canvas). There the new window is spawned in a
+        separate process with its own isolated OpenGL context, so a crash
+        there can never take down the main helicon process.
+        """
+        if sys.platform == "darwin":
+            try:
+                new_viewer = napari.Viewer(title=os.path.basename(path))
+            except Exception as exc:  # pragma: no cover - environment dependent
+                print(f"[helicon] failed to open new display window: {exc}")
+                return
+            _viewers.append(new_viewer)
+            _active_viewer[0] = new_viewer
+            _track_viewer(new_viewer)
+            _hide_layer_panels(new_viewer)
+            _install_panel_toggle(new_viewer)
+            try:
+                _open_file(new_viewer, path, mode=mode)
+            except Exception as exc:  # pragma: no cover - environment dependent
+                print(f"[helicon] failed to display {path}: {exc}")
+            return
+
+        import subprocess
+
+        try:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "from helicon.commands.display import _run_standalone; "
+                    "_run_standalone()",
+                    path,
+                    mode or "",
+                ],
+                start_new_session=True,
+            )
+        except Exception as exc:  # pragma: no cover - environment dependent
+            print(f"[helicon] failed to open new display window: {exc}")
+
     def _on_file_selected_new_window(path):
-        new_viewer = napari.Viewer(title=os.path.basename(path))
-        _viewers.append(new_viewer)
-        _active_viewer[0] = new_viewer
-        _track_viewer(new_viewer)
-        _open_file(new_viewer, path)
+        _spawn_viewer_and_open(path)
+
+    def _on_display_requested(path, mode, new_window):
+        if mode == "chimerax":
+            _launch_chimerax(path)
+            return
+        if new_window:
+            _spawn_viewer_and_open(path, mode=mode)
+        else:
+            if _active_viewer[0] is not None:
+                _open_file(_active_viewer[0], path, mode=mode)
 
     widget = FolderBrowserWidget(start_dir=start_dir)
     widget.file_selected.connect(_on_file_selected)
     widget.file_selected_new_window.connect(_on_file_selected_new_window)
+    widget.display_requested.connect(_on_display_requested)
     widget.setWindowFlags(Qt.WindowType.Window)
     widget.setWindowTitle("helicon — Files")
     widget.show()
