@@ -1,4 +1,4 @@
-"""Compute True FSC curve with mask correlation removed using phase randomization."""
+"""A command line tool to compute True FSC curve with optimal mask and phase randomization"""
 
 import argparse
 from asyncio import subprocess

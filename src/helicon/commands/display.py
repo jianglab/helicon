@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""Open a napari viewer with a floating folder browser for viewing images, volumes, PDFs, and text files."""
+"""A file browser for viewing image, map, star, bild, eps, pdf, html, and text files"""
 
 from __future__ import annotations
 
@@ -42,6 +42,36 @@ def _get_qsettings():
     return QSettings("helicon", "display")
 
 
+def _is_wsl():
+    """Return True if running inside Windows Subsystem for Linux."""
+    import platform
+
+    if platform.system() != "Linux":
+        return False
+    try:
+        with open("/proc/version", "r") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _supports_position_restore():
+    """Return True if the platform reliably supports QWidget.move().
+
+    macOS and native Linux compositors honour move() requests.
+    WSL and Windows do not (the compositor overrides positions),
+    so callers should fall back to automatic placement there.
+    """
+    import platform
+
+    system = platform.system()
+    if system == "Darwin":
+        return True
+    if system == "Linux" and not _is_wsl():
+        return True
+    return False
+
+
 def _restore_geometry(dock, viewer):
     """Restore saved window sizes and reposition after the compositor places them."""
     from PySide6.QtCore import QTimer
@@ -67,10 +97,19 @@ def _restore_geometry(dock, viewer):
                 pass
 
         dock_geo = _read_rect(settings, "dock")
-        _position_default(dock, viewer)
-        if dock_geo is not None:
-            _, _, w, h = dock_geo
+        if (
+            dock_geo is not None
+            and _supports_position_restore()
+            and _on_screen(*dock_geo)
+        ):
+            x, y, w, h = dock_geo
             dock.resize(w, h)
+            dock.move(x, y)
+        else:
+            _position_default(dock, viewer)
+            if dock_geo is not None:
+                _, _, w, h = dock_geo
+                dock.resize(w, h)
         dock.show()
 
     QTimer.singleShot(0, _apply)
@@ -111,9 +150,9 @@ def _on_screen(x, y, w, h):
 
 def _position_default(dock, viewer):
     try:
-        napari_rect = viewer.window._qt_window.geometry()
+        napari_rect = viewer.window._qt_window.frameGeometry()
         dock.adjustSize()
-        dock_rect = dock.geometry()
+        dock_rect = dock.frameGeometry()
         w = max(dock_rect.width(), 300)
         x = napari_rect.x() - w - 10
         y = napari_rect.y()
@@ -155,7 +194,7 @@ def _save_geometry(dock, viewer):
 
 def _write_rect(settings, prefix, widget):
     try:
-        geo = widget.geometry()
+        geo = widget.frameGeometry()
         settings.setValue(f"{prefix}_x", geo.x())
         settings.setValue(f"{prefix}_y", geo.y())
         settings.setValue(f"{prefix}_width", geo.width())
@@ -174,6 +213,7 @@ _METADATA_STAR_SUFFIXES = (
     "model.star",
     "sampling.star",
     "job.star",
+    "extractpick.star",
 )
 
 
@@ -225,12 +265,47 @@ class _LazyStarStack:
 
 
 class _SliceDirectionWidget:
-    """Replaces axis labels with a Z/Y/X dropdown at the right end of each slider."""
+    """Replaces axis labels with a Z/Y/X dropdown at the right end of each slider.
+
+    For 3D volumes displayed as 2D slices the dropdown lets the user swap
+    which spatial axis (Z/Y/X) the visible slider navigates through. For a
+    *true* image stack (a list of independent 2D frames — ``.mrcs`` particle
+    stacks, ``_data.star`` reference stacks, multi-page PDFs) the axis
+    selector is meaningless because axis 0 is a frame index, not a spatial
+    axis. ``set_stack_mode(True)`` hides every combo for that case.
+    """
 
     _combos: list = []
+    # True while the active layer is an image stack (non-spatial axis 0):
+    # the axis-direction combos are hidden so the Z/Y/X selector does not
+    # appear for stacks where it would be nonsensical.
+    _stack_mode: bool = False
 
     def __init__(self, viewer):
         self._viewer = viewer
+
+    @classmethod
+    def set_stack_mode(cls, is_stack: bool) -> None:
+        """Show or hide all axis-direction combos.
+
+        Called by ``_open_file`` immediately before ``viewer.add_image(...)`` so
+        that newly-built sliders pick up the right state and any pre-existing
+        combos (reused across files) are updated in place.
+        """
+        cls._stack_mode = bool(is_stack)
+        alive = []
+        for combo in cls._combos:
+            try:
+                if cls._stack_mode:
+                    combo.hide()
+                    combo.setFixedWidth(0)
+                else:
+                    combo.setFixedWidth(60)
+                    combo.show()
+                alive.append(combo)
+            except RuntimeError:
+                continue
+        cls._combos = alive
 
     def inject(self):
         from PySide6.QtWidgets import QComboBox
@@ -293,6 +368,10 @@ class _SliceDirectionWidget:
                 combo.currentIndexChanged.emit(idx)
 
             combo.mousePressEvent = _mousePressEvent
+
+            if _SliceDirectionWidget._stack_mode:
+                combo.hide()
+                combo.setFixedWidth(0)
 
             _SliceDirectionWidget._combos.append(combo)
 
@@ -568,7 +647,7 @@ def _open_text(viewer, path: str) -> None:
     if not hasattr(qt_window, "_text_overlay"):
         overlay = QTextEdit(central)
         overlay.setReadOnly(True)
-        overlay.setFont(QFont("Courier", 12))
+        overlay.setFont(QFont("Courier New", 12))
         overlay.setLineWrapMode(QTextEdit.NoWrap)
         overlay.setStyleSheet(
             "background-color: #2d2d2d; color: #cccccc; border: none;"
@@ -633,6 +712,9 @@ def _open_pdf(viewer, path: str) -> None:
     data = np.stack(pages) if len(pages) > 1 else pages[0]
     name = Path(path).name
     contrast = _auto_contrast(data)
+    # Multi-page PDF is a stack of 2D pages, not a 3D volume: hide the
+    # axis selector so it does not appear for the page-frame axis.
+    _SliceDirectionWidget.set_stack_mode(len(pages) > 1)
     layer = viewer.add_image(
         data,
         name=name,
@@ -856,6 +938,129 @@ def _is_metadata_star(path: str) -> bool:
     return any(name.endswith(suffix) for suffix in _METADATA_STAR_SUFFIXES)
 
 
+def _parse_star_image_refs(
+    star_path: str,
+) -> tuple[list[tuple[int, str, float]], tuple, float] | None:
+    """Parse a .star file line-by-line and build lazy image-stack entries.
+
+    Extracts only the ImageName/MicrographName column instead of loading the
+    entire file into a pandas DataFrame (which blocks for minutes on large
+    *data.star files with millions of particles). Resolved MRC paths are
+    cached because most particles reference frames from the same file.
+
+    Parameters
+    ----------
+    star_path : str
+        Path to the .star file.
+
+    Returns
+    -------
+    tuple of (entries, first_shape, first_apix) or None
+        * ``entries``: list of ``(frame_idx_0based, mrc_path, 0.0)`` tuples.
+        * ``first_shape``: ``(nx, ny)`` or ``(nx, ny, nz)`` of the first image.
+        * ``first_apix``: pixel size in Angstroms (fallback 1.0).
+        Returns None if no image references could be resolved.
+    """
+    from pathlib import Path
+
+    import mrcfile
+
+    star_dir = Path(star_path).parent
+
+    col_names: list[str] = []
+    image_col_idx = -1
+    in_loop = False
+    in_data = False
+    entries: list[tuple[int, str, float]] = []
+    first_shape: tuple | None = None
+    first_apix = 1.0
+    resolved_cache: dict[str, str | None] = {}
+
+    def _resolve(img_rel: str) -> str | None:
+        if img_rel in resolved_cache:
+            return resolved_cache[img_rel]
+        resolved = None
+        for ancestor in [star_dir] + list(star_dir.parents):
+            candidate = ancestor / img_rel
+            if candidate.is_file():
+                resolved = str(candidate)
+                break
+        resolved_cache[img_rel] = resolved
+        return resolved
+
+    try:
+        with open(star_path) as f:
+            for line in f:
+                raw = line.rstrip("\n\r")
+                s = raw.strip()
+                if not s or s.startswith("#"):
+                    continue
+
+                if s.startswith("data_") or s == "loop_":
+                    in_loop = s == "loop_"
+                    in_data = False
+                    if in_loop:
+                        col_names = []
+                        image_col_idx = -1
+                    continue
+
+                if in_loop and s.startswith("_"):
+                    col_names.append(s.split()[0])
+                    if image_col_idx < 0:
+                        cl = s.lower()
+                        if "imagename" in cl or "micrographname" in cl:
+                            image_col_idx = len(col_names) - 1
+                    continue
+
+                if image_col_idx < 0:
+                    continue
+
+                if not in_data:
+                    in_data = True
+
+                parts = raw.split()
+                if image_col_idx >= len(parts):
+                    continue
+                image_ref = parts[image_col_idx]
+
+                if "@" in image_ref:
+                    idx_str, img_rel = image_ref.split("@", 1)
+                else:
+                    idx_str, img_rel = "1", image_ref
+
+                try:
+                    frame_idx = int(idx_str) - 1
+                except ValueError:
+                    continue
+
+                resolved_path = _resolve(img_rel)
+                if resolved_path is None:
+                    continue
+
+                entries.append((frame_idx, resolved_path, 0.0))
+
+                if first_shape is None:
+                    with mrcfile.open(resolved_path, header_only=True) as mrc:
+                        nx = int(mrc.header.nx)
+                        ny = int(mrc.header.ny)
+                        nz = int(mrc.header.nz)
+                        first_shape = (
+                            (nx, ny)
+                            if nz == 1 or Path(resolved_path).suffix.lower() == ".mrcs"
+                            else (nx, ny, nz)
+                        )
+                        first_apix = float(mrc.voxel_size.x)
+                        if first_apix <= 0:
+                            first_apix = 1.0
+    except Exception:
+        return None
+
+    if not entries or first_shape is None:
+        return None
+
+    return entries, first_shape, first_apix
+
+
 def _set_ndisplay(viewer, value: int) -> None:
     """Set the viewer's 2D/3D display dimension, tolerating empty dims.
 
@@ -904,6 +1109,10 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
             viewer.layers.remove(layer)
         except Exception:
             pass
+    # Reset to the volume default; specific branches below set True when the
+    # incoming layer is a true image stack (axis 0 is a frame index, not a
+    # spatial axis) so the Z/Y/X axis selector is hidden for those files.
+    _SliceDirectionWidget.set_stack_mode(False)
     if mode == "volume":
         _set_ndisplay(viewer, 3)
     else:
@@ -921,74 +1130,24 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
 
     ext = Path(path).suffix.lower()
 
+    # "metadata" mode: always open any star file as text, regardless of type.
+    if ext == ".star" and mode == "metadata":
+        _open_text(viewer, path)
+        _reset_view(viewer)
+        return
+
     if ext == ".star" and _is_metadata_star(path) and mode != "general":
         _open_text(viewer, path)
         _reset_view(viewer)
         return
 
     if ext == ".star" and mode != "general":
-        import starfile
         import mrcfile
 
-        df = starfile.read(path, always_dict=True)
-        star_dir = Path(path).parent
-
-        image_name_col = None
-        image_df = None
-        for block_name, val in df.items():
-            if block_name == "optics":
-                continue
-            for col in val.columns:
-                if "ImageName" in col or "MicrographName" in col:
-                    image_name_col = col
-                    image_df = val
-                    break
-            if image_name_col:
-                break
-
-        if image_name_col is None:
+        result = _parse_star_image_refs(path)
+        if result is None:
             return
-
-        entries = []
-        first_apix = 1.0
-        first_shape = None
-
-        for name in image_df[image_name_col]:
-            name = str(name)
-            if "@" in name:
-                idx_str, mrc_path = name.split("@", 1)
-            else:
-                idx_str, mrc_path = "1", name
-
-            mrc_path_resolved = None
-            for ancestor in [star_dir] + list(star_dir.parents):
-                candidate = ancestor / mrc_path
-                if candidate.is_file():
-                    mrc_path_resolved = candidate
-                    break
-
-            if mrc_path_resolved is None:
-                continue
-
-            frame_idx = int(idx_str) - 1
-            entries.append((frame_idx, str(mrc_path_resolved), 0.0))
-
-            if first_shape is None:
-                with mrcfile.open(str(mrc_path_resolved), header_only=True) as mrc:
-                    nx = int(mrc.header.nx)
-                    ny = int(mrc.header.ny)
-                    nz = int(mrc.header.nz)
-                    first_shape = (
-                        (nx, ny)
-                        if nz == 1 or mrc_path_resolved.suffix.lower() == ".mrcs"
-                        else (nx, ny, nz)
-                    )
-                    first_apix = float(mrc.voxel_size.x)
-                    if first_apix <= 0:
-                        first_apix = 1.0
-
-        if not entries:
-            return
+        entries, first_shape, first_apix = result
 
         n = len(entries)
         with mrcfile.open(entries[0][1], permissive=True) as mrc:
@@ -1006,6 +1165,9 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
         lazy = _LazyStarStack(entries, stack_shape, dtype)
 
         name = Path(path).name
+        # This is a true image stack (frame index axis 0), not a 3D volume:
+        # hide the Z/Y/X axis selector.
+        _SliceDirectionWidget.set_stack_mode(True)
         layer = viewer.add_image(
             lazy,
             name=name,
@@ -1066,6 +1228,9 @@ def _open_file(viewer, path: str, mode: str | None = None) -> None:
 
         name = Path(path).name
         contrast = _auto_contrast(data)
+        # .mrcs is a true image stack (frame index axis 0); volumes (.mrc/.map)
+        # keep the Z/Y/X axis selector so the user can flip the slice axis.
+        _SliceDirectionWidget.set_stack_mode(ext == ".mrcs")
         layer = viewer.add_image(
             data,
             name=name,
@@ -1125,6 +1290,11 @@ def _run_standalone() -> None:
     viewer = napari.Viewer(title=os.path.basename(path))
     _hide_layer_panels(viewer)
     _install_panel_toggle(viewer)
+    try:
+        if not isinstance(viewer.window, MagicMock):
+            _SliceDirectionWidget(viewer).inject()
+    except Exception:
+        pass
     try:
         _open_file(viewer, path, mode=mode)
     except Exception as exc:  # pragma: no cover - environment dependent
@@ -1275,6 +1445,11 @@ def main(args: argparse.Namespace) -> None:
             _track_viewer(new_viewer)
             _hide_layer_panels(new_viewer)
             _install_panel_toggle(new_viewer)
+            try:
+                if not isinstance(new_viewer.window, MagicMock):
+                    _SliceDirectionWidget(new_viewer).inject()
+            except Exception:
+                pass
             try:
                 _open_file(new_viewer, path, mode=mode)
             except Exception as exc:  # pragma: no cover - environment dependent

@@ -13,7 +13,6 @@ cli_commands = [
     "cryosparc",
     "images2star",
     "proc3d",
-    "symmetry_mismatch",
     "trueFSC",
 ]
 napari_commands = [

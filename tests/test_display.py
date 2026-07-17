@@ -196,15 +196,79 @@ class TestDisplayMain(object):
 
 
 class TestGeometryPersistence(object):
+    @patch.object(display, "_supports_position_restore", return_value=False)
     @patch.object(display, "_position_default")
     @patch.object(display, "_read_rect")
     @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_applies_saved_dock(
-        self, mock_get_settings, mock_read_rect, mock_position_default
+    def test_restore_geometry_falls_back_when_position_not_supported(
+        self,
+        mock_get_settings,
+        mock_read_rect,
+        mock_position_default,
+        mock_pos_supported,
     ):
+        """On unsupported platforms (WSL), dock uses _position_default."""
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
         mock_read_rect.return_value = (100, 200, 300, 400)
+
+        mock_dock = MagicMock()
+        mock_viewer = MagicMock()
+
+        with patch("PySide6.QtCore.QTimer") as mock_timer:
+            display._restore_geometry(mock_dock, mock_viewer)
+            captured_fn = mock_timer.singleShot.call_args[0][1]
+            captured_fn()
+
+        mock_position_default.assert_called_once_with(mock_dock, mock_viewer)
+        mock_dock.resize.assert_called_once_with(300, 400)
+        mock_dock.show.assert_called_once()
+
+    @patch.object(display, "_on_screen", return_value=True)
+    @patch.object(display, "_supports_position_restore", return_value=True)
+    @patch.object(display, "_read_rect")
+    @patch.object(display, "_get_qsettings")
+    def test_restore_geometry_restores_dock_position_when_supported(
+        self,
+        mock_get_settings,
+        mock_read_rect,
+        mock_pos_supported,
+        mock_on_screen,
+    ):
+        """On macOS/Linux, dock position is fully restored from saved values."""
+        mock_settings = MagicMock()
+        mock_get_settings.return_value = mock_settings
+        mock_read_rect.return_value = (100, 200, 300, 400)
+
+        mock_dock = MagicMock()
+        mock_viewer = MagicMock()
+
+        with patch("PySide6.QtCore.QTimer") as mock_timer:
+            display._restore_geometry(mock_dock, mock_viewer)
+            captured_fn = mock_timer.singleShot.call_args[0][1]
+            captured_fn()
+
+        mock_dock.resize.assert_called_once_with(300, 400)
+        mock_dock.move.assert_called_once_with(100, 200)
+        mock_dock.show.assert_called_once()
+
+    @patch.object(display, "_on_screen", return_value=False)
+    @patch.object(display, "_supports_position_restore", return_value=True)
+    @patch.object(display, "_position_default")
+    @patch.object(display, "_read_rect")
+    @patch.object(display, "_get_qsettings")
+    def test_restore_geometry_falls_back_when_dock_off_screen(
+        self,
+        mock_get_settings,
+        mock_read_rect,
+        mock_position_default,
+        mock_pos_supported,
+        mock_on_screen,
+    ):
+        """When saved position is off-screen, fall back to _position_default."""
+        mock_settings = MagicMock()
+        mock_get_settings.return_value = mock_settings
+        mock_read_rect.return_value = (5000, 5000, 300, 400)
 
         mock_dock = MagicMock()
         mock_viewer = MagicMock()
@@ -233,8 +297,14 @@ class TestGeometryPersistence(object):
         mock_dock.geometry.return_value = MagicMock(
             x=lambda: 0, y=lambda: 0, width=lambda: 250, height=lambda: 800
         )
+        mock_dock.frameGeometry.return_value = MagicMock(
+            x=lambda: 0, y=lambda: 0, width=lambda: 250, height=lambda: 800
+        )
         mock_viewer = MagicMock()
         mock_viewer.window._qt_window.geometry.return_value = MagicMock(
+            x=lambda: 1200, y=lambda: 100, width=lambda: 1000, height=lambda: 800
+        )
+        mock_viewer.window._qt_window.frameGeometry.return_value = MagicMock(
             x=lambda: 1200, y=lambda: 100, width=lambda: 1000, height=lambda: 800
         )
 
@@ -268,12 +338,12 @@ class TestGeometryPersistence(object):
 
     def test_position_default_places_dock_left_of_viewer(self):
         mock_dock = MagicMock()
-        mock_dock.geometry.return_value = MagicMock(
+        mock_dock.frameGeometry.return_value = MagicMock(
             x=lambda: 0, y=lambda: 0, width=lambda: 250, height=lambda: 800
         )
 
         mock_viewer = MagicMock()
-        mock_viewer.window._qt_window.geometry.return_value = MagicMock(
+        mock_viewer.window._qt_window.frameGeometry.return_value = MagicMock(
             x=lambda: 500, y=lambda: 100, width=lambda: 1000, height=lambda: 800
         )
 
@@ -284,12 +354,12 @@ class TestGeometryPersistence(object):
 
     def test_position_default_uses_minimum_width(self):
         mock_dock = MagicMock()
-        mock_dock.geometry.return_value = MagicMock(
+        mock_dock.frameGeometry.return_value = MagicMock(
             x=lambda: 0, y=lambda: 0, width=lambda: 100, height=lambda: 600
         )
 
         mock_viewer = MagicMock()
-        mock_viewer.window._qt_window.geometry.return_value = MagicMock(
+        mock_viewer.window._qt_window.frameGeometry.return_value = MagicMock(
             x=lambda: 500, y=lambda: 100, width=lambda: 1000, height=lambda: 800
         )
 
@@ -369,6 +439,46 @@ class TestGeometryPersistence(object):
             mock_qapp.screens.return_value = [mock_screen]
             assert display._on_screen(5000, 5000, 300, 400) is False
 
+    @patch("platform.system", return_value="Darwin")
+    def test_supports_position_restore_true_on_macos(self, _mock_sys):
+        assert display._supports_position_restore() is True
+
+    @patch.object(display, "_is_wsl", return_value=False)
+    @patch("platform.system", return_value="Linux")
+    def test_supports_position_restore_true_on_native_linux(self, _mock_sys, _mock_wsl):
+        assert display._supports_position_restore() is True
+
+    @patch.object(display, "_is_wsl", return_value=True)
+    @patch("platform.system", return_value="Linux")
+    def test_supports_position_restore_false_on_wsl(self, _mock_sys, _mock_wsl):
+        assert display._supports_position_restore() is False
+
+    @patch("platform.system", return_value="Windows")
+    def test_supports_position_restore_false_on_windows(self, _mock_sys):
+        assert display._supports_position_restore() is False
+
+    @patch("platform.system", return_value="Linux")
+    def test_is_wsl_true_when_microsoft_in_proc_version(self, _mock_sys):
+        mock_file = MagicMock()
+        mock_file.__enter__ = lambda s: s
+        mock_file.__exit__ = MagicMock(return_value=False)
+        mock_file.read.return_value = "Linux version 5.10.16.3-microsoft-standard-WSL2"
+        with patch("builtins.open", return_value=mock_file):
+            assert display._is_wsl() is True
+
+    @patch("platform.system", return_value="Linux")
+    def test_is_wsl_false_on_native_linux(self, _mock_sys):
+        mock_file = MagicMock()
+        mock_file.__enter__ = lambda s: s
+        mock_file.__exit__ = MagicMock(return_value=False)
+        mock_file.read.return_value = "Linux version 6.1.0-25-amd64"
+        with patch("builtins.open", return_value=mock_file):
+            assert display._is_wsl() is False
+
+    @patch("platform.system", return_value="Darwin")
+    def test_is_wsl_false_on_macos(self, _mock_sys):
+        assert display._is_wsl() is False
+
     @patch("PySide6.QtCore.QObject")
     @patch("PySide6.QtCore.QEvent")
     @patch.object(display, "_save_geometry")
@@ -414,7 +524,7 @@ class TestGeometryPersistence(object):
         mock_get_settings.return_value = mock_settings
 
         mock_widget = MagicMock()
-        mock_widget.geometry.return_value = MagicMock(
+        mock_widget.frameGeometry.return_value = MagicMock(
             x=lambda: 100, y=lambda: 200, width=lambda: 300, height=lambda: 400
         )
 
@@ -431,7 +541,7 @@ class TestGeometryPersistence(object):
         mock_get_settings.return_value = mock_settings
 
         mock_widget = MagicMock()
-        mock_widget.geometry.side_effect = RuntimeError(
+        mock_widget.frameGeometry.side_effect = RuntimeError(
             "Internal C++ object already deleted"
         )
 
@@ -550,78 +660,49 @@ class TestOpenFile(object):
 
     def test_open_data_star_uses_lazy_stack(self):
         import numpy as np
-        import pandas as pd
 
-        # Referenced mrc file must "exist" for path resolution to succeed.
-        with patch("pathlib.Path.is_file", return_value=True):
-            stack = np.stack(
-                [np.full((4, 4), float(i + 1), dtype=np.float32) for i in range(3)]
-            )
+        first_frame = np.full((4, 4), 1.0, dtype=np.float32)
 
-            class _FakeMRC:
-                def __init__(self, data, apix=2.0):
-                    self.data = data
-                    self._apix = apix
+        class _FakeMRC:
+            data = first_frame
 
-                    class _H:
-                        nx = data.shape[-1]
-                        ny = data.shape[-2]
-                        nz = 1 if data.ndim == 2 else data.shape[0]
-                        cella = type("C", (), {"x": apix})()
-                        mapc = 1
-                        mapr = 2
-                        maps = 3
+            class header:
+                ndim = 2
 
-                    self.header = _H()
+            class voxel_size:
+                x = 2.0
 
-                    class _V:
-                        x = apix
+            def __enter__(self):
+                return self
 
-                    self.voxel_size = _V()
+            def __exit__(self, *a):
+                return False
 
-                def __enter__(self):
-                    return self
+        mock_viewer = MagicMock()
+        mock_viewer.dims.current_step = [0]
 
-                def __exit__(self, *a):
-                    return False
+        fake_entries = [(0, "/x.mrcs", 0.0), (1, "/x.mrcs", 0.0), (2, "/x.mrcs", 0.0)]
+        fake_shape = (4, 4)
+        fake_apix = 2.0
 
-            mock_mrcfile = MagicMock()
-            mock_mrcfile.open.return_value = _FakeMRC(stack, apix=2.0)
+        mock_mrcfile = MagicMock()
+        mock_mrcfile.open.return_value = _FakeMRC()
 
-            mock_starfile = MagicMock()
-            mock_starfile.read.return_value = {
-                "particles": pd.DataFrame(
-                    {"ImageName": ["1@/x.mrcs", "2@/x.mrcs", "3@/x.mrcs"]}
-                )
-            }
+        with (
+            patch.object(
+                display,
+                "_parse_star_image_refs",
+                return_value=(fake_entries, fake_shape, fake_apix),
+            ),
+            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
+        ):
+            display._open_file(mock_viewer, "/path/to/data.star", mode="slice")
 
-            mock_viewer = MagicMock()
-            mock_viewer.dims.current_step = [0]
-
-            old_mrc = sys.modules.get("mrcfile")
-            old_sf = sys.modules.get("starfile")
-            sys.modules["mrcfile"] = mock_mrcfile
-            sys.modules["starfile"] = mock_starfile
-            try:
-                display._open_file(mock_viewer, "/path/to/data.star", mode="slice")
-            finally:
-                if old_mrc is not None:
-                    sys.modules["mrcfile"] = old_mrc
-                else:
-                    del sys.modules["mrcfile"]
-                if old_sf is not None:
-                    sys.modules["starfile"] = old_sf
-                else:
-                    del sys.modules["starfile"]
-
-            mock_viewer.add_image.assert_called_once()
-            args, kwargs = mock_viewer.add_image.call_args
-            # Lazy loading: a _LazyStarStack is passed, not a materialised array.
-            assert type(args[0]).__name__ == "_LazyStarStack"
-            # Contrast limits derived from the first frame only, so napari does
-            # not scan the whole stack (which would load every referenced image).
-            assert "contrast_limits" in kwargs
-            assert kwargs["scale"] == (1.0, 2.0, 2.0)
+        mock_viewer.add_image.assert_called_once()
+        args, kwargs = mock_viewer.add_image.call_args
+        assert type(args[0]).__name__ == "_LazyStarStack"
+        assert "contrast_limits" in kwargs
+        assert kwargs["scale"] == (1.0, 2.0, 2.0)
 
     def test_open_png_file_uses_viewer_open(self):
         mock_viewer = MagicMock()
@@ -667,6 +748,40 @@ class TestOpenFile(object):
             display._open_eps(mock_viewer, "/d/fig.eps")
         mock_viewer.add_image.assert_not_called()
         assert any("Ghostscript" in str(c.args) for c in mock_print.call_args_list)
+
+    def test_extractpick_star_opens_as_text(self):
+        mock_viewer = MagicMock()
+        mock_viewer.window._qt_window._text_overlay = MagicMock()
+        mock_viewer.window._qt_window._text_overlay.isVisible.return_value = False
+        mock_viewer.window._qt_window.centralWidget.return_value = MagicMock()
+        mock_viewer.window._qt_window.centralWidget.return_value.rect.return_value = (
+            MagicMock()
+        )
+
+        with patch("builtins.open", MagicMock(return_value=MagicMock())):
+            with patch.object(display, "_is_text_file", return_value=True):
+                display._open_file(mock_viewer, "/path/to/extractpick.star")
+
+        mock_viewer.open.assert_not_called()
+        mock_viewer.add_image.assert_not_called()
+
+    def test_metadata_mode_opens_any_star_as_text(self):
+        mock_viewer = MagicMock()
+        mock_viewer.window._qt_window._text_overlay = MagicMock()
+        mock_viewer.window._qt_window._text_overlay.isVisible.return_value = False
+        mock_viewer.window._qt_window.centralWidget.return_value = MagicMock()
+        mock_viewer.window._qt_window.centralWidget.return_value.rect.return_value = (
+            MagicMock()
+        )
+
+        with patch("builtins.open", MagicMock(return_value=MagicMock())):
+            with patch.object(display, "_is_text_file", return_value=True):
+                display._open_file(
+                    mock_viewer, "/path/to/particles.star", mode="metadata"
+                )
+
+        mock_viewer.open.assert_not_called()
+        mock_viewer.add_image.assert_not_called()
 
 
 class TestAutoContrast(object):
@@ -1200,7 +1315,7 @@ class TestAsyncFileInfo(object):
         model = FileBrowserModel(str(tmp_path))
         row = 0
         filepath = model.file_path(model.index(row, 0))
-        model.apply_file_info(row, "100x100", "1", "1.50 Å")
+        model.apply_file_info(filepath, "100x100", "1", "1.50 Å")
         assert model.item(row, COL_INFO).text() == "100x100"
         assert model.item(row, COL_INFO).data(ROLE_SORT) == "100x100"
         assert model.item(row, COL_PIXELSIZE).data(ROLE_SORT) == 1.5

@@ -172,7 +172,7 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
                     pixel_size = f"{apix:.2f} Å"
                 if ext == ".mrcs":
                     n_images = str(nz) if nz > 1 else "1"
-                    info = f"{nz}×{nx}×{ny}" if nz > 1 else f"{nx}×{ny}"
+                    info = f"{nx}×{ny}"
                 else:
                     n_images = "1"
                     info = f"{nx}×{ny}" if nz == 1 else f"{nx}×{ny}×{nz}"
@@ -205,33 +205,62 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
 
     elif ext == ".star":
         try:
-            import starfile
-
-            df = starfile.read(filepath, always_dict=True)
             star_dir = Path(filepath).parent
-            for block_name, val in df.items():
-                if block_name == "optics":
-                    continue
-                if not hasattr(val, "shape"):
-                    continue
 
-                n_images = str(val.shape[0])
-                image_name_col = None
-                for col in val.columns:
-                    if "ImageName" in col or "MicrographName" in col:
-                        image_name_col = col
-                        break
+            # State for line-by-line star parser (avoids loading the entire
+            # file into a DataFrame — critical for large *data.star files).
+            col_names: list[str] = []
+            image_col_idx = -1
+            in_loop = False
+            in_data = False
+            n_particles = 0
+            first_image_ref: str | None = None
 
-                if image_name_col:
-                    first_name = str(val[image_name_col].iloc[0])
-                    if "@" in first_name:
-                        img_path = first_name.split("@")[-1]
-                    else:
-                        img_path = first_name
+            with open(filepath) as f:
+                for line in f:
+                    raw = line.rstrip("\n\r")
+                    s = raw.strip()
+                    if not s or s.startswith("#"):
+                        continue
+
+                    if s.startswith("data_") or s == "loop_":
+                        in_loop = s == "loop_"
+                        in_data = False
+                        if in_loop:
+                            col_names = []
+                            image_col_idx = -1
+                        continue
+
+                    if in_loop and s.startswith("_"):
+                        col_names.append(s.split()[0])
+                        if image_col_idx < 0:
+                            cl = s.lower()
+                            if "imagename" in cl or "micrographname" in cl:
+                                image_col_idx = len(col_names) - 1
+                        continue
+
+                    if not in_data:
+                        in_data = True
+
+                    n_particles += 1
+                    if first_image_ref is None and image_col_idx >= 0:
+                        parts = raw.split()
+                        if image_col_idx < len(parts):
+                            first_image_ref = parts[image_col_idx]
+
+            if n_particles > 0:
+                n_images = str(n_particles)
+
+                if first_image_ref:
+                    img_rel = (
+                        first_image_ref.split("@")[-1]
+                        if "@" in first_image_ref
+                        else first_image_ref
+                    )
 
                     img_path_resolved = None
                     for ancestor in [star_dir] + list(star_dir.parents):
-                        candidate = ancestor / img_path
+                        candidate = ancestor / img_rel
                         if candidate.is_file():
                             img_path_resolved = candidate
                             break
@@ -259,7 +288,6 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
 
                             with Image.open(str(img_path_resolved)) as img:
                                 info = f"{img.width}×{img.height}"
-                break
         except Exception:
             pass
 
@@ -311,6 +339,7 @@ _METADATA_STAR_SUFFIXES = (
     "model.star",
     "sampling.star",
     "job.star",
+    "extractpick.star",
 )
 
 
@@ -454,18 +483,22 @@ class FileBrowserModel(QStandardItemModel):
         return rows
 
     def apply_file_info(
-        self, row: int, info: str, n_images: str, pixel_size: str
+        self, filepath: str, info: str, n_images: str, pixel_size: str
     ) -> None:
-        """Fill the Dimension / Images / Pixel Size columns for ``row``.
+        """Fill the Dimension / Images / Pixel Size columns for ``filepath``.
 
-        Updates the cached info and the per-column sort roles so subsequent
-        sorting by those columns reflects the now-known values.
+        Resolves the row by searching for *filepath* in the Name column, so
+        results remain correct even when the model has been re-sorted after
+        the ``InfoWorker`` was dispatched. Updates the cached info and the
+        per-column sort roles so subsequent sorting by those columns reflects
+        the now-known values.
         """
+        if not filepath:
+            return
+        self._file_infos[filepath] = (info, n_images, pixel_size)
+        row = self._row_for_filepath(filepath)
         if row < 0 or row >= self.rowCount():
             return
-        filepath = self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
-        if filepath:
-            self._file_infos[filepath] = (info, n_images, pixel_size)
 
         info_item = self.item(row, COL_INFO)
         if info_item is not None:
@@ -489,6 +522,16 @@ class FileBrowserModel(QStandardItemModel):
                 )
             except (ValueError, IndexError):
                 apix_item.setData(0, ROLE_SORT)
+
+    def _row_for_filepath(self, filepath: str) -> int:
+        """Return the model row containing *filepath*, or -1 if not found."""
+        for row in range(self.rowCount()):
+            if (
+                self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
+                == filepath
+            ):
+                return row
+        return -1
 
     def refresh(self) -> None:
         self._file_infos.clear()
@@ -553,7 +596,9 @@ class InfoWorker(QThread):
     exhausted so the owner can clean up and re-sort if needed.
     """
 
-    info_ready = Signal(int, str, str, str, int)  # row, info, n_images, apix, epoch
+    info_ready = Signal(
+        str, str, str, str, int
+    )  # filepath, info, n_images, apix, epoch
 
     def __init__(self, tasks: list[tuple[int, str]], epoch: int) -> None:
         super().__init__()
@@ -561,9 +606,9 @@ class InfoWorker(QThread):
         self._epoch = epoch
 
     def run(self) -> None:
-        for row, filepath in self._tasks:
+        for _row, filepath in self._tasks:
             info, n_images, pixel_size = _get_file_info(filepath)
-            self.info_ready.emit(row, info, n_images, pixel_size, self._epoch)
+            self.info_ready.emit(filepath, info, n_images, pixel_size, self._epoch)
 
 
 class FolderBrowserWidget(QWidget):
@@ -793,13 +838,16 @@ class FolderBrowserWidget(QWidget):
         self._btn_stats = QPushButton("Stats")
         self._btn_general = QPushButton("General Display")
         self._btn_general_default = "General Display"
+        self._btn_metadata = QPushButton("Metadata")
+        self._btn_metadata.setToolTip("Open this file as text/metadata")
         self._new_window_cb = QCheckBox("New display window")
         for btn in (
-            self._btn_slice,
             self._btn_volume,
             self._btn_chimerax,
-            self._btn_stats,
             self._btn_general,
+            self._btn_slice,
+            self._btn_metadata,
+            self._btn_stats,
         ):
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
@@ -812,6 +860,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_chimerax.clicked.connect(lambda: self._emit_display("chimerax"))
         self._btn_stats.clicked.connect(lambda: self._emit_display("stats"))
         self._btn_general.clicked.connect(lambda: self._emit_display("general"))
+        self._btn_metadata.clicked.connect(lambda: self._emit_display("metadata"))
 
         layout.addWidget(self._action_bar)
 
@@ -865,8 +914,8 @@ class FolderBrowserWidget(QWidget):
         if ext == ".star":
             name = Path(path).name
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
-                return ["general"]
-            return ["slice", "stats"]
+                return ["metadata"]
+            return ["slice", "stats", "metadata"]
         if ext == ".mrcs":
             return ["slice"]
         if ext in (".mrc", ".map"):
@@ -932,6 +981,8 @@ class FolderBrowserWidget(QWidget):
         self._btn_volume.setVisible("volume" in modes)
         self._btn_chimerax.setVisible("chimerax" in modes)
         self._btn_stats.setVisible("stats" in modes)
+        self._btn_general.setVisible("general" in modes)
+        self._btn_metadata.setVisible("metadata" in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -973,6 +1024,7 @@ class FolderBrowserWidget(QWidget):
         else:
             self._btn_general.setText(self._btn_general_default)
         self._current_path = str(path)
+        self._reorder_buttons_alphabetically(modes)
         self._action_bar.show()
 
     def _emit_display(self, mode: str) -> None:
@@ -981,6 +1033,50 @@ class FolderBrowserWidget(QWidget):
         self.display_requested.emit(
             self._current_path, mode, self._new_window_cb.isChecked()
         )
+
+    def _reorder_buttons_alphabetically(self, modes: list[str]) -> None:
+        layout = self._action_bar.layout()
+        buttons = [
+            self._btn_slice,
+            self._btn_volume,
+            self._btn_chimerax,
+            self._btn_stats,
+            self._btn_general,
+            self._btn_metadata,
+        ]
+        active = [
+            b
+            for b in buttons
+            if any(
+                m in modes
+                for m in (
+                    ("slice",)
+                    if b is self._btn_slice
+                    else (
+                        ("volume",)
+                        if b is self._btn_volume
+                        else (
+                            ("chimerax",)
+                            if b is self._btn_chimerax
+                            else (
+                                ("stats",)
+                                if b is self._btn_stats
+                                else (
+                                    ("general",)
+                                    if b is self._btn_general
+                                    else ("metadata",)
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        ]
+        active.sort(key=lambda b: b.text().lower())
+        for btn in buttons:
+            layout.removeWidget(btn)
+        for btn in reversed(active):
+            layout.insertWidget(0, btn)
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
@@ -1059,10 +1155,10 @@ class FolderBrowserWidget(QWidget):
         sort_col = self._tree.header().sortIndicatorSection()
         re_sort_needed = sort_col in (COL_IMAGES, COL_INFO, COL_PIXELSIZE)
 
-        def on_info_ready(row, info, n_images, pixel_size, result_epoch):
+        def on_info_ready(filepath, info, n_images, pixel_size, result_epoch):
             if result_epoch != self._model.current_epoch():
                 return  # directory was reloaded; ignore stale result
-            self._model.apply_file_info(row, info, n_images, pixel_size)
+            self._model.apply_file_info(filepath, info, n_images, pixel_size)
 
         def on_worker_finished():
             nonlocal pending
