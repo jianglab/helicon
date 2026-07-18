@@ -840,6 +840,8 @@ class FolderBrowserWidget(QWidget):
         self._btn_general_default = "General Display"
         self._btn_metadata = QPushButton("Metadata")
         self._btn_metadata.setToolTip("Open this file as text/metadata")
+        self._btn_gallery = QPushButton("Gallery")
+        self._btn_gallery.setToolTip("Show a lazy thumbnail grid of the stack")
         self._new_window_cb = QCheckBox("New display window")
         for btn in (
             self._btn_volume,
@@ -848,6 +850,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_slice,
             self._btn_metadata,
             self._btn_stats,
+            self._btn_gallery,
         ):
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
@@ -861,6 +864,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_stats.clicked.connect(lambda: self._emit_display("stats"))
         self._btn_general.clicked.connect(lambda: self._emit_display("general"))
         self._btn_metadata.clicked.connect(lambda: self._emit_display("metadata"))
+        self._btn_gallery.clicked.connect(lambda: self._emit_display("gallery"))
 
         layout.addWidget(self._action_bar)
 
@@ -915,11 +919,11 @@ class FolderBrowserWidget(QWidget):
             name = Path(path).name
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return ["metadata"]
-            return ["slice", "stats", "metadata"]
+            return ["slice", "gallery", "stats", "metadata"]
         if ext == ".mrcs":
-            return ["slice"]
+            return ["slice", "gallery"]
         if ext in (".mrc", ".map"):
-            return ["slice", "volume", "chimerax"]
+            return ["slice", "volume", "gallery", "chimerax"]
         if ext == ".bild":
             # 3D plot file: shown as a general image and also openable in
             # ChimeraX, which renders the cylinders/spheres natively.
@@ -983,6 +987,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_stats.setVisible("stats" in modes)
         self._btn_general.setVisible("general" in modes)
         self._btn_metadata.setVisible("metadata" in modes)
+        self._btn_gallery.setVisible("gallery" in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -1043,6 +1048,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_stats,
             self._btn_general,
             self._btn_metadata,
+            self._btn_gallery,
         ]
         active = [
             b
@@ -1064,7 +1070,11 @@ class FolderBrowserWidget(QWidget):
                                 else (
                                     ("general",)
                                     if b is self._btn_general
-                                    else ("metadata",)
+                                    else (
+                                        ("metadata",)
+                                        if b is self._btn_metadata
+                                        else ("gallery",)
+                                    )
                                 )
                             )
                         )

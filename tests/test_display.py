@@ -98,7 +98,7 @@ class TestDisplayMain(object):
             args = parser.parse_args([])
             display.main(args)
 
-            mock_napari.Viewer.assert_called_once_with(title="helicon display")
+            mock_napari.Viewer.assert_called_once_with(title="helicon")
             mock_widget_class.assert_called_once_with(start_dir=os.getcwd())
             mock_widget.setWindowFlags.assert_called_once()
             mock_widget.show.assert_called_once()
@@ -221,7 +221,11 @@ class TestGeometryPersistence(object):
             captured_fn()
 
         mock_position_default.assert_called_once_with(mock_dock, mock_viewer)
-        mock_dock.resize.assert_called_once_with(300, 400)
+        # _position_default runs first, then the saved width/height are applied
+        # via setGeometry (outer frame rect). x()/y() are MagicMocks here, so we
+        # only assert the trailing width/height match the saved (300, 400).
+        assert mock_dock.setGeometry.called
+        assert mock_dock.setGeometry.call_args_list[-1].args[-2:] == (300, 400)
         mock_dock.show.assert_called_once()
 
     @patch.object(display, "_on_screen", return_value=True)
@@ -248,8 +252,7 @@ class TestGeometryPersistence(object):
             captured_fn = mock_timer.singleShot.call_args[0][1]
             captured_fn()
 
-        mock_dock.resize.assert_called_once_with(300, 400)
-        mock_dock.move.assert_called_once_with(100, 200)
+        mock_dock.setGeometry.assert_called_once_with(100, 200, 300, 400)
         mock_dock.show.assert_called_once()
 
     @patch.object(display, "_on_screen", return_value=False)
@@ -279,7 +282,8 @@ class TestGeometryPersistence(object):
             captured_fn()
 
         mock_position_default.assert_called_once_with(mock_dock, mock_viewer)
-        mock_dock.resize.assert_called_once_with(300, 400)
+        assert mock_dock.setGeometry.called
+        assert mock_dock.setGeometry.call_args_list[-1].args[-2:] == (300, 400)
         mock_dock.show.assert_called_once()
 
     @patch.object(display, "_read_rect")
@@ -313,8 +317,12 @@ class TestGeometryPersistence(object):
             captured_fn = mock_timer.singleShot.call_args[0][1]
             captured_fn()
 
-        mock_viewer.window._qt_window.resize.assert_called_once_with(700, 800)
-        mock_viewer.window._qt_window.move.assert_called_once_with(500, 600)
+        mock_viewer.window._qt_window.setGeometry.assert_called_once_with(
+            500,
+            600,
+            700,
+            800,
+        )
 
     @patch.object(display, "_position_default")
     @patch.object(display, "_on_screen", return_value=True)
@@ -558,11 +566,14 @@ class TestOpenFile(object):
         mock_mrc = MagicMock()
         test_data = np.zeros((3, 4, 5), dtype=np.float32)
         mock_mrc.data = test_data
-        mock_mrc.voxel_size.x = 2.0
+        mock_mrc.header.cella.x = 10.0
+        mock_mrc.header.nx = 5
+        mock_mrc.header.ny = 4
+        mock_mrc.header.nz = 3
+        mock_mrc.header.mode = 2
         mock_mrc.header.mapc = 1
         mock_mrc.header.mapr = 2
         mock_mrc.header.maps = 3
-        mock_mrc.header.nz = 3
 
         mock_mrcfile = MagicMock()
         mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
@@ -580,7 +591,11 @@ class TestOpenFile(object):
 
         mock_viewer.add_image.assert_called_once()
         call_args, call_kwargs = mock_viewer.add_image.call_args
-        np.testing.assert_array_equal(call_args[0], test_data)
+        # 2D views are opened lazily: add_image receives a dask array that
+        # reconstructs the full volume plane-by-plane, never the eager array.
+        assert hasattr(call_args[0], "compute")
+        np.testing.assert_array_equal(call_args[0].compute(), test_data)
+        assert call_args[0].shape == (3, 4, 5)
         assert call_kwargs["name"] == "test.mrc"
         assert call_kwargs["scale"] == (2.0, 2.0, 2.0)
         assert "contrast_limits" in call_kwargs
@@ -1411,3 +1426,113 @@ class TestAsyncFileInfo(object):
             assert widget._model.item(row, COL_INFO).text() != ""
             assert widget._model.item(row, COL_IMAGES).text() != ""
             assert widget._model.item(row, COL_PIXELSIZE).text() != ""
+
+
+class TestSaveQimage:
+    def test_saves_png_to_chosen_path(self, qapp, tmp_path):
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QFileDialog
+
+        qimg = QImage(10, 10, QImage.Format.Format_RGB32)
+        qimg.fill(0xFF0000FF)
+        out = str(tmp_path / "out.png")
+        with patch.object(
+            QFileDialog,
+            "getSaveFileName",
+            return_value=(out, ""),
+        ):
+            display._save_qimage(qimg)
+        assert os.path.exists(out)
+
+    def test_cancel_dialog_saves_nothing(self, qapp):
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QFileDialog
+
+        qimg = QImage(4, 4, QImage.Format.Format_RGB32)
+        qimg.fill(0)
+        with patch.object(
+            QFileDialog,
+            "getSaveFileName",
+            return_value=("", ""),
+        ):
+            display._save_qimage(qimg)
+
+
+class TestRenderQimageVector:
+    def test_pdf_render_creates_file(self, qapp, tmp_path):
+        from PySide6.QtGui import QImage
+
+        qimg = QImage(20, 20, QImage.Format.Format_RGB32)
+        qimg.fill(0xFFFFFFFF)
+        out = str(tmp_path / "out.pdf")
+        display._render_qimage_vector(qimg, out, "pdf")
+        assert os.path.exists(out)
+        assert os.path.getsize(out) > 0
+
+    def test_svg_render_creates_file(self, qapp, tmp_path):
+        from PySide6.QtGui import QImage
+
+        qimg = QImage(20, 20, QImage.Format.Format_RGB32)
+        qimg.fill(0xFFFFFFFF)
+        out = str(tmp_path / "out.svg")
+        display._render_qimage_vector(qimg, out, "svg")
+        assert os.path.exists(out)
+        assert os.path.getsize(out) > 0
+
+
+class TestInstallViewerSaveMenu:
+    def test_installs_right_click_filter(self, qapp):
+        from PySide6.QtWidgets import QWidget
+
+        class FakeWindow(QWidget):
+            pass
+
+        mock_view = MagicMock()
+        mock_camera = MagicMock()
+        mock_camera.viewbox_mouse_event = MagicMock()
+        mock_view.camera = mock_camera
+
+        qv = MagicMock()
+        qv.canvas.view = mock_view
+
+        mock_viewer = MagicMock()
+        mock_viewer.window = FakeWindow()
+        mock_viewer.window._qt_viewer = qv
+        display._install_viewer_save_menu(mock_viewer)
+
+        for name in ("mouse_press", "mouse_move", "mouse_release"):
+            emitter = getattr(mock_view.events, name)
+            emitter.disconnect.assert_called_once_with(mock_camera.viewbox_mouse_event)
+            emitter.connect.assert_called()
+
+    def test_returns_early_on_bad_viewer(self, qapp):
+        mock_viewer = MagicMock()
+        type(mock_viewer.window).isinstance = lambda self, t: False
+        display._install_viewer_save_menu(mock_viewer)
+
+
+class TestSaveViewport:
+    def test_captures_screenshot_and_saves(self, qapp, tmp_path):
+        import numpy as np
+        from PySide6.QtWidgets import QFileDialog
+
+        mock_viewer = MagicMock()
+        arr = np.zeros((10, 10, 4), dtype=np.uint8)
+        mock_viewer.screenshot.return_value = arr
+        out = str(tmp_path / "shot.png")
+        with patch.object(
+            QFileDialog,
+            "getSaveFileName",
+            return_value=(out, ""),
+        ):
+            display._save_viewport(mock_viewer)
+        mock_viewer.screenshot.assert_called_once_with(
+            canvas_only=True,
+            flash=False,
+        )
+        assert os.path.exists(out)
+
+    def test_returns_early_on_screenshot_error(self, qapp):
+        mock_viewer = MagicMock()
+        mock_viewer.screenshot.side_effect = RuntimeError("fail")
+        display._save_viewport(mock_viewer)
