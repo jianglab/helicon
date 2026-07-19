@@ -8,10 +8,14 @@ The viewport-culling math is kept framework-agnostic in :class:`GalleryPanel`
 so it can be unit-tested without a Qt application.
 """
 
-from PySide6.QtCore import QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtCore import QTimer, QRect, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -180,6 +184,11 @@ class _ControlPanel(QWidget):
     """
 
     PANEL_WIDTH = 180
+    z_thickness_changed = Signal(float)
+    sort_column_changed = Signal(str)
+    sort_reverse_changed = Signal(bool)
+    log_changed = Signal(bool)
+    histogram_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -205,6 +214,7 @@ class _ControlPanel(QWidget):
             "QPushButton:hover { background: #666; }"
         )
         radio_style = "QRadioButton { color: #e0e0e0; font-size: 11px; }"
+        chk_style = "QCheckBox { color: #e0e0e0; font-size: 11px; }"
 
         # --- Brightness ---
         root.addWidget(self._label("Brightness", lbl_style))
@@ -244,6 +254,23 @@ class _ControlPanel(QWidget):
         self._auto_btn.setStyleSheet(btn_style)
         root.addWidget(self._auto_btn)
 
+        # --- Histogram ---
+        self._histogram_chk = QCheckBox("Show Histogram")
+        self._histogram_chk.setChecked(True)
+        self._histogram_chk.setStyleSheet(chk_style)
+        self._histogram_chk.toggled.connect(self.histogram_changed)
+        root.addWidget(self._histogram_chk)
+
+        self._histogram_widget = _HistogramWidget()
+        root.addWidget(self._histogram_widget)
+
+        # --- Log transform ---
+        self._log_chk = QCheckBox("Log Transform")
+        self._log_chk.setChecked(False)
+        self._log_chk.setStyleSheet(chk_style)
+        self._log_chk.toggled.connect(self.log_changed)
+        root.addWidget(self._log_chk)
+
         # --- Scope ---
         root.addWidget(self._label("Scope", lbl_style))
         self._scope_group = QButtonGroup(self)
@@ -257,7 +284,91 @@ class _ControlPanel(QWidget):
         root.addWidget(self._radio_selected)
         root.addWidget(self._radio_all)
 
+        root.addSpacing(6)
+        self._z_thickness_sep = QFrame()
+        self._z_thickness_sep.setFrameShape(QFrame.HLine)
+        self._z_thickness_sep.setStyleSheet("color: #555;")
+        self._z_thickness_sep.setVisible(False)
+        root.addWidget(self._z_thickness_sep)
+
+        self._z_thickness_label = self._label("Z Thickness (Å)", lbl_style)
+        self._z_thickness_spin = QDoubleSpinBox()
+        self._z_thickness_spin.setRange(0.0, 99999.0)
+        self._z_thickness_spin.setDecimals(1)
+        self._z_thickness_spin.setSingleStep(1.0)
+        self._z_thickness_spin.setValue(0.0)
+        self._z_thickness_spin.setStyleSheet(
+            "QDoubleSpinBox { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            "border-radius: 3px; padding: 3px; }"
+        )
+        self._z_thickness_spin.setSuffix(" Å")
+        self._z_thickness_label.setVisible(False)
+        self._z_thickness_spin.setVisible(False)
+        self._z_thickness_spin.valueChanged.connect(self.z_thickness_changed)
+        root.addWidget(self._z_thickness_label)
+        root.addWidget(self._z_thickness_spin)
+
+        root.addSpacing(6)
+        self._sort_sep = QFrame()
+        self._sort_sep.setFrameShape(QFrame.HLine)
+        self._sort_sep.setStyleSheet("color: #555;")
+        self._sort_sep.setVisible(False)
+        root.addWidget(self._sort_sep)
+
+        combo_style = (
+            "QComboBox { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            "border-radius: 3px; padding: 3px; font-size: 11px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { color: #e0e0e0; background: #3a3a3a; }"
+        )
+        self._sort_column_combo = QComboBox()
+        self._sort_column_combo.setStyleSheet(combo_style)
+        self._sort_column_combo.setVisible(False)
+        self._sort_column_combo.currentTextChanged.connect(self.sort_column_changed)
+        self._sort_label = self._label("Sort by", lbl_style)
+        self._sort_label.setVisible(False)
+        root.addWidget(self._sort_label)
+        root.addWidget(self._sort_column_combo)
+
+        self._sort_reverse_chk = QCheckBox("Reverse Sort")
+        self._sort_reverse_chk.setStyleSheet(chk_style)
+        self._sort_reverse_chk.setChecked(True)
+        self._sort_reverse_chk.setVisible(False)
+        self._sort_reverse_chk.toggled.connect(self.sort_reverse_changed)
+        root.addWidget(self._sort_reverse_chk)
+
         root.addStretch(1)
+
+    def show_z_thickness(self, visible: bool = True, maximum: float = 99999.0) -> None:
+        self._z_thickness_sep.setVisible(visible)
+        self._z_thickness_label.setVisible(visible)
+        self._z_thickness_spin.setVisible(visible)
+        self._z_thickness_spin.setMaximum(maximum)
+        if visible:
+            self._z_thickness_spin.setValue(0.0)
+
+    def show_sort_ui(
+        self, visible: bool = True, columns: list[str] | None = None
+    ) -> None:
+        self._sort_label.setVisible(visible)
+        self._sort_sep.setVisible(visible)
+        self._sort_column_combo.setVisible(visible)
+        self._sort_reverse_chk.setVisible(visible)
+        if visible and columns is not None:
+            current = self._sort_column_combo.currentText()
+            self._sort_column_combo.blockSignals(True)
+            self._sort_column_combo.clear()
+            self._sort_column_combo.addItems(columns)
+            if current in columns:
+                self._sort_column_combo.setCurrentText(current)
+            self._sort_column_combo.blockSignals(False)
+
+    def show_log_ui(self, visible: bool = True) -> None:
+        self._log_chk.setVisible(visible)
+
+    def show_histogram_ui(self, visible: bool = True) -> None:
+        self._histogram_chk.setVisible(visible)
+        self._histogram_widget.setVisible(visible)
 
     # ---- helpers ----------------------------------------------------------
 
@@ -274,6 +385,116 @@ class _ControlPanel(QWidget):
         s.setValue(val)
         s.setStyleSheet(style)
         return s
+
+
+class _HistogramWidget(QWidget):
+    """Histogram of pixel values with BCG transfer curve overlay.
+
+    Samples a few images from the stack, bins pixel values into 256 buckets,
+    and draws them as gray bars.  A white curve shows the current
+    brightness/contrast/gamma mapping from normalized [0, 1] → display [0, 1].
+    """
+
+    HIST_HEIGHT = 100
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self.HIST_HEIGHT)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor("#2d2d2d"))
+        self.setPalette(palette)
+        self._bins: np.ndarray | None = None
+        self._brightness = 0.0
+        self._contrast = 1.0
+        self._gamma = 1.0
+        self._log_transform = False
+
+    def update_histogram(
+        self,
+        read_fn,
+        n: int,
+        brightness: float = 0.0,
+        contrast: float = 1.0,
+        gamma: float = 1.0,
+        log_transform: bool = False,
+    ) -> None:
+        if read_fn is None or n <= 0:
+            self._bins = None
+            self.update()
+            return
+        self._brightness = brightness
+        self._contrast = contrast
+        self._gamma = gamma
+        self._log_transform = log_transform
+        step = max(1, n // 10)
+        samples = []
+        for i in range(0, n, step):
+            try:
+                frame = read_fn(i).astype(np.float64)
+                if log_transform:
+                    frame = np.log1p(frame - frame.min())
+                samples.append(frame.ravel())
+            except Exception:
+                pass
+        if not samples:
+            self._bins = None
+            self.update()
+            return
+        all_px = np.concatenate(samples)
+        lo, hi = float(np.min(all_px)), float(np.max(all_px))
+        if hi - lo < 1e-12:
+            self._bins = np.zeros(256, dtype=np.float64)
+            self.update()
+            return
+        normed = np.clip((all_px - lo) / (hi - lo), 0.0, 1.0) * 255.0
+        self._bins, _ = np.histogram(normed, bins=256, range=(0, 255))
+        self.update()
+
+    def _transfer(self, x: np.ndarray) -> np.ndarray:
+        """Apply the BCG transfer function to normalized [0, 1] values."""
+        y = x + self._brightness
+        y = (y - 0.5) * self._contrast + 0.5
+        if self._gamma != 1.0:
+            y = np.clip(y, 0.0, 1.0) ** (1.0 / self._gamma)
+        return np.clip(y, 0.0, 1.0)
+
+    def paintEvent(self, event) -> None:
+        from PySide6.QtCore import QPointF
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#2d2d2d"))
+        if self._bins is None or self._bins.sum() == 0:
+            painter.end()
+            return
+        w = self.width()
+        h = self.height()
+        margin = 4
+        draw_w = w - 2 * margin
+        draw_h = h - 2 * margin
+        max_bin = max(1, int(self._bins.max()))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(120, 120, 120))
+        for i in range(256):
+            bx = margin + int(i * draw_w / 255)
+            bw = max(1, int(draw_w / 256))
+            bh = int(self._bins[i] * draw_h / max_bin)
+            if bh > 0:
+                painter.drawRect(bx, margin + draw_h - bh, bw, bh)
+
+        x_vals = np.linspace(0.0, 1.0, 256)
+        y_vals = self._transfer(x_vals)
+        pts = QPolygonF()
+        for i in range(256):
+            px = margin + i * draw_w / 255.0
+            py = margin + draw_h - y_vals[i] * draw_h
+            pts.append(QPointF(px, py))
+        painter.setPen(QColor(230, 230, 230))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPolyline(pts)
+
+        painter.end()
 
 
 class ImageGalleryWidget(QWidget):
@@ -328,6 +549,7 @@ class ImageGalleryWidget(QWidget):
         self._brightness = 0.0
         self._contrast = 1.0
         self._gamma = 1.0
+        self._log_transform = False
         self._adjust_scope = "all"
         self._selected_idx: int | None = None
 
@@ -349,6 +571,11 @@ class ImageGalleryWidget(QWidget):
 
     def set_adjust_scope(self, scope: str) -> None:
         self._adjust_scope = scope
+        self._thumb_cache.clear()
+        self.update()
+
+    def set_log_transform(self, val: bool) -> None:
+        self._log_transform = val
         self._thumb_cache.clear()
         self.update()
 
@@ -444,6 +671,8 @@ class ImageGalleryWidget(QWidget):
         """
         from helicon.commands.display import _auto_contrast
 
+        if self._log_transform:
+            frame = np.log1p(frame - frame.min())
         black, white = _auto_contrast(frame)
         arr = frame.astype(np.float64)
         arr = np.clip((arr - black) / max(1e-9, white - black), 0.0, 1.0)
@@ -617,7 +846,7 @@ class ImageGalleryWidget(QWidget):
                     if self._labels and i < len(self._labels)
                     else str(i)
                 )
-                trect = QRect(tx, ty, thumb.width(), thumb.height())
+                trect = QRect(tx, ty, draw_w, draw_h)
                 metrics = painter.fontMetrics()
                 tw = metrics.horizontalAdvance(text)
                 th = metrics.height()
@@ -675,7 +904,7 @@ class ImageGalleryWidget(QWidget):
         from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
-        menu.addAction("Save Viewport As…", self._save_as)
+        menu.addAction("Save Canvas As…", self._save_as)
         menu.exec(self.mapToGlobal(pos))
 
     def _save_as(self):

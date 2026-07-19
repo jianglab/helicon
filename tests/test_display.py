@@ -480,7 +480,7 @@ class TestGeometryPersistence(object):
     def test_is_wsl_false_on_macos(self, _mock_sys):
         assert display._is_wsl() is False
 
-    @patch("PySide6.QtCore.QObject")
+    @patch("PySide6.QtCore.QObject", side_effect=lambda *a, **kw: MagicMock())
     @patch("PySide6.QtCore.QEvent")
     @patch.object(display, "_save_geometry")
     def test_install_save_hook_returns_filter(
@@ -492,6 +492,7 @@ class TestGeometryPersistence(object):
         result = display._install_save_hook(mock_dock, mock_viewer)
 
         mock_viewer.window._qt_window.installEventFilter.assert_called_once_with(result)
+        mock_dock.installEventFilter.assert_called_once()
         assert hasattr(result, "eventFilter")
 
     @patch.object(display, "_write_rect")
@@ -532,7 +533,7 @@ class TestGeometryPersistence(object):
         mock_get_settings.return_value = mock_settings
 
         mock_widget = MagicMock()
-        mock_widget.frameGeometry.return_value = MagicMock(
+        mock_widget.geometry.return_value = MagicMock(
             x=lambda: 100, y=lambda: 200, width=lambda: 300, height=lambda: 400
         )
 
@@ -549,7 +550,7 @@ class TestGeometryPersistence(object):
         mock_get_settings.return_value = mock_settings
 
         mock_widget = MagicMock()
-        mock_widget.frameGeometry.side_effect = RuntimeError(
+        mock_widget.geometry.side_effect = RuntimeError(
             "Internal C++ object already deleted"
         )
 
@@ -1247,6 +1248,45 @@ class TestFolderBrowser(object):
         assert widget._btn_general.text() == "EPS"
         # EPS is a single general image (no slice/volume/chimerax modes).
         assert widget._display_modes_for(str(tmp_path / "fig.eps")) == ["general"]
+
+    def test_display_modes_class2d_model_star(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        job_dir = tmp_path / "Class2D" / "job001"
+        job_dir.mkdir(parents=True)
+        star_file = job_dir / "model.star"
+        star_file.write_text("dummy")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._display_modes_for(str(star_file)) == [
+            "metadata",
+            "2dclasses",
+        ]
+
+    def test_display_modes_class3d_optimiser_star(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        job_dir = tmp_path / "Class3D" / "job001"
+        job_dir.mkdir(parents=True)
+        star_file = job_dir / "optimiser.star"
+        star_file.write_text("dummy")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._display_modes_for(str(star_file)) == [
+            "metadata",
+            "optimiser",
+        ]
+
+    def test_display_modes_refine3d_model_star(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        job_dir = tmp_path / "Refine3D" / "job001"
+        job_dir.mkdir(parents=True)
+        star_file = job_dir / "model.star"
+        star_file.write_text("dummy")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._display_modes_for(str(star_file)) == [
+            "metadata",
+            "optimiser",
+        ]
 
     def test_file_browser_model_filter_wildcard(self, tmp_path):
         from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME

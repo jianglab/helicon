@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QPushButton,
     QCheckBox,
+    QComboBox,
 )
 from PySide6.QtGui import (
     QStandardItemModel,
@@ -56,6 +57,37 @@ _IMAGE_EXTENSIONS = {
     ".html",
     ".htm",
 }
+
+
+def _get_recent_folders() -> list[str]:
+    """Return up to the 5 most-recent starting folders, newest first.
+
+    Persisted via QSettings under the ``helicon`` / ``display`` organisation
+    so the list survives program restarts.
+    """
+    settings = QSettings("helicon", "display")
+    raw = settings.value("recent_folders", [], type=list)
+    seen = set()
+    out = []
+    for p in raw:
+        p = str(p)
+        if p and p not in seen and Path(p).is_dir():
+            seen.add(p)
+            out.append(p)
+    return out[:5]
+
+
+def _add_recent_folder(path: str) -> None:
+    """Record ``path`` as the most-recent starting folder (max 5 kept)."""
+    path = str(Path(path).resolve())
+    if not Path(path).is_dir():
+        return
+    cur = _get_recent_folders()
+    cur = [p for p in cur if p != path]
+    cur.insert(0, path)
+    cur = cur[:5]
+    settings = QSettings("helicon", "display")
+    settings.setValue("recent_folders", cur)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -673,6 +705,20 @@ class FolderBrowserWidget(QWidget):
         self._path_edit.returnPressed.connect(self._go_to_path)
         nav_layout.addWidget(self._path_edit)
 
+        self._recent_combo = QComboBox()
+        self._recent_combo.setPlaceholderText("Recent")
+        self._recent_combo.setToolTip("Recent starting folders")
+        self._recent_combo.setFixedWidth(80)
+        self._recent_combo.setStyleSheet(
+            "QComboBox { color: #cccccc; background: #3c3c3c; border: 1px solid #555; "
+            "border-radius: 3px; padding: 3px; }"
+            "QComboBox QAbstractItemView { color: #cccccc; background: #2d2d2d; }"
+        )
+        _add_recent_folder(start_dir)
+        self._refresh_recent_combo()
+        self._recent_combo.activated.connect(self._on_recent_selected)
+        nav_layout.addWidget(self._recent_combo)
+
         layout.addLayout(nav_layout)
 
         filter_layout = QHBoxLayout()
@@ -846,6 +892,8 @@ class FolderBrowserWidget(QWidget):
         self._btn_optimiser.setToolTip(
             "Show center slices (Z, Y, X) of referenced MRC maps"
         )
+        self._btn_2dclasses = QPushButton("2D Classes")
+        self._btn_2dclasses.setToolTip("Show 2D class averages sorted by abundance")
         self._new_window_cb = QCheckBox("New display window")
         for btn in (
             self._btn_volume,
@@ -856,6 +904,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_stats,
             self._btn_gallery,
             self._btn_optimiser,
+            self._btn_2dclasses,
         ):
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
@@ -871,6 +920,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_metadata.clicked.connect(lambda: self._emit_display("metadata"))
         self._btn_gallery.clicked.connect(lambda: self._emit_display("gallery"))
         self._btn_optimiser.clicked.connect(lambda: self._emit_display("optimiser"))
+        self._btn_2dclasses.clicked.connect(lambda: self._emit_display("2dclasses"))
 
         layout.addWidget(self._action_bar)
 
@@ -924,7 +974,12 @@ class FolderBrowserWidget(QWidget):
         if ext == ".star":
             name = Path(path).name
             if name.endswith("optimiser.star") or name.endswith("model.star"):
-                return ["metadata", "optimiser"]
+                _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
+                return (
+                    ["metadata", "2dclasses"]
+                    if _is_class2d
+                    else ["metadata", "optimiser"]
+                )
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return ["metadata"]
             return ["slice", "gallery", "stats", "metadata"]
@@ -997,6 +1052,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_metadata.setVisible("metadata" in modes)
         self._btn_gallery.setVisible("gallery" in modes)
         self._btn_optimiser.setVisible("optimiser" in modes)
+        self._btn_2dclasses.setVisible("2dclasses" in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -1093,8 +1149,25 @@ class FolderBrowserWidget(QWidget):
         self._history.append(path)
         self._history_index = len(self._history) - 1
         self._model.set_root_path(path)
+        sort_col = self._tree.header().sortIndicatorSection()
+        sort_order = self._tree.header().sortIndicatorOrder()
+        self._model.sort(sort_col, sort_order)
         self._path_edit.setText(path)
+        _add_recent_folder(path)
+        self._refresh_recent_combo()
         self._populate_file_info_async()
+
+    def _refresh_recent_combo(self) -> None:
+        self._recent_combo.blockSignals(True)
+        self._recent_combo.clear()
+        self._recent_combo.addItems(_get_recent_folders())
+        self._recent_combo.setCurrentIndex(-1)
+        self._recent_combo.blockSignals(False)
+
+    def _on_recent_selected(self, index: int) -> None:
+        path = self._recent_combo.itemText(index)
+        if path and Path(path).is_dir():
+            self._navigate_to(path)
 
     def _go_up(self) -> None:
         current = self._model._root_path
@@ -1107,6 +1180,9 @@ class FolderBrowserWidget(QWidget):
             self._history_index -= 1
             path = self._history[self._history_index]
             self._model.set_root_path(path)
+            sort_col = self._tree.header().sortIndicatorSection()
+            sort_order = self._tree.header().sortIndicatorOrder()
+            self._model.sort(sort_col, sort_order)
             self._path_edit.setText(path)
             self._populate_file_info_async()
 

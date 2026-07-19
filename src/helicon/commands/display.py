@@ -166,7 +166,9 @@ def _install_save_hook(dock, viewer):
     """Install an event filter to save geometry when the viewer window closes."""
     from PySide6.QtCore import QEvent, QObject
 
-    class _CloseFilter(QObject):
+    class _ViewerCloseFilter(QObject):
+        """Saves both viewer and dock geometry when the viewer window closes."""
+
         def __init__(self, dock, viewer, parent=None):
             super().__init__(parent)
             self._dock = dock
@@ -177,8 +179,27 @@ def _install_save_hook(dock, viewer):
                 _save_geometry(self._dock, self._viewer)
             return False
 
-    flt = _CloseFilter(dock, viewer, parent=viewer.window._qt_window)
+    class _DockCloseFilter(QObject):
+        """Saves only dock geometry when the dock closes independently."""
+
+        def __init__(self, dock, parent=None):
+            super().__init__(parent)
+            self._dock = dock
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Close:
+                settings = _get_qsettings()
+                _write_rect(settings, "dock", self._dock)
+                save_cols = getattr(self._dock, "_save_col_widths", None)
+                if callable(save_cols):
+                    save_cols()
+            return False
+
+    flt = _ViewerCloseFilter(dock, viewer, parent=viewer.window._qt_window)
     viewer.window._qt_window.installEventFilter(flt)
+
+    dock_flt = _DockCloseFilter(dock, parent=dock)
+    dock.installEventFilter(dock_flt)
     return flt
 
 
@@ -199,7 +220,7 @@ def _save_geometry(dock, viewer):
 
 def _write_rect(settings, prefix, widget):
     try:
-        geo = widget.frameGeometry()
+        geo = widget.geometry()
         settings.setValue(f"{prefix}_x", geo.x())
         settings.setValue(f"{prefix}_y", geo.y())
         settings.setValue(f"{prefix}_width", geo.width())
@@ -620,7 +641,7 @@ def _install_viewer_save_menu(viewer):
     viewbox's mouse events and **connect** new filtered wrappers that:
 
     * Block right-button events from reaching the camera (preventing zoom).
-    * Show a "Save Viewport As…" context menu on right-click press.
+    * Show a "Save Canvas As…" context menu on right-click press.
     * Forward all other events to the original camera handler unchanged.
     """
     from unittest.mock import MagicMock
@@ -661,7 +682,7 @@ def _install_viewer_save_menu(viewer):
         def _show_save_menu():
             gpos = canvas.native.cursor().pos()
             menu = QMenu()
-            menu.addAction("Save Viewport As…")
+            menu.addAction("Save Canvas As…")
             menu.triggered.connect(
                 lambda action: (
                     _save_viewport(viewer)
@@ -1648,6 +1669,109 @@ def _parse_model_star(model_path: str) -> list[str] | None:
     return mrc_paths if mrc_paths else None
 
 
+def _parse_class2d_model_star(
+    model_path: str,
+) -> tuple[list[tuple[str, int]], list[float]] | None:
+    """Extract MRC references and class distributions from a RELION model.star.
+
+    Reads the ``data_model_classes`` section and resolves
+    ``_rlnReferenceImage`` (which may be ``idx@path.mrcs`` for Class2D)
+    and ``_rlnClassDistribution`` (abundance) columns.
+
+    Returns
+    -------
+    tuple of (entries, distributions) or None
+        * ``entries``: list of ``(mrc_path, frame_idx)`` tuples.
+        * ``distributions``: list of class distribution values (0-1).
+    """
+    from pathlib import Path
+
+    model_dir = Path(model_path).parent
+    in_loop = False
+    in_data_model_classes = False
+    col_names: list[str] = []
+    ref_image_col_idx = -1
+    class_dist_col_idx = -1
+    entries: list[tuple[str, int]] = []
+    distributions: list[float] = []
+
+    try:
+        with open(model_path) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+
+                if s.startswith("data_"):
+                    in_data_model_classes = "model_classes" in s
+                    in_loop = False
+                    col_names = []
+                    ref_image_col_idx = -1
+                    class_dist_col_idx = -1
+                    continue
+
+                if s == "loop_":
+                    in_loop = True
+                    col_names = []
+                    ref_image_col_idx = -1
+                    class_dist_col_idx = -1
+                    continue
+
+                if in_loop and s.startswith("_"):
+                    col_name = s.split()[0]
+                    col_names.append(col_name)
+                    if "referenceimage" in col_name.lower():
+                        ref_image_col_idx = len(col_names) - 1
+                    elif "classdistribution" in col_name.lower():
+                        class_dist_col_idx = len(col_names) - 1
+                    continue
+
+                if not in_data_model_classes:
+                    continue
+
+                if not in_loop:
+                    continue
+
+                parts = s.split()
+                if ref_image_col_idx < 0 or ref_image_col_idx >= len(parts):
+                    continue
+
+                ref_raw = parts[ref_image_col_idx]
+                frame_idx = 0
+                if "@" in ref_raw:
+                    idx_str, file_part = ref_raw.split("@", 1)
+                    frame_idx = int(idx_str) - 1
+                else:
+                    file_part = ref_raw
+
+                resolved = None
+                for ancestor in [model_dir] + list(model_dir.parents):
+                    candidate = ancestor / file_part
+                    if candidate.is_file():
+                        resolved = str(candidate)
+                        break
+
+                if not resolved:
+                    continue
+
+                dist = 0.0
+                if class_dist_col_idx >= 0 and class_dist_col_idx < len(parts):
+                    try:
+                        dist = float(parts[class_dist_col_idx])
+                    except ValueError:
+                        dist = 0.0
+
+                entries.append((resolved, frame_idx))
+                distributions.append(dist)
+    except Exception:
+        return None
+
+    if not entries:
+        return None
+
+    return entries, distributions
+
+
 def _parse_star_image_refs(
     star_path: str,
 ) -> tuple[list[tuple[int, str, float]], tuple, float] | None:
@@ -1827,7 +1951,7 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     """
     from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QWidget
 
-    from helicon.lib.image_gallery import _ControlPanel
+    from helicon.lib.gallery_widget import _ControlPanel
 
     wc = _ControlPanel.PANEL_WIDTH
 
@@ -1879,14 +2003,36 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     def _on_brightness(val):
         gallery.set_brightness(val / 100.0)
         panel._brightness_val.setText(f"{gallery._brightness:.2f}")
+        _refresh_histogram()
 
     def _on_contrast(val):
         gallery.set_contrast(val / 100.0)
         panel._contrast_val.setText(f"{gallery._contrast:.2f}")
+        _refresh_histogram()
 
     def _on_gamma(val):
         gallery.set_gamma(val / 100.0)
         panel._gamma_val.setText(f"{gallery._gamma:.2f}")
+        _refresh_histogram()
+
+    def _on_log_transform(checked):
+        gallery.set_log_transform(checked)
+        _refresh_histogram()
+
+    def _refresh_histogram():
+        if gallery.has_data() and panel._histogram_chk.isChecked():
+            panel._histogram_widget.update_histogram(
+                gallery._read_fn,
+                gallery._n,
+                gallery._brightness,
+                gallery._contrast,
+                gallery._gamma,
+                gallery._log_transform,
+            )
+
+    def _on_histogram_toggled(checked):
+        panel._histogram_widget.setVisible(checked)
+        _refresh_histogram()
 
     def _on_autocontrast():
         panel._brightness_slider.setValue(0)
@@ -1907,15 +2053,16 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     panel._auto_btn.clicked.connect(_on_autocontrast)
     panel._radio_selected.toggled.connect(_on_scope_selected)
     panel._radio_all.toggled.connect(_on_scope_all)
+    panel.log_changed.connect(_on_log_transform)
+    panel.histogram_changed.connect(_on_histogram_toggled)
+
+    _refresh_histogram()
 
     return container
 
 
 def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> None:
     """Show the lazy thumbnail grid for a stack in a standalone window.
-
-    The gallery is a self-contained :class:`PySide6.QtWidgets.QMainWindow`
-    with an :class:`ImageGalleryWidget`; it does not depend on a napari viewer.
 
     Parameters
     ----------
@@ -1932,132 +2079,69 @@ def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> No
     name : str
         Display name (usually the file name).
     """
-    from PySide6.QtWidgets import QMainWindow
+    from helicon.lib.gallery_backends import StackGallery
 
-    from helicon.lib.image_gallery import ImageGalleryWidget
-
-    widget = ImageGalleryWidget()
-    widget.set_data(read_fn, n, img_w, img_h, None, source_name=name)
-
-    container = _wrap_gallery_with_panel(widget)
-
-    if reuse_window is not None:
-        reuse_window.setWindowTitle(f"helicon - {name}")
-        reuse_window.setCentralWidget(container)
-        reuse_window.show()
-        reuse_window.raise_()
-        return reuse_window
-
-    class _GalleryWindow(QMainWindow):
-        def closeEvent(self, event):
-            _on_gallery_closing(self)
-            super().closeEvent(event)
-
-    window = _GalleryWindow()
-    window.setWindowTitle(f"helicon - {name}")
-    window.setCentralWidget(container)
-    tile = 128 + widget._panel.min_sep
-    window.resize(5 * tile + widget._sb_width, 5 * tile)
-    _galleries.append(window)
-    _active_gallery[0] = window
-    window.show()
-    return window
+    gallery = StackGallery(
+        star_path=name,
+        read_fn=read_fn,
+        n=n,
+        img_w=img_w,
+        img_h=img_h,
+        apix=apix,
+    )
+    return gallery.open(reuse_window=reuse_window)
 
 
 def _open_xyz_slice_gallery(star_path: str, reuse_window=None) -> "QMainWindow | None":
     """Display center slices (Z, Y, X) of MRC files referenced by a star file.
 
-    Works for both ``*optimiser.star`` (which indirects through model.star)
-    and ``*model.star`` (which directly lists MRC references). Each MRC file
-    gets one row of three center slices.
+    Delegates to ``Class3dGallery`` (with abundance labels) or
+    ``Refine3dGallery`` (without) based on the path.
     """
-    from pathlib import Path
-
-    import mrcfile
-    import numpy as np
-    from PySide6.QtWidgets import QMainWindow
-
-    from helicon.lib.image_gallery import ImageGalleryWidget
+    from helicon.lib.gallery_backends import Class3dGallery, Refine3dGallery
 
     name = Path(star_path).name
-    if name.endswith("model.star"):
-        mrc_paths = _parse_model_star(star_path)
-    else:
-        mrc_paths = _parse_optimiser_star(star_path)
-    if not mrc_paths:
-        return None
+    is_refine = any(p.startswith("Refine3D") for p in Path(star_path).parts)
+    gallery = Refine3dGallery(star_path) if is_refine else Class3dGallery(star_path)
+    return gallery.open(reuse_window=reuse_window)
 
-    slices_per_mrc = 3
-    total_images = len(mrc_paths) * slices_per_mrc
-    img_w = img_h = 0
 
-    def _read_slice(i: int) -> np.ndarray:
-        nonlocal img_w, img_h
-        mrc_idx = i // slices_per_mrc
-        slice_idx = i % slices_per_mrc
+def _find_model_star_from_optimiser(optimiser_path: str) -> str | None:
+    """Find the model.star referenced by an optimiser.star file."""
+    from pathlib import Path
 
-        with mrcfile.open(mrc_paths[mrc_idx], permissive=True) as mrc:
-            data = mrc.data
-            nz, ny, nx = data.shape
-            z_center = nz // 2
-            y_center = ny // 2
-            x_center = nx // 2
+    star_dir = Path(optimiser_path).parent
 
-            if slice_idx == 0:
-                sl = data[z_center, :, :]
-            elif slice_idx == 1:
-                sl = data[:, y_center, :]
-            else:
-                sl = data[:, :, x_center]
+    try:
+        with open(optimiser_path) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("_rlnModelStarFile"):
+                    parts = s.split()
+                    if len(parts) >= 2:
+                        model_rel = parts[-1]
+                        for ancestor in [star_dir] + list(star_dir.parents):
+                            candidate = ancestor / model_rel
+                            if candidate.is_file():
+                                return str(candidate)
+    except Exception:
+        pass
+    return None
 
-            if img_w == 0:
-                img_h, img_w = sl.shape[:2]
 
-            return sl.astype(np.float32)
+def _open_2d_classes_gallery(star_path: str, reuse_window=None) -> "QMainWindow | None":
+    """Display 2D class averages from a Class2D model.star.
 
-    _read_slice(0)
+    Shows one MRC per class (``_rlnReferenceImage``) with abundance labels
+    (``_rlnClassDistribution``). Sort-by-abundance and reverse-sort controls
+    are provided in the control panel.
+    """
+    from helicon.lib.gallery_backends import Class2dGallery
 
-    axis_labels = ["Z", "Y", "X"]
-    labels = [
-        f"{mrc_idx + 1}-{axis_labels[slice_idx]}"
-        for mrc_idx in range(len(mrc_paths))
-        for slice_idx in range(slices_per_mrc)
-    ]
-
-    widget = ImageGalleryWidget()
-    widget.set_data(
-        _read_slice,
-        total_images,
-        img_w,
-        img_h,
-        None,
-        labels=labels,
-        source_name=Path(star_path).name,
-    )
-
-    container = _wrap_gallery_with_panel(widget)
-
-    if reuse_window is not None:
-        reuse_window.setWindowTitle(f"helicon - {Path(star_path).name}")
-        reuse_window.setCentralWidget(container)
-        reuse_window.show()
-        reuse_window.raise_()
-        return reuse_window
-
-    class _GalleryWindow(QMainWindow):
-        def closeEvent(self, event):
-            _on_gallery_closing(self)
-            super().closeEvent(event)
-
-    window = _GalleryWindow()
-    window.setWindowTitle(f"helicon - {Path(star_path).name}")
-    window.setCentralWidget(container)
-    tile = 128 + widget._panel.min_sep
-    window.resize(5 * tile + widget._sb_width, 5 * tile)
-    _galleries.append(window)
-    _active_gallery[0] = window
-    window.show()
-    return window
+    gallery = Class2dGallery(star_path)
+    return gallery.open(reuse_window=reuse_window)
 
 
 def _open_frame_in_slice_view(viewer, read_fn, idx, img_w, img_h, apix, name) -> None:
@@ -2168,6 +2252,10 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
 
     if ext == ".star" and mode == "optimiser":
         _open_xyz_slice_gallery(path, reuse_window=reuse_gallery)
+        return
+
+    if ext == ".star" and mode == "2dclasses":
+        _open_2d_classes_gallery(path, reuse_window=reuse_gallery)
         return
 
     # "metadata" mode: always open any star file as text, regardless of type.
@@ -2697,7 +2785,7 @@ def main(args: argparse.Namespace) -> None:
         if mode == "chimerax":
             _launch_chimerax(path)
             return
-        if mode in ("gallery", "optimiser"):
+        if mode in ("gallery", "optimiser", "2dclasses"):
             reuse = None
             if not new_window:
                 ag = _active_gallery[0]
