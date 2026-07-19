@@ -240,8 +240,13 @@ class TestOpenGalleryDispatch:
         # The gallery is a standalone window with no napari viewer dependency.
         assert window is not None
         assert window.centralWidget() is not None
+        from helicon.lib.image_gallery import ImageGalleryWidget
+
+        assert window.centralWidget().findChild(ImageGalleryWidget) is not None
 
     def test_click_does_not_open_in_viewer(self, qapp):
+        from helicon.lib.image_gallery import ImageGalleryWidget
+
         viewer = _mock_viewer()
         images = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
         window = display._open_gallery(
@@ -252,9 +257,74 @@ class TestOpenGalleryDispatch:
             apix=1.0,
             name="x.mrcs",
         )
-        widget = window.centralWidget()
-        widget.image_activated.emit(17)
+        gallery = window.centralWidget().findChild(ImageGalleryWidget)
+        gallery.image_activated.emit(17)
         assert viewer._added_image is None
+
+    def test_panel_toggle_grows_window_leftward(self, qapp):
+        from helicon.lib.image_gallery import ImageGalleryWidget, _ControlPanel
+
+        images = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
+        window = display._open_gallery(
+            read_fn=lambda i: images[i],
+            n=50,
+            img_w=20,
+            img_h=20,
+            apix=1.0,
+            name="x.mrcs",
+        )
+        gallery = window.centralWidget().findChild(ImageGalleryWidget)
+        panel = window.centralWidget().findChild(_ControlPanel)
+
+        wc = _ControlPanel.PANEL_WIDTH
+        w0, h0, x0, y0 = window.width(), window.height(), window.x(), window.y()
+        assert not panel.isVisible()
+
+        # Toggle ON: window grows leftward by ~wc, gallery position unchanged.
+        gallery.panel_toggle_requested.emit()
+        qapp.processEvents()
+        assert panel.isVisible()
+        assert window.width() == w0 + wc
+        assert window.height() == h0
+        # x shifts left by wc (frame-margin noise allowed on the test platform)
+        assert abs((window.x() - x0) + wc) <= 4
+        # Absolute invariant the user reported: no vertical drift per toggle.
+        assert window.y() == y0
+
+        # Toggle OFF: window shrinks back to original geometry.
+        gallery.panel_toggle_requested.emit()
+        qapp.processEvents()
+        assert not panel.isVisible()
+        assert window.width() == w0
+        assert window.height() == h0
+        assert abs(window.x() - x0) <= 4
+        assert window.y() == y0
+
+    def test_panel_toggle_no_vertical_drift(self, qapp):
+        # Regression test for the reported bug: each toggle used to move the
+        # window up by the title-bar height.  Toggling many times must keep
+        # the window's y exactly constant (no accumulation).
+        from helicon.lib.image_gallery import ImageGalleryWidget
+
+        images = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
+        window = display._open_gallery(
+            read_fn=lambda i: images[i],
+            n=50,
+            img_w=20,
+            img_h=20,
+            apix=1.0,
+            name="x.mrcs",
+        )
+        gallery = window.centralWidget().findChild(ImageGalleryWidget)
+        y0 = window.y()
+
+        for _ in range(5):
+            gallery.panel_toggle_requested.emit()
+            qapp.processEvents()
+            gallery.panel_toggle_requested.emit()
+            qapp.processEvents()
+
+        assert window.y() == y0
 
     def test_reuse_window_updates_content(self, qapp):
         images_a = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
@@ -359,6 +429,117 @@ class TestGallerySave:
             calls = [str(c) for c in mock_menu.addAction.call_args_list]
             assert any("Save Viewport As…" in c for c in calls)
         assert not w._dragged
+        w.close()
+
+    def test_save_as_crops_to_content(self, qapp):
+        # The saved image should contain only the drawn thumbnails, not the
+        # surrounding gray padding or the scrollbar.
+        from unittest.mock import patch
+
+        images = [np.full((20, 20), 0.5, dtype=np.float32) for _ in range(3)]
+        w = ImageGalleryWidget()
+        w.set_data(lambda i: images[i], 3, 20, 20, np.float32)
+        w.resize(400, 300)
+        w.show()
+        QApplication.processEvents()
+
+        captured = {}
+        with patch(
+            "helicon.commands.display._save_qimage",
+            side_effect=lambda qimg, parent: captured.update({"qimg": qimg}),
+        ):
+            w._save_as()
+
+        assert "qimg" in captured
+        qimg = captured["qimg"]
+        # Cropped image must be strictly smaller than the full widget (which
+        # includes padding + scrollbar space).  The grabbed pixmap is in
+        # device pixels, so compare logical sizes via devicePixelRatio.
+        dpr = qimg.devicePixelRatio() or 1
+        assert (qimg.width() / dpr) < w.width()
+        assert (qimg.height() / dpr) < w.height()
+        # And must match the tight bounding box of the drawn thumbnails.
+        coords = w._coords
+        assert coords
+        min_x = min(r.x() for r in coords.values())
+        min_y = min(r.y() for r in coords.values())
+        max_x = max(r.x() + r.width() for r in coords.values())
+        max_y = max(r.y() + r.height() for r in coords.values())
+        assert (qimg.width() / dpr) == max_x - min_x
+        assert (qimg.height() / dpr) == max_y - min_y
+        w.close()
+
+    def test_save_as_prefills_source_name(self, qapp):
+        # The save dialog should open pre-filled with the opened file's base
+        # name (suffix replaced by .png).
+        from unittest.mock import patch
+
+        images = [np.full((20, 20), 0.5, dtype=np.float32) for _ in range(3)]
+        w = ImageGalleryWidget()
+        w.set_data(
+            lambda i: images[i], 3, 20, 20, np.float32, source_name="stack_a.mrcs"
+        )
+        w.resize(400, 300)
+        w.show()
+        QApplication.processEvents()
+
+        captured = {}
+        real_save = display._save_qimage
+
+        def _fake(qimg, parent, default_name=None):
+            captured["default_name"] = default_name
+            return real_save(qimg, parent, default_name=default_name)
+
+        with patch("helicon.commands.display._save_qimage", side_effect=_fake):
+            w._save_as()
+        assert captured["default_name"] == "stack_a.mrcs"
+
+    def test_save_as_excludes_scrolled_off_tiles(self, qapp):
+        # After scrolling, the crop must reflect only the tiles now visible,
+        # not stale rects from before the scroll (the bug that made the saved
+        # image larger than the viewport in both directions).
+        from unittest.mock import patch
+
+        images = [np.full((100, 100), 0.5, dtype=np.float32) for _ in range(50)]
+        w = ImageGalleryWidget()
+        w.set_data(lambda i: images[i], 50, 100, 100, np.float32)
+        # Small viewport so the stack overflows and requires scrolling.
+        w.resize(200, 200)
+        w.show()
+        QApplication.processEvents()
+
+        # Sanity: initially the top rows are visible.
+        assert 0 in w._coords
+
+        # Scroll far down so the first rows leave the viewport.
+        w._scroll_y = -5000
+        w.update()
+        QApplication.processEvents()
+
+        captured = {}
+        with patch(
+            "helicon.commands.display._save_qimage",
+            side_effect=lambda qimg, parent: captured.update({"qimg": qimg}),
+        ):
+            w._save_as()
+
+        assert "qimg" in captured
+        qimg = captured["qimg"]
+        coords = w._coords
+        assert coords
+        # No stale tile from the top rows may remain after the scroll.
+        min_index = min(coords.keys())
+        assert min_index > 0, "scrolled-off top tiles leaked into the crop"
+        # Crop must match the visible tiles' bbox, clipped to the widget
+        # (grab() clips to the widget rect, so partial tiles shrink to what is
+        # actually on screen).  The grabbed pixmap is in device pixels.
+        dpr = qimg.devicePixelRatio() or 1
+        min_x = max(0, min(r.x() for r in coords.values()))
+        min_y = max(0, min(r.y() for r in coords.values()))
+        max_x = min(w.width(), max(r.x() + r.width() for r in coords.values()))
+        max_y = min(w.height(), max(r.y() + r.height() for r in coords.values()))
+        assert (qimg.width() / dpr) == max_x - min_x
+        assert (qimg.height() / dpr) == max_y - min_y
         w.close()
 
 

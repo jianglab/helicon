@@ -838,10 +838,14 @@ class FolderBrowserWidget(QWidget):
         self._btn_stats = QPushButton("Stats")
         self._btn_general = QPushButton("General Display")
         self._btn_general_default = "General Display"
-        self._btn_metadata = QPushButton("Metadata")
+        self._btn_metadata = QPushButton("Text")
         self._btn_metadata.setToolTip("Open this file as text/metadata")
         self._btn_gallery = QPushButton("Gallery")
         self._btn_gallery.setToolTip("Show a lazy thumbnail grid of the stack")
+        self._btn_optimiser = QPushButton("XYZ Slice")
+        self._btn_optimiser.setToolTip(
+            "Show center slices (Z, Y, X) of referenced MRC maps"
+        )
         self._new_window_cb = QCheckBox("New display window")
         for btn in (
             self._btn_volume,
@@ -851,6 +855,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_metadata,
             self._btn_stats,
             self._btn_gallery,
+            self._btn_optimiser,
         ):
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
@@ -865,6 +870,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_general.clicked.connect(lambda: self._emit_display("general"))
         self._btn_metadata.clicked.connect(lambda: self._emit_display("metadata"))
         self._btn_gallery.clicked.connect(lambda: self._emit_display("gallery"))
+        self._btn_optimiser.clicked.connect(lambda: self._emit_display("optimiser"))
 
         layout.addWidget(self._action_bar)
 
@@ -917,6 +923,8 @@ class FolderBrowserWidget(QWidget):
         ext = Path(path).suffix.lower()
         if ext == ".star":
             name = Path(path).name
+            if name.endswith("optimiser.star") or name.endswith("model.star"):
+                return ["metadata", "optimiser"]
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return ["metadata"]
             return ["slice", "gallery", "stats", "metadata"]
@@ -988,6 +996,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_general.setVisible("general" in modes)
         self._btn_metadata.setVisible("metadata" in modes)
         self._btn_gallery.setVisible("gallery" in modes)
+        self._btn_optimiser.setVisible("optimiser" in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -1041,47 +1050,18 @@ class FolderBrowserWidget(QWidget):
 
     def _reorder_buttons_alphabetically(self, modes: list[str]) -> None:
         layout = self._action_bar.layout()
-        buttons = [
-            self._btn_slice,
-            self._btn_volume,
-            self._btn_chimerax,
-            self._btn_stats,
-            self._btn_general,
-            self._btn_metadata,
-            self._btn_gallery,
-        ]
-        active = [
-            b
-            for b in buttons
-            if any(
-                m in modes
-                for m in (
-                    ("slice",)
-                    if b is self._btn_slice
-                    else (
-                        ("volume",)
-                        if b is self._btn_volume
-                        else (
-                            ("chimerax",)
-                            if b is self._btn_chimerax
-                            else (
-                                ("stats",)
-                                if b is self._btn_stats
-                                else (
-                                    ("general",)
-                                    if b is self._btn_general
-                                    else (
-                                        ("metadata",)
-                                        if b is self._btn_metadata
-                                        else ("gallery",)
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        ]
+        btn_mode_map = {
+            self._btn_slice: "slice",
+            self._btn_volume: "volume",
+            self._btn_chimerax: "chimerax",
+            self._btn_stats: "stats",
+            self._btn_general: "general",
+            self._btn_metadata: "metadata",
+            self._btn_gallery: "gallery",
+            self._btn_optimiser: "optimiser",
+        }
+        buttons = list(btn_mode_map.keys())
+        active = [b for b in buttons if btn_mode_map[b] in modes]
         active.sort(key=lambda b: b.text().lower())
         for btn in buttons:
             layout.removeWidget(btn)

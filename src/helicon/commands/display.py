@@ -26,6 +26,7 @@ if sys.platform == "darwin":
 
 import argparse
 import os
+from pathlib import Path
 
 import helicon
 from helicon.lib.exceptions import HeliconDependencyError
@@ -87,15 +88,10 @@ def _restore_geometry(dock, viewer):
 
         settings = _get_qsettings()
 
-        viewer_geo = _read_rect(settings, "viewer")
-        if viewer_geo is not None:
-            x, y, w, h = viewer_geo
+        viewer_ba = settings.value("viewer_ba")
+        if viewer_ba is not None:
             try:
-                # setGeometry takes the OUTER (frame) rect, matching the
-                # frameGeometry() used when saving. resize()/move() would treat
-                # w/h as the inner client size and let the title bar add extra
-                # height on macOS, making the restored window too tall.
-                qt_win.setGeometry(x, y, w, h)
+                qt_win.restoreGeometry(viewer_ba)
             except AttributeError:
                 pass
 
@@ -188,9 +184,14 @@ def _install_save_hook(dock, viewer):
 
 def _save_geometry(dock, viewer):
     settings = _get_qsettings()
+    qt_win = viewer.window._qt_window
+
+    cached_ba = getattr(viewer, "_display_only_ba", None)
+    viewer_ba = cached_ba if cached_ba is not None else qt_win.saveGeometry()
+    settings.setValue("viewer_ba", viewer_ba)
+
     _write_rect(settings, "dock", dock)
-    _write_rect(settings, "viewer", viewer.window._qt_window)
-    # Persist file-browser column widths (backup for the widget closeEvent).
+
     save_cols = getattr(dock, "_save_col_widths", None)
     if callable(save_cols):
         save_cols()
@@ -510,7 +511,7 @@ def _enable_continuous_auto_contrast(layer, viewer) -> None:
         pass
 
 
-def _save_qimage(qimage, parent=None):
+def _save_qimage(qimage, parent=None, default_name=None):
     """Open a Save-As dialog and write a QImage to the chosen file.
 
     Supported formats: PNG, TIFF, PDF, SVG.  The dialog filter list
@@ -522,6 +523,10 @@ def _save_qimage(qimage, parent=None):
         The image to save.
     parent : QWidget, optional
         Parent widget for the dialog (centre-on-parent).
+    default_name : str, optional
+        Suggested base filename (without extension).  The dialog pre-fills
+        it with a ``.png`` suffix, replacing any existing suffix on the
+        caller's source name.
     """
     from PySide6.QtWidgets import QFileDialog
     from PySide6.QtGui import QPixmap
@@ -529,15 +534,29 @@ def _save_qimage(qimage, parent=None):
     if isinstance(qimage, QPixmap):
         qimage = qimage.toImage()
 
+    if default_name and isinstance(default_name, (str, bytes)):
+        stem = (
+            Path(default_name).stem if "." in Path(default_name).name else default_name
+        )
+        suggested = stem + ".png"
+    else:
+        suggested = ""
+
     filt = "Images (*.png *.tiff *.tif);;PDF (*.pdf);;SVG (*.svg)"
-    path, _ = QFileDialog.getSaveFileName(
-        parent,
-        "Save Image",
-        "",
-        filt,
-    )
-    if not path:
+    dlg = QFileDialog(parent, "Save Image")
+    dlg.setAcceptMode(QFileDialog.AcceptSave)
+    dlg.setNameFilter(filt)
+    # selectFile() reliably pre-fills the file name on native dialogs
+    # (macOS/Windows); passing it only via the static getSaveFileName()
+    # "directory" argument is ignored by the native save dialog.
+    if suggested:
+        dlg.selectFile(suggested)
+    if not dlg.exec():
         return
+    selected = dlg.selectedFiles()
+    if not selected:
+        return
+    path = selected[0]
     ext = path.rsplit(".", 1)[-1].lower()
     if ext in ("pdf", "svg"):
         _render_qimage_vector(qimage, path, ext)
@@ -678,6 +697,62 @@ def _install_viewer_save_menu(viewer):
         pass
 
 
+def _crop_to_content(arr):
+    """Crop an RGB/RGBA screenshot to the tight bounding box of the data.
+
+    napari's ``screenshot(canvas_only=True)`` still contains the uniformly
+    filled canvas background (letterboxing when the data does not fill the
+    canvas).  The background is assumed to be a single solid colour, sampled
+    from the top-left corner; every pixel that differs from it is content,
+    and the result is cropped to that region's bounding box.
+
+    Parameters
+    ----------
+    arr : numpy.ndarray
+        ``H x W x (3 or 4)`` uint8 image.
+
+    Returns
+    -------
+    numpy.ndarray
+        Cropped image, or ``arr`` unchanged if it has no colour channel or
+        no non-background pixels.
+    """
+    import numpy as np
+
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return arr
+    h, w = arr.shape[:2]
+    bg = arr[0, 0, :3].astype(int)
+    rgb = arr[:, :, :3].astype(int)
+    # Allow a small tolerance for anti-aliased edges against the background.
+    diff = np.any(np.abs(rgb - bg) > 8, axis=2)
+    if not diff.any():
+        return arr
+    rows = np.where(diff.any(axis=1))[0]
+    cols = np.where(diff.any(axis=0))[0]
+    y0, y1 = int(rows[0]), int(rows[-1]) + 1
+    x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    return arr[y0:y1, x0:x1]
+
+
+def _viewer_source_name(viewer) -> str | None:
+    """Best-effort source file name for a napari viewer's current content.
+
+    napari records the path a layer was loaded from in ``layer.source.path``
+    (image/points/etc.).  Returns the first such path's name, or ``None`` if
+    no layer carries a source path (e.g. generated/empty viewers).
+    """
+    try:
+        for layer in viewer.layers:
+            src = getattr(layer, "source", None)
+            path = getattr(src, "path", None)
+            if path:
+                return Path(path).name
+    except Exception:
+        pass
+    return None
+
+
 def _save_viewport(viewer, parent=None):
     """Capture the napari canvas and save it via the file dialog.
 
@@ -695,10 +770,20 @@ def _save_viewport(viewer, parent=None):
         arr = np.ascontiguousarray(viewer.screenshot(canvas_only=True, flash=False))
     except Exception:
         return
+    # Drop the empty canvas padding around the data (mirrors the gallery
+    # save, which crops to the drawn thumbnail bounding box).
+    arr = _crop_to_content(arr)
+    # _crop_to_content returns a (possibly non-contiguous) view; QImage needs
+    # contiguous memory, so copy before wrapping.
+    arr = np.ascontiguousarray(arr)
     h, w = arr.shape[:2]
     qimg = QImage(arr.data, w, h, w * 4, QImage.Format_RGBA8888)
     qimg.ndarray = arr
-    _save_qimage(qimg, parent)
+    # Prefer the name recorded by _open_file (covers openers that add layers
+    # directly); fall back to napari's own layer.source.path for files opened
+    # through viewer.open().
+    source = getattr(viewer, "_source_name", None) or _viewer_source_name(viewer)
+    _save_qimage(qimg, parent, default_name=source)
 
 
 def _launch_chimerax(path: str) -> None:
@@ -749,8 +834,40 @@ def _install_panel_toggle(viewer) -> None:
     """Install a middle-click handler that toggles the layer panel.
 
     Middle-clicking the canvas shows/hides the left-side layer list and
-    layer controls. Installed on every viewer (main window and any new
-    display window) so the toggle works uniformly.
+    layer controls. The display area keeps its size and screen position:
+    the window grows leftward when the panel opens and shrinks from the
+    left when it closes, so the canvas is never resized.
+
+    Three sources of unwanted zoom had to be defeated:
+
+    * A Qt event filter consumes ``MouseButtonPress`` (triggers panel toggle),
+      ``MouseButtonRelease`` (clears the shared ``_middle_held`` flag), and
+      **``MouseButtonDblClick``** (napari binds ALL double-clicks to
+      ``double_click_to_zoom`` which multiplies ``viewer.camera.zoom * 2`` —
+      this was the root cause of the progressive zoom on rapid middle clicks).
+
+    * A wrap around the camera's ``viewbox_mouse_event`` suppresses camera
+      pan/zoom when the ``button`` or ``buttons`` field contains a middle value.
+      VisPy and Qt number the middle button differently (3 vs 4), so all
+      of ``(2, 3, 4)`` are checked.  The viewbox stores the connection as
+      ``(camera, "viewbox_mouse_event")`` — a weak ref + method name — so
+      patching the instance attribute (not the class) is honoured on each emit.
+
+    * The ``_middle_held`` flag bridges two layers: the Qt event filter sets it
+      on middle press; the camera wrap reads it to suppress ``mouse_wheel``
+      events that have ``buttons=[]`` (no button reported).  These micro-scroll
+      events are generated by the physical scroll wheel mechanism as it
+      settles — they carry neither the middle button flag nor arrive through the
+      Qt event filter, so only the flag can suppress them.
+
+    napari swaps the camera instance when the 2D/3D display mode changes, so
+    the wrap is re-applied whenever ``dims.ndisplay`` changes.
+
+    References
+    ----------
+    VisPy button map (``_qt.py``): 1=left, 2=right, 3=middle
+    Qt enum values: 1=left, 2=right, 4=middle
+    napari double-click zoom: ``_viewer_mouse_bindings.py:double_click_to_zoom``
     """
     try:
         from unittest.mock import MagicMock
@@ -763,38 +880,199 @@ def _install_panel_toggle(viewer) -> None:
         layer_list = qv.dockLayerList
         layer_controls = qv.dockLayerControls
 
+        # Shared state: the event filter sets this on press/release, and the
+        # camera wrap reads it to suppress micro-scroll events that arrive as
+        # a side-effect of pressing the physical scroll wheel.
+        _middle_held = [False]
+
         class _MiddleClickFilter(QObject):
-            def __init__(self, layer_list, layer_controls, parent=None):
+            def __init__(
+                self, layer_list, layer_controls, qt_viewer, viewer, parent=None
+            ):
                 super().__init__(parent)
                 self._layer_list = layer_list
                 self._layer_controls = layer_controls
+                self._qt_viewer = qt_viewer
+                self._viewer = viewer
+                self._saved_dock_w = 0
+                self._toggling = False
+                self._pending_timer = None
+                self._panel_shown = False
 
-            def eventFilter(self, obj, event):
-                if (
-                    event.type() == QEvent.MouseButtonPress
-                    and event.button() == Qt.MouseButton.MiddleButton
-                ):
-                    if self._layer_list.isVisible():
-                        self._layer_list.hide()
-                        self._layer_controls.hide()
-                    else:
+            def _toggle_panel(self):
+                if self._toggling:
+                    return
+                if self._pending_timer is not None:
+                    self._pending_timer.stop()
+                    self._pending_timer = None
+                self._toggling = True
+                try:
+                    self._do_toggle()
+                finally:
+                    self._toggling = False
+
+            def _apply_geometry(self, handle, win, x, y, w, h):
+                if handle:
+                    handle.setGeometry(x, y, w, h)
+                else:
+                    win.setGeometry(x, y, w, h)
+
+            def _cache_display_rect(self, handle, win):
+                self._viewer._display_only_ba = win.saveGeometry()
+
+            def _do_toggle(self):
+                win = self._qt_viewer.window()
+                if win is None:
+                    return
+                from PySide6.QtCore import QTimer
+                from PySide6.QtWidgets import QStyle
+
+                handle = win.windowHandle()
+                style = self._layer_list.style()
+                grip = max(
+                    style.pixelMetric(QStyle.PixelMetric.PM_DockWidgetSeparatorExtent),
+                    style.pixelMetric(QStyle.PixelMetric.PM_DockWidgetHandleExtent),
+                    0,
+                )
+                hiding = self._layer_list.isVisible()
+                base = handle.geometry() if handle else win.geometry()
+                if hiding:
+                    dock_w = self._layer_list.width() + grip
+                    self._saved_dock_w = dock_w
+                    self._layer_list.hide()
+                    self._layer_controls.hide()
+                    self._panel_shown = False
+                    new_x = base.x() + dock_w
+                    new_w = max(base.width() - dock_w, 1)
+                    self._apply_geometry(
+                        handle, win, new_x, base.y(), new_w, base.height()
+                    )
+                    self._cache_display_rect(handle, win)
+                else:
+                    self._cache_display_rect(handle, win)
+                    if self._saved_dock_w > 0:
+                        dock_w = self._saved_dock_w
+                        new_x = base.x() - dock_w
+                        new_w = base.width() + dock_w
+                        self._apply_geometry(
+                            handle, win, new_x, base.y(), new_w, base.height()
+                        )
                         self._layer_list.show()
                         self._layer_controls.show()
-                    # Consume so the camera does not also pan in 3D.
-                    return True
+                        self._panel_shown = True
+                    else:
+                        # Docks were hidden since cold start and have never
+                        # been laid out, so width() is not yet valid. Resize the
+                        # window first using a sizeHint estimate so the docks
+                        # land in the new left-hand space (no canvas-overlap
+                        # flash), then correct on the next turn once Qt has laid
+                        # out the freshly-shown docks and width() is real.
+                        est = self._layer_list.sizeHint().width() + grip
+                        self._saved_dock_w = est
+                        new_x = base.x() - est
+                        new_w = base.width() + est
+                        self._apply_geometry(
+                            handle, win, new_x, base.y(), new_w, base.height()
+                        )
+                        self._layer_list.show()
+                        self._layer_controls.show()
+                        self._panel_shown = True
+                        self._pending_timer = QTimer()
+                        self._pending_timer.setSingleShot(True)
+                        self._pending_timer.timeout.connect(
+                            lambda: self._finish_first_show(handle, win, grip, est)
+                        )
+                        self._pending_timer.start(0)
+
+            def _finish_first_show(self, handle, win, grip, est):
+                self._pending_timer = None
+                dock_w = self._layer_list.width() + grip
+                self._saved_dock_w = dock_w
+                # The window was already shifted left by ``est`` in the
+                # current turn; correct only the remaining difference.
+                delta = dock_w - est
+                if delta == 0:
+                    return
+                base = handle.geometry() if handle else win.geometry()
+                new_x = base.x() - delta
+                new_w = base.width() + delta
+                self._apply_geometry(handle, win, new_x, base.y(), new_w, base.height())
+
+            def eventFilter(self, obj, event):
+                etype = event.type()
+                if etype in (
+                    QEvent.MouseButtonPress,
+                    QEvent.MouseButtonRelease,
+                    QEvent.MouseButtonDblClick,
+                ):
+                    if event.button() == Qt.MouseButton.MiddleButton:
+                        if etype == QEvent.MouseButtonPress:
+                            _middle_held[0] = True
+                            self._toggle_panel()
+                            return True
+                        elif etype == QEvent.MouseButtonRelease:
+                            _middle_held[0] = False
+                        elif etype == QEvent.MouseButtonDblClick:
+                            return True
                 return False
 
-        # 3D: VisPy canvas consumes the middle button for camera panning,
-        # which stops propagation to the ancestor qt_viewer filter. Install
-        # on the canvas native QWidget (the leaf that gets the event first)
-        # so the toggle fires in both 2D and 3D.
         canvas_native = getattr(getattr(qv, "canvas", None), "native", None)
         if isinstance(canvas_native, QObject):
-            mf = _MiddleClickFilter(layer_list, layer_controls, parent=canvas_native)
+            mf = _MiddleClickFilter(
+                layer_list,
+                layer_controls,
+                qv,
+                viewer,
+                parent=canvas_native,
+            )
             canvas_native.installEventFilter(mf)
         else:
-            mf = _MiddleClickFilter(layer_list, layer_controls, parent=qv)
+            mf = _MiddleClickFilter(layer_list, layer_controls, qv, viewer, parent=qv)
             qv.installEventFilter(mf)
+        viewer._panel_toggle = mf
+
+        view = getattr(getattr(qv, "canvas", None), "view", None)
+        if view is None:
+            return
+
+        # VisPy reports middle as 3 (its own enum), Qt reports it as 4,
+        # and some builds pass through the raw Qt value.  Suppress all
+        # three, including when middle is held during mouse_wheel/move.
+        middle_values = (2, 3, 4)
+
+        def _wrap_camera() -> None:
+            camera = getattr(view, "camera", None)
+            if camera is None or getattr(camera, "_panel_toggle_wrapped", False):
+                return
+            original = camera.viewbox_mouse_event
+
+            def _wrapped_viewbox_mouse_event(event) -> None:
+                btn = getattr(event, "button", None)
+                btns = getattr(event, "buttons", None) or []
+                is_middle = (
+                    btn in middle_values
+                    or any(b in middle_values for b in btns)
+                    or (
+                        getattr(event, "type", None) == "mouse_wheel"
+                        and _middle_held[0]
+                    )
+                )
+                if is_middle:
+                    try:
+                        event.handled = True
+                    except Exception:
+                        pass
+                    return
+                original(event)
+
+            camera.viewbox_mouse_event = _wrapped_viewbox_mouse_event
+            camera._panel_toggle_wrapped = True
+
+        _wrap_camera()
+        try:
+            viewer.dims.events.ndisplay.connect(lambda *a, **k: _wrap_camera())
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1237,6 +1515,139 @@ def _is_metadata_star(path: str) -> bool:
     return any(name.endswith(suffix) for suffix in _METADATA_STAR_SUFFIXES)
 
 
+def _is_optimiser_star(path: str) -> bool:
+    """Return True for RELION optimiser.star files.
+
+    These contain references to MRC files whose center slices can be
+    displayed in a gallery view.
+    """
+    from pathlib import Path
+
+    return Path(path).name.lower().endswith("optimiser.star")
+
+
+def _parse_optimiser_star(optimiser_path: str) -> list[str] | None:
+    """Parse a RELION optimiser.star file and extract referenced MRC file paths.
+
+    The optimiser.star file references model.star files, which in turn
+    contain the actual MRC file paths in the ``_rlnReferenceImage`` column.
+
+    Parameters
+    ----------
+    optimiser_path : str
+        Path to the optimiser.star file.
+
+    Returns
+    -------
+    list of str or None
+        List of resolved MRC file paths, or None if parsing fails.
+    """
+    from pathlib import Path
+
+    star_dir = Path(optimiser_path).parent
+    model_star_paths: list[str] = []
+
+    try:
+        with open(optimiser_path) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+
+                if s.startswith("_rlnModelStarFile"):
+                    parts = s.split()
+                    if len(parts) >= 2:
+                        model_rel = parts[-1]
+                        for ancestor in [star_dir] + list(star_dir.parents):
+                            candidate = ancestor / model_rel
+                            if candidate.is_file():
+                                model_star_paths.append(str(candidate))
+                                break
+    except Exception:
+        return None
+
+    if not model_star_paths:
+        return None
+
+    mrc_paths: list[str] = []
+    for model_path in model_star_paths:
+        result = _parse_model_star(model_path)
+        if result:
+            for p in result:
+                if p not in mrc_paths:
+                    mrc_paths.append(p)
+
+    return mrc_paths if mrc_paths else None
+
+
+def _parse_model_star(model_path: str) -> list[str] | None:
+    """Extract referenced MRC file paths from a RELION model.star.
+
+    Reads the ``data_model_classes`` section and resolves the
+    ``_rlnReferenceImage`` column to absolute MRC paths.
+    """
+    from pathlib import Path
+
+    model_dir = Path(model_path).parent
+    in_loop = False
+    in_data_model_classes = False
+    col_names: list[str] = []
+    ref_image_col_idx = -1
+    mrc_paths: list[str] = []
+
+    try:
+        with open(model_path) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+
+                if s.startswith("data_"):
+                    in_data_model_classes = "model_classes" in s
+                    in_loop = False
+                    col_names = []
+                    ref_image_col_idx = -1
+                    continue
+
+                if s == "loop_":
+                    in_loop = True
+                    col_names = []
+                    ref_image_col_idx = -1
+                    continue
+
+                if in_loop and s.startswith("_"):
+                    col_names.append(s.split()[0])
+                    if "referenceimage" in s.lower():
+                        ref_image_col_idx = len(col_names) - 1
+                    continue
+
+                if not in_data_model_classes or ref_image_col_idx < 0:
+                    continue
+
+                if not in_loop:
+                    continue
+
+                parts = s.split()
+                if ref_image_col_idx >= len(parts):
+                    continue
+
+                mrc_rel = parts[ref_image_col_idx]
+
+                resolved = None
+                for ancestor in [model_dir] + list(model_dir.parents):
+                    candidate = ancestor / mrc_rel
+                    if candidate.is_file():
+                        resolved = str(candidate)
+                        break
+
+                if resolved and resolved not in mrc_paths:
+                    mrc_paths.append(resolved)
+    except Exception:
+        return None
+
+    return mrc_paths if mrc_paths else None
+
+
 def _parse_star_image_refs(
     star_path: str,
 ) -> tuple[list[tuple[int, str, float]], tuple, float] | None:
@@ -1407,6 +1818,99 @@ def _on_gallery_closing(w) -> None:
         _active_gallery[0] = _galleries[-1] if _galleries else None
 
 
+def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
+    """Wrap an ImageGalleryWidget with a left-side _ControlPanel sibling.
+
+    The panel is prepended to the left.  Toggling it grows the parent
+    window leftward by ``_ControlPanel.PANEL_WIDTH`` so the gallery
+    widget keeps both its width and its screen position unchanged.
+    """
+    from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QWidget
+
+    from helicon.lib.image_gallery import _ControlPanel
+
+    wc = _ControlPanel.PANEL_WIDTH
+
+    panel = _ControlPanel()
+    panel.hide()
+    panel.setFixedWidth(wc)
+    panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(panel)
+    layout.addWidget(gallery, 1)
+
+    def _on_toggle():
+        win = container.window()
+        visible = not panel.isVisible()
+        # Operate on the underlying QWindow's geometry, which is the FRAME
+        # rect (title bar + borders included) and is not subject to the
+        # client-vs-frame conversion that QWidget.setGeometry does.  This
+        # keeps the frame's top-left y pinned across toggles on macOS,
+        # Linux, and Windows/WSL -- anchoring the client rect would let the
+        # title-bar height accumulate into y on every toggle.
+        handle = win.windowHandle()
+        if handle is None:
+            # Fall back to QWidget geometry (no platform window yet).
+            if visible:
+                panel.show()
+                win.setGeometry(win.x() - wc, win.y(), win.width() + wc, win.height())
+            else:
+                panel.hide()
+                win.setGeometry(
+                    win.x() + wc, win.y(), max(win.width() - wc, 1), win.height()
+                )
+            return
+        fg = handle.geometry()
+        if visible:
+            panel.show()
+            handle.setGeometry(fg.x() - wc, fg.y(), fg.width() + wc, fg.height())
+        else:
+            panel.hide()
+            handle.setGeometry(
+                fg.x() + wc, fg.y(), max(fg.width() - wc, 1), fg.height()
+            )
+
+    gallery.panel_toggle_requested.connect(_on_toggle)
+
+    def _on_brightness(val):
+        gallery.set_brightness(val / 100.0)
+        panel._brightness_val.setText(f"{gallery._brightness:.2f}")
+
+    def _on_contrast(val):
+        gallery.set_contrast(val / 100.0)
+        panel._contrast_val.setText(f"{gallery._contrast:.2f}")
+
+    def _on_gamma(val):
+        gallery.set_gamma(val / 100.0)
+        panel._gamma_val.setText(f"{gallery._gamma:.2f}")
+
+    def _on_autocontrast():
+        panel._brightness_slider.setValue(0)
+        panel._contrast_slider.setValue(100)
+        panel._gamma_slider.setValue(100)
+
+    def _on_scope_selected(checked):
+        if checked:
+            gallery.set_adjust_scope("selected")
+
+    def _on_scope_all(checked):
+        if checked:
+            gallery.set_adjust_scope("all")
+
+    panel._brightness_slider.valueChanged.connect(_on_brightness)
+    panel._contrast_slider.valueChanged.connect(_on_contrast)
+    panel._gamma_slider.valueChanged.connect(_on_gamma)
+    panel._auto_btn.clicked.connect(_on_autocontrast)
+    panel._radio_selected.toggled.connect(_on_scope_selected)
+    panel._radio_all.toggled.connect(_on_scope_all)
+
+    return container
+
+
 def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> None:
     """Show the lazy thumbnail grid for a stack in a standalone window.
 
@@ -1433,11 +1937,13 @@ def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> No
     from helicon.lib.image_gallery import ImageGalleryWidget
 
     widget = ImageGalleryWidget()
-    widget.set_data(read_fn, n, img_w, img_h, None)
+    widget.set_data(read_fn, n, img_w, img_h, None, source_name=name)
+
+    container = _wrap_gallery_with_panel(widget)
 
     if reuse_window is not None:
         reuse_window.setWindowTitle(f"helicon - {name}")
-        reuse_window.setCentralWidget(widget)
+        reuse_window.setCentralWidget(container)
         reuse_window.show()
         reuse_window.raise_()
         return reuse_window
@@ -1449,7 +1955,103 @@ def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> No
 
     window = _GalleryWindow()
     window.setWindowTitle(f"helicon - {name}")
-    window.setCentralWidget(widget)
+    window.setCentralWidget(container)
+    tile = 128 + widget._panel.min_sep
+    window.resize(5 * tile + widget._sb_width, 5 * tile)
+    _galleries.append(window)
+    _active_gallery[0] = window
+    window.show()
+    return window
+
+
+def _open_xyz_slice_gallery(star_path: str, reuse_window=None) -> "QMainWindow | None":
+    """Display center slices (Z, Y, X) of MRC files referenced by a star file.
+
+    Works for both ``*optimiser.star`` (which indirects through model.star)
+    and ``*model.star`` (which directly lists MRC references). Each MRC file
+    gets one row of three center slices.
+    """
+    from pathlib import Path
+
+    import mrcfile
+    import numpy as np
+    from PySide6.QtWidgets import QMainWindow
+
+    from helicon.lib.image_gallery import ImageGalleryWidget
+
+    name = Path(star_path).name
+    if name.endswith("model.star"):
+        mrc_paths = _parse_model_star(star_path)
+    else:
+        mrc_paths = _parse_optimiser_star(star_path)
+    if not mrc_paths:
+        return None
+
+    slices_per_mrc = 3
+    total_images = len(mrc_paths) * slices_per_mrc
+    img_w = img_h = 0
+
+    def _read_slice(i: int) -> np.ndarray:
+        nonlocal img_w, img_h
+        mrc_idx = i // slices_per_mrc
+        slice_idx = i % slices_per_mrc
+
+        with mrcfile.open(mrc_paths[mrc_idx], permissive=True) as mrc:
+            data = mrc.data
+            nz, ny, nx = data.shape
+            z_center = nz // 2
+            y_center = ny // 2
+            x_center = nx // 2
+
+            if slice_idx == 0:
+                sl = data[z_center, :, :]
+            elif slice_idx == 1:
+                sl = data[:, y_center, :]
+            else:
+                sl = data[:, :, x_center]
+
+            if img_w == 0:
+                img_h, img_w = sl.shape[:2]
+
+            return sl.astype(np.float32)
+
+    _read_slice(0)
+
+    axis_labels = ["Z", "Y", "X"]
+    labels = [
+        f"{mrc_idx + 1}-{axis_labels[slice_idx]}"
+        for mrc_idx in range(len(mrc_paths))
+        for slice_idx in range(slices_per_mrc)
+    ]
+
+    widget = ImageGalleryWidget()
+    widget.set_data(
+        _read_slice,
+        total_images,
+        img_w,
+        img_h,
+        None,
+        labels=labels,
+        source_name=Path(star_path).name,
+    )
+
+    container = _wrap_gallery_with_panel(widget)
+
+    if reuse_window is not None:
+        reuse_window.setWindowTitle(f"helicon - {Path(star_path).name}")
+        reuse_window.setCentralWidget(container)
+        reuse_window.show()
+        reuse_window.raise_()
+        return reuse_window
+
+    class _GalleryWindow(QMainWindow):
+        def closeEvent(self, event):
+            _on_gallery_closing(self)
+            super().closeEvent(event)
+
+    window = _GalleryWindow()
+    window.setWindowTitle(f"helicon - {Path(star_path).name}")
+    window.setCentralWidget(container)
     tile = 128 + widget._panel.min_sep
     window.resize(5 * tile + widget._sb_width, 5 * tile)
     _galleries.append(window)
@@ -1547,6 +2149,11 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
 
     if viewer is not None:
         viewer.title = f"helicon - {Path(path).name}"
+        # Remember the opened file name so the Save-As dialog can pre-fill it
+        # (mirrors ImageGalleryWidget._source_name).  napari only populates
+        # layer.source.path when a file is loaded via viewer.open(); most
+        # helicon openers add layers directly, so we record it here instead.
+        viewer._source_name = Path(path).name
 
     # When a display mode is forced (button bar), the *.mrc / *.map volume
     # branch must show as a 3D volume (ndisplay=3) or a 2D slice stack
@@ -1558,6 +2165,10 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         force_ndisplay = 2
 
     ext = Path(path).suffix.lower()
+
+    if ext == ".star" and mode == "optimiser":
+        _open_xyz_slice_gallery(path, reuse_window=reuse_gallery)
+        return
 
     # "metadata" mode: always open any star file as text, regardless of type.
     if ext == ".star" and mode == "metadata":
@@ -2021,9 +2632,9 @@ def main(args: argparse.Namespace) -> None:
         target = _active_viewer[0]
         if target is None or not _viewer_is_alive(target):
             target = _recreate_main_viewer()
-        _open_file(target, path)
         if target is viewer or target is _active_viewer[0]:
             _show_main_viewer()
+        _open_file(target, path)
 
     def _spawn_viewer_and_open(path, mode=None):
         """Open ``path`` in a new napari viewer.
@@ -2086,9 +2697,7 @@ def main(args: argparse.Namespace) -> None:
         if mode == "chimerax":
             _launch_chimerax(path)
             return
-        # Gallery mode is fully standalone (its own QMainWindow, no napari
-        # viewer), so it must never reveal or spawn the main napari window.
-        if mode == "gallery":
+        if mode in ("gallery", "optimiser"):
             reuse = None
             if not new_window:
                 ag = _active_gallery[0]
@@ -2107,8 +2716,8 @@ def main(args: argparse.Namespace) -> None:
             target = _active_viewer[0]
             if target is None or not _viewer_is_alive(target):
                 target = _recreate_main_viewer()
-            _open_file(target, path, mode=mode)
             _show_main_viewer()
+            _open_file(target, path, mode=mode)
 
     widget = FolderBrowserWidget(start_dir=start_dir)
     widget.file_selected.connect(_on_file_selected)

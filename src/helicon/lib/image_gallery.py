@@ -10,7 +10,16 @@ so it can be unit-tested without a Qt application.
 
 from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QRadioButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 import math
 
@@ -161,6 +170,112 @@ class GalleryPanel:
         return [self.rowstart, self.visiblerows, self.visiblecols]
 
 
+class _ControlPanel(QWidget):
+    """Collapsible side panel with brightness / contrast / gamma controls.
+
+    Parameters
+    ----------
+    parent : QWidget, optional
+        Parent widget.
+    """
+
+    PANEL_WIDTH = 180
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(self.PANEL_WIDTH)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor("#3a3a3a"))
+        self.setPalette(palette)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        lbl_style = "color: #e0e0e0; font-size: 11px;"
+        slider_style = (
+            "QSlider::groove:horizontal { background: #555; height: 4px; }"
+            "QSlider::handle:horizontal { background: #ccc; width: 12px; "
+            "margin: -4px 0; border-radius: 6px; }"
+        )
+        btn_style = (
+            "QPushButton { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            "border-radius: 3px; padding: 4px; }"
+            "QPushButton:hover { background: #666; }"
+        )
+        radio_style = "QRadioButton { color: #e0e0e0; font-size: 11px; }"
+
+        # --- Brightness ---
+        root.addWidget(self._label("Brightness", lbl_style))
+        self._brightness_slider = self._make_slider(-100, 100, 0, slider_style)
+        self._brightness_val = QLabel("0", parent=self)
+        self._brightness_val.setStyleSheet(lbl_style)
+        self._brightness_val.setAlignment(Qt.AlignCenter)
+        row_b = QHBoxLayout()
+        row_b.addWidget(self._brightness_slider)
+        row_b.addWidget(self._brightness_val)
+        root.addLayout(row_b)
+
+        # --- Contrast ---
+        root.addWidget(self._label("Contrast", lbl_style))
+        self._contrast_slider = self._make_slider(1, 300, 100, slider_style)
+        self._contrast_val = QLabel("1.00", parent=self)
+        self._contrast_val.setStyleSheet(lbl_style)
+        self._contrast_val.setAlignment(Qt.AlignCenter)
+        row_c = QHBoxLayout()
+        row_c.addWidget(self._contrast_slider)
+        row_c.addWidget(self._contrast_val)
+        root.addLayout(row_c)
+
+        # --- Gamma ---
+        root.addWidget(self._label("Gamma", lbl_style))
+        self._gamma_slider = self._make_slider(1, 300, 100, slider_style)
+        self._gamma_val = QLabel("1.00", parent=self)
+        self._gamma_val.setStyleSheet(lbl_style)
+        self._gamma_val.setAlignment(Qt.AlignCenter)
+        row_g = QHBoxLayout()
+        row_g.addWidget(self._gamma_slider)
+        row_g.addWidget(self._gamma_val)
+        root.addLayout(row_g)
+
+        # --- Autocontrast ---
+        self._auto_btn = QPushButton("Autocontrast")
+        self._auto_btn.setStyleSheet(btn_style)
+        root.addWidget(self._auto_btn)
+
+        # --- Scope ---
+        root.addWidget(self._label("Scope", lbl_style))
+        self._scope_group = QButtonGroup(self)
+        self._radio_selected = QRadioButton("Selected image")
+        self._radio_selected.setStyleSheet(radio_style)
+        self._radio_all = QRadioButton("All visible")
+        self._radio_all.setStyleSheet(radio_style)
+        self._radio_all.setChecked(True)
+        self._scope_group.addButton(self._radio_selected, 0)
+        self._scope_group.addButton(self._radio_all, 1)
+        root.addWidget(self._radio_selected)
+        root.addWidget(self._radio_all)
+
+        root.addStretch(1)
+
+    # ---- helpers ----------------------------------------------------------
+
+    @staticmethod
+    def _label(text: str, style: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(style)
+        return lbl
+
+    @staticmethod
+    def _make_slider(lo: int, hi: int, val: int, style: str) -> QSlider:
+        s = QSlider(Qt.Horizontal)
+        s.setRange(lo, hi)
+        s.setValue(val)
+        s.setStyleSheet(style)
+        return s
+
+
 class ImageGalleryWidget(QWidget):
     """Lazy thumbnail grid for an image stack, rendered with ``QPainter``.
 
@@ -177,13 +292,11 @@ class ImageGalleryWidget(QWidget):
     """
 
     image_activated = Signal(int)
+    panel_toggle_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(200, 200)
-        # Fill the host dock in both directions so the grid centers in the
-        # dock's actual (not preferred) width; otherwise the dock leaves the
-        # widget at its preferred size and left-aligned within the dock.
         from PySide6.QtWidgets import QSizePolicy
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -198,6 +311,8 @@ class ImageGalleryWidget(QWidget):
         self._img_w = 0
         self._img_h = 0
         self._dtype = None
+        self._labels: list[str] | None = None
+        self._source_name: str | None = None
         self._scale = 1.0
         self._scroll_y = 0
         self._panel = GalleryPanel(0, 1, 1)
@@ -209,8 +324,57 @@ class ImageGalleryWidget(QWidget):
         self._scrubbing = False
         self._zooming = False
 
+        # --- adjustment state (driven externally via setters) ---
+        self._brightness = 0.0
+        self._contrast = 1.0
+        self._gamma = 1.0
+        self._adjust_scope = "all"
+        self._selected_idx: int | None = None
+
+    # --------------------------------------------------------------- setters
+    def set_brightness(self, val: float) -> None:
+        self._brightness = val
+        self._thumb_cache.clear()
+        self.update()
+
+    def set_contrast(self, val: float) -> None:
+        self._contrast = val
+        self._thumb_cache.clear()
+        self.update()
+
+    def set_gamma(self, val: float) -> None:
+        self._gamma = val
+        self._thumb_cache.clear()
+        self.update()
+
+    def set_adjust_scope(self, scope: str) -> None:
+        self._adjust_scope = scope
+        self._thumb_cache.clear()
+        self.update()
+
+    def reset_adjustments(self) -> None:
+        self._brightness = 0.0
+        self._contrast = 1.0
+        self._gamma = 1.0
+        self._thumb_cache.clear()
+        self.update()
+
+    def set_selected_idx(self, idx: int | None) -> None:
+        self._selected_idx = idx
+        self._thumb_cache.clear()
+        self.update()
+
     # ------------------------------------------------------------------ data
-    def set_data(self, read_fn, n: int, img_w: int, img_h: int, dtype) -> None:
+    def set_data(
+        self,
+        read_fn,
+        n: int,
+        img_w: int,
+        img_h: int,
+        dtype,
+        labels: list[str] | None = None,
+        source_name: str | None = None,
+    ) -> None:
         """Bind a lazy data source and trigger a repaint.
 
         Parameters
@@ -226,18 +390,22 @@ class ImageGalleryWidget(QWidget):
             Native height of a single image.
         dtype : numpy.dtype or type
             Data type of the frames (used only for bookkeeping).
+        source_name : str, optional
+            Original source file name (without expecting a specific suffix).
+            Used to pre-fill the save dialog with a matching base name.
         """
         self._read_fn = read_fn
         self._n = int(n)
         self._img_w = int(img_w)
         self._img_h = int(img_h)
         self._dtype = dtype
+        self._labels = labels
+        self._source_name = source_name
         self._panel = GalleryPanel(self._n, self._img_w, self._img_h)
         self._coords = {}
         self._thumb_cache = {}
         self._scroll_y = 0
-
-        self.update()
+        self._selected_idx = None
 
         self.update()
 
@@ -246,13 +414,28 @@ class ImageGalleryWidget(QWidget):
         return self._read_fn is not None and self._n > 0
 
     # -------------------------------------------------------------- rendering
-    def _to_thumb(self, frame: np.ndarray) -> QPixmap:
+    def _to_thumb(
+        self,
+        frame: np.ndarray,
+        brightness: float | None = None,
+        contrast: float | None = None,
+        gamma: float | None = None,
+    ) -> QPixmap:
         """Normalise a frame to an 8-bit grayscale ``QPixmap`` thumbnail.
 
         Parameters
         ----------
         frame : numpy.ndarray
             2D image data.
+        brightness : float, optional
+            Additive offset in ``[-1, 1]`` applied *after* normalisation.
+            ``None`` uses the instance attribute.
+        contrast : float, optional
+            Multiplicative contrast centred at 1.0.  ``None`` uses the
+            instance attribute.
+        gamma : float, optional
+            Gamma-correction value (1.0 = no correction).  ``None`` uses
+            the instance attribute.
 
         Returns
         -------
@@ -264,6 +447,20 @@ class ImageGalleryWidget(QWidget):
         black, white = _auto_contrast(frame)
         arr = frame.astype(np.float64)
         arr = np.clip((arr - black) / max(1e-9, white - black), 0.0, 1.0)
+
+        b = brightness if brightness is not None else self._brightness
+        c = contrast if contrast is not None else self._contrast
+        g = gamma if gamma is not None else self._gamma
+
+        # brightness: additive offset
+        arr = arr + b
+        # contrast: multiplicative around midpoint
+        arr = (arr - 0.5) * c + 0.5
+        # gamma: power-law correction
+        if g != 1.0:
+            arr = np.clip(arr, 0.0, 1.0) ** (1.0 / g)
+        arr = np.clip(arr, 0.0, 1.0)
+
         arr = (arr * 255.0).astype(np.uint8)
         h, w = arr.shape
         qimg = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
@@ -284,12 +481,7 @@ class ImageGalleryWidget(QWidget):
         return max(1, self.width() - sb)
 
     def _needs_scrollbar(self) -> bool:
-        """Return ``True`` if the stack overflows the viewport vertically.
-
-        A scrollbar should only be shown (and its width reserved) when there
-        is actually something to scroll, so the gallery stays centered in the
-        full width instead of leaving dead space on the right.
-        """
+        """Return ``True`` if the stack overflows the viewport vertically."""
         panel = GalleryPanel(self._n, self._img_w, self._img_h, self._panel.min_sep)
         panel.visible_row_col(
             self._canvas_width(with_sb=False),
@@ -315,37 +507,22 @@ class ImageGalleryWidget(QWidget):
         self._scroll_y = self._panel.clamp_scroll_y(self._scroll_y)
 
     def _apply_zoom(self, factor: float, cx: int, cy: int) -> None:
-        """Zoom by ``factor`` about the canvas point ``(cx, cy)``.
-
-        The grid is scaled about the cursor so the image content currently
-        under the pointer stays put (zoom-to-cursor), instead of always
-        growing from the top-left. ``factor > 1`` zooms in; ``< 1`` zooms out.
-
-        Parameters
-        ----------
-        factor : float
-            Multiplicative zoom factor applied to the current scale.
-        cx, cy : int
-            Cursor position, in widget pixels, to keep stationary.
-        """
+        """Zoom by ``factor`` about the canvas point ``(cx, cy)``."""
         if self._img_w <= 0:
             return
         new_scale = self._scale * factor
-        # Cap so at least one column fits the canvas, and never absurd.
         available = self._canvas_width() - self._panel.min_sep
         max_fit = available / max(1, self._img_w)
         new_scale = min(max(new_scale, 1e-3), max(max_fit, 1e-3), 20.0)
         if new_scale == self._scale:
             return
 
-        # Fractional row under the cursor before the zoom.
         old_h = int(round(self._img_h * self._scale)) + self._panel.min_sep
         frac_row = (cy - self._scroll_y) / old_h if old_h > 0 else 0.0
 
         self._scale = new_scale
         self._clamp_scroll()
 
-        # Re-anchor scroll_y so the same fractional row sits under the cursor.
         new_h = int(round(self._img_h * self._scale)) + self._panel.min_sep
         self._scroll_y = cy - frac_row * new_h
         self._clamp_scroll()
@@ -364,12 +541,10 @@ class ImageGalleryWidget(QWidget):
         if max_scroll == 0:
             return None
         track = self._scrollbar_rect()
-        # Thumb height proportional to visible/total content.
         total_rows = int(np.ceil(self._n / max(1, self._panel.visiblecols)))
         visible_rows = max(1, self._panel.visiblerows)
         frac = min(1.0, visible_rows / total_rows)
         thumb_h = max(20, int(track.height() * frac))
-        # Position from current scroll fraction.
         frac_scrolled = (-self._scroll_y) / (-max_scroll) if max_scroll < 0 else 0.0
         frac_scrolled = min(1.0, max(0.0, frac_scrolled))
         y = int(track.y() + frac_scrolled * (track.height() - thumb_h))
@@ -377,6 +552,11 @@ class ImageGalleryWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         """Draw only the visible tiles, reading each lazily on first paint."""
+        # Rebuild the visible-tile map from scratch each paint so it never
+        # retains stale rects from a previous scroll/zoom position.  _save_as
+        # and the click hit-test both rely on it matching exactly what is on
+        # screen.
+        self._coords = {}
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#2d2d2d"))
 
@@ -384,9 +564,6 @@ class ImageGalleryWidget(QWidget):
             return
 
         size = self.size()
-        # Only reserve the scrollbar width (and draw it) when the stack
-        # actually overflows vertically, so the grid centers in the full
-        # width instead of drifting left with dead space on the right.
         needs_sb = self._needs_scrollbar()
         canvas_w = self._canvas_width(with_sb=needs_sb)
         res = self._panel.visible_row_col(
@@ -396,19 +573,11 @@ class ImageGalleryWidget(QWidget):
             return
         rowstart, visiblerows, visiblecols = res
 
-        # Clamp the authoritative scroll offset once, using the layout just
-        # computed. Mid-scroll this is a no-op, so the grid never jumps.
         self._scroll_y = self._panel.clamp_scroll_y(self._scroll_y)
 
-        # Center the column block horizontally within the canvas.
         block_w = visiblecols * self._panel.rendered_w
         x_start = max(0, (canvas_w - block_w) // 2)
 
-        # Vertical anchor: ty(r) = r * rendered_h + scroll_y (continuous in
-        # scroll_y, so the grid scrolls smoothly). rowstart is the first row
-        # whose top may be >= scroll_y; draw one extra row so the bottom of
-        # the viewport is always filled when the top row is partially above.
-        # Index labels: small, legible in the top-left of every thumbnail.
         label_font = painter.font()
         label_font.setPixelSize(max(9, min(13, int(self._panel.rendered_h * 0.28))))
         painter.setFont(label_font)
@@ -416,9 +585,6 @@ class ImageGalleryWidget(QWidget):
         label_bg = QColor(0, 0, 0, 140)
 
         for r in range(rowstart, rowstart + visiblerows + 1):
-            # Items actually present in this row (the last row may be partial).
-            # Center each row independently so a short trailing row does not
-            # hang off to the left of the grid.
             row_count = min(visiblecols, max(0, self._n - r * visiblecols))
             if row_count <= 0:
                 break
@@ -431,20 +597,31 @@ class ImageGalleryWidget(QWidget):
                 tx = row_x_start + c * self._panel.rendered_w
                 ty = r * self._panel.rendered_h + self._scroll_y
                 if i not in self._thumb_cache:
-                    self._thumb_cache[i] = self._to_thumb(self._read_fn(i))
+                    # In "selected" mode, only apply adjustments to the
+                    # selected thumbnail; others use identity values.
+                    if self._adjust_scope == "selected" and i != self._selected_idx:
+                        self._thumb_cache[i] = self._to_thumb(
+                            self._read_fn(i),
+                            brightness=0.0,
+                            contrast=1.0,
+                            gamma=1.0,
+                        )
+                    else:
+                        self._thumb_cache[i] = self._to_thumb(self._read_fn(i))
                 thumb = self._thumb_cache[i]
                 painter.drawPixmap(tx, ty, draw_w, draw_h, thumb)
                 self._coords[i] = QRect(tx, ty, draw_w, draw_h)
 
-                # Label text sized to the rendered thumbnail.
-                text = str(i)
+                text = (
+                    self._labels[i]
+                    if self._labels and i < len(self._labels)
+                    else str(i)
+                )
                 trect = QRect(tx, ty, thumb.width(), thumb.height())
                 metrics = painter.fontMetrics()
                 tw = metrics.horizontalAdvance(text)
                 th = metrics.height()
                 pad = 2
-                # Clip the label background to the thumbnail so it never spills
-                # into neighbouring tiles.
                 painter.save()
                 painter.setClipRect(trect)
                 painter.fillRect(
@@ -454,7 +631,6 @@ class ImageGalleryWidget(QWidget):
                 painter.drawText(tx + pad, ty + pad + metrics.ascent(), text)
                 painter.restore()
 
-        # Vertical scrollbar (only when the stack overflows the viewport).
         if needs_sb:
             track = self._scrollbar_rect()
             painter.fillRect(track, QColor("#1f1f1f"))
@@ -469,7 +645,6 @@ class ImageGalleryWidget(QWidget):
             delta = event.angleDelta().y()
             factor = 1.1 if delta > 0 else 1.0 / 1.1
             new_scale = self._scale * factor
-            # Cap scale so at least one column fits the canvas width.
             if self._img_w > 0:
                 available = self._canvas_width() - self._panel.min_sep
                 max_fit = available / max(1, self._img_w)
@@ -480,8 +655,6 @@ class ImageGalleryWidget(QWidget):
             event.accept()
             return
 
-        # Plain wheel: scroll vertically through the stack. Wheel-down (delta
-        # < 0) advances to later images (more negative scroll_y).
         if self._max_scroll(self.height()) == 0:
             event.accept()
             return
@@ -506,19 +679,46 @@ class ImageGalleryWidget(QWidget):
         menu.exec(self.mapToGlobal(pos))
 
     def _save_as(self):
-        qimg = self.grab()
+        from PySide6.QtCore import QRect
+
         from helicon.commands.display import _save_qimage
 
-        _save_qimage(qimg, self)
+        # Grab the full widget, then copy out the tight bounding box of the
+        # drawn thumbnail rects so the saved image contains the real content
+        # and not the surrounding gray padding or the scrollbar.  We grab the
+        # whole widget (QWidget.grab(rect) is unreliable on HiDPI builds and
+        # returns the full widget) and crop in device pixels afterwards.
+        full = self.grab()
+        if self._coords:
+            min_x = max(0, min(r.x() for r in self._coords.values()))
+            min_y = max(0, min(r.y() for r in self._coords.values()))
+            max_x = min(
+                self.width(), max(r.x() + r.width() for r in self._coords.values())
+            )
+            max_y = min(
+                self.height(), max(r.y() + r.height() for r in self._coords.values())
+            )
+            dpr = full.devicePixelRatio()
+            cx = int(round(min_x * dpr))
+            cy = int(round(min_y * dpr))
+            cw = int(round((max_x - min_x) * dpr))
+            ch = int(round((max_y - min_y) * dpr))
+            qimg = full.copy(QRect(cx, cy, cw, ch))
+        else:
+            qimg = full
+        _save_qimage(qimg, self, default_name=self._source_name)
 
     def mousePressEvent(self, event) -> None:
-        """Begin vertical drag, cursor zoom, or scrollbar scrub."""
+        """Begin vertical drag, cursor zoom, scrollbar scrub, or toggle panel."""
+        if event.button() == Qt.MiddleButton:
+            self.panel_toggle_requested.emit()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton:
             self._drag_last = event.pos()
             self._dragged = False
             self._scrubbing = self._hit_scrollbar(event.pos())
         elif event.button() == Qt.RightButton:
-            # Right-drag zooms about the press point (no keyboard needed).
             self._drag_last = event.pos()
             self._dragged = False
             self._zooming = True
@@ -530,7 +730,6 @@ class ImageGalleryWidget(QWidget):
         dy = event.y() - self._drag_last.y()
 
         if self._zooming:
-            # Drag up zooms in, down zooms out; exponential for smoothness.
             factor = float(np.exp(-dy * 0.005))
             anchor = self._drag_last
             self._apply_zoom(factor, anchor.x(), anchor.y())
@@ -569,7 +768,10 @@ class ImageGalleryWidget(QWidget):
         ):
             for i, rect in self._coords.items():
                 if rect.contains(event.pos()):
+                    self._selected_idx = i
+                    self._thumb_cache.clear()
                     self.image_activated.emit(i)
+                    self.update()
                     break
         if event.button() == Qt.RightButton and not self._dragged:
             self._show_save_menu(event.pos())

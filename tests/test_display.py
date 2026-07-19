@@ -1,6 +1,8 @@
 import argparse
 import os
 import sys
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch, MagicMock
 import helicon
@@ -286,15 +288,15 @@ class TestGeometryPersistence(object):
         assert mock_dock.setGeometry.call_args_list[-1].args[-2:] == (300, 400)
         mock_dock.show.assert_called_once()
 
-    @patch.object(display, "_read_rect")
+    @patch.object(display, "_read_rect", return_value=None)
     @patch.object(display, "_get_qsettings")
     def test_restore_geometry_applies_saved_viewer(
         self, mock_get_settings, mock_read_rect
     ):
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
-        mock_read_rect.side_effect = lambda s, p: (
-            (500, 600, 700, 800) if p == "viewer" else None
+        mock_settings.value.side_effect = lambda key: (
+            b"fake-geometry-data" if key == "viewer_ba" else None
         )
 
         mock_dock = MagicMock()
@@ -305,23 +307,14 @@ class TestGeometryPersistence(object):
             x=lambda: 0, y=lambda: 0, width=lambda: 250, height=lambda: 800
         )
         mock_viewer = MagicMock()
-        mock_viewer.window._qt_window.geometry.return_value = MagicMock(
-            x=lambda: 1200, y=lambda: 100, width=lambda: 1000, height=lambda: 800
-        )
-        mock_viewer.window._qt_window.frameGeometry.return_value = MagicMock(
-            x=lambda: 1200, y=lambda: 100, width=lambda: 1000, height=lambda: 800
-        )
 
         with patch("PySide6.QtCore.QTimer") as mock_timer:
             display._restore_geometry(mock_dock, mock_viewer)
             captured_fn = mock_timer.singleShot.call_args[0][1]
             captured_fn()
 
-        mock_viewer.window._qt_window.setGeometry.assert_called_once_with(
-            500,
-            600,
-            700,
-            800,
+        mock_viewer.window._qt_window.restoreGeometry.assert_called_once_with(
+            b"fake-geometry-data"
         )
 
     @patch.object(display, "_position_default")
@@ -513,18 +506,25 @@ class TestGeometryPersistence(object):
         mock_dock.geometry.return_value = MagicMock(
             x=lambda: 100, y=lambda: 200, width=lambda: 300, height=lambda: 400
         )
-        mock_viewer = MagicMock()
-        mock_viewer.window._qt_window.geometry.return_value = MagicMock(
-            x=lambda: 500, y=lambda: 600, width=lambda: 700, height=lambda: 800
-        )
 
-        display._save_geometry(mock_dock, mock_viewer)
+        def _make_viewer(display_ba=None):
+            mock_viewer = MagicMock()
+            mock_viewer._display_only_ba = display_ba
+            win = mock_viewer.window._qt_window
+            win.saveGeometry.return_value = b"saved-geo"
+            return mock_viewer
 
-        assert mock_write_rect.call_count == 2
-        mock_write_rect.assert_any_call(mock_settings, "dock", mock_dock)
-        mock_write_rect.assert_any_call(
-            mock_settings, "viewer", mock_viewer.window._qt_window
-        )
+        mock_write_rect.reset_mock()
+        display._save_geometry(mock_dock, _make_viewer())
+        assert mock_write_rect.call_count == 1
+        mock_write_rect.assert_called_once_with(mock_settings, "dock", mock_dock)
+        mock_settings.setValue.assert_any_call("viewer_ba", b"saved-geo")
+
+        mock_write_rect.reset_mock()
+        mock_settings.reset_mock()
+        viewer_with_cache = _make_viewer(display_ba=b"display-only-ba")
+        display._save_geometry(mock_dock, viewer_with_cache)
+        mock_settings.setValue.assert_any_call("viewer_ba", b"display-only-ba")
 
     @patch.object(display, "_get_qsettings")
     def test_write_rect_saves_individual_values(self, mock_get_settings):
@@ -1436,10 +1436,16 @@ class TestSaveQimage:
         qimg = QImage(10, 10, QImage.Format.Format_RGB32)
         qimg.fill(0xFF0000FF)
         out = str(tmp_path / "out.png")
-        with patch.object(
-            QFileDialog,
-            "getSaveFileName",
-            return_value=(out, ""),
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        with (
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
         ):
             display._save_qimage(qimg)
         assert os.path.exists(out)
@@ -1450,12 +1456,111 @@ class TestSaveQimage:
 
         qimg = QImage(4, 4, QImage.Format.Format_RGB32)
         qimg.fill(0)
-        with patch.object(
-            QFileDialog,
-            "getSaveFileName",
-            return_value=("", ""),
+
+        def _exec(self):
+            return QFileDialog.Rejected
+
+        with patch.object(QFileDialog, "exec", _exec):
+            display._save_qimage(qimg)
+
+    def test_prefills_default_name_replacing_suffix(self, qapp, tmp_path):
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QFileDialog
+
+        qimg = QImage(4, 4, QImage.Format.Format_RGB32)
+        qimg.fill(0)
+        captured = {}
+        out = str(tmp_path / "ignored.png")
+
+        def _select_file(self, name):
+            captured["name"] = name
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        with (
+            patch.object(QFileDialog, "selectFile", _select_file),
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
+        ):
+            display._save_qimage(qimg, default_name="run1_optimiser.star")
+        assert captured["name"] == "run1_optimiser.png"
+
+    def test_prefills_default_name_without_suffix(self, qapp, tmp_path):
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QFileDialog
+
+        qimg = QImage(4, 4, QImage.Format.Format_RGB32)
+        qimg.fill(0)
+        captured = {}
+        out = str(tmp_path / "ignored.png")
+
+        def _select_file(self, name):
+            captured["name"] = name
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        with (
+            patch.object(QFileDialog, "selectFile", _select_file),
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
+        ):
+            display._save_qimage(qimg, default_name="volume")
+        assert captured["name"] == "volume.png"
+
+    def test_no_default_name_leaves_field_blank(self, qapp, tmp_path):
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QFileDialog
+
+        qimg = QImage(4, 4, QImage.Format.Format_RGB32)
+        qimg.fill(0)
+        captured = {}
+        out = str(tmp_path / "ignored.png")
+
+        def _select_file(self, name):
+            captured["name"] = name
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        with (
+            patch.object(QFileDialog, "selectFile", _select_file),
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
         ):
             display._save_qimage(qimg)
+        assert "name" not in captured
+
+    def test_viewer_source_name_reads_layer_path(self):
+        class _Src:
+            path = "/data/run1_model.star"
+
+        class _Layer:
+            source = _Src()
+
+        class _Viewer:
+            layers = [_Layer()]
+
+        assert display._viewer_source_name(_Viewer()) == "run1_model.star"
+
+    def test_viewer_source_name_returns_none_without_path(self):
+        class _Layer:
+            source = None
+
+        class _Viewer:
+            layers = [_Layer()]
+
+        assert display._viewer_source_name(_Viewer()) is None
 
 
 class TestRenderQimageVector:
@@ -1520,10 +1625,16 @@ class TestSaveViewport:
         arr = np.zeros((10, 10, 4), dtype=np.uint8)
         mock_viewer.screenshot.return_value = arr
         out = str(tmp_path / "shot.png")
-        with patch.object(
-            QFileDialog,
-            "getSaveFileName",
-            return_value=(out, ""),
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        with (
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
         ):
             display._save_viewport(mock_viewer)
         mock_viewer.screenshot.assert_called_once_with(
@@ -1536,3 +1647,118 @@ class TestSaveViewport:
         mock_viewer = MagicMock()
         mock_viewer.screenshot.side_effect = RuntimeError("fail")
         display._save_viewport(mock_viewer)
+
+    def test_save_viewport_prefills_recorded_source_name(self, qapp, tmp_path):
+        # The viewer records the opened file name on _source_name; the save
+        # dialog must open pre-filled with that base name + .png, mirroring
+        # the gallery widget behaviour.
+        import numpy as np
+        from PySide6.QtWidgets import QFileDialog
+
+        mock_viewer = MagicMock()
+        mock_viewer._source_name = "run1_model.star"
+        arr = np.zeros((10, 10, 4), dtype=np.uint8)
+        mock_viewer.screenshot.return_value = arr
+        out = str(tmp_path / "shot.png")
+        captured = {}
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        def _select_file(self, name):
+            captured["name"] = name
+
+        with (
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
+            patch.object(QFileDialog, "selectFile", _select_file),
+        ):
+            display._save_viewport(mock_viewer)
+        assert captured["name"] == "run1_model.png"
+
+    def test_crops_canvas_padding_around_content(self, qapp, tmp_path):
+        # The data is a small white block centred in a large black canvas;
+        # the saved image must be cropped to the white block only.
+        import numpy as np
+        from PySide6.QtWidgets import QFileDialog
+
+        mock_viewer = MagicMock()
+        h = w = 100
+        arr = np.zeros((h, w, 4), dtype=np.uint8)
+        arr[40:60, 30:70, :3] = 255  # white content block
+        arr[:, :, 3] = 255
+        mock_viewer.screenshot.return_value = arr
+        out = str(tmp_path / "shot.png")
+
+        def _exec(self):
+            return QFileDialog.Accepted
+
+        def _selected_files(self):
+            return [out]
+
+        with (
+            patch.object(QFileDialog, "exec", _exec),
+            patch.object(QFileDialog, "selectedFiles", _selected_files),
+        ):
+            display._save_viewport(mock_viewer)
+        from PySide6.QtGui import QImage
+
+        saved = QImage(out)
+        assert saved.height() == 20  # content height (60 - 40)
+        assert saved.width() == 40  # content width (70 - 30)
+
+    def test_crop_to_content_returns_full_image_when_no_content(self):
+        import numpy as np
+
+        arr = np.zeros((10, 10, 4), dtype=np.uint8)
+        cropped = display._crop_to_content(arr)
+        assert cropped.shape == arr.shape
+
+    def test_crop_to_content_returns_full_image_for_gray_content(self):
+        # A content block that is the same colour as the background corner is
+        # not cropped away (it differs nowhere meaningful, so the whole image
+        # is returned rather than an empty crop).
+        import numpy as np
+
+        arr = np.zeros((10, 10, 4), dtype=np.uint8)
+        arr[2:8, 2:8, :3] = 0  # identical to background
+        cropped = display._crop_to_content(arr)
+        assert cropped.shape == arr.shape
+
+
+class TestPanelToggle:
+    def test_middle_click_toggles_panel_and_skips_camera(self, qapp):
+        # Middle-click must toggle the layer panel but NOT reach the camera's
+        # viewbox_mouse_event (otherwise it also pans/zooms the object).
+        # VisPy reports the middle button as integer 2 (not the Qt enum value).
+        napari = pytest.importorskip("napari")
+        from vispy.app.canvas import MouseEvent
+
+        viewer = napari.Viewer(show=False)
+        try:
+            camera = viewer.window._qt_viewer.canvas.view.camera
+            # Spy on the REAL camera handler first; _install_panel_toggle will
+            # capture this spy as its "original" and only call it for non-middle
+            # events.
+            cam_calls = []
+
+            def _spy(ev):
+                cam_calls.append(ev.type)
+
+            camera.viewbox_mouse_event = _spy
+
+            display._install_panel_toggle(viewer)
+            wrapped = viewer.window._qt_viewer.canvas.view.camera.viewbox_mouse_event
+
+            ev_mid = MouseEvent(type="mouse_press", button=2, pos=(5, 5))
+            wrapped(ev_mid)
+            assert cam_calls == []  # camera never saw the middle press
+
+            ev_left = MouseEvent(type="mouse_press", button=1, pos=(5, 5))
+            wrapped(ev_left)
+            assert cam_calls == ["mouse_press"]  # left press still reaches camera
+        finally:
+            viewer.close()
