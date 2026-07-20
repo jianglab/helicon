@@ -3,7 +3,6 @@
 import argparse
 from asyncio import subprocess
 import logging
-import os
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -32,7 +31,7 @@ def main(args):
     """
     helicon.log_command_line()
 
-    log_file = os.path.splitext(args.plotFile)[0] + ".log"
+    log_file = str(Path(args.plotFile).with_suffix(".log"))
     fh = logging.FileHandler(log_file, mode="w")
     fh.setLevel(logging.DEBUG)
 
@@ -97,7 +96,7 @@ def main(args):
             "Please provide two maps independently refined using half datasets."
         )
 
-    fsc_prefix = os.path.splitext(args.plotFile)[0]
+    fsc_prefix = str(Path(args.plotFile).with_suffix(""))
 
     # Precompute shell labels (reused by all FSC calls)
     n = map1.shape[0]
@@ -273,25 +272,25 @@ def main(args):
         mask2 = _soft_mask(mask2, mask_soft_px)
 
     # Save masks (skip when user provides them)
-    maskdir = os.path.dirname(args.plotFile) or "."
+    maskdir = str(Path(args.plotFile).parent) or "."
     basename1 = Path(map1_file).stem
     basename2 = Path(map2_file).stem
 
     if not user_mask:
         if args.oneMask:
-            mask1_file = os.path.join(
-                maskdir, basename1 + "_" + basename2 + ".common_mask.mrc"
+            mask1_file = str(
+                Path(maskdir) / (basename1 + "_" + basename2 + ".common_mask.mrc")
             )
             logger.info("Saving final mask: %s", mask1_file)
             with mrcfile.new(mask1_file, overwrite=True) as mrc:
                 mrc.set_data(mask1.astype(np.float32))
         else:
-            mask1_file = os.path.join(maskdir, basename1 + ".mask.mrc")
+            mask1_file = str(Path(maskdir) / (basename1 + ".mask.mrc"))
             logger.info("Saving final mask: %s", mask1_file)
             with mrcfile.new(mask1_file, overwrite=True) as mrc:
                 mrc.set_data(mask1.astype(np.float32))
 
-            mask2_file = os.path.join(maskdir, basename2 + ".mask.mrc")
+            mask2_file = str(Path(maskdir) / (basename2 + ".mask.mrc"))
             logger.info("Saving final mask: %s", mask2_file)
             with mrcfile.new(mask2_file, overwrite=True) as mrc:
                 mrc.set_data(mask2.astype(np.float32))
@@ -310,12 +309,12 @@ def main(args):
     m2r = map2r * mask2
 
     # Save masked maps
-    masked1_file = os.path.join(maskdir, basename1 + ".masked.mrc")
+    masked1_file = str(Path(maskdir) / (basename1 + ".masked.mrc"))
     logger.info("Saving final masked map: %s", masked1_file)
     with mrcfile.new(masked1_file, overwrite=True) as mrc:
         mrc.set_data(m1.astype(np.float32))
 
-    masked2_file = os.path.join(maskdir, basename2 + ".masked.mrc")
+    masked2_file = str(Path(maskdir) / (basename2 + ".masked.mrc"))
     logger.info("Saving final masked map: %s", masked2_file)
     with mrcfile.new(masked2_file, overwrite=True) as mrc:
         mrc.set_data(m2.astype(np.float32))
@@ -867,7 +866,7 @@ def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
                 pdf.savefig(fig)
                 plt.close(fig)
             else:
-                outbase = os.path.splitext(fscfile)[0]
+                outbase = str(Path(fscfile).with_suffix(""))
                 safe_name = page_title.lower().replace(" ", "_")
                 fig.savefig(f"{outbase}.{safe_name}.png")
                 plt.close(fig)

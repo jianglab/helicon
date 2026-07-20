@@ -11,7 +11,7 @@ from shiny.pytest import create_app_fixture
 from shiny.playwright import controller
 from playwright.sync_api import Page
 from shiny.run import ShinyAppProc
-from helicon.webApps.denovo3D import app as denovo3d_app
+from helicon.webApps.denovo3D.utils import _combine_images_for_display
 
 APP_PATH = Path(__file__).parents[1] / "src/helicon/webApps/denovo3D/app.py"
 
@@ -41,7 +41,7 @@ def test_stitching_preview_handles_mixed_heights_with_large_right_shift():
     first = np.ones((160, 160), dtype=np.float32)
     second = np.full((320, 160), 2, dtype=np.float32)
 
-    preview = denovo3d_app._combine_images_for_display([first, second], [0, 200])
+    preview = _combine_images_for_display([first, second], [0, 200])
 
     assert preview.shape == (320, 520)
     np.testing.assert_allclose(preview[:160, :160], 1)

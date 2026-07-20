@@ -56,13 +56,31 @@ all = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+helicon = ["resources/*.png"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 python_files = ["test_*.py"]
-norecursedirs = ["*.egg-info", "__pycache__"]
+norecursedirs = ["*.egg-info", "__pycache__", ".hypothesis"]
+filterwarnings = [
+    # Third-party (napari) uses the deprecated pydantic `json_encoders` config;
+    # not fixable in our code. Tracked upstream.
+    "ignore:`json_encoders` is deprecated:pydantic.warnings.PydanticDeprecatedSince20",
+    # scipy.spatial.transform.Rotation emits this on the measure-zero gimbal-lock
+    # subset of Euler angles (re-emitted via hypothesis). Expected math-library
+    # behavior, not a code defect.
+    "ignore:Gimbal lock detected:UserWarning",
+    # Test fixtures write all-zero dummy .mrc files; mrcfile warns on the
+    # missing/zero machine stamp and absent map ID. Benign fixture artifact,
+    # not a code defect.
+    "ignore:Unrecognised machine stamp:RuntimeWarning",
+    "ignore:Map ID string not found:RuntimeWarning",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "helicon.__version__"}

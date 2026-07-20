@@ -1,0 +1,2 @@
+recursive-include src/helicon/resources *.png
+include src/helicon/resources/*.png

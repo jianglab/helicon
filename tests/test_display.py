@@ -1488,7 +1488,7 @@ class TestSaveQimage:
             patch.object(QFileDialog, "selectedFiles", _selected_files),
         ):
             display._save_qimage(qimg)
-        assert os.path.exists(out)
+        assert Path(out).exists()
 
     def test_cancel_dialog_saves_nothing(self, qapp):
         from PySide6.QtGui import QImage
@@ -1611,8 +1611,8 @@ class TestRenderQimageVector:
         qimg.fill(0xFFFFFFFF)
         out = str(tmp_path / "out.pdf")
         display._render_qimage_vector(qimg, out, "pdf")
-        assert os.path.exists(out)
-        assert os.path.getsize(out) > 0
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
 
     def test_svg_render_creates_file(self, qapp, tmp_path):
         from PySide6.QtGui import QImage
@@ -1621,8 +1621,8 @@ class TestRenderQimageVector:
         qimg.fill(0xFFFFFFFF)
         out = str(tmp_path / "out.svg")
         display._render_qimage_vector(qimg, out, "svg")
-        assert os.path.exists(out)
-        assert os.path.getsize(out) > 0
+        assert Path(out).exists()
+        assert Path(out).stat().st_size > 0
 
 
 class TestInstallViewerSaveMenu:
@@ -1681,7 +1681,7 @@ class TestSaveViewport:
             canvas_only=True,
             flash=False,
         )
-        assert os.path.exists(out)
+        assert Path(out).exists()
 
     def test_returns_early_on_screenshot_error(self, qapp):
         mock_viewer = MagicMock()
@@ -1802,3 +1802,178 @@ class TestPanelToggle:
             assert cam_calls == ["mouse_press"]  # left press still reaches camera
         finally:
             viewer.close()
+
+
+class TestOrthogonalViewer:
+
+    def test_display_modes_mrc_with_nz_gt1_includes_orthogonal(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        mrc_path = tmp_path / "volume.mrc"
+        mrc_path.write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(widget, "_volume_has_nz_gt1", return_value=True):
+            modes = widget._display_modes_for(str(mrc_path))
+        assert "orthogonal" in modes
+
+    def test_display_modes_mrc_with_nz_eq1_no_orthogonal(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        mrc_path = tmp_path / "volume.mrc"
+        mrc_path.write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(widget, "_volume_has_nz_gt1", return_value=False):
+            modes = widget._display_modes_for(str(mrc_path))
+        assert "orthogonal" not in modes
+
+    def test_display_modes_map_with_nz_gt1_includes_orthogonal(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        map_path = tmp_path / "volume.map"
+        map_path.write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(widget, "_volume_has_nz_gt1", return_value=True):
+            modes = widget._display_modes_for(str(map_path))
+        assert "orthogonal" in modes
+
+    def test_display_modes_non_mrc_no_orthogonal(self, tmp_path, qapp):
+        from helicon.lib.napari_widgets import FolderBrowserWidget
+
+        star_path = tmp_path / "particles.star"
+        star_path.write_text("data_\n\nloop_\n_rlnImageName\n")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        modes = widget._display_modes_for(str(star_path))
+        assert "orthogonal" not in modes
+
+    def test_open_file_orthogonal_mode_calls_viewer(self):
+        import numpy as np
+
+        mock_viewer = MagicMock()
+        test_data = np.zeros((4, 8, 8), dtype=np.float32)
+        mock_mrc = MagicMock()
+        mock_mrc.data = test_data
+        mock_mrc.voxel_size.x = 1.5
+        mock_mrc.header.nz = 4
+        mock_mrc.header.mapc = 1
+        mock_mrc.header.mapr = 2
+        mock_mrc.header.maps = 3
+
+        mock_mrcfile = MagicMock()
+        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
+        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_gal_cls = MagicMock()
+        mock_gal_inst = MagicMock()
+        mock_gal_cls.return_value = mock_gal_inst
+
+        with (
+            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
+            patch("helicon.commands.display._open_orthogonal_viewer") as mock_open_ov,
+        ):
+            display._open_file(mock_viewer, "/d/volume.mrc", mode="orthogonal")
+            mock_open_ov.assert_called_once()
+
+    def test_open_file_orthogonal_mode_nz_eq1_skips(self):
+        import numpy as np
+
+        mock_viewer = MagicMock()
+        test_data = np.zeros((1, 8, 8), dtype=np.float32)
+        mock_mrc = MagicMock()
+        mock_mrc.data = test_data
+        mock_mrc.voxel_size.x = 1.5
+        mock_mrc.header.nz = 1
+        mock_mrc.header.mapc = 1
+        mock_mrc.header.mapr = 2
+        mock_mrc.header.maps = 3
+
+        mock_mrcfile = MagicMock()
+        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
+        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
+            patch("helicon.commands.display._open_orthogonal_viewer") as mock_open_ov,
+        ):
+            display._open_file(mock_viewer, "/d/volume.mrc", mode="orthogonal")
+            mock_open_ov.assert_not_called()
+            mock_viewer.add_image.assert_called_once()
+
+    def test_sliceview_instantiates(self, qapp):
+        from helicon.lib.gallery_widget import _SliceView
+
+        view = _SliceView()
+        assert view is not None
+        assert view._zoom == 1.0
+        assert view._brightness == 0.0
+        assert view._contrast == 1.0
+        assert view._gamma == 1.0
+        assert view._log_transform is False
+        view.deleteLater()
+
+    def test_controlbar_instantiates(self, qapp):
+        from helicon.lib.gallery_widget import _ControlBar, _BCGPanel
+
+        bar = _ControlBar(64, 48, 32)
+        assert bar is not None
+        bar.deleteLater()
+
+        bcg = _BCGPanel()
+        b, c, g = bcg.get_bcg()
+        assert b == pytest.approx(0.0)
+        assert c == pytest.approx(1.0)
+        assert g == pytest.approx(1.0)
+        bcg.deleteLater()
+
+    def test_orthogonal_viewer_widget_instantiates(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        vol = np.random.rand(8, 10, 12).astype(np.float32)
+        w = OrthogonalViewerWidget(vol, apix=2.0, name="test.mrc")
+        assert w is not None
+        assert w._nx == 12
+        assert w._ny == 10
+        assert w._nz == 8
+        assert w._pos == [6, 5, 4]
+        w.deleteLater()
+
+    def test_orthogonal_viewer_get_slice(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        vol = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        w = OrthogonalViewerWidget(vol, apix=1.0, name="test")
+        sl = w._get_slice(0, 1)
+        np.testing.assert_array_equal(sl, vol[1])
+        sl = w._get_slice(1, 2)
+        np.testing.assert_array_equal(sl, vol[:, 2, :])
+        sl = w._get_slice(2, 3)
+        np.testing.assert_array_equal(sl, vol[:, :, 3])
+        w.deleteLater()
+
+    def test_orthogonal_viewer_click_updates_position(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        vol = np.zeros((8, 8, 8), dtype=np.float32)
+        w = OrthogonalViewerWidget(vol, apix=1.0, name="test")
+        w._on_click(0, 5.0, 3.0)
+        assert w._pos[0] == 5
+        assert w._pos[1] == 3
+        w._on_click(1, 2.0, 7.0)
+        assert w._pos[0] == 2
+        assert w._pos[2] == 7
+        w._on_click(2, 6.0, 1.0)
+        assert w._pos[1] == 6
+        assert w._pos[2] == 1
+        w.deleteLater()
+
+    def test_orthogonal_viewer_slider_updates_position(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        vol = np.zeros((8, 8, 8), dtype=np.float32)
+        w = OrthogonalViewerWidget(vol, apix=1.0, name="test")
+        w._on_slider_position(3, 4, 5)
+        assert w._pos == [3, 4, 5]
+        w.deleteLater()

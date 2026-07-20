@@ -8,19 +8,30 @@ The viewport-culling math is kept framework-agnostic in :class:`GalleryPanel`
 so it can be unit-tested without a Qt application.
 """
 
-from PySide6.QtCore import QTimer, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap, QPolygonF
+from PySide6.QtCore import QTimer, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QRadioButton,
     QSlider,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -1007,3 +1018,707 @@ class ImageGalleryWidget(QWidget):
         self._drag_last = None
         self._scrubbing = False
         self._zooming = False
+
+
+_DARK_BG = QColor("#2d2d2d")
+_COLOR_X = QColor(255, 0, 0)
+_COLOR_Y = QColor(0, 255, 0)
+_COLOR_Z = QColor(0, 100, 255)
+
+
+class _SliceView(QWidget):
+    """Single 2D slice view with pan, zoom, cross-hair, and marker lines.
+
+    Signals
+    -------
+    clicked(float, float)
+        Emitted with data-space coordinates when the user clicks.
+    panned(int, int)
+        Emitted with pixel deltas when the user drags.
+    zoomed(float)
+        Emitted with zoom factor when the user scrolls.
+    """
+
+    clicked = Signal(float, float)
+    panned = Signal(int, int)
+    zoomed = Signal(float)
+    middle_clicked = Signal()
+
+    def __init__(self, parent=None, axis_label: str = ""):
+        super().__init__(parent)
+        self.setMinimumSize(100, 100)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), _DARK_BG)
+        self.setPalette(pal)
+
+        self._image: np.ndarray | None = None
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._crosshair: tuple[float, float] | None = None
+        self._crosshair_color_x = QColor(255, 255, 0)
+        self._crosshair_color_y = QColor(255, 255, 0)
+        # (position_data_units, color, "h"|"v")
+        self._markers: list[tuple[float, QColor, str]] = []
+        self._brightness = 0.0
+        self._contrast = 1.0
+        self._gamma = 1.0
+        self._log_transform = False
+        self._drag_last: QPoint | None = None
+        self._border_color = QColor(255, 255, 255)
+        self._axis_label = axis_label
+
+    def set_image(self, data: np.ndarray | None) -> None:
+        self._image = data
+        self.update()
+
+    def set_border_color(self, color: QColor) -> None:
+        self._border_color = color
+
+    def set_crosshair(
+        self,
+        x: float,
+        y: float,
+        color_x: QColor | None = None,
+        color_y: QColor | None = None,
+    ) -> None:
+        self._crosshair = (x, y)
+        if color_x is not None:
+            self._crosshair_color_x = color_x
+        if color_y is not None:
+            self._crosshair_color_y = color_y
+        self.update()
+
+    def set_markers(self, markers: list[tuple[float, QColor, str]]) -> None:
+        self._markers = markers
+        self.update()
+
+    def set_bcg(self, brightness: float, contrast: float, gamma: float) -> None:
+        self._brightness = brightness
+        self._contrast = contrast
+        self._gamma = gamma
+        self.update()
+
+    def set_log_transform(self, val: bool) -> None:
+        self._log_transform = val
+        self.update()
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = max(0.05, zoom)
+        self.update()
+
+    def set_pan(self, x: float, y: float) -> None:
+        self._pan_x = x
+        self._pan_y = y
+        self.update()
+
+    def _apply_bcg(self, data: np.ndarray) -> np.ndarray:
+        """Apply brightness/contrast/gamma to raw slice data."""
+        arr = data.astype(np.float64)
+        lo, hi = float(arr.min()), float(arr.max())
+        if hi - lo < 1e-9:
+            arr = np.zeros_like(arr)
+        else:
+            arr = (arr - lo) / (hi - lo)
+        if self._log_transform:
+            arr = np.log1p(arr)
+        arr = arr + self._brightness
+        arr = (arr - 0.5) * self._contrast + 0.5
+        if self._gamma != 1.0:
+            arr = np.clip(arr, 0.0, 1.0) ** (1.0 / self._gamma)
+        return np.clip(arr, 0.0, 1.0)
+
+    def _data_to_screen(self, dx: float, dy: float) -> tuple[float, float]:
+        w, h = self.width(), self.height()
+        if self._image is None:
+            return 0.0, 0.0
+        ih, iw = self._image.shape[:2]
+        scale = min(w / max(iw, 1), h / max(ih, 1)) * self._zoom
+        sx = (w - iw * scale) / 2 + self._pan_x
+        sy = (h - ih * scale) / 2 + self._pan_y
+        return sx + dx * scale, sy + dy * scale
+
+    def _screen_to_data(self, sx: float, sy: float) -> tuple[float, float]:
+        w, h = self.width(), self.height()
+        if self._image is None:
+            return 0.0, 0.0
+        ih, iw = self._image.shape[:2]
+        scale = min(w / max(iw, 1), h / max(ih, 1)) * self._zoom
+        ix = (w - iw * scale) / 2 + self._pan_x
+        iy = (h - ih * scale) / 2 + self._pan_y
+        return (sx - ix) / max(scale, 1e-9), (sy - iy) / max(scale, 1e-9)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), _DARK_BG)
+
+        if self._image is None or self._image.size == 0:
+            painter.end()
+            return
+
+        w, h = self.width(), self.height()
+        ih, iw = self._image.shape[:2]
+        scale = min(w / max(iw, 1), h / max(ih, 1)) * self._zoom
+        ox = (w - iw * scale) / 2 + self._pan_x
+        oy = (h - ih * scale) / 2 + self._pan_y
+
+        arr = self._apply_bcg(self._image)
+        gray = (arr * 255).astype(np.uint8)
+        qimg = QImage(gray.data, iw, ih, iw, QImage.Format_Grayscale8)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawImage(
+            QRectF(ox, oy, iw * scale, ih * scale), qimg, QRectF(0, 0, iw, ih)
+        )
+
+        for mpos, mcolor, morient in self._markers:
+            painter.setPen(QPen(mcolor, 1))
+            if morient == "v":
+                sx, _ = self._data_to_screen(mpos, 0)
+                painter.drawLine(QPointF(sx, 0), QPointF(sx, h))
+            else:
+                _, sy = self._data_to_screen(0, mpos)
+                painter.drawLine(QPointF(0, sy), QPointF(w, sy))
+
+        if self._crosshair is not None:
+            cx, cy = self._crosshair
+            sx, sy = self._data_to_screen(cx, cy)
+            pen = QPen(self._crosshair_color_x, 0.5, Qt.DashLine)
+            pen.setDashPattern([8, 12])
+            painter.setPen(pen)
+            painter.drawLine(QPointF(sx, 0), QPointF(sx, h))
+            pen = QPen(self._crosshair_color_y, 0.5, Qt.DashLine)
+            pen.setDashPattern([8, 12])
+            painter.setPen(pen)
+            painter.drawLine(QPointF(0, sy), QPointF(w, sy))
+
+        painter.setPen(QPen(self._border_color, 1))
+        painter.drawRect(0, 0, w - 1, h - 1)
+
+        if self._axis_label:
+            painter.setPen(QColor(255, 255, 255))
+            painter.setFont(QFont("Arial", 14, QFont.Bold))
+            painter.drawText(6, 18, self._axis_label)
+
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MiddleButton:
+            self.middle_clicked.emit()
+        elif event.button() == Qt.LeftButton:
+            dx, dy = self._screen_to_data(event.pos().x(), event.pos().y())
+            self.clicked.emit(dx, dy)
+            self._drag_last = event.pos()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_last is not None:
+            dpx = event.pos().x() - self._drag_last.x()
+            dpy = event.pos().y() - self._drag_last.y()
+            self._drag_last = event.pos()
+            self.panned.emit(dpx, dpy)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._drag_last = None
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y()
+        factor = 1.1 if delta > 0 else 1 / 1.1
+        self.zoomed.emit(factor)
+
+
+class _ControlBar(QWidget):
+    """Right-side control bar: position sliders, movie, zoom."""
+
+    position_changed = Signal(int, int, int)
+    movie_toggled = Signal(bool)
+    zoom_changed = Signal(float)
+    reset_view_requested = Signal()
+    middle_clicked = Signal()
+
+    def __init__(self, nx: int, ny: int, nz: int, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(120)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor("#333333"))
+        self.setPalette(pal)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        lbl = "QLabel { color: #ffffff; font-size: 11px; }"
+        sld = (
+            "QSlider::groove:horizontal { background: #555; height: 4px; }"
+            "QSlider::handle:horizontal { background: #aaa; width: 12px; "
+            "margin: -4px 0; border-radius: 3px; }"
+        )
+        val_lbl = "QLabel { color: #ffffff; font-size: 10px; }"
+        btn = (
+            "QPushButton { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            "border-radius: 3px; padding: 4px; font-size: 11px; }"
+            "QPushButton:hover { background: #666; }"
+        )
+
+        def _label(text):
+            l = QLabel(text)
+            l.setStyleSheet(lbl)
+            return l
+
+        def _slider(rng):
+            s = QSlider(Qt.Horizontal)
+            s.setRange(0, max(0, rng - 1))
+            s.setStyleSheet(sld)
+            return s
+
+        def _make_slider_row(label_text, rng, val_text):
+            sl = _slider(rng)
+            vl = _label(val_text)
+            vl.setStyleSheet(val_lbl)
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            row.addWidget(_label(label_text))
+            row.addWidget(sl, 1)
+            row.addWidget(vl)
+            return sl, vl, row
+
+        self._x_slider, self._x_val, x_row = _make_slider_row("X", nx, "0")
+        root.addLayout(x_row)
+
+        self._y_slider, self._y_val, y_row = _make_slider_row("Y", ny, "0")
+        root.addLayout(y_row)
+
+        self._z_slider, self._z_val, z_row = _make_slider_row("Z", nz, "0")
+        root.addLayout(z_row)
+
+        self._zoom_slider = QSlider(Qt.Horizontal)
+        self._zoom_slider.setRange(0, 1000)
+        self._zoom_slider.setValue(500)
+        self._zoom_slider.setStyleSheet(sld)
+        self._zoom_val = _label("1.00x")
+        self._zoom_val.setStyleSheet(val_lbl)
+        row_zm = QHBoxLayout()
+        row_zm.setSpacing(4)
+        row_zm.addWidget(_label("Zoom"))
+        row_zm.addWidget(self._zoom_slider, 1)
+        row_zm.addWidget(self._zoom_val)
+        root.addLayout(row_zm)
+
+        row_btns = QHBoxLayout()
+        self._movie_btn = QPushButton("Movie")
+        self._movie_btn.setCheckable(True)
+        self._movie_btn.setStyleSheet(btn)
+        self._movie_btn.clicked.connect(self.movie_toggled)
+        row_btns.addWidget(self._movie_btn)
+
+        self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setStyleSheet(btn)
+        self._reset_btn.clicked.connect(self.reset_view_requested)
+        row_btns.addWidget(self._reset_btn)
+        root.addLayout(row_btns)
+
+        root.addStretch(1)
+
+        self._z_slider.valueChanged.connect(
+            lambda v: self.position_changed.emit(
+                self._x_slider.value(), self._y_slider.value(), v
+            )
+        )
+        self._y_slider.valueChanged.connect(
+            lambda v: self.position_changed.emit(
+                self._x_slider.value(), v, self._z_slider.value()
+            )
+        )
+        self._x_slider.valueChanged.connect(
+            lambda v: self.position_changed.emit(
+                v, self._y_slider.value(), self._z_slider.value()
+            )
+        )
+        self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
+
+    @staticmethod
+    def _slider_to_zoom(v: int) -> float:
+        return 10.0 ** (2.0 * v / 1000.0 - 1.0)
+
+    @staticmethod
+    def _zoom_to_slider(zoom: float) -> int:
+        import math
+
+        return int(round((math.log10(zoom) + 1.0) / 2.0 * 1000.0))
+
+    def _on_zoom_slider(self, v: int) -> None:
+        zoom = self._slider_to_zoom(v)
+        self._zoom_val.setText(f"{zoom:.2f}x")
+        self.zoom_changed.emit(zoom)
+
+    def set_position(self, x: int, y: int, z: int) -> None:
+        for slider, val_lbl, val in [
+            (self._x_slider, self._x_val, x),
+            (self._y_slider, self._y_val, y),
+            (self._z_slider, self._z_val, z),
+        ]:
+            slider.blockSignals(True)
+            slider.setValue(val)
+            val_lbl.setText(str(val))
+            slider.blockSignals(False)
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(self._zoom_to_slider(zoom))
+        self._zoom_val.setText(f"{zoom:.2f}x")
+        self._zoom_slider.blockSignals(False)
+
+    def set_movie_playing(self, playing: bool) -> None:
+        self._movie_btn.blockSignals(True)
+        self._movie_btn.setChecked(playing)
+        self._movie_btn.blockSignals(False)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MiddleButton:
+            self.middle_clicked.emit()
+        else:
+            super().mousePressEvent(event)
+
+
+class _BCGPanel(QWidget):
+    """Collapsible left-side panel with brightness / contrast / gamma controls."""
+
+    bcg_changed = Signal(float, float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(180)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor("#333333"))
+        self.setPalette(pal)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        lbl = "QLabel { color: #ffffff; font-size: 11px; }"
+        sld = (
+            "QSlider::groove:horizontal { background: #555; height: 4px; }"
+            "QSlider::handle:horizontal { background: #aaa; width: 12px; "
+            "margin: -4px 0; border-radius: 3px; }"
+        )
+        val_lbl = "QLabel { color: #ffffff; font-size: 10px; }"
+
+        def _label(text):
+            return QLabel(text)
+
+        def _slider(rng):
+            s = QSlider(Qt.Horizontal)
+            s.setRange(0, max(0, rng - 1))
+            s.setStyleSheet(sld)
+            return s
+
+        root.addWidget(_label("Brightness"))
+        self._b_slider = _slider(200)
+        self._b_slider.setValue(100)
+        self._b_val = _label("0.00")
+        self._b_val.setStyleSheet(val_lbl)
+        row_b = QHBoxLayout()
+        row_b.addWidget(self._b_slider, 1)
+        row_b.addWidget(self._b_val)
+        root.addLayout(row_b)
+
+        root.addWidget(_label("Contrast"))
+        self._c_slider = _slider(300)
+        self._c_slider.setValue(100)
+        self._c_val = _label("1.00")
+        self._c_val.setStyleSheet(val_lbl)
+        row_c = QHBoxLayout()
+        row_c.addWidget(self._c_slider, 1)
+        row_c.addWidget(self._c_val)
+        root.addLayout(row_c)
+
+        root.addWidget(_label("Gamma"))
+        self._g_slider = _slider(300)
+        self._g_slider.setValue(100)
+        self._g_val = _label("1.00")
+        self._g_val.setStyleSheet(val_lbl)
+        row_g = QHBoxLayout()
+        row_g.addWidget(self._g_slider, 1)
+        row_g.addWidget(self._g_val)
+        root.addLayout(row_g)
+
+        root.addStretch(1)
+
+        self._b_slider.valueChanged.connect(self._emit)
+        self._c_slider.valueChanged.connect(self._emit)
+        self._g_slider.valueChanged.connect(self._emit)
+
+    def _emit(self) -> None:
+        self.bcg_changed.emit(*self.get_bcg())
+
+    def get_bcg(self) -> tuple[float, float, float]:
+        return (
+            self._b_slider.value() / 100.0 - 1.0,
+            self._c_slider.value() / 100.0,
+            self._g_slider.value() / 100.0,
+        )
+
+
+class OrthogonalViewerWidget(QWidget):
+    """Interactive three-panel orthogonal slice viewer for 3D volumes.
+
+    Displays XY (bottom-left), XZ (top-left), and YZ (top-right) slices
+    with linked navigation, pan, zoom, cross-hair cursor, and movie mode.
+
+    Parameters
+    ----------
+    volume : np.ndarray
+        3D array with shape ``(nz, ny, nx)``.
+    apix : float
+        Pixel size in Angstroms.
+    name : str
+        Display name for the window title.
+    """
+
+    panel_toggle_requested = Signal()
+    view_changed = Signal()
+
+    def __init__(self, volume: np.ndarray, apix: float = 1.0, name: str = ""):
+        super().__init__()
+        self._volume = volume
+        self._apix = apix
+        self._name = name
+        nz, ny, nx = volume.shape
+        self._nx, self._ny, self._nz = nx, ny, nz
+        self._pos = [nx // 2, ny // 2, nz // 2]
+        self._movie_timer = QTimer(self)
+        self._movie_timer.timeout.connect(self._advance_movie)
+        self._movie_axis = 2
+
+        self._brightness = 0.0
+        self._contrast = 1.0
+        self._gamma = 1.0
+        self._log_transform = False
+        self._adjust_scope = "all"
+        self._selected_panel_idx = -1
+
+        self._setup_ui()
+        self._sync_views(source_idx=-1)
+
+    def _setup_ui(self) -> None:
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._xy_view = _SliceView(axis_label="Z")
+        self._xz_view = _SliceView(axis_label="Y")
+        self._yz_view = _SliceView(axis_label="X")
+
+        self._xy_view.set_border_color(QColor(0, 200, 0))
+        self._xz_view.set_border_color(QColor(200, 0, 0))
+        self._yz_view.set_border_color(QColor(0, 100, 255))
+
+        self._ctrl = _ControlBar(self._nx, self._ny, self._nz)
+
+        layout.addWidget(self._xz_view, 0, 0)
+        layout.addWidget(self._yz_view, 0, 1)
+        layout.addWidget(self._xy_view, 1, 0)
+        layout.addWidget(self._ctrl, 1, 1)
+
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        layout.setRowStretch(0, 1)
+        layout.setRowStretch(1, 1)
+
+        self._xy_view.clicked.connect(lambda x, y: self._on_click(0, x, y))
+        self._xz_view.clicked.connect(lambda x, y: self._on_click(1, x, y))
+        self._yz_view.clicked.connect(lambda x, y: self._on_click(2, x, y))
+
+        self._xy_view.panned.connect(lambda dx, dy: self._on_pan(0, dx, dy))
+        self._xz_view.panned.connect(lambda dx, dy: self._on_pan(1, dx, dy))
+        self._yz_view.panned.connect(lambda dx, dy: self._on_pan(2, dx, dy))
+
+        self._xy_view.zoomed.connect(lambda f: self._on_zoom(f))
+        self._xz_view.zoomed.connect(lambda f: self._on_zoom(f))
+        self._yz_view.zoomed.connect(lambda f: self._on_zoom(f))
+
+        self._xy_view.middle_clicked.connect(self.panel_toggle_requested.emit)
+        self._xz_view.middle_clicked.connect(self.panel_toggle_requested.emit)
+        self._yz_view.middle_clicked.connect(self.panel_toggle_requested.emit)
+        self._ctrl.middle_clicked.connect(self.panel_toggle_requested.emit)
+
+        self._ctrl.position_changed.connect(self._on_slider_position)
+        self._ctrl.movie_toggled.connect(self._on_movie_toggle)
+        self._ctrl.zoom_changed.connect(self._on_ctrl_zoom)
+        self._ctrl.reset_view_requested.connect(self._on_reset_view)
+
+    def _get_slice(self, axis: int, idx: int) -> np.ndarray:
+        """axis 0=Z (XY plane), 1=Y (XZ plane), 2=X (YZ plane)."""
+        if axis == 0:
+            return self._volume[idx]
+        elif axis == 1:
+            return self._volume[:, idx, :]
+        else:
+            return self._volume[:, :, idx]
+
+    def _sync_views(self, source_idx: int = -1) -> None:
+        x, y, z = self._pos
+
+        self._xy_view.set_image(self._get_slice(0, z))
+        self._xy_view.set_crosshair(x, y, _COLOR_X, _COLOR_Y)
+
+        self._xz_view.set_image(self._get_slice(1, y))
+        self._xz_view.set_crosshair(x, z, _COLOR_X, _COLOR_Z)
+
+        self._yz_view.set_image(self._get_slice(2, x))
+        self._yz_view.set_crosshair(y, z, _COLOR_Y, _COLOR_Z)
+
+        self._ctrl.set_position(x, y, z)
+        self.view_changed.emit()
+
+    _MOVIE_AXES = [2, 1, 0]
+
+    def _on_click(self, panel_idx: int, dx: float, dy: float) -> None:
+        self._selected_panel_idx = panel_idx
+        self._movie_axis = self._MOVIE_AXES[panel_idx]
+        if panel_idx == 0:
+            self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
+            self._pos[1] = int(np.clip(round(dy), 0, self._ny - 1))
+        elif panel_idx == 1:
+            self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
+            self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
+        else:
+            self._pos[1] = int(np.clip(round(dx), 0, self._ny - 1))
+            self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
+        self._sync_views(source_idx=panel_idx)
+
+    def _on_pan(self, panel_idx: int, dpx: int, dpy: int) -> None:
+        """Linked panning: dragging in one view shifts the other two to keep
+        corresponding regions visible, matching IMOD's XYZ window behavior."""
+        views = [self._xy_view, self._xz_view, self._yz_view]
+        view = views[panel_idx]
+        if view._image is None:
+            return
+        ih, iw = view._image.shape[:2]
+        w, h = view.width(), view.height()
+        scale = min(w / max(iw, 1), h / max(ih, 1)) * view._zoom
+        if scale < 1e-9:
+            return
+
+        view._pan_x += dpx
+        view._pan_y += dpy
+
+        if panel_idx == 0:
+            self._xz_view._pan_x += dpx
+            self._yz_view._pan_y += dpy
+        elif panel_idx == 1:
+            self._xy_view._pan_x += dpx
+            self._yz_view._pan_y += dpy
+        else:
+            self._xy_view._pan_y += dpx
+            self._xz_view._pan_y += dpy
+
+        for v in views:
+            v.update()
+
+    def _on_zoom(self, factor: float) -> None:
+        for v in [self._xy_view, self._xz_view, self._yz_view]:
+            v.set_zoom(v._zoom * factor)
+        self._ctrl.set_zoom(self._xy_view._zoom)
+
+    def _on_ctrl_zoom(self, zoom: float) -> None:
+        for v in [self._xy_view, self._xz_view, self._yz_view]:
+            v.set_zoom(zoom)
+
+    # ---- adapter methods for _wrap_gallery_with_panel compatibility ----
+
+    def has_data(self) -> bool:
+        return self._volume is not None
+
+    @property
+    def _read_fn(self):
+        def _sample(i: int):
+            if self._adjust_scope == "selected" and self._selected_panel_idx >= 0:
+                idx = self._selected_panel_idx
+            else:
+                idx = i % 3
+            views = [self._xy_view, self._xz_view, self._yz_view]
+            return (
+                views[idx]._image
+                if views[idx]._image is not None
+                else np.zeros((1, 1), dtype=np.float32)
+            )
+
+        return _sample
+
+    @property
+    def _n(self):
+        if self._adjust_scope == "selected" and self._selected_panel_idx >= 0:
+            return 3
+        return 9
+
+    def _propagate_bcg(self):
+        views = [self._xy_view, self._xz_view, self._yz_view]
+        if self._adjust_scope == "selected" and self._selected_panel_idx >= 0:
+            targets = [views[self._selected_panel_idx]]
+        else:
+            targets = views
+        for v in targets:
+            v._brightness = self._brightness
+            v._contrast = self._contrast
+            v._gamma = self._gamma
+            v._log_transform = self._log_transform
+            v.update()
+
+    def set_brightness(self, val: float) -> None:
+        self._brightness = val
+        self._propagate_bcg()
+
+    def set_contrast(self, val: float) -> None:
+        self._contrast = val
+        self._propagate_bcg()
+
+    def set_gamma(self, val: float) -> None:
+        self._gamma = val
+        self._propagate_bcg()
+
+    def set_log_transform(self, val: bool) -> None:
+        self._log_transform = val
+        self._propagate_bcg()
+
+    def reset_adjustments(self) -> None:
+        self._brightness = 0.0
+        self._contrast = 1.0
+        self._gamma = 1.0
+        self._log_transform = False
+        self._propagate_bcg()
+
+    def set_adjust_scope(self, scope: str) -> None:
+        self._adjust_scope = scope
+
+    def set_selected_idx(self, idx) -> None:
+        pass
+
+    def _on_slider_position(self, x: int, y: int, z: int) -> None:
+        self._pos = [x, y, z]
+        self._sync_views(source_idx=-1)
+
+    def _on_movie_toggle(self, playing: bool) -> None:
+        if playing:
+            self._movie_timer.start(100)
+        else:
+            self._movie_timer.stop()
+
+    def _on_reset_view(self) -> None:
+        self._pos = [self._nx // 2, self._ny // 2, self._nz // 2]
+        for v in [self._xy_view, self._xz_view, self._yz_view]:
+            v._zoom = 1.0
+            v._pan_x = 0.0
+            v._pan_y = 0.0
+        self._ctrl.set_zoom(1.0)
+        self._sync_views(source_idx=-1)
+
+    def _advance_movie(self) -> None:
+        axis = self._movie_axis
+        sizes = [self._nx, self._ny, self._nz]
+        self._pos[axis] = (self._pos[axis] + 1) % sizes[axis]
+        self._sync_views(source_idx=-1)

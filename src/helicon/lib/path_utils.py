@@ -369,7 +369,10 @@ def convert_file_path(
         if to in ["real", "absolute", "abs"]:
             name2 = p_abs.as_posix()
         else:
-            name2_rel = os.path.relpath(p_abs, relpath_start)
+            try:
+                name2_rel = p_abs.relative_to(relpath_start).as_posix()
+            except ValueError:
+                name2_rel = os.path.relpath(p_abs, relpath_start)
             if to in ["relative", "rel"]:
                 name2 = name2_rel
             elif to == "shortest":

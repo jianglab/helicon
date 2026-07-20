@@ -118,6 +118,72 @@ class BaseGallery:
         pass
 
 
+class OrthogonalGallery:
+    """Gallery for 3D MRC volumes — opens the interactive orthogonal viewer.
+
+    Unlike ``BaseGallery`` subclasses, this does not use ``ImageGalleryWidget``.
+    It loads the full volume into memory and opens an ``OrthogonalViewerWidget``.
+
+    Parameters
+    ----------
+    mrc_path : str
+        Path to a 3D MRC/MAP file.
+    """
+
+    def __init__(self, mrc_path: str) -> None:
+        self.mrc_path = mrc_path
+        self._volume: np.ndarray | None = None
+        self._apix = 1.0
+        self._name = Path(mrc_path).name
+        self._parsed = False
+
+    def _parse(self) -> None:
+        import mrcfile
+
+        with mrcfile.open(self.mrc_path, permissive=True) as mrc:
+            data = mrc.data
+            if data is None or data.ndim != 3:
+                return
+            self._volume = data.astype(np.float32)
+            self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
+        self._parsed = True
+
+    def open(self, reuse_window=None):
+        if not self._parsed:
+            self._parse()
+        if self._volume is None:
+            return None
+
+        from PySide6.QtWidgets import QMainWindow
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+        from helicon.commands.display import _wrap_gallery_with_panel
+
+        widget = OrthogonalViewerWidget(self._volume, apix=self._apix, name=self._name)
+        container = _wrap_gallery_with_panel(widget)
+
+        if reuse_window is not None:
+            reuse_window.setWindowTitle(f"helicon - {self._name}")
+            reuse_window.setCentralWidget(container)
+            reuse_window.show()
+            reuse_window.raise_()
+            return reuse_window
+
+        from helicon.commands.display import _on_orthogonal_closing, _orthogonal_windows
+
+        class _OrthWindow(QMainWindow):
+            def closeEvent(self, event):
+                _on_orthogonal_closing(self)
+                super().closeEvent(event)
+
+        window = _OrthWindow()
+        window.setWindowTitle(f"helicon - {self._name}")
+        window.setCentralWidget(container)
+        window.resize(800, 600)
+        _orthogonal_windows.append(window)
+        window.show()
+        return window
+
+
 class StackGallery(BaseGallery):
     """Gallery for plain .mrcs stacks, data.star files, or generic read_fn.
 

@@ -1,7 +1,8 @@
 """Handler for the excludeFile option."""
 
 from __future__ import annotations
-import os, logging
+import logging
+from pathlib import Path
 import helicon
 from helicon.lib.exceptions import HeliconError
 from .selectFile import _select_by_file
@@ -55,7 +56,7 @@ def handle(data, args, index_d, param):
             )
         pattern = param_dict.get("pattern", None)
 
-        if not os.path.exists(sf):
+        if not Path(sf).exists():
             raise HeliconError(
                 "\tERROR: option --excludeFile has specified a non-existent file %s"
                 % sf

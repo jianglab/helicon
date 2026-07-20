@@ -894,6 +894,8 @@ class FolderBrowserWidget(QWidget):
         )
         self._btn_2dclasses = QPushButton("2D Classes")
         self._btn_2dclasses.setToolTip("Show 2D class averages sorted by abundance")
+        self._btn_orthogonal = QPushButton("Ortho Slice")
+        self._btn_orthogonal.setToolTip("Interactive XYZ slice viewer for 3D volumes")
         self._new_window_cb = QCheckBox("New display window")
         for btn in (
             self._btn_volume,
@@ -905,6 +907,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_gallery,
             self._btn_optimiser,
             self._btn_2dclasses,
+            self._btn_orthogonal,
         ):
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
@@ -921,6 +924,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_gallery.clicked.connect(lambda: self._emit_display("gallery"))
         self._btn_optimiser.clicked.connect(lambda: self._emit_display("optimiser"))
         self._btn_2dclasses.clicked.connect(lambda: self._emit_display("2dclasses"))
+        self._btn_orthogonal.clicked.connect(lambda: self._emit_display("orthogonal"))
 
         layout.addWidget(self._action_bar)
 
@@ -986,10 +990,11 @@ class FolderBrowserWidget(QWidget):
         if ext == ".mrcs":
             return ["slice", "gallery"]
         if ext in (".mrc", ".map"):
-            return ["slice", "volume", "gallery", "chimerax"]
+            modes = ["slice", "volume", "gallery", "chimerax"]
+            if self._volume_has_nz_gt1(path):
+                modes.append("orthogonal")
+            return modes
         if ext == ".bild":
-            # 3D plot file: shown as a general image and also openable in
-            # ChimeraX, which renders the cylinders/spheres natively.
             return ["general", "chimerax"]
         if ext in _KNOWN_EXTENSIONS:
             return ["general"]
@@ -998,6 +1003,20 @@ class FolderBrowserWidget(QWidget):
             return ["general"]
 
         return []
+
+    def _volume_has_nz_gt1(self, path: str) -> bool:
+        """Return True if a .mrc/.map file has more than one Z slice."""
+        try:
+            import mrcfile
+
+            with mrcfile.open(path, permissive=True) as mrc:
+                return (
+                    mrc.data is not None
+                    and mrc.data.ndim == 3
+                    and mrc.data.shape[0] > 1
+                )
+        except Exception:
+            return False
 
     def _is_image_stack(self, path: str) -> bool:
         """Return True for files that are stacks of 2D images.
@@ -1053,6 +1072,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_gallery.setVisible("gallery" in modes)
         self._btn_optimiser.setVisible("optimiser" in modes)
         self._btn_2dclasses.setVisible("2dclasses" in modes)
+        self._btn_orthogonal.setVisible("orthogonal" in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -1347,13 +1367,14 @@ def _find_chimerax() -> str | None:
         "chimerax",
         "/opt/UCSF/ChimeraX/bin/chimerax",
         "/Applications/ChimeraX.app/Contents/MacOS/ChimeraX",
+        str(Path.home() / "Applications/ChimeraX.app/Contents/MacOS/ChimeraX"),
         "/usr/bin/chimerax",
         "/usr/local/bin/chimerax",
         r"C:\Program Files\ChimeraX\bin\ChimeraX.exe",
         r"C:\Program Files\UCSF\ChimeraX\ChimeraX.exe",
     ]
     for cand in candidates:
-        found = shutil.which(cand) or (cand if os.path.isfile(cand) else None)
+        found = shutil.which(cand) or (cand if Path(cand).is_file() else None)
         if found:
             return found
     return None

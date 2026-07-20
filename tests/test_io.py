@@ -93,8 +93,11 @@ class TestIo(object):
         )
 
     def setup_method(self, method):
+        import tempfile
+
+        self._tmpdir = tempfile.mkdtemp(prefix="helicon_test_io_")
         # Create a dummy star file for testing
-        self.star_file = "test.star"
+        self.star_file = str(Path(self._tmpdir) / "test.star")
         self.df = pd.DataFrame(
             {
                 "rlnDefocusU": [10000, 11000],
@@ -113,7 +116,7 @@ class TestIo(object):
         starfile.write({"particles": self.df}, self.star_file, overwrite=True)
 
         # Create a dummy cs file for testing
-        self.cs_file = "test.cs"
+        self.cs_file = str(Path(self._tmpdir) / "test.cs")
         import numpy as np
 
         self.cs_array = np.array(
@@ -135,10 +138,13 @@ class TestIo(object):
         np.save(self.cs_file, self.cs_array)
 
     def teardown_method(self, method):
+        import shutil
+
         if Path(self.star_file).exists():
             Path(self.star_file).unlink()
         if Path(self.cs_file).exists():
             Path(self.cs_file).unlink()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     @patch.object(Path, "is_symlink", return_value=False)
     @patch.object(Path, "is_file", return_value=True)
@@ -148,8 +154,8 @@ class TestIo(object):
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 2
 
-    def test_dataframe2star(self):
-        output_star_file = "output.star"
+    def test_dataframe2star(self, tmp_path):
+        output_star_file = str(tmp_path / "output.star")
         # Mock the path normalization to avoid issues with file not found
         with patch("helicon.lib.io.dataframe_normalize_filename") as mock_normalize:
             mock_normalize.side_effect = lambda df, *args, **kwargs: df
@@ -179,8 +185,8 @@ class TestIo(object):
             assert len(df) == 2
             assert "ctf/accel_kv" in df.columns
 
-    def test_dataframe2cs(self):
-        output_cs_file = "output.cs"
+    def test_dataframe2cs(self, tmp_path):
+        output_cs_file = str(tmp_path / "output.cs")
         df = pd.DataFrame(self.cs_array)
         io.dataframe2cs(df, output_cs_file)
 

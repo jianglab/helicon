@@ -1942,6 +1942,14 @@ def _on_gallery_closing(w) -> None:
         _active_gallery[0] = _galleries[-1] if _galleries else None
 
 
+_orthogonal_windows: list = []
+
+
+def _on_orthogonal_closing(w) -> None:
+    if w in _orthogonal_windows:
+        _orthogonal_windows.remove(w)
+
+
 def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     """Wrap an ImageGalleryWidget with a left-side _ControlPanel sibling.
 
@@ -2056,6 +2064,9 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     panel.log_changed.connect(_on_log_transform)
     panel.histogram_changed.connect(_on_histogram_toggled)
 
+    if hasattr(gallery, "view_changed"):
+        gallery.view_changed.connect(_refresh_histogram)
+
     _refresh_histogram()
 
     return container
@@ -2103,6 +2114,14 @@ def _open_xyz_slice_gallery(star_path: str, reuse_window=None) -> "QMainWindow |
     name = Path(star_path).name
     is_refine = any(p.startswith("Refine3D") for p in Path(star_path).parts)
     gallery = Refine3dGallery(star_path) if is_refine else Class3dGallery(star_path)
+    return gallery.open(reuse_window=reuse_window)
+
+
+def _open_orthogonal_viewer(mrc_path: str, reuse_window=None) -> "QMainWindow | None":
+    """Open an interactive orthogonal slice viewer for a 3D MRC/MAP file."""
+    from helicon.lib.gallery_backends import OrthogonalGallery
+
+    gallery = OrthogonalGallery(mrc_path)
     return gallery.open(reuse_window=reuse_window)
 
 
@@ -2457,6 +2476,10 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
             )
             return
 
+        if mode == "orthogonal" and _nz > 1:
+            _open_orthogonal_viewer(path, reuse_window=reuse_gallery)
+            return
+
         # Slice / volume view: show the lazy 3D array; napari loads one plane
         # at a time as the user scrolls.
         _SliceDirectionWidget.set_stack_mode(ext == ".mrcs")
@@ -2522,7 +2545,7 @@ def _run_standalone() -> None:
     path = sys.argv[1]
     mode = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 
-    viewer = napari.Viewer(title=os.path.basename(path))
+    viewer = napari.Viewer(title=Path(path).name)
     _hide_layer_panels(viewer)
     _install_panel_toggle(viewer)
     try:
@@ -2592,6 +2615,13 @@ def main(args: argparse.Namespace) -> None:
     app = QApplication.instance()
     if app is not None:
         app.setApplicationName("helicon")
+        from pathlib import Path
+
+        _icon_path = Path(__file__).parent.parent / "resources" / "icon.png"
+        if _icon_path.is_file():
+            from PySide6.QtGui import QIcon
+
+            app.setWindowIcon(QIcon(str(_icon_path)))
 
     _viewers = [viewer]
     _active_viewer = [viewer]
@@ -2740,7 +2770,7 @@ def main(args: argparse.Namespace) -> None:
         """
         if sys.platform == "darwin":
             try:
-                new_viewer = napari.Viewer(title=f"helicon - {os.path.basename(path)}")
+                new_viewer = napari.Viewer(title=f"helicon - {Path(path).name}")
             except Exception as exc:  # pragma: no cover - environment dependent
                 print(f"[helicon] failed to open new display window: {exc}")
                 return
@@ -2785,7 +2815,7 @@ def main(args: argparse.Namespace) -> None:
         if mode == "chimerax":
             _launch_chimerax(path)
             return
-        if mode in ("gallery", "optimiser", "2dclasses"):
+        if mode in ("gallery", "optimiser", "2dclasses", "orthogonal"):
             reuse = None
             if not new_window:
                 ag = _active_gallery[0]

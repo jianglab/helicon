@@ -13,7 +13,7 @@ import math
 from PIL import Image
 from pathlib import Path
 
-from scipy.optimize import minimize, curve_fit
+from scipy.optimize import minimize, curve_fit, OptimizeWarning
 from matplotlib import pyplot as plt
 
 import os
@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 from uuid import uuid4
 import sys
+import warnings
 from helicon.lib.exceptions import (
     HeliconError,
     HeliconValidationError,
@@ -1370,14 +1371,16 @@ def HelicalSegmentConsistency(
             G_model, x_fit, y_fit, p0=[A0, sigma0], sigma=y_err, absolute_sigma=False
         )
     else:
-        popt, pcov = curve_fit(
-            G2_model,
-            x_fit,
-            y_fit,
-            p0=[A0, sigma0, ATail, sigmaTail],
-            sigma=y_err,
-            absolute_sigma=False,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=OptimizeWarning)
+            popt, pcov = curve_fit(
+                G2_model,
+                x_fit,
+                y_fit,
+                p0=[A0, sigma0, ATail, sigmaTail],
+                sigma=y_err,
+                absolute_sigma=False,
+            )
 
     APeak_fit, sigmaPeak_fit, ATail_fit, sigmaTail_fit = popt
 

@@ -478,3 +478,59 @@ def tilt_psi_dy_str(tilt, psi, dy, sep=" ", sep2="=", unit=True):
     if dy:
         tpy_str += f"{sep}dy{sep2}{round(dy, 2)}" + ("Å" if unit else "")
     return tpy_str
+
+
+# ---------------------------------------------------------------------------
+# Image stitching helpers
+# ---------------------------------------------------------------------------
+
+
+def _image_stitching_x_positions(images, x_offsets=None):
+    if not images:
+        return []
+
+    x_offsets = [] if x_offsets is None else list(x_offsets)
+    positions = []
+    next_x = 0
+    for i, img in enumerate(images):
+        offset = x_offsets[i] if i < len(x_offsets) else 0
+        positions.append(next_x + int(round(offset)))
+        next_x += img.shape[1]
+    return positions
+
+
+def _combine_images_for_display(images, x_offsets=None):
+    if not images:
+        return np.zeros((0, 0), dtype=np.float64)
+
+    x_positions = _image_stitching_x_positions(images, x_offsets)
+    canvas_left = min(0, min(x_positions))
+    canvas_right = max(
+        start_x + img.shape[1] for start_x, img in zip(x_positions, images)
+    )
+    canvas_height = max(img.shape[0] for img in images)
+    canvas_width = max(0, canvas_right - canvas_left)
+
+    sum_image = np.zeros((canvas_height, canvas_width), dtype=np.float64)
+    count_image = np.zeros((canvas_height, canvas_width), dtype=np.uint16)
+
+    for start_x, img in zip(x_positions, images):
+        canvas_start = max(start_x - canvas_left, 0)
+        canvas_end = min(start_x - canvas_left + img.shape[1], canvas_width)
+        if canvas_start >= canvas_end:
+            continue
+
+        img_start = max(0, canvas_left - start_x)
+        img_end = img_start + (canvas_end - canvas_start)
+        img_slice = img[:, img_start:img_end].astype(np.float64)
+
+        img_height = img_slice.shape[0]
+        sum_image[:img_height, canvas_start:canvas_end] += img_slice
+        count_image[:img_height, canvas_start:canvas_end] += 1
+
+    return np.divide(
+        sum_image,
+        count_image,
+        where=(count_image > 0),
+        out=np.zeros_like(sum_image),
+    )

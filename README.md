@@ -1,11 +1,10 @@
 
 # Helicon
 
-A collection of tools for cryo-EM analysis of helical structures.
+A collection of tools for cryo-EM analysis of helical structures
 
 ## Publication
-  Li, D., Zhang, X., and Jiang, W. (2025). Helicon: Helical indexing and 3D reconstruction from one image. bioRxiv, 2025.04.05.647385. [doi:10.1101/2025.04.05.647385](https://doi.org/10.1101/2025.04.05.647385).
-  
+  Li, D., Zhang, X., Jiang, W., 2025. Helicon: Helical parameter determination and 3D reconstruction from one image. Journal of Structural Biology 217, 108256. [doi.org/10.1016/j.jsb.2025.108256](https://doi.org/10.1016/j.jsb.2025.108256)
 
 
 ## Installation
@@ -20,23 +19,32 @@ Run this command in a terminal and follow the help message:
 helicon --help
 ```
 
-## Commands included in helicon
-- **cryosparc**:           A command line tool that interacts with a CryoSPARC server and performs image analysis tasks
-- **ctfSimulation**:       A Web app that simulates 1D/2D TEM contrast transfer function (CTF)
-- **denovo3D**:            A Web app for de novo helical indexing and 3D reconstruction from a single 2D image
-- **denovo3DBatch**:       A command line tool for de novo helical indexing and 3D reconstruction from a single 2D image
-- **display**:             A napari viewer with a docked folder browser for viewing images, volumes, PDFs, and text files
-- **helicalLattice**:      A Web app that illustrates the interconversion of 2D Lattice ⇔ Helical Lattice
+## Programs included in helicon
+
+### Command-line programs
+- **cryosparc**:           A command-line tool that interacts with a CryoSPARC server and performs image analysis tasks
+- **images2star**:         A command-line tool that analyzes/transforms dataset(s) and saves the dataset in a RELION star file
+- **proc3d**:              A command-line tool that analyzes/transforms 3D maps
+- **trueFSC**:             A command-line tool to compute True FSC curve with optimal mask and phase randomization
+
+### GUI apps
+- **display**:             A file browser for viewing image, map, star, bild, eps, pdf, html, and text files
+
+### Shiny web apps
+- **denovo3D**:            A Web app that performs de novo helical indexing and 3D reconstruction from a single 2D image
 - **helicalPitch**:        A Web app that helps you determine helical pitch/twist using 2D Classification info
 - **helicalProjection**:   A Web app that helps you compare 2D images with helical structure projections
+- **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
+
+### Streamlit web apps
+- **ctfSimulation**:       A Web app that simulates 1D/2D TEM contrast transfer function (CTF)
+- **helicalLattice**:      A Web app that illustrates the interconversion of 2D Lattice ⇔ Helical Lattice
 - **hi3d**:                A Web app for helical indexing using the cylindrical projection of a 3D map
 - **hill**:                A Web app for helical indexing using Fourier layer lines of 2D images
-- **images2star**:         A command line tool that analyzes/transforms dataset(s) and saves the dataset in RELION star file
 - **map2seq**:             A Web app that identifies the best protein sequence explaining a 3D density map
-- **proc3d**:              A command line tool that anaylzes/transforms 3D maps
 - **procart**:             A Web app that plots cartoon illustration of the residue properties of amyloid atomic models
-- **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
-- **HOMcontainer**:        A command line tool for looking at the consistency of helical assignments. Open github issue to update WISHLIST_HOMcontainer.md. 
+
+
 ## Documentation
 - [Helicon@readthedocs](https://helicon.readthedocs.io): for users
 - [Helicon@DeepWiki](https://deepwiki.com/jianglab/helicon): for developers
