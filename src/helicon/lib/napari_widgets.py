@@ -896,6 +896,10 @@ class FolderBrowserWidget(QWidget):
         self._btn_2dclasses.setToolTip("Show 2D class averages sorted by abundance")
         self._btn_orthogonal = QPushButton("Ortho Slice")
         self._btn_orthogonal.setToolTip("Interactive XYZ slice viewer for 3D volumes")
+        self._btn_fsc = QPushButton("FSC")
+        self._btn_fsc.setToolTip(
+            "Display Fourier Shell Correlation curve from model.star"
+        )
         self._new_window_cb = QCheckBox("New display window")
         for btn in (
             self._btn_volume,
@@ -908,6 +912,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_optimiser,
             self._btn_2dclasses,
             self._btn_orthogonal,
+            self._btn_fsc,
         ):
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
@@ -925,6 +930,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_optimiser.clicked.connect(lambda: self._emit_display("optimiser"))
         self._btn_2dclasses.clicked.connect(lambda: self._emit_display("2dclasses"))
         self._btn_orthogonal.clicked.connect(lambda: self._emit_display("orthogonal"))
+        self._btn_fsc.clicked.connect(lambda: self._emit_display("fsc"))
 
         layout.addWidget(self._action_bar)
 
@@ -979,11 +985,12 @@ class FolderBrowserWidget(QWidget):
             name = Path(path).name
             if name.endswith("optimiser.star") or name.endswith("model.star"):
                 _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
-                return (
-                    ["metadata", "2dclasses"]
-                    if _is_class2d
-                    else ["metadata", "optimiser"]
-                )
+                if _is_class2d:
+                    return ["metadata", "2dclasses"]
+                modes = ["metadata", "optimiser"]
+                if name.endswith("model.star"):
+                    modes.append("fsc")
+                return modes
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return ["metadata"]
             return ["slice", "gallery", "stats", "metadata"]
@@ -1073,6 +1080,7 @@ class FolderBrowserWidget(QWidget):
         self._btn_optimiser.setVisible("optimiser" in modes)
         self._btn_2dclasses.setVisible("2dclasses" in modes)
         self._btn_orthogonal.setVisible("orthogonal" in modes)
+        self._btn_fsc.setVisible("fsc" in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -1135,6 +1143,7 @@ class FolderBrowserWidget(QWidget):
             self._btn_metadata: "metadata",
             self._btn_gallery: "gallery",
             self._btn_optimiser: "optimiser",
+            self._btn_fsc: "fsc",
         }
         buttons = list(btn_mode_map.keys())
         active = [b for b in buttons if btn_mode_map[b] in modes]

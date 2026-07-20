@@ -2103,6 +2103,214 @@ def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> No
     return gallery.open(reuse_window=reuse_window)
 
 
+def _open_fsc_plot(star_path: str) -> None:
+    """Display the FSC curve from a RELION model.star file using pyqtgraph.
+
+    Reads ``data_model_class_N`` sections and plots resolution vs. FSC
+    for each class.  A horizontal line at FSC = 0.143 marks the
+    gold-standard threshold.
+    """
+    import numpy as np
+
+    try:
+        import pyqtgraph as pg
+        from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
+        from PySide6.QtCore import Qt
+    except ImportError:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            None,
+            "Missing dependency",
+            "pyqtgraph is required to display FSC curves.\n"
+            "Install it with: pip install pyqtgraph",
+        )
+        return
+
+    try:
+        import starfile
+
+        data = starfile.read(star_path, always_dict=True)
+    except Exception:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            None,
+            "Error",
+            f"Failed to read {Path(star_path).name}.\n"
+            "Make sure it is a valid RELION model.star file.",
+        )
+        return
+
+    class_sections = {k: v for k, v in data.items() if k.startswith("model_class_")}
+    if not class_sections:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.information(
+            None,
+            "No FSC data",
+            f"No data_model_class_N sections found in {Path(star_path).name}.",
+        )
+        return
+
+    all_curves = []
+    for key in sorted(class_sections, key=lambda k: int(k.split("_")[-1])):
+        df = class_sections[key]
+        class_num = key.split("_")[-1]
+
+        sf_col = None
+        ang_col = None
+        fsc_col = None
+        for col in df.columns:
+            cl = col.lower()
+            if "goldstandardfsc" in cl:
+                fsc_col = col
+            elif "fouriershellcorrelation" in cl and "phase" not in cl:
+                fsc_col = col
+            if cl in ("_rlnresolution", "rlnresolution"):
+                sf_col = col
+            if cl in ("_rlnangstromresolution", "rlnangstromresolution"):
+                ang_col = col
+
+        if sf_col is None or fsc_col is None:
+            continue
+
+        spatial_freq = np.asarray(df[sf_col], dtype=np.float64)
+        fsc = np.asarray(df[fsc_col], dtype=np.float64)
+
+        order = np.argsort(spatial_freq)
+        spatial_freq = spatial_freq[order]
+        fsc = fsc[order]
+
+        angstrom = None
+        if ang_col is not None:
+            angstrom = np.asarray(df[ang_col], dtype=np.float64)[order]
+
+        all_curves.append((spatial_freq, fsc, f"Class {class_num}", angstrom))
+
+    if not all_curves:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            None,
+            "Column error",
+            "Could not find resolution/FSC columns in any class section.",
+        )
+        return
+
+    name = Path(star_path).name
+    win = QMainWindow()
+    win.setWindowTitle(f"FSC — {name}")
+    win.resize(700, 450)
+
+    central = QWidget()
+    layout = QVBoxLayout(central)
+    layout.setContentsMargins(0, 0, 0, 0)
+    win.setCentralWidget(central)
+
+    pg.setConfigOptions(antialias=True)
+    plot_widget = pg.PlotWidget()
+    layout.addWidget(plot_widget)
+
+    plot = plot_widget.getPlotItem()
+    plot.getAxis("bottom").enableAutoSIPrefix(False)
+    plot.setLabel("bottom", "Resolution", units="1/Å")
+    plot.setLabel("left", "FSC")
+    plot.setYRange(0, 1.05)
+    plot.addLegend()
+    plot.showGrid(x=True, y=True, alpha=0.3)
+
+    top_axis = plot.getAxis("top")
+    top_axis.enableAutoSIPrefix(False)
+    top_axis.setLabel("Resolution", units="Å")
+    _origTickStrings = top_axis.tickStrings
+
+    def _angstrom_tickStrings(values, scale, spacing):
+        return [f"{1.0 / v:.1f}" if v > 0 else "" for v in values]
+
+    top_axis.tickStrings = _angstrom_tickStrings
+    top_axis.show()
+
+    colors = [
+        (0, 120, 215),
+        (220, 120, 0),
+        (0, 170, 80),
+        (180, 0, 180),
+        (200, 50, 50),
+        (100, 100, 100),
+    ]
+
+    for i, (spatial_freq, fsc, label, _) in enumerate(all_curves):
+        color = colors[i % len(colors)]
+        pen = pg.mkPen(color=color, width=2)
+        plot.plot(spatial_freq, fsc, pen=pen, name=label)
+
+    threshold_pen = pg.mkPen(color=(220, 50, 50), width=1, style=Qt.PenStyle.DashLine)
+    plot.addItem(
+        pg.InfiniteLine(
+            pos=0.143,
+            angle=0,
+            pen=threshold_pen,
+        )
+    )
+    threshold_label = pg.TextItem("0.143", color=(220, 50, 50), anchor=(0, 0))
+    threshold_label.setZValue(5)
+    plot.addItem(threshold_label, ignoreBounds=True)
+
+    def _position_threshold_label():
+        vr = plot.vb.viewRect()
+        threshold_label.setPos(vr.left() + vr.width() * 0.005, 0.143)
+
+    _position_threshold_label()
+    plot.vb.sigResized.connect(_position_threshold_label)
+
+    crosshair_pen = pg.mkPen(
+        color=(150, 150, 150, 160), width=1, style=Qt.PenStyle.DashLine
+    )
+    vline = pg.InfiniteLine(angle=90, pen=crosshair_pen, movable=False)
+    hline = pg.InfiniteLine(angle=0, pen=crosshair_pen, movable=False)
+    plot.addItem(vline, ignoreBounds=True)
+    plot.addItem(hline, ignoreBounds=True)
+    coord_text = pg.TextItem(anchor=(0, 1), color=(220, 220, 220))
+    coord_text.setZValue(20)
+    plot.addItem(coord_text, ignoreBounds=True)
+
+    def _on_mouse_moved(evt):
+        pos = plot.vb.mapSceneToView(evt if hasattr(evt, "x") else evt[0])
+        x, y = pos.x(), pos.y()
+        if not plot.vb.viewRect().contains(pos):
+            coord_text.setVisible(False)
+            return
+        vline.setValue(x)
+        hline.setValue(y)
+        vline.setVisible(True)
+        hline.setVisible(True)
+        ang = f"{1.0 / x:.2f}" if x > 0 else "∞"
+        coord_text.setHtml(
+            f'<span style="color: #dcdcdc; background-color: rgba(0,0,0,180);'
+            f' padding: 2px;">'
+            f"{x:.4f} 1/Å  ({ang} Å)<br>FSC = {y:.4f}</span>"
+        )
+        coord_text.setVisible(True)
+        vr = plot.vb.viewRect()
+        dx = vr.width() * 0.02
+        dy = vr.height() * 0.02
+        tx = x + dx
+        ty = y + dy
+        if tx + vr.width() * 0.15 > vr.right():
+            tx = x - vr.width() * 0.15 - dx
+        coord_text.setPos(tx, ty)
+
+    plot_widget.scene().sigMouseMoved.connect(_on_mouse_moved)
+
+    win.show()
+    import sys
+
+    _fsc_windows = getattr(sys, "_helicon_fsc_windows", [])
+    _fsc_windows.append(win)
+    sys._helicon_fsc_windows = _fsc_windows
+
+
 def _open_xyz_slice_gallery(star_path: str, reuse_window=None) -> "QMainWindow | None":
     """Display center slices (Z, Y, X) of MRC files referenced by a star file.
 
@@ -2823,6 +3031,9 @@ def main(args: argparse.Namespace) -> None:
                     reuse = ag
 
             _open_file(None, path, mode=mode, reuse_gallery=reuse)
+            return
+        if mode == "fsc":
+            _open_fsc_plot(path)
             return
         # The "new window" checkbox only matters once a window is already
         # visible: it then forces a second window. Otherwise the file opens in

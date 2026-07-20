@@ -1286,6 +1286,7 @@ class TestFolderBrowser(object):
         assert widget._display_modes_for(str(star_file)) == [
             "metadata",
             "optimiser",
+            "fsc",
         ]
 
     def test_file_browser_model_filter_wildcard(self, tmp_path):
