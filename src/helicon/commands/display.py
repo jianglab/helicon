@@ -628,8 +628,6 @@ def _install_viewer_save_menu(viewer):
                 except Exception:
                     pass
 
-        _right_active = [False]
-
         def _show_save_menu():
             gpos = canvas.native.cursor().pos()
             menu = QMenu()
@@ -647,16 +645,7 @@ def _install_viewer_save_menu(viewer):
             etype = getattr(event, "type", None)
 
             if etype == "mouse_press" and getattr(event, "button", None) == 2:
-                _right_active[0] = True
-                event.handled = True
                 QTimer.singleShot(0, _show_save_menu)
-                return
-
-            if _right_active[0]:
-                event.handled = True
-                if etype == "mouse_release":
-                    _right_active[0] = False
-                return
 
             original_handler(event)
 
@@ -1470,10 +1459,9 @@ def _install_panel_toggle(viewer) -> None:
         if view is None:
             return
 
-        # VisPy reports middle as 3 (its own enum), Qt reports it as 4,
-        # and some builds pass through the raw Qt value.  Suppress all
-        # three, including when middle is held during mouse_wheel/move.
-        middle_values = (2, 3, 4)
+        # VisPy reports middle as 3 (its own enum), Qt reports it as 4.
+        # VisPy right button is 2 — do NOT include it here.
+        middle_values = (3, 4)
 
         def _wrap_camera() -> None:
             camera = getattr(view, "camera", None)
@@ -2592,13 +2580,20 @@ _PLOT_MODES = {"fsc"}
 
 
 def _quit_all_windows():
-    """Close every tracked window and quit the application."""
+    """Close every tracked window and the file browser, then quit."""
+    from PySide6.QtWidgets import QApplication
+
     for tracker in (_napari, _gallery, _text, _plot):
         for w in list(tracker.alive()):
             try:
                 w.close()
             except Exception:
                 pass
+    for w in QApplication.topLevelWidgets():
+        try:
+            w.close()
+        except Exception:
+            pass
 
 
 def _install_window_shortcuts(window):
@@ -2608,7 +2603,7 @@ def _install_window_shortcuts(window):
     close_sc = QShortcut(QKeySequence("Ctrl+W"), window)
     close_sc.activated.connect(window.close)
 
-    quit_sc = QShortcut(QKeySequence("Ctrl+Q"), window)
+    quit_sc = QShortcut(QKeySequence.StandardKey.Quit, window)
     quit_sc.activated.connect(_quit_all_windows)
 
 
