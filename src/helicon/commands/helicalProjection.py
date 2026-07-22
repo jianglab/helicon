@@ -11,16 +11,15 @@ logger = logging.getLogger(__name__)
 def main(args):
     """Launch the helical projection Shiny web app."""
     try:
+        from helicon.lib.shiny import launch_shiny_app
+
         urls = [
             "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/app.py",
             "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/compute.py",
         ]
         folder = download_files(urls)
 
-        cmd = f"shiny run --launch-browser --no-dev-mode --host 0.0.0.0 --port 0 {folder}/app.py"
-        import subprocess
-
-        subprocess.call(cmd, shell=True)
+        launch_shiny_app(f"{folder}/app.py")
     except Exception:
         homephage = "https://jianglab.science.psu.edu/HelicalProjection"
         logger.error(

@@ -17,6 +17,7 @@ __all__ = [
     "google_analytics",
     "image_gallery",
     "image_select",
+    "launch_shiny_app",
     "set_client_url_query_params",
 ]
 
@@ -609,3 +610,115 @@ def set_client_url_query_params(query_params):
             """
     )
     return script
+
+
+def launch_shiny_app(app_file, env=None, block=True, query_params=None):
+    """Launch a Shiny app with automatic browser opening.
+
+    Handles WSL2 where Python's webbrowser module fails to open the Windows
+    browser. Captures the random port from server output and opens the browser
+    manually.
+
+    Parameters
+    ----------
+    app_file : str or Path
+        Path to the Shiny app file.
+    env : dict, optional
+        Environment variables for the subprocess. Defaults to None (inherits
+        current environment).
+    block : bool, optional
+        If True (default), wait for the process to finish. If False, return
+        the Popen object immediately (used by the file browser to avoid
+        blocking the Qt event loop).
+    query_params : dict, optional
+        URL query parameters to append when opening the browser.
+    """
+    import re
+    import subprocess
+    import sys
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "shiny",
+        "run",
+        "--no-dev-mode",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "0",
+        str(app_file),
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+
+    if not block:
+        import threading
+
+        def _reader():
+            found_url = False
+            for line in proc.stdout:
+                if not found_url:
+                    m = re.search(r"Uvicorn running on http://[\d.]+:(\d+)", line)
+                    if m:
+                        base = f"http://localhost:{m.group(1)}/"
+                        if query_params:
+                            import urllib.parse
+
+                            parts = []
+                            for k, v in query_params.items():
+                                if v == "":
+                                    parts.append(k)
+                                else:
+                                    parts.append(
+                                        f"{k}={urllib.parse.quote(str(v), safe='')}"
+                                    )
+                            base += "?" + "&".join(parts)
+                        _open_browser(base)
+                        found_url = True
+
+        threading.Thread(target=_reader, daemon=True).start()
+        return proc
+
+    url = None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        m = re.search(r"Uvicorn running on http://[\d.]+:(\d+)", line)
+        if m:
+            url = f"http://localhost:{m.group(1)}/"
+            break
+
+    if url:
+        _open_browser(url)
+
+    proc.wait()
+
+
+def _is_wsl():
+    """Detect if running inside WSL."""
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _open_browser(url):
+    """Open a URL in the system browser, with WSL2 support."""
+    import subprocess
+    import webbrowser
+
+    if _is_wsl():
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        webbrowser.open(url)

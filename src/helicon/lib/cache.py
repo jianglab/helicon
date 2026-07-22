@@ -172,9 +172,13 @@ def cache(
         )
 
     ignore = ignore or []
-    cache_validation_callback = joblib.memory.expires_after(
-        seconds=expires_after.total_seconds()
-    )
+
+    if expires_after is None:
+        cache_validation_callback = lambda x: True
+    else:
+        cache_validation_callback = joblib.memory.expires_after(
+            seconds=expires_after.total_seconds()
+        )
 
     if cache_dir is None:
         cache_dir = setup_cache_dir()

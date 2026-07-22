@@ -76,20 +76,18 @@ class TestDisplayMain(object):
         finally:
             display.FolderBrowserWidget = original
 
-    @patch.object(display, "_install_save_hook")
+    @patch.object(display, "_install_dock_save_hook")
     @patch.object(display, "_restore_geometry")
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
-    def test_main_creates_viewer_with_dock(
+    def test_main_creates_dock_without_viewer(
         self,
         mock_widget_class,
         mock_has_napari,
         mock_restore,
-        mock_save_hook,
+        mock_dock_save_hook,
     ):
         mock_napari = MagicMock()
-        mock_viewer = MagicMock()
-        mock_napari.Viewer.return_value = mock_viewer
         mock_widget = MagicMock()
         mock_widget_class.return_value = mock_widget
 
@@ -100,7 +98,7 @@ class TestDisplayMain(object):
             args = parser.parse_args([])
             display.main(args)
 
-            mock_napari.Viewer.assert_called_once_with(title="helicon")
+            mock_napari.Viewer.assert_not_called()
             mock_widget_class.assert_called_once_with(start_dir=os.getcwd())
             mock_widget.setWindowFlags.assert_called_once()
             mock_widget.show.assert_called_once()
@@ -112,8 +110,6 @@ class TestDisplayMain(object):
     @patch.object(display, "FolderBrowserWidget")
     def test_main_restores_and_saves_geometry(self, mock_widget_class, mock_has_napari):
         mock_napari = MagicMock()
-        mock_viewer = MagicMock()
-        mock_napari.Viewer.return_value = mock_viewer
         mock_widget = MagicMock()
         mock_widget_class.return_value = mock_widget
 
@@ -125,16 +121,16 @@ class TestDisplayMain(object):
 
             with (
                 patch.object(display, "_restore_geometry") as mock_restore,
-                patch.object(display, "_install_save_hook") as mock_save,
+                patch.object(display, "_install_dock_save_hook") as mock_save,
             ):
                 display.main(args)
 
-                mock_restore.assert_called_once_with(mock_widget, mock_viewer)
-                mock_save.assert_called_once_with(mock_widget, mock_viewer)
+                mock_restore.assert_called_once_with(mock_widget, None)
+                mock_save.assert_called_once_with(mock_widget)
         finally:
             del sys.modules["napari"]
 
-    @patch.object(display, "_install_save_hook")
+    @patch.object(display, "_install_dock_save_hook")
     @patch.object(display, "_restore_geometry")
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
@@ -143,11 +139,9 @@ class TestDisplayMain(object):
         mock_widget_class,
         mock_has_napari,
         mock_restore,
-        mock_save_hook,
+        mock_dock_save_hook,
     ):
         mock_napari = MagicMock()
-        mock_viewer = MagicMock()
-        mock_napari.Viewer.return_value = mock_viewer
         mock_widget = MagicMock()
         mock_widget_class.return_value = mock_widget
 
@@ -162,7 +156,7 @@ class TestDisplayMain(object):
         finally:
             del sys.modules["napari"]
 
-    @patch.object(display, "_install_save_hook")
+    @patch.object(display, "_install_dock_save_hook")
     @patch.object(display, "_restore_geometry")
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
@@ -171,11 +165,9 @@ class TestDisplayMain(object):
         mock_widget_class,
         mock_has_napari,
         mock_restore,
-        mock_save_hook,
+        mock_dock_save_hook,
     ):
         mock_napari = MagicMock()
-        mock_viewer = MagicMock()
-        mock_napari.Viewer.return_value = mock_viewer
         mock_widget = MagicMock()
         mock_widget_class.return_value = mock_widget
 
@@ -198,21 +190,41 @@ class TestDisplayMain(object):
 
 
 class TestGeometryPersistence(object):
-    @patch.object(display, "_supports_position_restore", return_value=False)
     @patch.object(display, "_position_default")
-    @patch.object(display, "_read_rect")
     @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_falls_back_when_position_not_supported(
+    def test_restore_geometry_restores_dock_from_ba(
         self,
         mock_get_settings,
-        mock_read_rect,
         mock_position_default,
-        mock_pos_supported,
     ):
-        """On unsupported platforms (WSL), dock uses _position_default."""
+        """Dock geometry is restored from saved QByteArray."""
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
-        mock_read_rect.return_value = (100, 200, 300, 400)
+        mock_settings.value.side_effect = lambda key: (
+            b"fake-dock-geo" if key == "dock_ba" else None
+        )
+
+        mock_dock = MagicMock()
+        mock_viewer = MagicMock()
+
+        with patch("PySide6.QtCore.QTimer") as mock_timer:
+            display._restore_geometry(mock_dock, mock_viewer)
+            captured_fn = mock_timer.singleShot.call_args[0][1]
+            captured_fn()
+
+        mock_dock.restoreGeometry.assert_called_once_with(b"fake-dock-geo")
+        mock_position_default.assert_not_called()
+        mock_dock.show.assert_called_once()
+
+    @patch.object(display, "_position_default")
+    @patch.object(display, "_get_qsettings")
+    def test_restore_geometry_calls_position_default_when_no_saved_dock(
+        self, mock_get_settings, mock_position_default
+    ):
+        """When no dock_ba is saved and viewer exists, fall back to _position_default."""
+        mock_settings = MagicMock()
+        mock_get_settings.return_value = mock_settings
+        mock_settings.value.return_value = None
 
         mock_dock = MagicMock()
         mock_viewer = MagicMock()
@@ -223,76 +235,11 @@ class TestGeometryPersistence(object):
             captured_fn()
 
         mock_position_default.assert_called_once_with(mock_dock, mock_viewer)
-        # _position_default runs first, then the saved width/height are applied
-        # via setGeometry (outer frame rect). x()/y() are MagicMocks here, so we
-        # only assert the trailing width/height match the saved (300, 400).
-        assert mock_dock.setGeometry.called
-        assert mock_dock.setGeometry.call_args_list[-1].args[-2:] == (300, 400)
         mock_dock.show.assert_called_once()
 
-    @patch.object(display, "_on_screen", return_value=True)
-    @patch.object(display, "_supports_position_restore", return_value=True)
-    @patch.object(display, "_read_rect")
-    @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_restores_dock_position_when_supported(
-        self,
-        mock_get_settings,
-        mock_read_rect,
-        mock_pos_supported,
-        mock_on_screen,
-    ):
-        """On macOS/Linux, dock position is fully restored from saved values."""
-        mock_settings = MagicMock()
-        mock_get_settings.return_value = mock_settings
-        mock_read_rect.return_value = (100, 200, 300, 400)
-
-        mock_dock = MagicMock()
-        mock_viewer = MagicMock()
-
-        with patch("PySide6.QtCore.QTimer") as mock_timer:
-            display._restore_geometry(mock_dock, mock_viewer)
-            captured_fn = mock_timer.singleShot.call_args[0][1]
-            captured_fn()
-
-        mock_dock.setGeometry.assert_called_once_with(100, 200, 300, 400)
-        mock_dock.show.assert_called_once()
-
-    @patch.object(display, "_on_screen", return_value=False)
-    @patch.object(display, "_supports_position_restore", return_value=True)
     @patch.object(display, "_position_default")
-    @patch.object(display, "_read_rect")
     @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_falls_back_when_dock_off_screen(
-        self,
-        mock_get_settings,
-        mock_read_rect,
-        mock_position_default,
-        mock_pos_supported,
-        mock_on_screen,
-    ):
-        """When saved position is off-screen, fall back to _position_default."""
-        mock_settings = MagicMock()
-        mock_get_settings.return_value = mock_settings
-        mock_read_rect.return_value = (5000, 5000, 300, 400)
-
-        mock_dock = MagicMock()
-        mock_viewer = MagicMock()
-
-        with patch("PySide6.QtCore.QTimer") as mock_timer:
-            display._restore_geometry(mock_dock, mock_viewer)
-            captured_fn = mock_timer.singleShot.call_args[0][1]
-            captured_fn()
-
-        mock_position_default.assert_called_once_with(mock_dock, mock_viewer)
-        assert mock_dock.setGeometry.called
-        assert mock_dock.setGeometry.call_args_list[-1].args[-2:] == (300, 400)
-        mock_dock.show.assert_called_once()
-
-    @patch.object(display, "_read_rect", return_value=None)
-    @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_applies_saved_viewer(
-        self, mock_get_settings, mock_read_rect
-    ):
+    def test_restore_geometry_applies_saved_viewer(self, mock_get_settings, mock_pd):
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
         mock_settings.value.side_effect = lambda key: (
@@ -300,12 +247,6 @@ class TestGeometryPersistence(object):
         )
 
         mock_dock = MagicMock()
-        mock_dock.geometry.return_value = MagicMock(
-            x=lambda: 0, y=lambda: 0, width=lambda: 250, height=lambda: 800
-        )
-        mock_dock.frameGeometry.return_value = MagicMock(
-            x=lambda: 0, y=lambda: 0, width=lambda: 250, height=lambda: 800
-        )
         mock_viewer = MagicMock()
 
         with patch("PySide6.QtCore.QTimer") as mock_timer:
@@ -316,26 +257,6 @@ class TestGeometryPersistence(object):
         mock_viewer.window._qt_window.restoreGeometry.assert_called_once_with(
             b"fake-geometry-data"
         )
-
-    @patch.object(display, "_position_default")
-    @patch.object(display, "_on_screen", return_value=True)
-    @patch.object(display, "_read_rect", return_value=None)
-    @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_calls_position_default_when_no_saved_state(
-        self, mock_get_settings, mock_read_rect, mock_on_screen, mock_position
-    ):
-        mock_settings = MagicMock()
-        mock_get_settings.return_value = mock_settings
-
-        mock_dock = MagicMock()
-        mock_viewer = MagicMock()
-
-        with patch("PySide6.QtCore.QTimer") as mock_timer:
-            display._restore_geometry(mock_dock, mock_viewer)
-            captured_fn = mock_timer.singleShot.call_args[0][1]
-            captured_fn()
-
-        mock_position.assert_called_once_with(mock_dock, mock_viewer)
 
     def test_position_default_places_dock_left_of_viewer(self):
         mock_dock = MagicMock()
@@ -369,95 +290,6 @@ class TestGeometryPersistence(object):
         args = mock_dock.setGeometry.call_args[0]
         assert args[2] == 300  # width clamped to minimum 300
 
-    @patch.object(display, "_on_screen", return_value=True)
-    @patch.object(display, "_read_rect")
-    @patch.object(display, "_get_qsettings")
-    def test_restore_geometry_handles_missing_qt_window(
-        self, mock_get_settings, mock_read_rect, mock_on_screen
-    ):
-        mock_settings = MagicMock()
-        mock_get_settings.return_value = mock_settings
-        mock_read_rect.side_effect = lambda s, p: (
-            (100, 200, 300, 400) if p == "viewer" else None
-        )
-
-        mock_dock = MagicMock()
-        mock_viewer = MagicMock()
-        del mock_viewer.window._qt_window
-
-        with patch("PySide6.QtCore.QTimer") as mock_timer:
-            display._restore_geometry(mock_dock, mock_viewer)
-            captured_fn = mock_timer.singleShot.call_args[0][1]
-            captured_fn()
-
-    def test_read_rect_returns_tuple_when_all_values_present(self):
-        mock_settings = MagicMock()
-        mock_settings.value.side_effect = lambda key: {
-            "dock_x": 100,
-            "dock_y": 200,
-            "dock_width": 300,
-            "dock_height": 400,
-        }[key]
-
-        result = display._read_rect(mock_settings, "dock")
-        assert result == (100, 200, 300, 400)
-
-    def test_read_rect_returns_none_when_value_missing(self):
-        mock_settings = MagicMock()
-        mock_settings.value.side_effect = lambda key: {
-            "dock_x": 100,
-            "dock_y": 200,
-            "dock_width": None,
-            "dock_height": 400,
-        }[key]
-
-        result = display._read_rect(mock_settings, "dock")
-        assert result is None
-
-    def test_read_rect_returns_none_when_value_not_int(self):
-        mock_settings = MagicMock()
-        mock_settings.value.side_effect = lambda key: {
-            "dock_x": 100,
-            "dock_y": "bad",
-            "dock_width": 300,
-            "dock_height": 400,
-        }[key]
-
-        result = display._read_rect(mock_settings, "dock")
-        assert result is None
-
-    def test_on_screen_returns_true_when_center_on_screen(self):
-        mock_screen = MagicMock()
-        mock_screen.geometry.return_value.contains.return_value = True
-        with patch("PySide6.QtGui.QGuiApplication") as mock_qapp:
-            mock_qapp.screens.return_value = [mock_screen]
-            assert display._on_screen(100, 200, 300, 400) is True
-
-    def test_on_screen_returns_false_when_center_off_screen(self):
-        mock_screen = MagicMock()
-        mock_screen.geometry.return_value.contains.return_value = False
-        with patch("PySide6.QtGui.QGuiApplication") as mock_qapp:
-            mock_qapp.screens.return_value = [mock_screen]
-            assert display._on_screen(5000, 5000, 300, 400) is False
-
-    @patch("platform.system", return_value="Darwin")
-    def test_supports_position_restore_true_on_macos(self, _mock_sys):
-        assert display._supports_position_restore() is True
-
-    @patch.object(display, "_is_wsl", return_value=False)
-    @patch("platform.system", return_value="Linux")
-    def test_supports_position_restore_true_on_native_linux(self, _mock_sys, _mock_wsl):
-        assert display._supports_position_restore() is True
-
-    @patch.object(display, "_is_wsl", return_value=True)
-    @patch("platform.system", return_value="Linux")
-    def test_supports_position_restore_false_on_wsl(self, _mock_sys, _mock_wsl):
-        assert display._supports_position_restore() is False
-
-    @patch("platform.system", return_value="Windows")
-    def test_supports_position_restore_false_on_windows(self, _mock_sys):
-        assert display._supports_position_restore() is False
-
     @patch("platform.system", return_value="Linux")
     def test_is_wsl_true_when_microsoft_in_proc_version(self, _mock_sys):
         mock_file = MagicMock()
@@ -483,30 +315,40 @@ class TestGeometryPersistence(object):
     @patch("PySide6.QtCore.QObject", side_effect=lambda *a, **kw: MagicMock())
     @patch("PySide6.QtCore.QEvent")
     @patch.object(display, "_save_geometry")
-    def test_install_save_hook_returns_filter(
+    def test_install_viewer_save_hook_returns_filter(
         self, mock_save, mock_qevent, mock_qobject
     ):
         mock_dock = MagicMock()
         mock_viewer = MagicMock()
 
-        result = display._install_save_hook(mock_dock, mock_viewer)
+        result = display._install_viewer_save_hook(mock_dock, mock_viewer)
 
         mock_viewer.window._qt_window.installEventFilter.assert_called_once_with(result)
+        assert hasattr(result, "eventFilter")
+
+    @patch("PySide6.QtCore.QObject", side_effect=lambda *a, **kw: MagicMock())
+    @patch("PySide6.QtCore.QEvent")
+    @patch.object(display, "_get_qsettings")
+    def test_install_dock_save_hook_saves_geometry(
+        self, mock_get_settings, mock_qevent, mock_qobject
+    ):
+        mock_settings = MagicMock()
+        mock_get_settings.return_value = mock_settings
+        mock_dock = MagicMock()
+        mock_dock.saveGeometry.return_value = b"dock-geo"
+
+        result = display._install_dock_save_hook(mock_dock)
+
         mock_dock.installEventFilter.assert_called_once()
         assert hasattr(result, "eventFilter")
 
-    @patch.object(display, "_write_rect")
     @patch.object(display, "_get_qsettings")
-    def test_save_geometry_saves_dock_and_viewer(
-        self, mock_get_settings, mock_write_rect
-    ):
+    def test_save_geometry_saves_dock_and_viewer(self, mock_get_settings):
         mock_settings = MagicMock()
         mock_get_settings.return_value = mock_settings
 
         mock_dock = MagicMock()
-        mock_dock.geometry.return_value = MagicMock(
-            x=lambda: 100, y=lambda: 200, width=lambda: 300, height=lambda: 400
-        )
+        mock_dock.saveGeometry.return_value = b"dock-ba"
 
         def _make_viewer(display_ba=None):
             mock_viewer = MagicMock()
@@ -515,85 +357,34 @@ class TestGeometryPersistence(object):
             win.saveGeometry.return_value = b"saved-geo"
             return mock_viewer
 
-        mock_write_rect.reset_mock()
+        mock_settings.reset_mock()
         display._save_geometry(mock_dock, _make_viewer())
-        assert mock_write_rect.call_count == 1
-        mock_write_rect.assert_called_once_with(mock_settings, "dock", mock_dock)
         mock_settings.setValue.assert_any_call("viewer_ba", b"saved-geo")
+        mock_settings.setValue.assert_any_call("dock_ba", b"dock-ba")
 
-        mock_write_rect.reset_mock()
         mock_settings.reset_mock()
         viewer_with_cache = _make_viewer(display_ba=b"display-only-ba")
         display._save_geometry(mock_dock, viewer_with_cache)
         mock_settings.setValue.assert_any_call("viewer_ba", b"display-only-ba")
-
-    @patch.object(display, "_get_qsettings")
-    def test_write_rect_saves_individual_values(self, mock_get_settings):
-        mock_settings = MagicMock()
-        mock_get_settings.return_value = mock_settings
-
-        mock_widget = MagicMock()
-        mock_widget.geometry.return_value = MagicMock(
-            x=lambda: 100, y=lambda: 200, width=lambda: 300, height=lambda: 400
-        )
-
-        display._write_rect(mock_settings, "dock", mock_widget)
-
-        mock_settings.setValue.assert_any_call("dock_x", 100)
-        mock_settings.setValue.assert_any_call("dock_y", 200)
-        mock_settings.setValue.assert_any_call("dock_width", 300)
-        mock_settings.setValue.assert_any_call("dock_height", 400)
-
-    @patch.object(display, "_get_qsettings")
-    def test_write_rect_handles_deleted_c_object(self, mock_get_settings):
-        mock_settings = MagicMock()
-        mock_get_settings.return_value = mock_settings
-
-        mock_widget = MagicMock()
-        mock_widget.geometry.side_effect = RuntimeError(
-            "Internal C++ object already deleted"
-        )
-
-        display._write_rect(mock_settings, "dock", mock_widget)
-
-        mock_settings.setValue.assert_not_called()
+        mock_settings.setValue.assert_any_call("dock_ba", b"dock-ba")
 
 
 class TestOpenFile(object):
-    def test_open_mrc_file_adds_image(self):
+    def test_open_mrc_file_adds_image(self, tmp_path):
         import numpy as np
+        import mrcfile as _real_mrcfile
+
+        test_data = np.zeros((3, 4, 5), dtype=np.float32)
+        p = tmp_path / "test.mrc"
+        with _real_mrcfile.new(str(p), overwrite=True) as mrc:
+            mrc.set_data(test_data)
+            mrc.voxel_size = (2.0, 2.0, 2.0)
 
         mock_viewer = MagicMock()
-        mock_mrc = MagicMock()
-        test_data = np.zeros((3, 4, 5), dtype=np.float32)
-        mock_mrc.data = test_data
-        mock_mrc.header.cella.x = 10.0
-        mock_mrc.header.nx = 5
-        mock_mrc.header.ny = 4
-        mock_mrc.header.nz = 3
-        mock_mrc.header.mode = 2
-        mock_mrc.header.mapc = 1
-        mock_mrc.header.mapr = 2
-        mock_mrc.header.maps = 3
-
-        mock_mrcfile = MagicMock()
-        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
-        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
-
-        old_mrc = sys.modules.get("mrcfile")
-        sys.modules["mrcfile"] = mock_mrcfile
-        try:
-            display._open_file(mock_viewer, "/path/to/test.mrc")
-        finally:
-            if old_mrc is not None:
-                sys.modules["mrcfile"] = old_mrc
-            else:
-                del sys.modules["mrcfile"]
+        display._open_file(mock_viewer, str(p))
 
         mock_viewer.add_image.assert_called_once()
         call_args, call_kwargs = mock_viewer.add_image.call_args
-        # 2D views are opened lazily: add_image receives a dask array that
-        # reconstructs the full volume plane-by-plane, never the eager array.
         assert hasattr(call_args[0], "compute")
         np.testing.assert_array_equal(call_args[0].compute(), test_data)
         assert call_args[0].shape == (3, 4, 5)
@@ -602,19 +393,20 @@ class TestOpenFile(object):
         assert "contrast_limits" in call_kwargs
         assert len(call_kwargs["contrast_limits"]) == 2
 
-    def test_ndisplay_resets_for_new_file(self):
+    def test_ndisplay_resets_for_new_file(self, tmp_path):
         import numpy as np
+        import mrcfile as _real_mrcfile
 
         # A fake viewer that records dims.ndisplay and supports layer removal,
         # so we can assert the 2D/3D mode is reset per file.
         class FakeDims:
-            ndisplay = 2
-            current_step = (0,)
+            def __init__(self):
+                self.ndisplay = 2
+                self.current_step = (0, 0, 0)
 
         class FakeLayer:
-            def __init__(self, name):
+            def __init__(self, name="layer"):
                 self.name = name
-                self.visible = True
 
         class FakeViewer:
             def __init__(self):
@@ -632,28 +424,23 @@ class TestOpenFile(object):
             def reset_view(self):
                 self.reset_calls += 1
 
-        # Mock mrcfile so the volume open doesn't hit real file I/O.
-        mock_mrc = MagicMock()
-        test_data = np.zeros((4, 8, 8), dtype=np.float32)
-        mock_mrc.data = test_data
-        mock_mrc.voxel_size.x = 1.5
-        mock_mrc.header.nz = 4
-        mock_mrc.header.mapc = 1
-        mock_mrc.header.mapr = 2
-        mock_mrc.header.maps = 3
-        mock_mrcfile = MagicMock()
-        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
-        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
-        # helicon.change_map_axes_order is only called for ndim>=3 & nz>1.
-        with (
-            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
-            patch.object(
-                display.helicon, "change_map_axes_order", lambda d, h: (d, None)
-            ),
+        # Create real temp MRC files.
+        vol_path = tmp_path / "map.mrc"
+        with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (1.5, 1.5, 1.5)
+
+        stack_path = tmp_path / "stack.mrcs"
+        with _real_mrcfile.new(str(stack_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((3, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (2.0, 2.0, 2.0)
+
+        with patch.object(
+            display.helicon, "change_map_axes_order", lambda d, h: (d, None)
         ):
             # First open a 3D volume (ndisplay forced to 3)...
             vol_viewer = FakeViewer()
-            display._open_file(vol_viewer, "/d/map.mrc", mode="volume")
+            display._open_file(vol_viewer, str(vol_path), mode="volume")
             assert vol_viewer.dims.ndisplay == 3
 
             # ...then a 2D image stack. The stale 3D mode must not
@@ -663,7 +450,7 @@ class TestOpenFile(object):
             img_viewer.dims.ndisplay = 3  # simulate leftover state
             old_layer = FakeLayer("old.mrc")
             img_viewer.layers.append(old_layer)
-            display._open_file(img_viewer, "/d/stack.mrcs", mode="slice")
+            display._open_file(img_viewer, str(stack_path), mode="slice")
             assert img_viewer.dims.ndisplay == 2
             assert len(img_viewer.layers) == 1  # old removed, new added
             assert img_viewer.layers[0].name == "stack.mrcs"
@@ -708,7 +495,7 @@ class TestOpenFile(object):
             patch.object(
                 display,
                 "_parse_star_image_refs",
-                return_value=(fake_entries, fake_shape, fake_apix),
+                return_value=(fake_entries, fake_shape, fake_apix, 0),
             ),
             patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
         ):
@@ -767,14 +554,13 @@ class TestOpenFile(object):
 
     def test_extractpick_star_opens_as_text(self):
         mock_viewer = MagicMock()
-        mock_viewer.window._qt_window._text_overlay = MagicMock()
-        mock_viewer.window._qt_window._text_overlay.isVisible.return_value = False
-        mock_viewer.window._qt_window.centralWidget.return_value = MagicMock()
-        mock_viewer.window._qt_window.centralWidget.return_value.rect.return_value = (
-            MagicMock()
-        )
 
-        with patch("builtins.open", MagicMock(return_value=MagicMock())):
+        mock_file = MagicMock()
+        mock_file.__enter__ = MagicMock(return_value=mock_file)
+        mock_file.__exit__ = MagicMock(return_value=False)
+        mock_file.read.return_value = "_rlnCoordinateX 1\n"
+
+        with patch("builtins.open", MagicMock(return_value=mock_file)):
             with patch.object(display, "_is_text_file", return_value=True):
                 display._open_file(mock_viewer, "/path/to/extractpick.star")
 
@@ -783,18 +569,15 @@ class TestOpenFile(object):
 
     def test_metadata_mode_opens_any_star_as_text(self):
         mock_viewer = MagicMock()
-        mock_viewer.window._qt_window._text_overlay = MagicMock()
-        mock_viewer.window._qt_window._text_overlay.isVisible.return_value = False
-        mock_viewer.window._qt_window.centralWidget.return_value = MagicMock()
-        mock_viewer.window._qt_window.centralWidget.return_value.rect.return_value = (
-            MagicMock()
-        )
 
-        with patch("builtins.open", MagicMock(return_value=MagicMock())):
+        mock_file = MagicMock()
+        mock_file.__enter__ = MagicMock(return_value=mock_file)
+        mock_file.__exit__ = MagicMock(return_value=False)
+        mock_file.read.return_value = "_rlnCoordinateX 1\n"
+
+        with patch("builtins.open", MagicMock(return_value=mock_file)):
             with patch.object(display, "_is_text_file", return_value=True):
-                display._open_file(
-                    mock_viewer, "/path/to/particles.star", mode="metadata"
-                )
+                display._open_file(mock_viewer, "/path/to/particles.star", mode="text")
 
         mock_viewer.open.assert_not_called()
         mock_viewer.add_image.assert_not_called()
@@ -871,34 +654,34 @@ class TestAutoContrast(object):
 
 class TestFolderBrowser(object):
     def test_format_size_bytes(self):
-        from helicon.lib.napari_widgets import _format_size
+        from helicon.lib.file_browser import _format_size
 
         assert _format_size(512) == "512 B"
 
     def test_format_size_kilobytes(self):
-        from helicon.lib.napari_widgets import _format_size
+        from helicon.lib.file_browser import _format_size
 
         assert _format_size(2048) == "2.0 KB"
 
     def test_format_size_megabytes(self):
-        from helicon.lib.napari_widgets import _format_size
+        from helicon.lib.file_browser import _format_size
 
         assert _format_size(5 * 1024 * 1024) == "5.0 MB"
 
     def test_format_size_gigabytes(self):
-        from helicon.lib.napari_widgets import _format_size
+        from helicon.lib.file_browser import _format_size
 
         assert _format_size(2 * 1024 * 1024 * 1024) == "2.00 GB"
 
     def test_file_browser_model_has_six_columns(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, NUM_COLUMNS
+        from helicon.lib.file_browser import FileBrowserModel, NUM_COLUMNS
 
         (tmp_path / "test.txt").write_text("hello")
         model = FileBrowserModel(str(tmp_path))
         assert model.columnCount() == NUM_COLUMNS
 
     def test_file_browser_model_headers(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel
+        from helicon.lib.file_browser import FileBrowserModel
 
         model = FileBrowserModel(str(tmp_path))
         headers = [model.headerData(c, Qt.Orientation.Horizontal) for c in range(7)]
@@ -913,7 +696,7 @@ class TestFolderBrowser(object):
         ]
 
     def test_file_browser_model_lists_files(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME
 
         (tmp_path / "aaa.txt").write_text("a")
         (tmp_path / "bbb.txt").write_text("b")
@@ -923,7 +706,7 @@ class TestFolderBrowser(object):
         assert "bbb.txt" in names
 
     def test_file_browser_model_lists_dirs_first(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME, COL_TYPE
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME, COL_TYPE
 
         (tmp_path / "adir").mkdir()
         (tmp_path / "file.txt").write_text("x")
@@ -934,7 +717,7 @@ class TestFolderBrowser(object):
         assert last_type != "Folder"
 
     def test_file_browser_model_shows_size(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_SIZE
+        from helicon.lib.file_browser import FileBrowserModel, COL_SIZE
 
         (tmp_path / "data.bin").write_bytes(b"x" * 2048)
         model = FileBrowserModel(str(tmp_path))
@@ -942,7 +725,7 @@ class TestFolderBrowser(object):
         assert "2.0 KB" in sizes
 
     def test_file_browser_model_shows_date(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_MODIFIED
+        from helicon.lib.file_browser import FileBrowserModel, COL_MODIFIED
 
         (tmp_path / "recent.txt").write_text("new")
         model = FileBrowserModel(str(tmp_path))
@@ -950,7 +733,7 @@ class TestFolderBrowser(object):
         assert any("202" in d for d in dates)
 
     def test_file_browser_model_sort_by_size(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_SIZE
+        from helicon.lib.file_browser import FileBrowserModel, COL_SIZE
 
         (tmp_path / "small.txt").write_text("s")
         (tmp_path / "big.txt").write_text("x" * 10000)
@@ -962,7 +745,7 @@ class TestFolderBrowser(object):
         assert sizes[-1] == ""
 
     def test_file_browser_model_sort_dirs_first(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_TYPE
+        from helicon.lib.file_browser import FileBrowserModel, COL_TYPE
 
         (tmp_path / "adir").mkdir()
         (tmp_path / "zfile.txt").write_text("z")
@@ -971,7 +754,7 @@ class TestFolderBrowser(object):
         assert model.item(0, COL_TYPE).text() == "Folder"
 
     def test_file_browser_model_set_root_path(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME
 
         sub = tmp_path / "sub"
         sub.mkdir()
@@ -982,7 +765,7 @@ class TestFolderBrowser(object):
         assert "inner.txt" in names
 
     def test_file_browser_model_file_path(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel
+        from helicon.lib.file_browser import FileBrowserModel
 
         (tmp_path / "hello.txt").write_text("hi")
         model = FileBrowserModel(str(tmp_path))
@@ -991,7 +774,7 @@ class TestFolderBrowser(object):
         assert "hello.txt" in path
 
     def test_file_browser_model_is_dir(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel
+        from helicon.lib.file_browser import FileBrowserModel
 
         (tmp_path / "mydir").mkdir()
         (tmp_path / "file.txt").write_text("f")
@@ -1006,7 +789,7 @@ class TestFolderBrowser(object):
                 assert model.is_dir(idx) is False
 
     def test_folder_browser_emits_signal(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         (tmp_path / "click.txt").write_text("c")
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -1021,7 +804,7 @@ class TestFolderBrowser(object):
         assert "click.txt" in results[0]
 
     def test_folder_browser_go_up(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         sub = tmp_path / "sub"
         sub.mkdir()
@@ -1030,7 +813,7 @@ class TestFolderBrowser(object):
         assert widget._model._root_path == str(tmp_path)
 
     def test_folder_browser_go_back(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         sub = tmp_path / "sub"
         sub.mkdir()
@@ -1042,7 +825,7 @@ class TestFolderBrowser(object):
     def test_folder_browser_shift_double_click_emits_new_window_signal(
         self, tmp_path, qapp
     ):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         (tmp_path / "image.mrc").write_bytes(b"\x00" * 100)
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -1066,7 +849,7 @@ class TestFolderBrowser(object):
         assert "image.mrc" in new_window_results[0]
 
     def test_is_image_stack_classification(self):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         assert FolderBrowserWidget._is_image_stack(None, "/d/particles.mrcs")
         assert FolderBrowserWidget._is_image_stack(None, "/d/data.star")
@@ -1077,7 +860,7 @@ class TestFolderBrowser(object):
         assert not FolderBrowserWidget._is_image_stack(None, "/d/map.map")
 
     def test_slice_button_label_for_image_stack(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
@@ -1102,7 +885,7 @@ class TestFolderBrowser(object):
         assert widget._btn_slice.text() == "2D Slice"
 
     def test_chimerax_button_shown_for_volumes(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
@@ -1129,7 +912,7 @@ class TestFolderBrowser(object):
         assert widget._btn_chimerax.isHidden()
 
     def test_chimerax_button_shown_for_bild(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         (tmp_path / "plot.bild").write_bytes(b"\x00" * 64)
@@ -1138,16 +921,14 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
-        # bild files get a ChimeraX button (renders cylinders/spheres natively)
-        # alongside the general image display.
+        # bild files get a ChimeraX button (renders cylinders/spheres natively).
         assert not widget._btn_chimerax.isHidden()
         assert widget._btn_chimerax.text() == "ChimeraX"
-        assert not widget._btn_general.isHidden()
 
     def test_launch_chimerax_invokes_executable(self, tmp_path):
         import subprocess
 
-        from helicon.lib import napari_widgets
+        from helicon.lib import file_browser
 
         called = {}
 
@@ -1159,7 +940,7 @@ class TestFolderBrowser(object):
             return object()
 
         with (
-            patch.object(napari_widgets, "_find_chimerax", fake_find),
+            patch.object(file_browser, "_find_chimerax", fake_find),
             patch.object(subprocess, "Popen", fake_popen),
         ):
             display._launch_chimerax("/d/map.mrc")
@@ -1167,11 +948,11 @@ class TestFolderBrowser(object):
         assert called["args"] == ["/fake/ChimeraX", "/d/map.mrc"]
 
     def test_chimerax_button_disabled_when_not_installed(self, tmp_path, qapp):
-        from helicon.lib import napari_widgets
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
-        with patch.object(napari_widgets, "_find_chimerax", lambda: None):
+        with patch.object(file_browser, "_find_chimerax", lambda: None):
             (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
             idx = widget._model.index(0, 0)
@@ -1183,11 +964,11 @@ class TestFolderBrowser(object):
             assert "not found" in widget._btn_chimerax.toolTip().lower()
 
     def test_chimerax_button_enabled_when_installed(self, tmp_path, qapp):
-        from helicon.lib import napari_widgets
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
-        with patch.object(napari_widgets, "_find_chimerax", lambda: "/x/ChimeraX"):
+        with patch.object(file_browser, "_find_chimerax", lambda: "/x/ChimeraX"):
             (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
             idx = widget._model.index(0, 0)
@@ -1198,7 +979,7 @@ class TestFolderBrowser(object):
             assert "Open this file" in widget._btn_chimerax.toolTip()
 
     def test_stats_button_for_data_star_only(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         (tmp_path / "data.star").write_text("_data_\n")
@@ -1230,7 +1011,7 @@ class TestFolderBrowser(object):
         assert widget._btn_stats.isHidden()
 
     def test_eps_label_and_mode(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         (tmp_path / "fig.eps").write_bytes(b"\x00" * 16)
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -1245,12 +1026,11 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
-        assert widget._btn_general.text() == "EPS"
-        # EPS is a single general image (no slice/volume/chimerax modes).
-        assert widget._display_modes_for(str(tmp_path / "fig.eps")) == ["general"]
+        # EPS is a known type with no display modes (no button shown).
+        assert widget._display_modes_for(str(tmp_path / "fig.eps")) == []
 
     def test_display_modes_class2d_model_star(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         job_dir = tmp_path / "Class2D" / "job001"
         job_dir.mkdir(parents=True)
@@ -1258,12 +1038,12 @@ class TestFolderBrowser(object):
         star_file.write_text("dummy")
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
         assert widget._display_modes_for(str(star_file)) == [
-            "metadata",
+            "text",
             "2dclasses",
         ]
 
     def test_display_modes_class3d_optimiser_star(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         job_dir = tmp_path / "Class3D" / "job001"
         job_dir.mkdir(parents=True)
@@ -1271,12 +1051,12 @@ class TestFolderBrowser(object):
         star_file.write_text("dummy")
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
         assert widget._display_modes_for(str(star_file)) == [
-            "metadata",
+            "text",
             "optimiser",
         ]
 
     def test_display_modes_refine3d_model_star(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         job_dir = tmp_path / "Refine3D" / "job001"
         job_dir.mkdir(parents=True)
@@ -1284,13 +1064,14 @@ class TestFolderBrowser(object):
         star_file.write_text("dummy")
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
         assert widget._display_modes_for(str(star_file)) == [
-            "metadata",
+            "text",
             "optimiser",
             "fsc",
+            "trueFSC",
         ]
 
     def test_file_browser_model_filter_wildcard(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME
 
         (tmp_path / "aaa.mrc").write_bytes(b"x")
         (tmp_path / "bbb.txt").write_text("y")
@@ -1303,7 +1084,7 @@ class TestFolderBrowser(object):
         assert "ccc.tif" not in names
 
     def test_file_browser_model_filter_regex(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME
 
         (tmp_path / "image_001.mrc").write_bytes(b"x")
         (tmp_path / "image_002.mrc").write_bytes(b"y")
@@ -1316,7 +1097,7 @@ class TestFolderBrowser(object):
         assert "data.txt" not in names
 
     def test_file_browser_model_filter_empty_shows_all(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME
 
         (tmp_path / "a.txt").write_text("a")
         (tmp_path / "b.mrc").write_bytes(b"b")
@@ -1327,7 +1108,7 @@ class TestFolderBrowser(object):
         assert "b.mrc" in names
 
     def test_file_browser_model_filter_dirs_always_shown(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel, COL_NAME
+        from helicon.lib.file_browser import FileBrowserModel, COL_NAME
 
         (tmp_path / "mydir").mkdir()
         (tmp_path / "file.mrc").write_bytes(b"x")
@@ -1342,7 +1123,7 @@ class TestFolderBrowser(object):
 
 class TestAsyncFileInfo(object):
     def test_async_columns_start_empty(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import (
+        from helicon.lib.file_browser import (
             COL_IMAGES,
             COL_INFO,
             COL_PIXELSIZE,
@@ -1360,7 +1141,7 @@ class TestAsyncFileInfo(object):
             assert widget._model.item(row, COL_PIXELSIZE).text() == ""
 
     def test_apply_file_info_updates_text_sort_and_cache(self, tmp_path):
-        from helicon.lib.napari_widgets import (
+        from helicon.lib.file_browser import (
             COL_INFO,
             COL_PIXELSIZE,
             FileBrowserModel,
@@ -1380,7 +1161,7 @@ class TestAsyncFileInfo(object):
         assert model._file_infos[filepath] == ("100x100", "1", "1.50 Å")
 
     def test_epoch_bumps_on_reload(self, tmp_path):
-        from helicon.lib.napari_widgets import FileBrowserModel
+        from helicon.lib.file_browser import FileBrowserModel
 
         (tmp_path / "a.mrc").write_bytes(b"\x00" * 1024)
         model = FileBrowserModel(str(tmp_path))
@@ -1391,8 +1172,8 @@ class TestAsyncFileInfo(object):
     def test_populate_fills_columns_async(self, tmp_path, qapp):
         from PySide6.QtWidgets import QApplication
 
-        from helicon.lib import napari_widgets
-        from helicon.lib.napari_widgets import (
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import (
             COL_IMAGES,
             COL_INFO,
             COL_PIXELSIZE,
@@ -1405,7 +1186,7 @@ class TestAsyncFileInfo(object):
             n = int("".join(c for c in name if c.isdigit()) or "1")
             return f"{n*10}x{n*10}", str(n), f"{n}.00 Å"
 
-        with patch.object(napari_widgets, "_get_file_info", fake_info):
+        with patch.object(file_browser, "_get_file_info", fake_info):
             for i in range(1, 6):
                 (tmp_path / f"img_{i}.mrc").write_bytes(b"\x00" * 512)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -1434,8 +1215,8 @@ class TestAsyncFileInfo(object):
     def test_initial_directory_populates_on_construction(self, tmp_path, qapp):
         from PySide6.QtWidgets import QApplication
 
-        from helicon.lib import napari_widgets
-        from helicon.lib.napari_widgets import (
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import (
             COL_IMAGES,
             COL_INFO,
             COL_PIXELSIZE,
@@ -1450,7 +1231,7 @@ class TestAsyncFileInfo(object):
             n = int("".join(c for c in name if c.isdigit()) or "1")
             return f"{n*10}x{n*10}", str(n), f"{n}.00 Å"
 
-        with patch.object(napari_widgets, "_get_file_info", fake_info):
+        with patch.object(file_browser, "_get_file_info", fake_info):
             for i in range(1, 4):
                 (tmp_path / f"img_{i}.mrc").write_bytes(b"\x00" * 512)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -1808,7 +1589,7 @@ class TestPanelToggle:
 class TestOrthogonalViewer:
 
     def test_display_modes_mrc_with_nz_gt1_includes_orthogonal(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         mrc_path = tmp_path / "volume.mrc"
         mrc_path.write_bytes(b"\x00" * 1024)
@@ -1818,7 +1599,7 @@ class TestOrthogonalViewer:
         assert "orthogonal" in modes
 
     def test_display_modes_mrc_with_nz_eq1_no_orthogonal(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         mrc_path = tmp_path / "volume.mrc"
         mrc_path.write_bytes(b"\x00" * 1024)
@@ -1828,7 +1609,7 @@ class TestOrthogonalViewer:
         assert "orthogonal" not in modes
 
     def test_display_modes_map_with_nz_gt1_includes_orthogonal(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         map_path = tmp_path / "volume.map"
         map_path.write_bytes(b"\x00" * 1024)
@@ -1838,7 +1619,7 @@ class TestOrthogonalViewer:
         assert "orthogonal" in modes
 
     def test_display_modes_non_mrc_no_orthogonal(self, tmp_path, qapp):
-        from helicon.lib.napari_widgets import FolderBrowserWidget
+        from helicon.lib.file_browser import FolderBrowserWidget
 
         star_path = tmp_path / "particles.star"
         star_path.write_text("data_\n\nloop_\n_rlnImageName\n")
@@ -1846,56 +1627,32 @@ class TestOrthogonalViewer:
         modes = widget._display_modes_for(str(star_path))
         assert "orthogonal" not in modes
 
-    def test_open_file_orthogonal_mode_calls_viewer(self):
+    def test_open_file_orthogonal_mode_calls_viewer(self, tmp_path):
         import numpy as np
+        import mrcfile as _real_mrcfile
 
         mock_viewer = MagicMock()
-        test_data = np.zeros((4, 8, 8), dtype=np.float32)
-        mock_mrc = MagicMock()
-        mock_mrc.data = test_data
-        mock_mrc.voxel_size.x = 1.5
-        mock_mrc.header.nz = 4
-        mock_mrc.header.mapc = 1
-        mock_mrc.header.mapr = 2
-        mock_mrc.header.maps = 3
+        vol_path = tmp_path / "volume.mrc"
+        with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (1.5, 1.5, 1.5)
 
-        mock_mrcfile = MagicMock()
-        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
-        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
-
-        mock_gal_cls = MagicMock()
-        mock_gal_inst = MagicMock()
-        mock_gal_cls.return_value = mock_gal_inst
-
-        with (
-            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
-            patch("helicon.commands.display._open_orthogonal_viewer") as mock_open_ov,
-        ):
-            display._open_file(mock_viewer, "/d/volume.mrc", mode="orthogonal")
+        with patch("helicon.commands.display._open_orthogonal_viewer") as mock_open_ov:
+            display._open_file(mock_viewer, str(vol_path), mode="orthogonal")
             mock_open_ov.assert_called_once()
 
-    def test_open_file_orthogonal_mode_nz_eq1_skips(self):
+    def test_open_file_orthogonal_mode_nz_eq1_skips(self, tmp_path):
         import numpy as np
+        import mrcfile as _real_mrcfile
 
         mock_viewer = MagicMock()
-        test_data = np.zeros((1, 8, 8), dtype=np.float32)
-        mock_mrc = MagicMock()
-        mock_mrc.data = test_data
-        mock_mrc.voxel_size.x = 1.5
-        mock_mrc.header.nz = 1
-        mock_mrc.header.mapc = 1
-        mock_mrc.header.mapr = 2
-        mock_mrc.header.maps = 3
+        vol_path = tmp_path / "volume.mrc"
+        with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((1, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (1.5, 1.5, 1.5)
 
-        mock_mrcfile = MagicMock()
-        mock_mrcfile.open.return_value.__enter__ = MagicMock(return_value=mock_mrc)
-        mock_mrcfile.open.return_value.__exit__ = MagicMock(return_value=False)
-
-        with (
-            patch.dict(sys.modules, {"mrcfile": mock_mrcfile}),
-            patch("helicon.commands.display._open_orthogonal_viewer") as mock_open_ov,
-        ):
-            display._open_file(mock_viewer, "/d/volume.mrc", mode="orthogonal")
+        with patch("helicon.commands.display._open_orthogonal_viewer") as mock_open_ov:
+            display._open_file(mock_viewer, str(vol_path), mode="orthogonal")
             mock_open_ov.assert_not_called()
             mock_viewer.add_image.assert_called_once()
 
@@ -1978,3 +1735,73 @@ class TestOrthogonalViewer:
         w._on_slider_position(3, 4, 5)
         assert w._pos == [3, 4, 5]
         w.deleteLater()
+
+
+class TestDisplayButtonSorting:
+
+    def test_reorder_sorts_visible_buttons_alphabetically(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        modes = ["hi3d", "slice", "volume", "gallery", "chimerax", "orthogonal"]
+        for attr, mode in widget._DISPLAY_BUTTONS:
+            getattr(widget, attr).setVisible(mode in modes)
+        widget._reorder_buttons_alphabetically(modes)
+
+        layout = widget._action_bar.layout()
+        display_btn_set = {
+            id(getattr(widget, attr)) for attr, _ in widget._DISPLAY_BUTTONS
+        }
+        visible_labels = [
+            layout.itemAt(i).widget().text()
+            for i in range(layout.count())
+            if layout.itemAt(i).widget() is not None
+            and id(layout.itemAt(i).widget()) in display_btn_set
+            and not layout.itemAt(i).widget().isHidden()
+        ]
+        assert visible_labels == sorted(visible_labels, key=str.lower)
+
+    def test_reorder_covers_all_display_buttons(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        all_modes = [mode for _, mode in widget._DISPLAY_BUTTONS]
+        for attr, mode in widget._DISPLAY_BUTTONS:
+            getattr(widget, attr).setVisible(mode in all_modes)
+        widget._reorder_buttons_alphabetically(all_modes)
+
+        layout = widget._action_bar.layout()
+        display_btn_set = {
+            id(getattr(widget, attr)) for attr, _ in widget._DISPLAY_BUTTONS
+        }
+        visible_labels = [
+            layout.itemAt(i).widget().text()
+            for i in range(layout.count())
+            if layout.itemAt(i).widget() is not None
+            and id(layout.itemAt(i).widget()) in display_btn_set
+            and not layout.itemAt(i).widget().isHidden()
+        ]
+        assert len(visible_labels) == len(widget._DISPLAY_BUTTONS)
+        assert visible_labels == sorted(visible_labels, key=str.lower)
+
+    def test_reorder_hides_inactive_buttons(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        modes = ["slice", "volume"]
+        for attr, mode in widget._DISPLAY_BUTTONS:
+            getattr(widget, attr).setVisible(mode in modes)
+        widget._reorder_buttons_alphabetically(modes)
+
+        layout = widget._action_bar.layout()
+        display_btn_set = {
+            id(getattr(widget, attr)) for attr, _ in widget._DISPLAY_BUTTONS
+        }
+        visible_labels = [
+            layout.itemAt(i).widget().text()
+            for i in range(layout.count())
+            if layout.itemAt(i).widget() is not None
+            and id(layout.itemAt(i).widget()) in display_btn_set
+            and not layout.itemAt(i).widget().isHidden()
+        ]
+        assert visible_labels == ["3D Volume", "Image Slice"]

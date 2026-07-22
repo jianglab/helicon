@@ -13,12 +13,10 @@ def main(args):
     try:
         from pathlib import Path
 
+        from helicon.lib.shiny import launch_shiny_app
+
         app_file = Path(__file__).parent.parent / "webApps" / "denovo3D" / "app.py"
-
-        cmd = f'shiny run --launch-browser --no-dev-mode --host 0.0.0.0 --port 0 "{app_file}"'
-        import subprocess
-
-        subprocess.call(cmd, shell=True)
+        launch_shiny_app(app_file)
     except Exception:
         homephage = "https://jianglab.science.psu.edu/helicon"
         logger.error("Please visit %s for more information", homephage)

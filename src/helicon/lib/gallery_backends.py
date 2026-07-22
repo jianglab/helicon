@@ -43,25 +43,21 @@ class BaseGallery:
         self._labels: list[str] = []
         self._read_fn: Callable[[int], np.ndarray] | None = None
 
-    def open(self, reuse_window: Any | None = None) -> Any | None:
+    def open(self, reuse_window: Any | None = None, tracker=None) -> Any | None:
         """Open the gallery window, optionally reusing an existing one.
 
         Parameters
         ----------
         reuse_window : QMainWindow, optional
             Window to reuse instead of creating a new one.
+        tracker : _DisplayTracker, optional
+            Tracker to register new windows with for lifecycle management.
 
         Returns
         -------
         QMainWindow or None
             The gallery window, or None if parsing failed.
         """
-        from helicon.commands.display import (
-            _on_gallery_closing,
-            _galleries,
-            _active_gallery,
-        )
-
         if not self._parsed:
             self._parse()
         if self._n == 0:
@@ -96,16 +92,31 @@ class BaseGallery:
 
         class _GalleryWindow(QMainWindow):
             def closeEvent(self, event):
-                _on_gallery_closing(self)
+                if tracker is not None:
+                    tracker.on_close(self)
                 super().closeEvent(event)
+
+            def changeEvent(self, event):
+                from PySide6.QtCore import QEvent
+
+                if (
+                    tracker is not None
+                    and event.type() == QEvent.Type.ActivationChange
+                    and self.isActiveWindow()
+                ):
+                    tracker.on_activate(self)
+                super().changeEvent(event)
 
         window = _GalleryWindow()
         window.setWindowTitle(f"helicon - {Path(self.star_path).name}")
         window.setCentralWidget(container)
         tile = 128 + widget._panel.min_sep
         window.resize(5 * tile + widget._sb_width, 5 * tile)
-        _galleries.append(window)
-        _active_gallery[0] = window
+        if tracker is not None:
+            tracker.register(window)
+        from helicon.commands.display import _install_window_shortcuts
+
+        _install_window_shortcuts(window)
         window.show()
         return window
 
@@ -148,7 +159,7 @@ class OrthogonalGallery:
             self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
         self._parsed = True
 
-    def open(self, reuse_window=None):
+    def open(self, reuse_window=None, tracker=None):
         if not self._parsed:
             self._parse()
         if self._volume is None:
@@ -168,18 +179,32 @@ class OrthogonalGallery:
             reuse_window.raise_()
             return reuse_window
 
-        from helicon.commands.display import _on_orthogonal_closing, _orthogonal_windows
-
         class _OrthWindow(QMainWindow):
             def closeEvent(self, event):
-                _on_orthogonal_closing(self)
+                if tracker is not None:
+                    tracker.on_close(self)
                 super().closeEvent(event)
+
+            def changeEvent(self, event):
+                from PySide6.QtCore import QEvent
+
+                if (
+                    tracker is not None
+                    and event.type() == QEvent.Type.ActivationChange
+                    and self.isActiveWindow()
+                ):
+                    tracker.on_activate(self)
+                super().changeEvent(event)
 
         window = _OrthWindow()
         window.setWindowTitle(f"helicon - {self._name}")
         window.setCentralWidget(container)
         window.resize(800, 600)
-        _orthogonal_windows.append(window)
+        if tracker is not None:
+            tracker.register(window)
+        from helicon.commands.display import _install_window_shortcuts
+
+        _install_window_shortcuts(window)
         window.show()
         return window
 

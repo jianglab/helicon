@@ -5,6 +5,16 @@
 from __future__ import annotations
 
 import sys
+import time
+import warnings
+
+# Suppress harmless mrcfile divide-by-zero warnings when reading headers.
+warnings.filterwarnings(
+    "ignore",
+    message="invalid value encountered in divide",
+    category=RuntimeWarning,
+    module="mrcfile",
+)
 
 # On macOS, set the process name before NSApplication is initialized
 # (triggered by PySide6 import below). NSApplication caches the app name
@@ -32,7 +42,7 @@ import helicon
 from helicon.lib.exceptions import HeliconDependencyError
 
 try:
-    from helicon.lib.napari_widgets import FolderBrowserWidget
+    from helicon.lib.file_browser import FolderBrowserWidget
 except ImportError:
     FolderBrowserWidget = None
 
@@ -56,96 +66,42 @@ def _is_wsl():
         return False
 
 
-def _supports_position_restore():
-    """Return True if the platform reliably supports QWidget.move().
-
-    macOS and native Linux compositors honour move() requests.
-    WSL and Windows do not (the compositor overrides positions),
-    so callers should fall back to automatic placement there.
-    """
-    import platform
-
-    system = platform.system()
-    if system == "Darwin":
-        return True
-    if system == "Linux" and not _is_wsl():
-        return True
-    return False
-
-
 def _restore_geometry(dock, viewer):
     """Restore saved window sizes and reposition after the compositor places them."""
     from PySide6.QtCore import QTimer
 
     def _apply(attempt=0):
-        try:
-            qt_win = viewer.window._qt_window
-        except AttributeError:
-            return
-        if not qt_win.isVisible() and attempt < 10:
-            QTimer.singleShot(50, lambda: _apply(attempt + 1))
-            return
-
         settings = _get_qsettings()
 
-        viewer_ba = settings.value("viewer_ba")
-        if viewer_ba is not None:
+        # Restore the viewer geometry if a viewer exists.
+        if viewer is not None:
             try:
-                qt_win.restoreGeometry(viewer_ba)
+                qt_win = viewer.window._qt_window
             except AttributeError:
-                pass
+                qt_win = None
+            if qt_win is not None and not qt_win.isVisible() and attempt < 10:
+                QTimer.singleShot(50, lambda: _apply(attempt + 1))
+                return
+            if qt_win is not None:
+                viewer_ba = settings.value("viewer_ba")
+                if viewer_ba is not None:
+                    try:
+                        qt_win.restoreGeometry(viewer_ba)
+                    except AttributeError:
+                        pass
 
-        dock_geo = _read_rect(settings, "dock")
-        if (
-            dock_geo is not None
-            and _supports_position_restore()
-            and _on_screen(*dock_geo)
-        ):
-            x, y, w, h = dock_geo
-            dock.setGeometry(x, y, w, h)
-        else:
+        # Restore the dock (browser) geometry independently.
+        dock_ba = settings.value("dock_ba")
+        if dock_ba is not None:
+            try:
+                dock.restoreGeometry(dock_ba)
+            except (AttributeError, TypeError):
+                pass
+        elif viewer is not None:
             _position_default(dock, viewer)
-            if dock_geo is not None:
-                _, _, w, h = dock_geo
-                # Keep the default x/y but restore the saved width/height as
-                # the outer frame size (consistent with _write_rect).
-                dock.setGeometry(dock.x(), dock.y(), w, h)
         dock.show()
 
     QTimer.singleShot(0, _apply)
-
-
-def _read_rect(settings, prefix):
-    """Read saved x, y, width, height from QSettings.
-
-    Returns
-    -------
-    tuple[int, int, int, int] or None
-        The (x, y, width, height) tuple, or None if any value is missing.
-    """
-    x = settings.value(f"{prefix}_x")
-    y = settings.value(f"{prefix}_y")
-    w = settings.value(f"{prefix}_width")
-    h = settings.value(f"{prefix}_height")
-    if None in (x, y, w, h):
-        return None
-    try:
-        return int(x), int(y), int(w), int(h)
-    except (TypeError, ValueError):
-        return None
-
-
-def _on_screen(x, y, w, h):
-    """Check if a window rectangle intersects any connected screen."""
-    from PySide6.QtGui import QGuiApplication
-
-    win_center_x = x + w // 2
-    win_center_y = y + h // 2
-    for screen in QGuiApplication.screens():
-        geo = screen.geometry()
-        if geo.contains(win_center_x, win_center_y):
-            return True
-    return False
 
 
 def _position_default(dock, viewer):
@@ -162,8 +118,33 @@ def _position_default(dock, viewer):
         pass
 
 
-def _install_save_hook(dock, viewer):
-    """Install an event filter to save geometry when the viewer window closes."""
+def _install_dock_save_hook(dock):
+    """Install an event filter to save dock geometry when it closes independently."""
+    from PySide6.QtCore import QEvent, QObject
+
+    class _DockCloseFilter(QObject):
+        """Saves only dock geometry when the dock closes independently."""
+
+        def __init__(self, dock, parent=None):
+            super().__init__(parent)
+            self._dock = dock
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Close:
+                settings = _get_qsettings()
+                settings.setValue("dock_ba", self._dock.saveGeometry())
+                save_cols = getattr(self._dock, "_save_col_widths", None)
+                if callable(save_cols):
+                    save_cols()
+            return False
+
+    dock_flt = _DockCloseFilter(dock, parent=dock)
+    dock.installEventFilter(dock_flt)
+    return dock_flt
+
+
+def _install_viewer_save_hook(dock, viewer):
+    """Install an event filter to save both viewer and dock geometry on viewer close."""
     from PySide6.QtCore import QEvent, QObject
 
     class _ViewerCloseFilter(QObject):
@@ -179,27 +160,8 @@ def _install_save_hook(dock, viewer):
                 _save_geometry(self._dock, self._viewer)
             return False
 
-    class _DockCloseFilter(QObject):
-        """Saves only dock geometry when the dock closes independently."""
-
-        def __init__(self, dock, parent=None):
-            super().__init__(parent)
-            self._dock = dock
-
-        def eventFilter(self, obj, event):
-            if event.type() == QEvent.Close:
-                settings = _get_qsettings()
-                _write_rect(settings, "dock", self._dock)
-                save_cols = getattr(self._dock, "_save_col_widths", None)
-                if callable(save_cols):
-                    save_cols()
-            return False
-
     flt = _ViewerCloseFilter(dock, viewer, parent=viewer.window._qt_window)
     viewer.window._qt_window.installEventFilter(flt)
-
-    dock_flt = _DockCloseFilter(dock, parent=dock)
-    dock.installEventFilter(dock_flt)
     return flt
 
 
@@ -211,22 +173,11 @@ def _save_geometry(dock, viewer):
     viewer_ba = cached_ba if cached_ba is not None else qt_win.saveGeometry()
     settings.setValue("viewer_ba", viewer_ba)
 
-    _write_rect(settings, "dock", dock)
+    settings.setValue("dock_ba", dock.saveGeometry())
 
     save_cols = getattr(dock, "_save_col_widths", None)
     if callable(save_cols):
         save_cols()
-
-
-def _write_rect(settings, prefix, widget):
-    try:
-        geo = widget.geometry()
-        settings.setValue(f"{prefix}_x", geo.x())
-        settings.setValue(f"{prefix}_y", geo.y())
-        settings.setValue(f"{prefix}_width", geo.width())
-        settings.setValue(f"{prefix}_height", geo.height())
-    except RuntimeError:
-        pass
 
 
 _MRC_EXTENSIONS = {".mrc", ".mrcs", ".map"}
@@ -815,7 +766,7 @@ def _launch_chimerax(path: str) -> None:
     """
     import subprocess
 
-    from helicon.lib.napari_widgets import _find_chimerax
+    from helicon.lib.file_browser import _find_chimerax
 
     exe = _find_chimerax()
     if exe is None:
@@ -829,6 +780,469 @@ def _launch_chimerax(path: str) -> None:
         print(f"[helicon] launched ChimeraX with {path}")
     except Exception as exc:  # pragma: no cover - environment dependent
         print(f"[helicon] failed to launch ChimeraX: {exc}")
+
+
+def _launch_denovo3d(path: str) -> None:
+    """Open a .mrcs file in the denovo3D Shiny web app.
+
+    Passes the file path as a URL query parameter so the app loads it
+    at startup.
+    """
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.shiny import launch_shiny_app
+
+    app_file = (
+        Path(__file__).resolve().parent.parent / "webApps" / "denovo3D" / "app.py"
+    )
+    try:
+        launch_shiny_app(
+            app_file,
+            block=False,
+            query_params={
+                "url_images": str(Path(path).resolve()),
+            },
+        )
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "denovo3D Launch Error",
+            f"Failed to launch denovo3D:\n{exc}",
+        )
+
+
+def _launch_whereismyclass(path: str) -> None:
+    """Open a data.star file in the WhereIsMyClass Shiny web app.
+
+    Passes the file path as a URL query parameter so the app loads it
+    at startup.
+    """
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.shiny import launch_shiny_app
+
+    app_file = (
+        Path(__file__).resolve().parent.parent / "webApps" / "whereIsMyClass" / "app.py"
+    )
+    try:
+        launch_shiny_app(
+            app_file,
+            block=False,
+            query_params={
+                "url_data": str(Path(path).resolve()),
+            },
+        )
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "WhereIsMyClass Launch Error",
+            f"Failed to launch WhereIsMyClass:\n{exc}",
+        )
+
+
+def _launch_helicalprojection(path: str) -> None:
+    """Open a file in the HelicalProjection Shiny web app.
+
+    Downloads the app from GitHub and patches the default URL in the
+    downloaded source so the app loads the local file on startup via
+    ``download_file_from_url``, which supports local file paths.
+    """
+    import tempfile
+    import shutil
+    import urllib.request
+    from contextlib import closing
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.shiny import launch_shiny_app
+
+    urls = [
+        "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/app.py",
+        "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/compute.py",
+    ]
+    try:
+        temp_folder = tempfile.mkdtemp()
+        for url in urls:
+            filename = url.split("/")[-1]
+            local_filename = Path(temp_folder) / filename
+            with closing(urllib.request.urlopen(url)) as r:
+                with open(local_filename, "wb") as f:
+                    shutil.copyfileobj(r, f)
+
+        app_file = Path(temp_folder) / "app.py"
+        app_text = app_file.read_text()
+        app_text = app_text.replace(
+            "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
+            str(Path(path).resolve()),
+        )
+        app_file.write_text(app_text)
+
+        launch_shiny_app(app_file, block=False)
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "HelicalProjection Launch Error",
+            f"Failed to launch HelicalProjection:\n{exc}",
+        )
+
+
+def _launch_helicalpitch(path: str) -> None:
+    """Open a file in the HelicalPitch Shiny web app.
+
+    Downloads the app from GitHub and patches the default URLs in the
+    downloaded source so the app loads the local files on startup via
+    ``download_file_from_url``, which supports local file paths.
+    """
+    import tempfile
+    import shutil
+    import urllib.request
+    from contextlib import closing
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.shiny import launch_shiny_app
+
+    urls = [
+        "https://raw.githubusercontent.com/jianglab/HelicalPitch/refs/heads/master/app.py",
+        "https://raw.githubusercontent.com/jianglab/HelicalPitch/refs/heads/master/compute.py",
+    ]
+    try:
+        temp_folder = tempfile.mkdtemp()
+        for url in urls:
+            filename = url.split("/")[-1]
+            local_filename = Path(temp_folder) / filename
+            with closing(urllib.request.urlopen(url)) as r:
+                with open(local_filename, "wb") as f:
+                    shutil.copyfileobj(r, f)
+
+        file_path = Path(path).resolve()
+        suffix = file_path.suffix.lower()
+
+        if suffix in (".star", ".cs"):
+            star_file = file_path
+            iter_match = __import__("re").search(r"run_it(\d+)", file_path.name)
+            if iter_match:
+                mrcs_file = (
+                    file_path.parent / f"run_it{iter_match.group(1)}_classes.mrcs"
+                )
+                if not mrcs_file.exists():
+                    mrcs_file = None
+            else:
+                mrcs_file = None
+        else:
+            mrcs_file = file_path
+            iter_match = __import__("re").search(r"run_it(\d+)", file_path.name)
+            if iter_match:
+                star_file = file_path.parent / f"run_it{iter_match.group(1)}_data.star"
+                if not star_file.exists():
+                    star_file = None
+            else:
+                star_file = None
+
+        app_file = Path(temp_folder) / "app.py"
+        app_text = app_file.read_text()
+        if star_file:
+            app_text = app_text.replace(
+                "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_data.star",
+                str(star_file),
+            )
+        if mrcs_file:
+            app_text = app_text.replace(
+                "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
+                str(mrcs_file),
+            )
+        app_file.write_text(app_text)
+
+        launch_shiny_app(app_file, block=False)
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "HelicalPitch Launch Error",
+            f"Failed to launch HelicalPitch:\n{exc}",
+        )
+
+
+def _launch_hill(path: str) -> None:
+    """Open a file in the HILL Shiny web app.
+
+    Downloads the app from GitHub and launches it.
+    """
+    import tempfile
+    import shutil
+    import urllib.request
+    from contextlib import closing
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.shiny import launch_shiny_app
+
+    urls = [
+        "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/app.py",
+        "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/compute.py",
+        "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/util.py",
+    ]
+    try:
+        temp_folder = tempfile.mkdtemp()
+        for url in urls:
+            filename = url.split("/")[-1]
+            local_filename = Path(temp_folder) / filename
+            with closing(urllib.request.urlopen(url)) as r:
+                with open(local_filename, "wb") as f:
+                    shutil.copyfileobj(r, f)
+
+        app_file = Path(temp_folder) / "app.py"
+        launch_shiny_app(app_file, block=False, query_params={"img_file_url": path})
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "HILL Launch Error",
+            f"Failed to launch HILL:\n{exc}",
+        )
+
+
+def _launch_hi3d(path: str) -> None:
+    """Open a file in the HI3D Streamlit web app.
+
+    Downloads the app from GitHub and patches the default URL in the
+    downloaded source so the app loads the local file on startup via
+    ``download_file_from_url``, which supports local file paths.
+    """
+    import tempfile
+    import shutil
+    import urllib.request
+    from contextlib import closing
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.shiny import _open_browser
+
+    try:
+        temp_folder = tempfile.mkdtemp()
+        url = "https://raw.githubusercontent.com/jianglab/HI3D/main/hi3d.py"
+        local_filename = Path(temp_folder) / "hi3d.py"
+        with closing(urllib.request.urlopen(url)) as r:
+            with open(local_filename, "wb") as f:
+                shutil.copyfileobj(r, f)
+
+        app_text = local_filename.read_text()
+        app_text = app_text.replace(
+            "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-10499/map/emd_10499.map.gz",
+            str(Path(path).resolve()),
+        )
+        app_text = app_text.replace(
+            'url_default = get_emdb_map_url("emd-10499")',
+            f'url_default = "{str(Path(path).resolve())}"',
+        )
+        app_text = app_text.replace("index=2", "index=1")
+        local_file = str(Path(path).resolve())
+        app_text = app_text.replace(
+            "def download_file_from_url(url):",
+            f"def download_file_from_url(url):\n"
+            f"    from pathlib import Path as _P\n"
+            f"    if _P(url).is_file():\n"
+            f"        import tempfile\n"
+            f"        fobj = tempfile.NamedTemporaryFile(suffix=_P(url).suffix, delete=False)\n"
+            f"        fobj.write(_P(url).read_bytes())\n"
+            f"        fobj.flush()\n"
+            f"        return fobj\n",
+        )
+        local_filename.write_text(app_text)
+
+        import subprocess
+        import sys
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(local_filename),
+            "--server.maxUploadSize",
+            "2048",
+            "--server.enableCORS",
+            "false",
+            "--server.enableXsrfProtection",
+            "false",
+            "--browser.gatherUsageStats",
+            "false",
+            "--server.headless",
+            "true",
+        ]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+
+        import re
+
+        url = None
+        for line in proc.stdout:
+            m = re.search(r"Local URL: (http://localhost:\d+)", line)
+            if m:
+                url = m.group(1)
+                break
+
+        if url:
+            _open_browser(url)
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "HI3D Launch Error",
+            f"Failed to launch HI3D:\n{exc}",
+        )
+
+
+def _launch_truefsc(path: str, parent=None) -> None:
+    """Compute True FSC from the two half-maps referenced by a model.star file."""
+    import logging
+    import os
+    import re
+    import tempfile
+    from pathlib import Path
+
+    from PySide6.QtCore import QThread, Signal
+    from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QTextEdit, QVBoxLayout
+
+    model_path = Path(path)
+    model_dir = model_path.parent
+    model_name = model_path.name
+
+    match = re.match(r"(run_it\d+)_half(\d)_", model_name)
+    if match:
+        prefix = match.group(1)
+        map1 = model_dir / f"{prefix}_half1_class001.mrc"
+        map2 = model_dir / f"{prefix}_half2_class001.mrc"
+    elif model_name == "run_model.star":
+        map1 = model_dir / "run_half1_class001_unfil.mrc"
+        map2 = model_dir / "run_half2_class001_unfil.mrc"
+    else:
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            None,
+            "trueFSC Error",
+            f"Cannot determine half-maps from:\n{model_name}",
+        )
+        return
+
+    if not map1.exists() or not map2.exists():
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.warning(
+            None,
+            "trueFSC Error",
+            f"Half-maps not found:\n{map1}\n{map2}",
+        )
+        return
+
+    if os.access(model_dir, os.W_OK):
+        output_dir = model_dir
+    else:
+        output_dir = Path(tempfile.mkdtemp(prefix="helicon_truefsc_"))
+
+    plot_file = output_dir / "trueFSC.pdf"
+
+    from helicon.commands.trueFSC import compute_truefsc
+
+    class LogHandler(logging.Handler):
+        def __init__(self, signal):
+            super().__init__()
+            self._signal = signal
+
+        def emit(self, record):
+            msg = self.format(record)
+            self._signal.emit(msg)
+
+    class Worker(QThread):
+        line_received = Signal(str)
+        finished = Signal(object)
+        error = Signal(str)
+
+        def __init__(self):
+            super().__init__()
+
+        def run(self):
+            try:
+                self.line_received.emit(f"Map 1: {map1}")
+                self.line_received.emit(f"Map 2: {map2}")
+                self.line_received.emit(f"Output: {plot_file}")
+                self.line_received.emit("")
+
+                handler = LogHandler(self.line_received)
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                logger = logging.getLogger("helicon.commands.trueFSC")
+                logger.addHandler(handler)
+                logger.setLevel(logging.DEBUG)
+                try:
+                    result = compute_truefsc(
+                        str(map1),
+                        str(map2),
+                        str(plot_file),
+                    )
+                finally:
+                    logger.removeHandler(handler)
+                self.finished.emit(result)
+            except Exception as e:
+                self.error.emit(str(e))
+
+    class ProgressDialog(QDialog):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("trueFSC")
+            self.setMinimumSize(500, 300)
+            layout = QVBoxLayout(self)
+
+            self.label = QLabel("Running trueFSC...")
+            layout.addWidget(self.label)
+
+            self.text_edit = QTextEdit()
+            self.text_edit.setReadOnly(True)
+            layout.addWidget(self.text_edit)
+
+            self.close_btn = QPushButton("Close")
+            self.close_btn.setEnabled(False)
+            self.close_btn.clicked.connect(self.accept)
+            layout.addWidget(self.close_btn)
+
+        def append_line(self, line):
+            self.text_edit.append(line)
+            scrollbar = self.text_edit.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+        def set_result(self, result):
+            if result and result.get("plot_file"):
+                self.label.setText(
+                    f"True FSC completed - Resolution: {result['resolution']:.2f} A"
+                )
+                viewer = _napari.active()
+                if viewer is None:
+                    viewer = _create_napari_viewer()
+                _open_file(viewer, str(result["plot_file"]), mode="slice")
+            else:
+                self.label.setText("trueFSC completed")
+            if output_dir != model_dir:
+                self.text_edit.append(f"\nResults saved to: {output_dir}")
+            self.close_btn.setEnabled(True)
+
+        def set_error(self, error_msg):
+            self.label.setText("trueFSC failed")
+            self.text_edit.append(f"\nError: {error_msg}")
+            self.close_btn.setEnabled(True)
+
+    dialog = ProgressDialog(parent)
+    worker = Worker()
+    worker.line_received.connect(dialog.append_line)
+    worker.finished.connect(dialog.set_result)
+    worker.error.connect(dialog.set_error)
+    worker.start()
+    dialog.exec()
 
 
 def _hide_layer_panels(viewer) -> None:
@@ -1098,6 +1512,36 @@ def _install_panel_toggle(viewer) -> None:
         pass
 
 
+def _create_napari_viewer(title="helicon display"):
+    """Create a new napari viewer with standard helicon customizations.
+
+    Sets up the ``_SliceDirectionWidget`` and hides the layer panels so
+    the viewer matches the default helicon look.  Raises
+    ``HeliconDependencyError`` if napari or OpenGL is unavailable.
+    """
+    from unittest.mock import MagicMock
+
+    import napari
+
+    try:
+        new_viewer = napari.Viewer(title=title)
+    except Exception as exc:
+        raise HeliconDependencyError(
+            f"Failed to create the napari viewer: {exc}\n"
+            "This can happen when no OpenGL-accelerated display is "
+            "available.\nTry setting QT_QPA_PLATFORM=offscreen or "
+            "updating your GPU drivers."
+        ) from exc
+    _napari.register(new_viewer)
+    _hide_layer_panels(new_viewer)
+    try:
+        if not isinstance(new_viewer.window, MagicMock):
+            _SliceDirectionWidget(new_viewer).inject()
+    except Exception:
+        pass
+    return new_viewer
+
+
 def _is_text_file(path: str) -> bool:
     """Check if a file is a text file by attempting UTF-8 decode.
 
@@ -1115,14 +1559,13 @@ def _is_text_file(path: str) -> bool:
         return False
 
 
-def _open_text(viewer, path: str) -> None:
-    """Open a text file as an overlay in the main viewer canvas."""
+def _open_text_window(path, reuse_window=None):
+    """Open a text file in a standalone text window."""
     from pathlib import Path
 
     try:
-        from PySide6.QtWidgets import QTextEdit
+        from PySide6.QtWidgets import QMainWindow, QTextEdit
         from PySide6.QtGui import QFont
-        from PySide6.QtCore import Qt
     except ImportError:
         return
 
@@ -1132,33 +1575,148 @@ def _open_text(viewer, path: str) -> None:
     except Exception:
         return
 
-    qt_window = viewer.window._qt_window
-    central = qt_window.centralWidget()
+    if reuse_window is not None:
+        try:
+            if reuse_window.isVisible():
+                reuse_window._text_edit.setPlainText(content)
+                reuse_window.setWindowTitle(f"helicon - {Path(path).name}")
+                reuse_window.show()
+                reuse_window.raise_()
+                return reuse_window
+        except Exception:
+            pass
 
-    if hasattr(qt_window, "_text_overlay") and qt_window._text_overlay.isVisible():
-        qt_window._text_overlay.hide()
+    class _TextWindow(QMainWindow):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            from PySide6.QtWidgets import (
+                QWidget,
+                QVBoxLayout,
+                QHBoxLayout,
+                QLineEdit,
+                QToolButton,
+            )
+            from PySide6.QtGui import QShortcut, QKeySequence, QTextCursor
+            from PySide6.QtCore import Qt
 
-    if not hasattr(qt_window, "_text_overlay"):
-        overlay = QTextEdit(central)
-        overlay.setReadOnly(True)
-        overlay.setFont(QFont("Courier New", 12))
-        overlay.setLineWrapMode(QTextEdit.NoWrap)
-        overlay.setStyleSheet(
-            "background-color: #2d2d2d; color: #cccccc; border: none;"
-        )
-        overlay.hide()
-        qt_window._text_overlay = overlay
-    else:
-        overlay = qt_window._text_overlay
+            self.setWindowTitle(f"helicon - {Path(path).name}")
+            self.resize(700, 500)
 
-    overlay.setPlainText(content)
-    overlay.setGeometry(central.rect())
-    overlay.show()
-    overlay.raise_()
-    overlay.setFocus()
+            central = QWidget()
+            layout = QVBoxLayout(central)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
 
-    name = Path(path).name
-    overlay.setWindowTitle(f"helicon - {name}")
+            te = QTextEdit(self)
+            te.setReadOnly(True)
+            te.setFont(QFont("Courier New", 12))
+            te.setLineWrapMode(QTextEdit.WidgetWidth)
+            te.setStyleSheet("background-color: #2d2d2d; color: #cccccc; border: none;")
+            self._text_edit = te
+            layout.addWidget(te, 1)
+
+            find_bar = QWidget()
+            find_bar.setStyleSheet(
+                "background-color: #3c3c3c; border-top: 1px solid #555;"
+            )
+            find_layout = QHBoxLayout(find_bar)
+            find_layout.setContentsMargins(6, 4, 6, 4)
+            find_layout.setSpacing(6)
+
+            find_input = QLineEdit()
+            find_input.setPlaceholderText("Find…")
+            find_input.setStyleSheet(
+                "background-color: #2d2d2d; color: #cccccc; "
+                "border: 1px solid #555; border-radius: 3px; padding: 3px;"
+            )
+            find_input.returnPressed.connect(self._find_next)
+            self._find_input = find_input
+
+            close_btn = QToolButton()
+            close_btn.setText("✕")
+            close_btn.setToolTip("Close find bar")
+            close_btn.clicked.connect(lambda: self._toggle_find_bar(False))
+            close_btn.setStyleSheet(
+                "QToolButton { background: transparent; border: none; "
+                "color: #cccccc; padding: 2px 6px; }"
+                "QToolButton:hover { color: #ffffff; }"
+            )
+
+            find_layout.addWidget(find_input, 1)
+            find_layout.addWidget(close_btn)
+            self._find_bar = find_bar
+            self._find_bar_visible = False
+            find_bar.hide()
+            layout.addWidget(find_bar)
+
+            self.setCentralWidget(central)
+
+            find_sc = QShortcut(QKeySequence.StandardKey.Find, self)
+            find_sc.activated.connect(lambda: self._toggle_find_bar(True))
+
+            esc_sc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+            esc_sc.activated.connect(self._close_find_bar)
+
+            wrap_sc = QShortcut(QKeySequence("Ctrl+Shift+W"), self)
+            wrap_sc.activated.connect(self._toggle_wrap)
+
+            _install_window_shortcuts(self)
+
+        def _toggle_find_bar(self, show: bool) -> None:
+            if show:
+                self._find_bar.show()
+                self._find_input.setFocus()
+                self._find_input.selectAll()
+                self._find_bar_visible = True
+            else:
+                self._find_bar.hide()
+                self._find_bar_visible = False
+                self._text_edit.setFocus()
+
+        def _close_find_bar(self) -> None:
+            if self._find_bar_visible:
+                self._toggle_find_bar(False)
+
+        def _find_next(self) -> None:
+            text = self._find_input.text()
+            if not text:
+                return
+            from PySide6.QtGui import QTextCursor, QTextDocument
+
+            found = self._text_edit.find(
+                text, QTextDocument.FindFlag.FindCaseSensitively
+            )
+            if not found:
+                cursor = self._text_edit.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.Start)
+                self._text_edit.setTextCursor(cursor)
+                self._text_edit.find(text, QTextDocument.FindFlag.FindCaseSensitively)
+
+        def _toggle_wrap(self) -> None:
+            current = self._text_edit.lineWrapMode()
+            if current == QTextEdit.NoWrap:
+                self._text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
+                self.statusBar().showMessage("Word wrap: ON", 2000)
+            else:
+                self._text_edit.setLineWrapMode(QTextEdit.NoWrap)
+                self.statusBar().showMessage("Word wrap: OFF", 2000)
+
+        def closeEvent(self, event):
+            _text.on_close(self)
+            super().closeEvent(event)
+
+        def changeEvent(self, event):
+            from PySide6.QtCore import QEvent
+
+            if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+                _text.on_activate(self)
+            super().changeEvent(event)
+
+    win = _TextWindow()
+    win._text_edit.setPlainText(content)
+    _text.register(win)
+    win.show()
+    return win
 
 
 def _open_html(viewer, path: str) -> None:
@@ -1187,21 +1745,35 @@ def _open_pdf(viewer, path: str) -> None:
 
     dpi = 150
     pages = []
+    max_w, max_h = 0, 0
     for i in range(n_pages):
         pt_size = doc.pagePointSize(i)
         w_px = int(pt_size.width() * dpi / 72)
         h_px = int(pt_size.height() * dpi / 72)
-        img = doc.render(i, QSize(w_px, h_px))
+        max_w = max(max_w, w_px)
+        max_h = max(max_h, h_px)
+
+    for i in range(n_pages):
+        pt_size = doc.pagePointSize(i)
+        w_px = int(pt_size.width() * dpi / 72)
+        h_px = int(pt_size.height() * dpi / 72)
+        scale = min(max_w / w_px, max_h / h_px)
+        rw = int(w_px * scale)
+        rh = int(h_px * scale)
+        img = doc.render(i, QSize(rw, rh))
         img = img.convertToFormat(QImage.Format.Format_ARGB32)
         ptr = img.bits()
         arr = np.frombuffer(bytes(ptr), dtype=np.uint8).reshape(
             img.height(), img.width(), 4
         )
-        rgb = arr[:, :, 2::-1].astype(np.float32)  # BGRA -> RGB float
+        rgb = arr[:, :, 2::-1].astype(np.float32)
         alpha = arr[:, :, 3:4].astype(np.float32) / 255.0
-        # Composite onto white background
         composite = alpha * rgb + (1.0 - alpha) * 255.0
-        pages.append(composite)
+        canvas = np.full((max_h, max_w, 3), 255.0, dtype=np.float32)
+        y0 = (max_h - rh) // 2
+        x0 = (max_w - rw) // 2
+        canvas[y0 : y0 + rh, x0 : x0 + rw] = composite
+        pages.append(canvas)
 
     data = np.stack(pages) if len(pages) > 1 else pages[0]
     name = Path(path).name
@@ -1219,6 +1791,11 @@ def _open_pdf(viewer, path: str) -> None:
     _enable_continuous_auto_contrast(layer, viewer)
     layer.contrast_limits_range = (float(data.min()), float(data.max()))
     _reset_view(viewer)
+    _hide_layer_panels(viewer)
+    if len(pages) > 1:
+        step = list(viewer.dims.current_step)
+        step[0] = 0
+        viewer.dims.current_step = step
 
 
 def _open_eps(viewer, path: str) -> None:
@@ -1774,7 +2351,7 @@ def _parse_class2d_model_star(
 
 def _parse_star_image_refs(
     star_path: str,
-) -> tuple[list[tuple[int, str, float]], tuple, float] | None:
+) -> tuple[list[tuple[int, str, float]], tuple, float, int] | None:
     """Parse a .star file line-by-line and build lazy image-stack entries.
 
     Extracts only the ImageName/MicrographName column instead of loading the
@@ -1789,10 +2366,12 @@ def _parse_star_image_refs(
 
     Returns
     -------
-    tuple of (entries, first_shape, first_apix) or None
+    tuple of (entries, first_shape, first_apix, n_skipped) or None
         * ``entries``: list of ``(frame_idx_0based, mrc_path, 0.0)`` tuples.
         * ``first_shape``: ``(nx, ny)`` or ``(nx, ny, nz)`` of the first image.
         * ``first_apix``: pixel size in Angstroms (fallback 1.0).
+        * ``n_skipped``: number of data lines whose binary images could not
+          be found on disk.
         Returns None if no image references could be resolved.
     """
     from pathlib import Path
@@ -1808,6 +2387,7 @@ def _parse_star_image_refs(
     entries: list[tuple[int, str, float]] = []
     first_shape: tuple | None = None
     first_apix = 1.0
+    n_skipped = 0
     resolved_cache: dict[str, str | None] = {}
 
     def _resolve(img_rel: str) -> str | None:
@@ -1869,6 +2449,7 @@ def _parse_star_image_refs(
 
                 resolved_path = _resolve(img_rel)
                 if resolved_path is None:
+                    n_skipped += 1
                     continue
 
                 entries.append((frame_idx, resolved_path, 0.0))
@@ -1890,9 +2471,11 @@ def _parse_star_image_refs(
         return None
 
     if not entries or first_shape is None:
+        if n_skipped:
+            return [], first_shape or (0, 0), first_apix, n_skipped
         return None
 
-    return entries, first_shape, first_apix
+    return entries, first_shape, first_apix, n_skipped
 
 
 def _set_ndisplay(viewer, value: int) -> None:
@@ -1922,32 +2505,122 @@ def _reset_view(viewer) -> None:
         pass
 
 
-# Gallery window lifecycle — mirrors _viewers / _active_viewer for napari.
-# Gallery windows are plain QMainWindow objects kept alive here until closed.
-_galleries: list = []
-_active_gallery: list = [None]  # last-focused gallery window
+class _DisplayTracker:
+    """Track alive windows of a single display category.
+
+    Each tracked window carries a ``time.monotonic()`` timestamp that
+    records when it was created or last activated (brought to front).
+    ``active()`` returns the window with the most recent timestamp.
+
+    Timeline of approaches tried (for the record):
+
+    1. ``owns_fn`` + ``app.focusChanged`` → ``on_focus()``
+       Problem: gallery windows display non-focusable image widgets, so
+       clicking them never changes the application *focus widget* — the
+       file browser's QTreeView keeps focus.  ``on_focus`` never matched.
+
+    2. ``changeEvent`` with ``QEvent.Type.WindowActivate``
+       Problem: this event type is never delivered on macOS.
+
+    3. ``changeEvent`` with ``QEvent.Type.ActivationChange`` + ``isActiveWindow()``
+       Works on all platforms.  When a window is brought to front Qt sends
+       ``ActivationChange``, and ``isActiveWindow()`` tells us whether
+       this window is now the active one.
+    """
+
+    def __init__(self, is_alive):
+        self._windows: dict = {}  # window → monotonic timestamp
+        self._is_alive = is_alive
+
+    def alive(self) -> list:
+        """Prune dead windows and return the living ones (newest first)."""
+        self._windows = {w: t for w, t in self._windows.items() if self._is_alive(w)}
+        return sorted(self._windows, key=self._windows.get, reverse=True)
+
+    def active(self):
+        """Return the most-recent alive window, or ``None``."""
+        alive = self.alive()
+        return alive[0] if alive else None
+
+    def register(self, window):
+        """Track a new window with current timestamp."""
+        self._windows[window] = time.monotonic()
+
+    def on_activate(self, window):
+        """Update the timestamp when *window* is activated (brought to front)."""
+        if window in self._windows:
+            self._windows[window] = time.monotonic()
+
+    def on_close(self, window):
+        """Remove a closed window from tracking."""
+        self._windows.pop(window, None)
 
 
-def _gallery_is_alive(w) -> bool:
+# ---------------------------------------------------------------------------
+# Alive-check helpers used by the trackers
+# ---------------------------------------------------------------------------
+
+
+def _is_alive_viewer(v):
+    try:
+        w = v.window._qt_window
+        return w is not None and w.isVisible()
+    except Exception:
+        return False
+
+
+def _is_alive_widget(w):
     try:
         return w is not None and w.isVisible()
     except Exception:
         return False
 
 
-def _on_gallery_closing(w) -> None:
-    if w in _galleries:
-        _galleries.remove(w)
-    if _active_gallery[0] is w:
-        _active_gallery[0] = _galleries[-1] if _galleries else None
+# ---------------------------------------------------------------------------
+# Per-category trackers (module-level so gallery_backends can reference them)
+# ---------------------------------------------------------------------------
+
+_napari = _DisplayTracker(_is_alive_viewer)
+_gallery = _DisplayTracker(_is_alive_widget)
+_plot = _DisplayTracker(_is_alive_widget)
+_text = _DisplayTracker(_is_alive_widget)
+
+_NAPARI_MODES = {"slice", "volume", "stats", "3dplot"}
+_GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
+_TEXT_MODES = {"text"}
+_PLOT_MODES = {"fsc"}
 
 
-_orthogonal_windows: list = []
+def _quit_all_windows():
+    """Close every tracked window and quit the application."""
+    for tracker in (_napari, _gallery, _text, _plot):
+        for w in list(tracker.alive()):
+            try:
+                w.close()
+            except Exception:
+                pass
 
 
-def _on_orthogonal_closing(w) -> None:
-    if w in _orthogonal_windows:
-        _orthogonal_windows.remove(w)
+def _install_window_shortcuts(window):
+    """Install Ctrl+W (close) and Ctrl+Q (quit) on *window*."""
+    from PySide6.QtGui import QShortcut, QKeySequence
+
+    close_sc = QShortcut(QKeySequence("Ctrl+W"), window)
+    close_sc.activated.connect(window.close)
+
+    quit_sc = QShortcut(QKeySequence("Ctrl+Q"), window)
+    quit_sc.activated.connect(_quit_all_windows)
+
+
+_TRACKER_FOR: dict[str, _DisplayTracker] = {}
+for _m in _NAPARI_MODES:
+    _TRACKER_FOR[_m] = _napari
+for _m in _GALLERY_MODES:
+    _TRACKER_FOR[_m] = _gallery
+for _m in _TEXT_MODES:
+    _TRACKER_FOR[_m] = _text
+for _m in _PLOT_MODES:
+    _TRACKER_FOR[_m] = _plot
 
 
 def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
@@ -2064,6 +2737,11 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     panel.log_changed.connect(_on_log_transform)
     panel.histogram_changed.connect(_on_histogram_toggled)
 
+    def _on_show_labels(checked):
+        gallery.set_show_labels(checked)
+
+    panel.show_labels_changed.connect(_on_show_labels)
+
     if hasattr(gallery, "view_changed"):
         gallery.view_changed.connect(_refresh_histogram)
 
@@ -2072,7 +2750,9 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     return container
 
 
-def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> None:
+def _open_gallery(
+    read_fn, n, img_w, img_h, apix, name, reuse_window=None, tracker=None
+) -> None:
     """Show the lazy thumbnail grid for a stack in a standalone window.
 
     Parameters
@@ -2089,6 +2769,8 @@ def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> No
         Pixel size (A/px) for the slice view scale.
     name : str
         Display name (usually the file name).
+    tracker : _DisplayTracker, optional
+        Tracker to register new windows with for lifecycle management.
     """
     from helicon.lib.gallery_backends import StackGallery
 
@@ -2100,10 +2782,10 @@ def _open_gallery(read_fn, n, img_w, img_h, apix, name, reuse_window=None) -> No
         img_h=img_h,
         apix=apix,
     )
-    return gallery.open(reuse_window=reuse_window)
+    return gallery.open(reuse_window=reuse_window, tracker=tracker)
 
 
-def _open_fsc_plot(star_path: str) -> None:
+def _open_fsc_plot(star_path: str, reuse_window=None) -> None:
     """Display the FSC curve from a RELION model.star file using pyqtgraph.
 
     Reads ``data_model_class_N`` sections and plots resolution vs. FSC
@@ -2199,14 +2881,10 @@ def _open_fsc_plot(star_path: str) -> None:
         return
 
     name = Path(star_path).name
-    win = QMainWindow()
-    win.setWindowTitle(f"FSC — {name}")
-    win.resize(700, 450)
 
     central = QWidget()
     layout = QVBoxLayout(central)
     layout.setContentsMargins(0, 0, 0, 0)
-    win.setCentralWidget(central)
 
     pg.setConfigOptions(antialias=True)
     plot_widget = pg.PlotWidget()
@@ -2223,7 +2901,6 @@ def _open_fsc_plot(star_path: str) -> None:
     top_axis = plot.getAxis("top")
     top_axis.enableAutoSIPrefix(False)
     top_axis.setLabel("Resolution", units="Å")
-    _origTickStrings = top_axis.tickStrings
 
     def _angstrom_tickStrings(values, scale, spacing):
         return [f"{1.0 / v:.1f}" if v > 0 else "" for v in values]
@@ -2303,15 +2980,38 @@ def _open_fsc_plot(star_path: str) -> None:
 
     plot_widget.scene().sigMouseMoved.connect(_on_mouse_moved)
 
+    if reuse_window is not None and _is_alive_widget(reuse_window):
+        reuse_window.setWindowTitle(f"FSC — {name}")
+        reuse_window.setCentralWidget(central)
+        reuse_window.resize(700, 450)
+        reuse_window.show()
+        reuse_window.raise_()
+        return
+
+    class _FscWindow(QMainWindow):
+        def closeEvent(self, event):
+            _plot.on_close(self)
+            super().closeEvent(event)
+
+        def changeEvent(self, event):
+            from PySide6.QtCore import QEvent
+
+            if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+                _plot.on_activate(self)
+            super().changeEvent(event)
+
+    win = _FscWindow()
+    win.setWindowTitle(f"FSC — {name}")
+    win.setCentralWidget(central)
+    win.resize(700, 450)
+    _plot.register(win)
+    _install_window_shortcuts(win)
     win.show()
-    import sys
-
-    _fsc_windows = getattr(sys, "_helicon_fsc_windows", [])
-    _fsc_windows.append(win)
-    sys._helicon_fsc_windows = _fsc_windows
 
 
-def _open_xyz_slice_gallery(star_path: str, reuse_window=None) -> "QMainWindow | None":
+def _open_xyz_slice_gallery(
+    star_path: str, reuse_window=None, tracker=None
+) -> "QMainWindow | None":
     """Display center slices (Z, Y, X) of MRC files referenced by a star file.
 
     Delegates to ``Class3dGallery`` (with abundance labels) or
@@ -2322,15 +3022,17 @@ def _open_xyz_slice_gallery(star_path: str, reuse_window=None) -> "QMainWindow |
     name = Path(star_path).name
     is_refine = any(p.startswith("Refine3D") for p in Path(star_path).parts)
     gallery = Refine3dGallery(star_path) if is_refine else Class3dGallery(star_path)
-    return gallery.open(reuse_window=reuse_window)
+    return gallery.open(reuse_window=reuse_window, tracker=tracker)
 
 
-def _open_orthogonal_viewer(mrc_path: str, reuse_window=None) -> "QMainWindow | None":
+def _open_orthogonal_viewer(
+    mrc_path: str, reuse_window=None, tracker=None
+) -> "QMainWindow | None":
     """Open an interactive orthogonal slice viewer for a 3D MRC/MAP file."""
     from helicon.lib.gallery_backends import OrthogonalGallery
 
     gallery = OrthogonalGallery(mrc_path)
-    return gallery.open(reuse_window=reuse_window)
+    return gallery.open(reuse_window=reuse_window, tracker=tracker)
 
 
 def _find_model_star_from_optimiser(optimiser_path: str) -> str | None:
@@ -2358,7 +3060,9 @@ def _find_model_star_from_optimiser(optimiser_path: str) -> str | None:
     return None
 
 
-def _open_2d_classes_gallery(star_path: str, reuse_window=None) -> "QMainWindow | None":
+def _open_2d_classes_gallery(
+    star_path: str, reuse_window=None, tracker=None
+) -> "QMainWindow | None":
     """Display 2D class averages from a Class2D model.star.
 
     Shows one MRC per class (``_rlnReferenceImage``) with abundance labels
@@ -2368,7 +3072,7 @@ def _open_2d_classes_gallery(star_path: str, reuse_window=None) -> "QMainWindow 
     from helicon.lib.gallery_backends import Class2dGallery
 
     gallery = Class2dGallery(star_path)
-    return gallery.open(reuse_window=reuse_window)
+    return gallery.open(reuse_window=reuse_window, tracker=tracker)
 
 
 def _open_frame_in_slice_view(viewer, read_fn, idx, img_w, img_h, apix, name) -> None:
@@ -2428,10 +3132,6 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
     from pathlib import Path
 
     if viewer is not None:
-        qt_window = viewer.window._qt_window
-        if hasattr(qt_window, "_text_overlay") and qt_window._text_overlay.isVisible():
-            qt_window._text_overlay.hide()
-
         # Reset the viewer to the mode expected for THIS file before any
         # layer is added. Otherwise a stale ndisplay (e.g. a 3D volume
         # view left over from the previous file) persists and produces a
@@ -2478,31 +3178,41 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
     ext = Path(path).suffix.lower()
 
     if ext == ".star" and mode == "optimiser":
-        _open_xyz_slice_gallery(path, reuse_window=reuse_gallery)
+        _open_xyz_slice_gallery(path, reuse_window=reuse_gallery, tracker=_gallery)
         return
 
     if ext == ".star" and mode == "2dclasses":
-        _open_2d_classes_gallery(path, reuse_window=reuse_gallery)
+        _open_2d_classes_gallery(path, reuse_window=reuse_gallery, tracker=_gallery)
         return
 
-    # "metadata" mode: always open any star file as text, regardless of type.
-    if ext == ".star" and mode == "metadata":
-        _open_text(viewer, path)
-        _reset_view(viewer)
+    # "text" mode: always open any star file as text, regardless of type.
+    if ext == ".star" and mode == "text":
+        _open_text_window(path, reuse_window=reuse_gallery)
         return
 
-    if ext == ".star" and _is_metadata_star(path) and mode != "general":
-        _open_text(viewer, path)
-        _reset_view(viewer)
+    if ext == ".star" and _is_metadata_star(path):
+        _open_text_window(path, reuse_window=reuse_gallery)
         return
 
-    if ext == ".star" and mode != "general":
+    if ext == ".star":
         import mrcfile
 
         result = _parse_star_image_refs(path)
         if result is None:
             return
-        entries, first_shape, first_apix = result
+        entries, first_shape, first_apix, n_skipped = result
+
+        if n_skipped:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(
+                None,
+                "Missing images",
+                f"{n_skipped} image(s) referenced in {Path(path).name} "
+                "could not be found on disk and were skipped.",
+            )
+        if not entries:
+            return
 
         n = len(entries)
         with mrcfile.open(entries[0][1], permissive=True) as mrc:
@@ -2529,6 +3239,7 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
                 apix=first_apix,
                 name=name,
                 reuse_window=reuse_gallery,
+                tracker=_gallery,
             )
             return
 
@@ -2569,42 +3280,18 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         return
 
     if _is_text_file(path):
-        _open_text(viewer, path)
+        _open_text_window(path, reuse_window=reuse_gallery)
         return
 
-    if ext in _MRC_EXTENSIONS and mode != "general":
-        import mrcfile
+    if ext in _MRC_EXTENSIONS:
+        import struct
         import numpy as np
         import dask.array as da
         from dask import delayed
 
-        # Read only the header so opening a file never eagerly pulls the whole
-        # volume/stack into memory. 2D views (slice and gallery) are read one
-        # plane at a time on demand via a lazily-evaluated dask array.
-        try:
-            with mrcfile.open(path, permissive=True) as _mrc:
-                _hdr = _mrc.header
-                _nx = int(_hdr.nx)
-                _ny = int(_hdr.ny)
-                _nz = int(_hdr.nz)
-                _mode = int(_hdr.mode)
-                try:
-                    _apix = float(_hdr.cella.x) / _nx if _nx else 1.0
-                except (AttributeError, ZeroDivisionError):
-                    _apix = 1.0
-        except Exception:
-            _nx = _ny = _nz = 0
-            _mode = 2
-            _apix = 1.0
-        if _apix <= 0:
-            try:
-                with mrcfile.open(path, permissive=True) as _m:
-                    _apix = float(_m.voxel_size.x)
-            except Exception:
-                _apix = 1.0
-        if _apix <= 0:
-            _apix = 1.0
-
+        # Parse the MRC header directly from raw bytes so we never open
+        # the file through mrcfile (which mmap's the *data* section and
+        # causes the OS to page the entire file into RSS).
         _MODE_DTYPE = {
             0: np.int8,
             1: np.int16,
@@ -2617,11 +3304,40 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
             14: np.int32,
             15: np.float64,
         }
+        try:
+            with open(path, "rb") as _fh:
+                _raw_hdr = _fh.read(1024)
+            _nx, _ny, _nz = struct.unpack_from("<3i", _raw_hdr, 0)
+            _mode = struct.unpack_from("<i", _raw_hdr, 12)[0]
+            _nsymbt = struct.unpack_from("<i", _raw_hdr, 92)[0]
+            _header_offset = 1024 + _nsymbt
+            # cella (floats at offsets 40, 44, 48) / dimensions → pixel size
+            _cella_x = struct.unpack_from("<f", _raw_hdr, 40)[0]
+            _apix = float(_cella_x) / _nx if _nx else 1.0
+        except Exception:
+            _nx = _ny = _nz = 0
+            _mode = 2
+            _apix = 1.0
+            _header_offset = 1024
+        if _apix <= 0:
+            try:
+                import mrcfile as _mrcfile_fallback
+
+                with _mrcfile_fallback.open(path, permissive=True) as _m:
+                    _apix = float(_m.voxel_size.x)
+            except Exception:
+                _apix = 1.0
+        if _apix <= 0:
+            _apix = 1.0
+
         _dtype = _MODE_DTYPE.get(_mode, np.float32)
 
+        _data_mmap = np.memmap(
+            path, dtype=_dtype, mode="r", offset=_header_offset, shape=(_nz, _ny, _nx)
+        )
+
         def _read_raw(i):
-            with mrcfile.open(path, permissive=True) as m:
-                return np.asarray(m.data[i])
+            return np.array(_data_mmap[i])
 
         name = Path(path).name
 
@@ -2639,8 +3355,32 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         else:
             _vol = None
 
+        # Gallery: read one plane at a time (lazy) — no full-volume load.
+        # Must be checked before the single-plane branch so that a 1-image
+        # .mrcs opened via the gallery button still reaches the gallery.
+        if mode == "gallery":
+            n = int(_vol.shape[0])
+            img_h, img_w = int(_vol.shape[1]), int(_vol.shape[2])
+
+            def _gal_read(i):
+                return np.asarray(_vol[i])
+
+            _open_gallery(
+                read_fn=_gal_read,
+                n=n,
+                img_w=img_w,
+                img_h=img_h,
+                apix=_apix,
+                name=name,
+                reuse_window=reuse_gallery,
+                tracker=_gallery,
+            )
+            return
+
         # Single 2D plane: one eager read is fine and keeps the 2D path simple.
         if _vol is None or (_vol.ndim == 3 and _vol.shape[0] == 1):
+            if viewer is None:
+                return
             _single = _read_raw(0) if _vol is not None else None
             if _single is None:
                 with mrcfile.open(path, permissive=True) as m:
@@ -2658,34 +3398,15 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
                 interpolation3d="linear",
             )
             _enable_continuous_auto_contrast(layer, viewer)
-            layer.contrast_limits_range = (
-                float(_single.min()),
-                float(_single.max()),
-            )
+            _lo, _hi = float(_single.min()), float(_single.max())
+            if _lo >= _hi:
+                _hi = _lo + 1.0
+            layer.contrast_limits_range = (_lo, _hi)
             _reset_view(viewer)
             return
 
-        # Gallery: read one plane at a time (lazy) — no full-volume load.
-        if mode == "gallery":
-            n = int(_vol.shape[0])
-            img_w, img_h = int(_vol.shape[1]), int(_vol.shape[2])
-
-            def _gal_read(i):
-                return np.asarray(_vol[i])
-
-            _open_gallery(
-                read_fn=_gal_read,
-                n=n,
-                img_w=img_w,
-                img_h=img_h,
-                apix=_apix,
-                name=name,
-                reuse_window=reuse_gallery,
-            )
-            return
-
         if mode == "orthogonal" and _nz > 1:
-            _open_orthogonal_viewer(path, reuse_window=reuse_gallery)
+            _open_orthogonal_viewer(path, reuse_window=reuse_gallery, tracker=_gallery)
             return
 
         # Slice / volume view: show the lazy 3D array; napari loads one plane
@@ -2703,15 +3424,16 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
             interpolation3d="linear",
         )
         _enable_continuous_auto_contrast(layer, viewer)
-        layer.contrast_limits_range = (
-            float(_sample.min()),
-            float(_sample.max()),
-        )
+        _lo, _hi = float(_sample.min()), float(_sample.max())
+        if _lo >= _hi:
+            _hi = _lo + 1.0
+        layer.contrast_limits_range = (_lo, _hi)
 
         if len(viewer.dims.current_step) > 0:
             step = list(viewer.dims.current_step)
             if ext == ".mrcs":
                 step[0] = 0
+                viewer.dims.current_step = tuple(step)
                 viewer.dims.ndisplay = 2
             else:
                 step[0] = _mid
@@ -2753,14 +3475,8 @@ def _run_standalone() -> None:
     path = sys.argv[1]
     mode = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 
-    viewer = napari.Viewer(title=Path(path).name)
-    _hide_layer_panels(viewer)
+    viewer = _create_napari_viewer(title=Path(path).name)
     _install_panel_toggle(viewer)
-    try:
-        if not isinstance(viewer.window, MagicMock):
-            _SliceDirectionWidget(viewer).inject()
-    except Exception:
-        pass
     try:
         _open_file(viewer, path, mode=mode)
     except Exception as exc:  # pragma: no cover - environment dependent
@@ -2805,9 +3521,6 @@ def main(args: argparse.Namespace) -> None:
 
     start_dir = args.folder if args.folder else os.getcwd()
 
-    viewer = napari.Viewer(title="helicon")
-    _add_welcome_shortcut(viewer)
-
     if sys.platform == "darwin":
         try:
             from AppKit import NSApplication
@@ -2831,36 +3544,6 @@ def main(args: argparse.Namespace) -> None:
 
             app.setWindowIcon(QIcon(str(_icon_path)))
 
-    _viewers = [viewer]
-    _active_viewer = [viewer]
-
-    def _on_focus_changed(old, new):
-        from PySide6.QtWidgets import QWidget
-
-        for v in _viewers:
-            try:
-                if v.window._qt_window.isAncestorOf(new) or v.window._qt_window == new:
-                    _active_viewer[0] = v
-                    break
-            except Exception:
-                pass
-        for gw in _galleries:
-            try:
-                if gw.isAncestorOf(new) or gw == new:
-                    _active_gallery[0] = gw
-                    break
-            except Exception:
-                pass
-
-    if app is not None:
-        app.focusChanged.connect(_on_focus_changed)
-
-    def _on_viewer_closing(closed_viewer):
-        if closed_viewer in _viewers:
-            _viewers.remove(closed_viewer)
-        if _active_viewer[0] is closed_viewer:
-            _active_viewer[0] = _viewers[0] if _viewers else None
-
     def _track_viewer(v):
         from PySide6.QtCore import QEvent, QObject
 
@@ -2871,126 +3554,67 @@ def main(args: argparse.Namespace) -> None:
 
             def eventFilter(self, obj, event):
                 if event.type() == QEvent.Close:
-                    _on_viewer_closing(self._viewer)
+                    _napari.on_close(self._viewer)
+                elif event.type() == QEvent.ActivationChange and obj.isActiveWindow():
+                    _napari.on_activate(self._viewer)
                 return False
 
         try:
             qt_window = v.window._qt_window
             if qt_window is not None and isinstance(qt_window, QObject):
-                # Connect to destroyed: napari may tear the window down without
-                # delivering a QEvent.Close, so this reliably tracks real closes.
-                qt_window.destroyed.connect(lambda *_: _on_viewer_closing(v))
+                qt_window.destroyed.connect(lambda *_: _napari.on_close(v))
                 flt = _CloseFilter(v, parent=qt_window)
                 qt_window.installEventFilter(flt)
         except Exception:
             pass
 
-    _track_viewer(viewer)
-    try:
+    def _ensure_napari_viewer():
+        """Return the active napari viewer, creating one on first use."""
         from unittest.mock import MagicMock
 
-        if not isinstance(viewer.window, MagicMock):
-            _install_viewer_save_menu(viewer)
-            slice_widget = _SliceDirectionWidget(viewer)
-            slice_widget.inject()
-    except Exception:
-        pass
-
-    _hide_layer_panels(viewer)
-    _install_panel_toggle(viewer)
-
-    # Hide the main napari window at startup so only the file browser shows;
-    # revealed when the first file is opened into it.
-    def _show_main_viewer():
-        try:
-            viewer.window._qt_window.show()
-            viewer.window._qt_window.raise_()
-        except Exception:
-            pass
-
-    def _first_visible_viewer():
-        for v in _viewers:
-            if _viewer_is_alive(v) and v.window._qt_window.isVisible():
-                return v
-        return None
-
-    def _viewer_is_alive(v):
-        try:
-            w = v.window._qt_window
-            if w is None:
-                return False
-            w.isVisible()
-            return True
-        except Exception:
-            return False
-
-    def _recreate_main_viewer():
-        # The main viewer was closed/destroyed; build a fresh in-process viewer
-        # to stand in for it. Safe on every platform because no other in-process
-        # canvas is live (the segfault only hits a *concurrent* 2nd viewer).
-        new_viewer = napari.Viewer(title="helicon display")
-        _viewers.append(new_viewer)
-        _active_viewer[0] = new_viewer
+        v = _napari.active()
+        if v is not None:
+            return v
+        new_viewer = _create_napari_viewer()
         _track_viewer(new_viewer)
-        _hide_layer_panels(new_viewer)
+        _add_welcome_shortcut(new_viewer)
         _install_panel_toggle(new_viewer)
         try:
             if not isinstance(new_viewer.window, MagicMock):
                 _install_viewer_save_menu(new_viewer)
-                _SliceDirectionWidget(new_viewer).inject()
         except Exception:
             pass
-        try:
-            viewer.window._qt_window.hide()
-        except Exception:
-            pass
+        _install_viewer_save_hook(widget, new_viewer)
         return new_viewer
 
-    try:
-        from unittest.mock import MagicMock
-
-        if not isinstance(viewer.window, MagicMock):
-            viewer.window._qt_window.hide()
-    except Exception:
-        pass
-
-    def _on_file_selected(path):
-        target = _active_viewer[0]
-        if target is None or not _viewer_is_alive(target):
-            target = _recreate_main_viewer()
-        if target is viewer or target is _active_viewer[0]:
-            _show_main_viewer()
-        _open_file(target, path)
+    def _show_napari_viewer():
+        """Ensure a napari viewer exists and reveal it."""
+        v = _ensure_napari_viewer()
+        try:
+            v.window._qt_window.show()
+            v.window._qt_window.raise_()
+        except Exception:
+            pass
 
     def _spawn_viewer_and_open(path, mode=None):
         """Open ``path`` in a new napari viewer.
 
         On macOS multiple in-process napari viewers coexist safely, so the
-        new window is opened in-process and tracked by the focus logic
-        (``_viewers`` / ``_active_viewer``), giving the same behaviour as
-        the main viewer.
-
-        On every other platform (notably Linux/Wayland), creating a second
-        in-process napari viewer segfaults (VisPy's QOpenGLWidget crashes
-        in glFlush of the 2nd canvas). There the new window is spawned in a
-        separate process with its own isolated OpenGL context, so a crash
-        there can never take down the main helicon process.
+        new window is opened in-process and tracked by the ``_napari``
+        tracker.  On every other platform (notably Linux/Wayland), creating
+        a second in-process napari viewer segfaults, so the new window is
+        spawned in a separate process.
         """
         if sys.platform == "darwin":
             try:
-                new_viewer = napari.Viewer(title=f"helicon - {Path(path).name}")
+                new_viewer = _create_napari_viewer(title=f"helicon - {Path(path).name}")
             except Exception as exc:  # pragma: no cover - environment dependent
                 print(f"[helicon] failed to open new display window: {exc}")
                 return
-            _viewers.append(new_viewer)
-            _active_viewer[0] = new_viewer
             _track_viewer(new_viewer)
-            _hide_layer_panels(new_viewer)
-            _install_panel_toggle(new_viewer)
             try:
                 if not isinstance(new_viewer.window, MagicMock):
                     _install_viewer_save_menu(new_viewer)
-                    _SliceDirectionWidget(new_viewer).inject()
             except Exception:
                 pass
             try:
@@ -3016,37 +3640,91 @@ def main(args: argparse.Namespace) -> None:
         except Exception as exc:  # pragma: no cover - environment dependent
             print(f"[helicon] failed to open new display window: {exc}")
 
+    def _categorize_file(path):
+        """Return (tracker, primary_mode) for a file based on its type."""
+        modes = widget._display_modes_for(path)
+        if not modes:
+            return _napari, "slice"
+        # For optimiser/model.star files, prefer gallery over text
+        if modes[0] == "text":
+            for m in modes:
+                if m in _GALLERY_MODES:
+                    return _TRACKER_FOR[m], m
+        return _TRACKER_FOR.get(modes[0], _napari), modes[0]
+
+    def _on_file_selected(path):
+        tracker, mode = _categorize_file(path)
+        if tracker is _napari:
+            _show_napari_viewer()
+            _open_file(_napari.active(), path)
+        elif tracker is _gallery:
+            reuse = tracker.active()
+            _open_file(None, path, mode=mode, reuse_gallery=reuse)
+        elif tracker is _text:
+            _open_text_window(path, reuse_window=tracker.active())
+        elif tracker is _plot:
+            _open_fsc_plot(path, reuse_window=tracker.active())
+
     def _on_file_selected_new_window(path):
-        _spawn_viewer_and_open(path)
+        tracker, mode = _categorize_file(path)
+        if tracker is _napari:
+            _spawn_viewer_and_open(path)
+        else:
+            _on_display_requested(path, mode, new_window=True)
 
     def _on_display_requested(path, mode, new_window):
         if mode == "chimerax":
             _launch_chimerax(path)
             return
-        if mode in ("gallery", "optimiser", "2dclasses", "orthogonal"):
-            reuse = None
-            if not new_window:
-                ag = _active_gallery[0]
-                if ag is not None and _gallery_is_alive(ag):
-                    reuse = ag
+        if mode == "denovo3D":
+            _launch_denovo3d(path)
+            return
+        if mode == "whereIsMyClass":
+            _launch_whereismyclass(path)
+            return
+        if mode == "helicalProjection":
+            _launch_helicalprojection(path)
+            return
+        if mode == "helicalPitch":
+            _launch_helicalpitch(path)
+            return
+        if mode == "hill":
+            _launch_hill(path)
+            return
+        if mode == "hi3d":
+            _launch_hi3d(path)
+            return
+        if mode == "trueFSC":
+            _launch_truefsc(path, parent=widget)
+            return
+        tracker = _TRACKER_FOR.get(mode)
+        if tracker is None:
+            return
+        if tracker is _napari:
+            if (
+                new_window
+                and _napari.active() is not None
+                and _is_alive_viewer(_napari.active())
+            ):
+                _spawn_viewer_and_open(path, mode=mode)
+            else:
+                _show_napari_viewer()
+                try:
+                    _open_file(_napari.active(), path, mode=mode)
+                except Exception as exc:
+                    import logging
 
-            _open_file(None, path, mode=mode, reuse_gallery=reuse)
-            return
-        if mode == "fsc":
-            _open_fsc_plot(path)
-            return
-        # The "new window" checkbox only matters once a window is already
-        # visible: it then forces a second window. Otherwise the file opens in
-        # the existing viewer, revealing it if it was hidden at startup. A dead
-        # or missing viewer is recreated so the buttons always respond.
-        if new_window and _first_visible_viewer() is not None:
-            _spawn_viewer_and_open(path, mode=mode)
+                    logging.getLogger("helicon").warning(
+                        "failed to display %s in napari: %s", path, exc
+                    )
         else:
-            target = _active_viewer[0]
-            if target is None or not _viewer_is_alive(target):
-                target = _recreate_main_viewer()
-            _show_main_viewer()
-            _open_file(target, path, mode=mode)
+            reuse = None if new_window else tracker.active()
+            if tracker is _gallery:
+                _open_file(None, path, mode=mode, reuse_gallery=reuse)
+            elif tracker is _text:
+                _open_text_window(path, reuse_window=reuse)
+            elif tracker is _plot:
+                _open_fsc_plot(path, reuse_window=reuse)
 
     widget = FolderBrowserWidget(start_dir=start_dir)
     widget.file_selected.connect(_on_file_selected)
@@ -3060,13 +3738,12 @@ def main(args: argparse.Namespace) -> None:
         from unittest.mock import MagicMock
 
         if not isinstance(widget, MagicMock):
-            quit_sc = QShortcut(QKeySequence.StandardKey.Quit, widget)
-            quit_sc.activated.connect(lambda: (viewer.close(), widget.close()))
+            _install_window_shortcuts(widget)
     except Exception:
         pass
 
-    _restore_geometry(widget, viewer)
-    _install_save_hook(widget, viewer)
+    _install_dock_save_hook(widget)
+    _restore_geometry(widget, None)
 
     napari.run()
 

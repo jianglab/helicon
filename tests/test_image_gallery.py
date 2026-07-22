@@ -192,35 +192,35 @@ def _mouse_event(etype, pos, button):
 # ---------------------------------------------------------------------------
 
 from helicon.commands import display  # noqa: E402
-from helicon.lib import napari_widgets  # noqa: E402
+from helicon.lib import file_browser  # noqa: E402
 
 
 class TestGalleryModeButtons:
     def test_mrcs_has_gallery_mode(self, qapp, tmp_path):
         f = tmp_path / "particles.mrcs"
         f.write_bytes(b"x" * 64)
-        w = napari_widgets.FolderBrowserWidget()
+        w = file_browser.FolderBrowserWidget()
         assert "gallery" in w._display_modes_for(str(f))
         w.deleteLater()
 
     def test_data_star_has_gallery_mode(self, qapp, tmp_path):
         f = tmp_path / "particles.star"
         f.write_text("_rlnImageName\n")
-        w = napari_widgets.FolderBrowserWidget()
+        w = file_browser.FolderBrowserWidget()
         assert "gallery" in w._display_modes_for(str(f))
         w.deleteLater()
 
     def test_metadata_star_has_no_gallery_mode(self, qapp, tmp_path):
         f = tmp_path / "pipeline.star"
         f.write_text("options\n")
-        w = napari_widgets.FolderBrowserWidget()
+        w = file_browser.FolderBrowserWidget()
         assert "gallery" not in w._display_modes_for(str(f))
         w.deleteLater()
 
     def test_volume_has_gallery_mode(self, qapp, tmp_path):
         f = tmp_path / "volume.mrc"
         f.write_bytes(b"x" * 64)
-        w = napari_widgets.FolderBrowserWidget()
+        w = file_browser.FolderBrowserWidget()
         assert "gallery" in w._display_modes_for(str(f))
         w.deleteLater()
 
@@ -356,10 +356,11 @@ class TestOpenGalleryDispatch:
         assert window.centralWidget() is not old_widget
 
     def test_close_removes_from_tracker(self, qapp):
-        old_galleries = display._galleries[:]
-        old_active = display._active_gallery[0]
-        display._galleries.clear()
-        display._active_gallery[0] = None
+        tracker = display._DisplayTracker(display._is_alive_widget)
+        old_tracker_windows = display._gallery._windows[:]
+        old_tracker_active = display._gallery._active
+        display._gallery._windows.clear()
+        display._gallery._active = None
         try:
             images_a = [np.full((20, 20), 0.0, dtype=np.float32) for _ in range(10)]
             images_b = [np.full((20, 20), 1.0, dtype=np.float32) for _ in range(10)]
@@ -370,6 +371,7 @@ class TestOpenGalleryDispatch:
                 img_h=20,
                 apix=1.0,
                 name="a.mrcs",
+                tracker=tracker,
             )
             wb = display._open_gallery(
                 read_fn=lambda i: images_b[i],
@@ -378,23 +380,24 @@ class TestOpenGalleryDispatch:
                 img_h=20,
                 apix=1.0,
                 name="b.mrcs",
+                tracker=tracker,
             )
-            assert wa in display._galleries
-            assert wb in display._galleries
-            assert display._active_gallery[0] is wb
+            assert wa in tracker.alive()
+            assert wb in tracker.alive()
+            assert tracker.active() is wb
 
             wa.close()
-            assert wa not in display._galleries
-            assert wb in display._galleries
-            assert display._active_gallery[0] is wb
+            assert wa not in tracker.alive()
+            assert wb in tracker.alive()
+            assert tracker.active() is wb
 
             wb.close()
-            assert wb not in display._galleries
-            assert display._active_gallery[0] is None
+            assert wb not in tracker.alive()
+            assert tracker.active() is None
         finally:
-            display._galleries.clear()
-            display._galleries.extend(old_galleries)
-            display._active_gallery[0] = old_active
+            display._gallery._windows.clear()
+            display._gallery._windows.extend(old_tracker_windows)
+            display._gallery._active = old_tracker_active
 
 
 class TestGallerySave:

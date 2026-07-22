@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
+
+from .cache import cache
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -243,10 +246,15 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
             # file into a DataFrame — critical for large *data.star files).
             col_names: list[str] = []
             image_col_idx = -1
+            size_col_idx = -1
+            apix_col_idx = -1
             in_loop = False
             in_data = False
+            current_data_block = ""
             n_particles = 0
             first_image_ref: str | None = None
+            optics_size: int | None = None
+            optics_pixel_size: float | None = None
 
             with open(filepath) as f:
                 for line in f:
@@ -255,29 +263,69 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
                     if not s or s.startswith("#"):
                         continue
 
-                    if s.startswith("data_") or s == "loop_":
-                        in_loop = s == "loop_"
+                    if s.startswith("data_"):
+                        current_data_block = s[5:].strip().lower()
+                        in_loop = False
                         in_data = False
-                        if in_loop:
-                            col_names = []
-                            image_col_idx = -1
+                        col_names = []
+                        image_col_idx = -1
+                        size_col_idx = -1
+                        apix_col_idx = -1
+                        continue
+
+                    if s == "loop_":
+                        in_loop = True
+                        col_names = []
+                        image_col_idx = -1
+                        size_col_idx = -1
+                        apix_col_idx = -1
                         continue
 
                     if in_loop and s.startswith("_"):
                         col_names.append(s.split()[0])
-                        if image_col_idx < 0:
-                            cl = s.lower()
-                            if "imagename" in cl or "micrographname" in cl:
-                                image_col_idx = len(col_names) - 1
+                        idx = len(col_names) - 1
+                        cl = s.lower()
+                        if "imagename" in cl or "micrographname" in cl:
+                            if image_col_idx < 0:
+                                image_col_idx = idx
+                        if current_data_block == "optics":
+                            if "imagesize" in cl and size_col_idx < 0:
+                                size_col_idx = idx
+                            if "imagepixelsize" in cl and apix_col_idx < 0:
+                                apix_col_idx = idx
                         continue
 
                     if not in_data:
                         in_data = True
 
-                    n_particles += 1
-                    if first_image_ref is None and image_col_idx >= 0:
-                        parts = raw.split()
-                        if image_col_idx < len(parts):
+                    parts = raw.split()
+
+                    if current_data_block == "optics":
+                        if (
+                            optics_size is None
+                            and size_col_idx >= 0
+                            and size_col_idx < len(parts)
+                        ):
+                            try:
+                                optics_size = int(parts[size_col_idx])
+                            except ValueError:
+                                pass
+                        if (
+                            optics_pixel_size is None
+                            and apix_col_idx >= 0
+                            and apix_col_idx < len(parts)
+                        ):
+                            try:
+                                optics_pixel_size = float(parts[apix_col_idx])
+                            except ValueError:
+                                pass
+                    else:
+                        n_particles += 1
+                        if (
+                            first_image_ref is None
+                            and image_col_idx >= 0
+                            and image_col_idx < len(parts)
+                        ):
                             first_image_ref = parts[image_col_idx]
 
             if n_particles > 0:
@@ -320,6 +368,16 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
 
                             with Image.open(str(img_path_resolved)) as img:
                                 info = f"{img.width}×{img.height}"
+
+                # Fallback to data_optics values when image file not found.
+                if not info and optics_size is not None:
+                    info = f"{optics_size}×{optics_size}"
+                if (
+                    not pixel_size
+                    and optics_pixel_size is not None
+                    and optics_pixel_size > 0
+                ):
+                    pixel_size = f"{optics_pixel_size:.2f} Å"
         except Exception:
             pass
 
@@ -450,7 +508,12 @@ class FileBrowserModel(QStandardItemModel):
             mod_item = QStandardItem("")
             mod_item.setData("", ROLE_SORT)
         else:
-            size_bytes = path.stat().st_size
+            try:
+                size_bytes = path.stat().st_size
+                mtime = datetime.fromtimestamp(path.stat().st_mtime)
+            except (OSError, ValueError):
+                size_bytes = 0
+                mtime = datetime.now()
             size_item = QStandardItem(_format_size(size_bytes))
             size_item.setData(size_bytes, ROLE_SORT)
 
@@ -469,8 +532,6 @@ class FileBrowserModel(QStandardItemModel):
 
             apix_item = QStandardItem("")
             apix_item.setData(0, ROLE_SORT)
-
-            mtime = datetime.fromtimestamp(path.stat().st_mtime)
             mod_item = QStandardItem(mtime.strftime("%Y-%m-%d %H:%M"))
             mod_item.setData(mtime.isoformat(), ROLE_SORT)
 
@@ -665,8 +726,32 @@ class FolderBrowserWidget(QWidget):
 
     file_selected = Signal(str)
     file_selected_new_window = Signal(str)
-    # (path, mode, new_window) where mode is "slice", "volume", or "general".
+    # (path, mode, new_window) where mode is a display-mode string from _DISPLAY_BUTTONS.
     display_requested = Signal(str, str, bool)
+
+    # Maps QPushButton attribute name → display-mode string. Drives button
+    # construction, click wiring, per-mode visibility, and alphabetical
+    # reordering in ``_reorder_buttons_alphabetically``.
+    _DISPLAY_BUTTONS: list[tuple[str, str]] = [
+        ("_btn_slice", "slice"),
+        ("_btn_volume", "volume"),
+        ("_btn_3dplot", "3dplot"),
+        ("_btn_chimerax", "chimerax"),
+        ("_btn_stats", "stats"),
+        ("_btn_text", "text"),
+        ("_btn_gallery", "gallery"),
+        ("_btn_optimiser", "optimiser"),
+        ("_btn_2dclasses", "2dclasses"),
+        ("_btn_orthogonal", "orthogonal"),
+        ("_btn_fsc", "fsc"),
+        ("_btn_denovo3d", "denovo3D"),
+        ("_btn_whereismyclass", "whereIsMyClass"),
+        ("_btn_helicalprojection", "helicalProjection"),
+        ("_btn_helicalpitch", "helicalPitch"),
+        ("_btn_hill", "hill"),
+        ("_btn_hi3d", "hi3d"),
+        ("_btn_truefsc", "trueFSC"),
+    ]
 
     def __init__(self, start_dir: str | Path | None = None, parent=None):
         super().__init__(parent)
@@ -758,6 +843,9 @@ class FolderBrowserWidget(QWidget):
         self._tree.setSortingEnabled(True)
         self._tree.sortByColumn(COL_NAME, Qt.SortOrder.AscendingOrder)
 
+        # Restore saved sort state.
+        self._restore_sort_state()
+
         self._tree.setSelectionBehavior(QTreeView.SelectionBehavior.SelectItems)
         self._tree.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
 
@@ -790,6 +878,7 @@ class FolderBrowserWidget(QWidget):
         self._col_save_timer.setSingleShot(True)
         self._col_save_timer.timeout.connect(self._save_col_widths)
         header.sectionResized.connect(lambda *a: self._col_save_timer.start(300))
+        header.sortIndicatorChanged.connect(self._save_sort_state)
 
         self._tree.setAnimated(True)
         self._tree.setIndentation(20)
@@ -879,13 +968,13 @@ class FolderBrowserWidget(QWidget):
 
         self._btn_slice = QPushButton("Image Slice")
         self._btn_volume = QPushButton("3D Volume")
+        self._btn_3dplot = QPushButton("3D Plot")
+        self._btn_3dplot.setToolTip("Display 3D coordinates from a .bild file")
         self._btn_chimerax = QPushButton("ChimeraX")
         self._btn_chimerax.setToolTip("Open this file in ChimeraX")
         self._btn_stats = QPushButton("Stats")
-        self._btn_general = QPushButton("General Display")
-        self._btn_general_default = "General Display"
-        self._btn_metadata = QPushButton("Text")
-        self._btn_metadata.setToolTip("Open this file as text/metadata")
+        self._btn_text = QPushButton("Text")
+        self._btn_text.setToolTip("Open this file as text")
         self._btn_gallery = QPushButton("Gallery")
         self._btn_gallery.setToolTip("Show a lazy thumbnail grid of the stack")
         self._btn_optimiser = QPushButton("XYZ Slice")
@@ -900,37 +989,47 @@ class FolderBrowserWidget(QWidget):
         self._btn_fsc.setToolTip(
             "Display Fourier Shell Correlation curve from model.star"
         )
-        self._new_window_cb = QCheckBox("New display window")
-        for btn in (
-            self._btn_volume,
-            self._btn_chimerax,
-            self._btn_general,
-            self._btn_slice,
-            self._btn_metadata,
-            self._btn_stats,
-            self._btn_gallery,
-            self._btn_optimiser,
-            self._btn_2dclasses,
-            self._btn_orthogonal,
-            self._btn_fsc,
-        ):
+        self._btn_denovo3d = QPushButton("denovo3D")
+        self._btn_denovo3d.setToolTip(
+            "Open this file in the denovo3D web app for de novo helical indexing"
+        )
+        self._btn_whereismyclass = QPushButton("WhereIsMyClass")
+        self._btn_whereismyclass.setToolTip(
+            "Open this file in the WhereIsMyClass web app for mapping 2D classes"
+        )
+        self._btn_helicalprojection = QPushButton("HelicalProjection")
+        self._btn_helicalprojection.setToolTip(
+            "Open this file in the HelicalProjection web app"
+        )
+        self._btn_helicalpitch = QPushButton("HelicalPitch")
+        self._btn_helicalpitch.setToolTip(
+            "Open this file in the HelicalPitch web app for determining helical pitch/twist"
+        )
+        self._btn_hill = QPushButton("HILL")
+        self._btn_hill.setToolTip(
+            "Open this file in the HILL web app for helical indexing via Fourier layer lines"
+        )
+        self._btn_hi3d = QPushButton("HI3D")
+        self._btn_hi3d.setToolTip(
+            "Open this file in the HI3D web app for helical indexing via cylindrical projection"
+        )
+        self._btn_truefsc = QPushButton("trueFSC")
+        self._btn_truefsc.setToolTip("Compute True FSC curve from the two half-maps")
+        self._new_window_cb = QCheckBox("New")
+        self._new_window_cb.setToolTip(
+            "<div style='white-space: normal; width: 200px;'>Create a new display window instead of reusing the current one. Most recently clicked/focused display window will be used as the display target if there are two or more display windows</div>"
+        )
+        for attr, _mode in self._DISPLAY_BUTTONS:
+            btn = getattr(self, attr)
             btn.setFixedHeight(26)
             action_layout.addWidget(btn)
         action_layout.addStretch(1)
         action_layout.addWidget(self._new_window_cb)
         self._action_bar.hide()
 
-        self._btn_slice.clicked.connect(lambda: self._emit_display("slice"))
-        self._btn_volume.clicked.connect(lambda: self._emit_display("volume"))
-        self._btn_chimerax.clicked.connect(lambda: self._emit_display("chimerax"))
-        self._btn_stats.clicked.connect(lambda: self._emit_display("stats"))
-        self._btn_general.clicked.connect(lambda: self._emit_display("general"))
-        self._btn_metadata.clicked.connect(lambda: self._emit_display("metadata"))
-        self._btn_gallery.clicked.connect(lambda: self._emit_display("gallery"))
-        self._btn_optimiser.clicked.connect(lambda: self._emit_display("optimiser"))
-        self._btn_2dclasses.clicked.connect(lambda: self._emit_display("2dclasses"))
-        self._btn_orthogonal.clicked.connect(lambda: self._emit_display("orthogonal"))
-        self._btn_fsc.clicked.connect(lambda: self._emit_display("fsc"))
+        for attr, mode in self._DISPLAY_BUTTONS:
+            btn = getattr(self, attr)
+            btn.clicked.connect(partial(self._emit_display, mode))
 
         layout.addWidget(self._action_bar)
 
@@ -986,28 +1085,53 @@ class FolderBrowserWidget(QWidget):
             if name.endswith("optimiser.star") or name.endswith("model.star"):
                 _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
                 if _is_class2d:
-                    return ["metadata", "2dclasses"]
-                modes = ["metadata", "optimiser"]
+                    return ["text", "2dclasses"]
+                modes = ["text", "optimiser"]
                 if name.endswith("model.star"):
                     modes.append("fsc")
+                    _is_refine3d = any(
+                        p.startswith("Refine3D") for p in Path(path).parts
+                    )
+                    if _is_refine3d:
+                        modes.append("trueFSC")
                 return modes
+            if name.endswith("data.star"):
+                _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
+                if _is_class2d:
+                    modes = ["slice", "gallery", "stats", "text", "whereIsMyClass"]
+                    if _folder_is_helical(str(Path(path).parent)):
+                        modes.append("helicalPitch")
+                    return modes
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
-                return ["metadata"]
-            return ["slice", "gallery", "stats", "metadata"]
+                return ["text"]
+            return ["slice", "gallery", "stats", "text"]
         if ext == ".mrcs":
-            return ["slice", "gallery"]
+            modes = ["slice", "gallery"]
+            _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
+            _helical = _folder_is_helical(str(Path(path).parent))
+            if _is_class2d and _helical:
+                modes.extend(["helicalProjection", "hill"])
+            if _helical:
+                modes.append("denovo3D")
+            return modes
         if ext in (".mrc", ".map"):
             modes = ["slice", "volume", "gallery", "chimerax"]
             if self._volume_has_nz_gt1(path):
                 modes.append("orthogonal")
+            _is_class3d_or_refine3d = any(
+                p.startswith("Class3D") or p.startswith("Refine3D")
+                for p in Path(path).parts
+            )
+            if _is_class3d_or_refine3d and _folder_is_helical(str(Path(path).parent)):
+                modes.append("hi3d")
             return modes
         if ext == ".bild":
-            return ["general", "chimerax"]
+            return ["text", "3dplot", "chimerax"]
         if ext in _KNOWN_EXTENSIONS:
-            return ["general"]
+            return []
 
         if _is_text_file(path):
-            return ["general"]
+            return ["text"]
 
         return []
 
@@ -1070,17 +1194,8 @@ class FolderBrowserWidget(QWidget):
         if not modes:
             self._action_bar.hide()
             return
-        self._btn_slice.setVisible("slice" in modes)
-        self._btn_volume.setVisible("volume" in modes)
-        self._btn_chimerax.setVisible("chimerax" in modes)
-        self._btn_stats.setVisible("stats" in modes)
-        self._btn_general.setVisible("general" in modes)
-        self._btn_metadata.setVisible("metadata" in modes)
-        self._btn_gallery.setVisible("gallery" in modes)
-        self._btn_optimiser.setVisible("optimiser" in modes)
-        self._btn_2dclasses.setVisible("2dclasses" in modes)
-        self._btn_orthogonal.setVisible("orthogonal" in modes)
-        self._btn_fsc.setVisible("fsc" in modes)
+        for attr, mode in self._DISPLAY_BUTTONS:
+            getattr(self, attr).setVisible(mode in modes)
         if "chimerax" in modes:
             if _find_chimerax() is None:
                 self._btn_chimerax.setEnabled(False)
@@ -1107,7 +1222,6 @@ class FolderBrowserWidget(QWidget):
                 "background-color: #2b2b2b; border: 1px solid #444; }"
             )
             self._btn_stats.setToolTip("Stats view is not implemented yet.")
-        self._btn_general.setVisible("general" in modes)
         # Label the slice button by what it actually opens: a 2D image for
         # image stacks, a 2D slice through a volume for volumes, otherwise a
         # generic image slice.
@@ -1117,10 +1231,6 @@ class FolderBrowserWidget(QWidget):
             self._btn_slice.setText("2D Slice")
         else:
             self._btn_slice.setText("Image Slice")
-        if "general" in modes:
-            self._btn_general.setText(_get_file_type_label(str(path)))
-        else:
-            self._btn_general.setText(self._btn_general_default)
         self._current_path = str(path)
         self._reorder_buttons_alphabetically(modes)
         self._action_bar.show()
@@ -1133,24 +1243,22 @@ class FolderBrowserWidget(QWidget):
         )
 
     def _reorder_buttons_alphabetically(self, modes: list[str]) -> None:
+        """Re-order visible display-mode buttons alphabetically by label.
+
+        All display buttons are removed from the layout and only the non-hidden
+        ones are re-inserted, sorted by their current text label.  Visibility
+        is controlled by ``_on_selection_changed`` (which calls ``setVisible``
+        per mode) before this method runs.  Because the button set is driven by
+        ``_DISPLAY_BUTTONS``, any new button added there is automatically
+        included — no separate mapping to maintain.
+        """
         layout = self._action_bar.layout()
-        btn_mode_map = {
-            self._btn_slice: "slice",
-            self._btn_volume: "volume",
-            self._btn_chimerax: "chimerax",
-            self._btn_stats: "stats",
-            self._btn_general: "general",
-            self._btn_metadata: "metadata",
-            self._btn_gallery: "gallery",
-            self._btn_optimiser: "optimiser",
-            self._btn_fsc: "fsc",
-        }
-        buttons = list(btn_mode_map.keys())
-        active = [b for b in buttons if btn_mode_map[b] in modes]
-        active.sort(key=lambda b: b.text().lower())
+        buttons = [getattr(self, attr) for attr, _ in self._DISPLAY_BUTTONS]
         for btn in buttons:
             layout.removeWidget(btn)
-        for btn in reversed(active):
+        visible = [btn for btn in buttons if not btn.isHidden()]
+        visible.sort(key=lambda b: b.text().lower())
+        for btn in reversed(visible):
             layout.insertWidget(0, btn)
 
     def eventFilter(self, obj, event):
@@ -1358,9 +1466,100 @@ class FolderBrowserWidget(QWidget):
         except RuntimeError:
             pass
 
+    def _restore_sort_state(self) -> None:
+        """Restore sort column and order saved from a previous launch."""
+        try:
+            settings = QSettings("helicon", "display")
+            col = settings.value("browser_sort_col")
+            order = settings.value("browser_sort_order")
+            if col is None or order is None:
+                return
+            col = int(col)
+            order = Qt.SortOrder(int(order))
+            if 0 <= col < NUM_COLUMNS:
+                self._tree.sortByColumn(col, order)
+        except (TypeError, ValueError):
+            pass
+
+    def _save_sort_state(self) -> None:
+        """Persist current sort column and order to QSettings."""
+        try:
+            header = self._tree.header()
+            settings = QSettings("helicon", "display")
+            settings.setValue("browser_sort_col", header.sortIndicatorSection())
+            settings.setValue("browser_sort_order", header.sortIndicatorOrder().value)
+        except Exception:
+            pass
+
     def closeEvent(self, event) -> None:
-        self._save_col_widths()
+        try:
+            self._save_col_widths()
+            self._save_sort_state()
+        except Exception:
+            pass
         super().closeEvent(event)
+
+
+@cache(expires_after=timedelta(days=7))
+def _folder_is_helical(folder: str) -> bool:
+    """Check if any ``model.star`` in *folder* has ``rlnIsHelix = 1``.
+
+    The result is cached for one week so repeated file selections within the
+    same RELION job folder do not re-scan the STAR header.
+    """
+    try:
+        folder_path = Path(folder)
+        for f in folder_path.glob("*model.star"):
+            try:
+                if _star_has_helix_col(f):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _star_has_helix_col(star_path: Path) -> bool:
+    """Check whether a RELION STAR file has ``rlnIsHelix = 1``.
+
+    Handles two header styles:
+
+    * **Column-definition** (``data.star``) — the header lists column names
+      with a ``#N`` index (e.g. ``_rlnIsHelix  #12``).  The first data row
+      is then inspected at the indicated column position.
+    * **Key-value** (``model.star``) — the header contains
+      ``_rlnIsHelix  <value>`` directly, so the value is checked in-place.
+    """
+    col_index = None
+    in_header = True
+    with open(star_path, "r") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if in_header:
+                if stripped.startswith("_rlnIsHelix"):
+                    # Key-value format: "_rlnIsHelix  1"
+                    tail = stripped.split("_rlnIsHelix", 1)[1].strip()
+                    if "#" in tail:
+                        # Column-definition format: "_rlnIsHelix  #12"
+                        col_index = int(tail.rsplit("#", 1)[-1]) - 1
+                    else:
+                        return tail == "1"
+                elif stripped.startswith("data_"):
+                    # Start of a data block — header continues until the
+                    # next blank line.
+                    continue
+                elif stripped == "":
+                    # RELION STAR headers: blank line ends the current
+                    # block.  Reset so we re-enter header mode when the
+                    # next ``data_`` block starts.
+                    col_index = None
+            elif col_index is not None:
+                parts = stripped.split()
+                if len(parts) > col_index:
+                    return parts[col_index] == "1"
+                return False
+    return False
 
 
 def _find_chimerax() -> str | None:

@@ -13,6 +13,9 @@ for _old, _new in _numba_np_compat.items():
     if not hasattr(np, _old) and hasattr(np, _new):
         setattr(np, _old, getattr(np, _new))
 
+from .lib.alignment import (
+    align_images,
+)
 from .lib.analysis import (
     calc_fsc,
     calc_fsc_from_fft,

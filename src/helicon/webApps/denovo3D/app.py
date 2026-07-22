@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 import numpy as np
 import pandas as pd
 import asyncio
@@ -8,13 +7,16 @@ from shinywidgets import render_plotly
 
 import shiny
 from shiny import reactive, req
-from shiny.express import input, ui, render
+from shiny.express import app_opts, input, session, ui, render
 
 import helicon
 
 from . import pipeline
 
 logger = logging.getLogger(__name__)
+
+init_done = reactive.value(False)
+url_images_init = reactive.value("")
 
 input_data = reactive.value(None)
 
@@ -73,9 +75,10 @@ reconstructed_map = reactive.value(None)
 run_button_text = reactive.value("Search Parameters")
 denovo3D_abort_event = False
 
+app_opts(bookmark_store="url")
+
 
 from .utils import _combine_images_for_display, _image_stitching_x_positions
-
 
 ui.head_content(ui.tags.title("Helicon denovo3D"))
 helicon.shiny.google_analytics(id="G-FDSYXQNKLX")
@@ -85,6 +88,16 @@ ui.tags.style(
     aside {--_padding-icon: 10px;}
     """
 )
+ui.head_content(
+    ui.tags.script(
+        """
+        Shiny.addCustomMessageHandler('clear_url_params', function(message) {
+            window.history.replaceState({}, '', window.location.pathname);
+        });
+    """
+    )
+)
+
 urls = {
     "empiar-10940_job010": (
         "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
@@ -132,11 +145,12 @@ with ui.sidebar(
                             )
                         )
                     elif input.input_mode_images() == "url":
+                        default_url = url_images_init() or urls[url_key][0]
                         ret.append(
                             ui.input_text(
                                 "url_images",
                                 "Download URL for a RELION or cryoSPARC 2D class mrc(s) file",
-                                value=urls[url_key][0],
+                                value=default_url,
                             )
                         )
                     elif input.input_mode_images() == "emdb":
@@ -567,6 +581,9 @@ with ui.sidebar(
                     "clear_cache",
                     label="Clear joblib cache",
                     style="width: 200px;",
+                )
+                ui.input_checkbox(
+                    "show_bookmark_url", "Show bookmark URL in address bar", value=False
                 )
 
 title = "Denovo3D: de novo helical indexing and 3D reconstruction"
@@ -1555,6 +1572,28 @@ def transformation_ui_group(prefix, shift_scale=100):
         ),
         id=f"{prefix}_card",
     )
+
+
+@reactive.effect(priority=1000)
+def _init_from_query_once():
+    """Read URL query params at startup (high priority, one shot).
+
+    Sets ``url_images_init`` reactive value so the dynamically-rendered
+    ``url_images`` input picks it up when it's first created.
+    """
+    from urllib.parse import parse_qs
+
+    if init_done():
+        return
+    init_done.set(True)
+
+    qs = session.clientdata.url_search()
+    qp = {k: v[0] if len(v) == 1 else v for k, v in parse_qs(qs.lstrip("?")).items()}
+
+    url_images = qp.get("url_images")
+    if url_images is not None:
+        url_images_init.set(url_images.strip('"'))
+        ui.update_radio_buttons("input_mode_images", selected="url")
 
 
 @reactive.effect
@@ -2550,3 +2589,33 @@ def toggle_output_map_download_button():
 def on_stop_denovo3D():
     global denovo3D_abort_event
     denovo3D_abort_event = True
+
+
+session.bookmark.exclude.append("upload_images")
+session.bookmark.exclude.append("select_image")
+session.bookmark.exclude.append("map_xyz_projections")
+session.bookmark.exclude.append("symmetrization_projection")
+session.bookmark.exclude.append("run_denovo3D")
+session.bookmark.exclude.append("stop_denovo3D")
+session.bookmark.exclude.append("clear_cache")
+session.bookmark.exclude.append("auto_transform")
+session.bookmark.exclude.append("reset_transform")
+session.bookmark.exclude.append("perform_stitching")
+session.bookmark.exclude.append("print_input_images")
+session.bookmark.exclude.append("print_reeconstructed_images")
+session.bookmark.exclude.append("randomize_emdb_id")
+session.bookmark.exclude.append("show_bookmark_url")
+
+
+@session.bookmark.on_bookmarked
+async def _(url: str):
+    await session.bookmark.update_query_string(url)
+
+
+@reactive.effect
+@reactive.event(input.show_bookmark_url, ignore_init=True)
+async def toggle_bookmark_url():
+    if input.show_bookmark_url():
+        await session.bookmark()
+    else:
+        await session.send_custom_message("clear_url_params", {})

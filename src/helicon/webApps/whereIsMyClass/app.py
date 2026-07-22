@@ -2,7 +2,7 @@ import pathlib
 import numpy as np
 
 from shiny import reactive, req
-from shiny.express import input, ui, render
+from shiny.express import input, session, ui, render
 from shinywidgets import render_plotly, render_widget
 
 import helicon
@@ -12,8 +12,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 params = reactive.value(None)
+init_done = reactive.value(False)
+url_data_init = reactive.value("")
 
 project_root_dir = reactive.value(None)
 filepath_classes = reactive.value(None)
@@ -45,6 +46,51 @@ pair_distances_df_selected = reactive.value([])
 
 first_point = reactive.Value(None)
 second_point = reactive.Value(None)
+
+
+@reactive.effect(priority=1000)
+def _init_from_query_once():
+    """Read URL query params at startup (high priority, one shot).
+
+    Sets ``url_data_init`` reactive value so the auto-load effect picks it up.
+    """
+    from urllib.parse import parse_qs
+
+    if init_done():
+        return
+    init_done.set(True)
+
+    qs = session.clientdata.url_search()
+    qp = {k: v[0] if len(v) == 1 else v for k, v in parse_qs(qs.lstrip("?")).items()}
+
+    url_data = qp.get("url_data")
+    if url_data is not None:
+        url_data_init.set(url_data.strip('"'))
+
+
+@reactive.effect
+def _auto_load_file():
+    file_path = url_data_init()
+    if not file_path:
+        return
+    filepath = pathlib.Path(file_path)
+    if not filepath.exists():
+        return
+    try:
+        project_root_dir.set(compute.get_project_root_dir(str(filepath)))
+        filepath_classes.set(compute.get_class_file(str(filepath)))
+        logger.info("Auto-loaded file from query param: %s", filepath)
+
+        df = compute.get_class2d_params_from_file(str(filepath))
+        helices = df.groupby(["rlnMicrographName", "rlnHelicalTubeID"])
+        for hi, (_, helix) in enumerate(helices):
+            l = helix["rlnHelicalTrackLengthAngst"].astype(float).max().round()
+            df.loc[helix.index, "length"] = l
+            df.loc[helix.index, "helixID"] = hi + 1
+        params.set(df)
+        logger.info("Auto-loaded class data from %s", filepath)
+    except Exception:
+        logger.error("Failed to auto-load file from query param", exc_info=True)
 
 
 ui.head_content(ui.tags.title("Helicon whereIsMyClass"))
@@ -344,7 +390,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
             fig = getattr(pair_distances_histogram_df_selected_display, "fig", None)
             data = pair_distances_df_selected()
 
-            (helices, filement_lengths, _) = df_selected_helices()
+            helices, filement_lengths, _ = df_selected_helices()
 
             if len(helices):
                 class_indices = np.unique(
@@ -390,7 +436,7 @@ with ui.layout_columns(col_widths=(5, 7), style="height: 100vh; overflow-y: auto
 @reactive.effect
 @reactive.event(df_selected_helices)
 def get_pair_lengths_df_selected():
-    (helices, filement_lengths, _) = df_selected_helices()
+    helices, filement_lengths, _ = df_selected_helices()
     if len(helices):
         dists, _ = compute.compute_pair_distances(helices=helices)
         pair_distances_df_selected.set(dists)

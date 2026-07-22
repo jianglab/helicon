@@ -200,6 +200,7 @@ class _ControlPanel(QWidget):
     sort_reverse_changed = Signal(bool)
     log_changed = Signal(bool)
     histogram_changed = Signal(bool)
+    show_labels_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -294,6 +295,13 @@ class _ControlPanel(QWidget):
         self._scope_group.addButton(self._radio_all, 1)
         root.addWidget(self._radio_selected)
         root.addWidget(self._radio_all)
+
+        root.addSpacing(6)
+        self._show_labels_chk = QCheckBox("Show Labels")
+        self._show_labels_chk.setChecked(True)
+        self._show_labels_chk.setStyleSheet(chk_style)
+        self._show_labels_chk.toggled.connect(self.show_labels_changed)
+        root.addWidget(self._show_labels_chk)
 
         root.addSpacing(6)
         self._z_thickness_sep = QFrame()
@@ -561,6 +569,7 @@ class ImageGalleryWidget(QWidget):
         self._contrast = 1.0
         self._gamma = 1.0
         self._log_transform = False
+        self._show_labels = True
         self._adjust_scope = "all"
         self._selected_idx: int | None = None
 
@@ -588,6 +597,10 @@ class ImageGalleryWidget(QWidget):
     def set_log_transform(self, val: bool) -> None:
         self._log_transform = val
         self._thumb_cache.clear()
+        self.update()
+
+    def set_show_labels(self, val: bool) -> None:
+        self._show_labels = val
         self.update()
 
     def reset_adjustments(self) -> None:
@@ -852,24 +865,25 @@ class ImageGalleryWidget(QWidget):
                 painter.drawPixmap(tx, ty, draw_w, draw_h, thumb)
                 self._coords[i] = QRect(tx, ty, draw_w, draw_h)
 
-                text = (
-                    self._labels[i]
-                    if self._labels and i < len(self._labels)
-                    else str(i)
-                )
-                trect = QRect(tx, ty, draw_w, draw_h)
-                metrics = painter.fontMetrics()
-                tw = metrics.horizontalAdvance(text)
-                th = metrics.height()
-                pad = 2
-                painter.save()
-                painter.setClipRect(trect)
-                painter.fillRect(
-                    tx, ty, min(tw + 2 * pad, trect.width()), th + 2 * pad, label_bg
-                )
-                painter.setPen(label_color)
-                painter.drawText(tx + pad, ty + pad + metrics.ascent(), text)
-                painter.restore()
+                if self._show_labels:
+                    text = (
+                        self._labels[i]
+                        if self._labels and i < len(self._labels)
+                        else str(i)
+                    )
+                    trect = QRect(tx, ty, draw_w, draw_h)
+                    metrics = painter.fontMetrics()
+                    tw = metrics.horizontalAdvance(text)
+                    th = metrics.height()
+                    pad = 2
+                    painter.save()
+                    painter.setClipRect(trect)
+                    painter.fillRect(
+                        tx, ty, min(tw + 2 * pad, trect.width()), th + 2 * pad, label_bg
+                    )
+                    painter.setPen(label_color)
+                    painter.drawText(tx + pad, ty + pad + metrics.ascent(), text)
+                    painter.restore()
 
         if needs_sb:
             track = self._scrollbar_rect()

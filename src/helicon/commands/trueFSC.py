@@ -53,10 +53,84 @@ def main(args):
     logger.info(" ".join(sys.argv))
     logger.info("Started at %s", datetime.now())
 
+    result = compute_truefsc(
+        args.map1,
+        args.map2,
+        args.plotFile,
+        apix=args.apix,
+        cutoff_res=args.cutoffRes,
+        one_mask=args.oneMask,
+        mask_file=args.maskFile,
+        mask_fraction_thresh=args.maskFractionThresh,
+        mask_thresh=args.maskThresh,
+        mask_mass=args.maskMass,
+        mask_soft=args.maskSoft,
+        refine_mask=args.refineMask,
+    )
+
+    if result["plot_file"]:
+        if args.showPlot:
+            _show_plot(result["plot_file"])
+
+    return result
+
+
+@helicon.cache(expires_after=None, ignore=["plot_file"])
+def compute_truefsc(
+    map1_file,
+    map2_file,
+    plot_file,
+    apix=0,
+    cutoff_res=0,
+    one_mask=1,
+    mask_file=None,
+    mask_fraction_thresh=-1,
+    mask_thresh=None,
+    mask_mass=0,
+    mask_soft=-1,
+    refine_mask=1,
+):
+    """Compute True FSC curve with optimal mask and phase randomization.
+
+    Parameters
+    ----------
+    map1_file : str
+        Path to half-map 1.
+    map2_file : str
+        Path to half-map 2.
+    plot_file : str
+        Path to output plot file.
+    apix : float, optional
+        Pixel size in Angstrom. Read from map header if 0.
+    cutoff_res : float, optional
+        Cutoff resolution for phase randomization. Default: auto.
+    one_mask : int, optional
+        Use same mask for both maps (1) or separate (0).
+    mask_file : list of str, optional
+        User-provided mask file(s).
+    mask_fraction_thresh : float, optional
+        Mask threshold as fraction of max.
+    mask_thresh : list of float, optional
+        Mask threshold pixel value(s).
+    mask_mass : float, optional
+        Total mass in kDa.
+    mask_soft : float, optional
+        Mask slope width in Angstrom. Default: auto.
+    refine_mask : int, optional
+        Refine mask slope (0 or 1).
+
+    Returns
+    -------
+    dict
+        Result dictionary with keys: resolution, resolution_fit, plot_file, etc.
+    """
     import mrcfile
 
-    map1_file = args.map1
-    map2_file = args.map2
+    logger.info("Started at %s", datetime.now())
+
+    map1_file = str(map1_file)
+    map2_file = str(map2_file)
+    plot_file = str(plot_file)
 
     if not Path(map1_file).exists():
         raise HeliconError(f"map1 not found: {map1_file}")
@@ -76,16 +150,16 @@ def main(args):
             f"maps must have the same size: {map1.shape} != {map2.shape}"
         )
 
-    if args.apix > 0:
-        apix = args.apix
+    if apix > 0:
+        pix_size = apix
     elif apix1 == apix2:
-        apix = apix1
+        pix_size = apix1
     else:
         raise HeliconError(
             f"maps have different pixel sizes: {apix1} != {apix2}. Use --apix to specify."
         )
 
-    logger.info("Sampling: %g Angstrom/pixel", apix)
+    logger.info("Sampling: %g Angstrom/pixel", pix_size)
     logger.info("Map size: %dx%dx%d", map1.shape[2], map1.shape[1], map1.shape[0])
 
     if np.allclose(np.mean(map1), np.mean(map2)) and np.allclose(
@@ -96,7 +170,7 @@ def main(args):
             "Please provide two maps independently refined using half datasets."
         )
 
-    fsc_prefix = str(Path(args.plotFile).with_suffix(""))
+    fsc_prefix = str(Path(plot_file).with_suffix(""))
 
     # Precompute shell labels (reused by all FSC calls)
     n = map1.shape[0]
@@ -111,7 +185,7 @@ def main(args):
 
     # Compute FSC of original, unmasked maps
     logger.info("Calculating FSC of original maps")
-    fsc_result = helicon.calc_fsc(map1, map2, apix, shell_flat=_shell_flat, n=n)
+    fsc_result = helicon.calc_fsc(map1, map2, pix_size, shell_flat=_shell_flat, n=n)
     saxis = fsc_result[:, 0]
     fsc_unmasked = fsc_result[:, 1]
 
@@ -119,31 +193,33 @@ def main(args):
     logger.info("Resolution at FSC=0.143 (unmasked): %.2f Angstrom", res_unmasked)
 
     # Determine cutoff resolution for phase randomization
-    if args.cutoffRes > 2:
-        cutoffRes = args.cutoffRes
+    if cutoff_res > 2:
+        cutoff_res_val = cutoff_res
     else:
-        cutoffRes = _find_resolution(saxis, fsc_unmasked, 0.8)
-        if cutoffRes > 100:
+        cutoff_res_val = _find_resolution(saxis, fsc_unmasked, 0.8)
+        if cutoff_res_val > 100:
             saxis_fit, fsc_fit, _ = _fit_fsc_curve(saxis, fsc_unmasked)
-            cutoffRes = _find_resolution(saxis_fit, fsc_fit, 0.8)
-        if cutoffRes > 10:
-            cutoffRes = round(cutoffRes)
-        elif cutoffRes > 5:
-            cutoffRes = round(cutoffRes * 2) / 2
+            cutoff_res_val = _find_resolution(saxis_fit, fsc_fit, 0.8)
+        if cutoff_res_val > 10:
+            cutoff_res_val = round(cutoff_res_val)
+        elif cutoff_res_val > 5:
+            cutoff_res_val = round(cutoff_res_val * 2) / 2
         else:
-            cutoffRes = round(cutoffRes * 4) / 4
+            cutoff_res_val = round(cutoff_res_val * 4) / 4
 
-    logger.info("Cutoff resolution for phase randomization: %.2f Angstrom", cutoffRes)
+    logger.info(
+        "Cutoff resolution for phase randomization: %.2f Angstrom", cutoff_res_val
+    )
 
     # Phase-randomize maps
     from helicon.lib.filters import randomize_phases_lowpass
     from scipy.fft import rfftn
 
-    logger.info("Randomizing phases below %.2f Angstrom", cutoffRes)
-    F1r = randomize_phases_lowpass(map1, apix, cutoffRes, return_fft=True)
-    F2r = randomize_phases_lowpass(map2, apix, cutoffRes, return_fft=True)
+    logger.info("Randomizing phases below %.2f Angstrom", cutoff_res_val)
+    F1r = randomize_phases_lowpass(map1, pix_size, cutoff_res_val, return_fft=True)
+    F2r = randomize_phases_lowpass(map2, pix_size, cutoff_res_val, return_fft=True)
 
-    cutoffRes_i = int(map1.shape[0] * apix / cutoffRes)
+    cutoff_res_i = int(map1.shape[0] * pix_size / cutoff_res_val)
 
     # Save unmasked FSC
     fscfile = fsc_prefix + ".unmasked.txt"
@@ -152,7 +228,7 @@ def main(args):
     # FSC of phase-randomized, unmasked maps (for reference)
     logger.info("Calculating FSC of phase randomized, unmasked maps")
     fsc_result_rand_unmasked = helicon.calc_fsc(
-        None, None, apix, F1=F1r, F2=F2r, shell_flat=_shell_flat, n=n
+        None, None, pix_size, F1=F1r, F2=F2r, shell_flat=_shell_flat, n=n
     )
     fscfile = fsc_prefix + ".randomized-unmasked.txt"
     np.savetxt(
@@ -163,45 +239,68 @@ def main(args):
     )
 
     # Generate masks
-    user_mask = len(args.maskFile) > 0
+    mask_file = mask_file or []
+    user_mask = len(mask_file) > 0
     if user_mask:
-        if len(args.maskFile) == 2:
-            logger.info("Reading mask files: %s", " ".join(args.maskFile))
-            mask1 = mrcfile.open(args.maskFile[0]).data.astype(np.float64)
-            mask2 = mrcfile.open(args.maskFile[1]).data.astype(np.float64)
-            if args.oneMask:
+        if len(mask_file) == 2:
+            logger.info("Reading mask files: %s", " ".join(mask_file))
+            mask1 = mrcfile.open(mask_file[0]).data.astype(np.float64)
+            mask2 = mrcfile.open(mask_file[1]).data.astype(np.float64)
+            if one_mask:
                 mask_avg = (mask1 + mask2) / 2
                 mask1, mask2 = mask_avg, mask_avg
         else:
-            logger.info("Reading mask file: %s", args.maskFile[0])
-            mask1 = mrcfile.open(args.maskFile[0]).data.astype(np.float64)
+            logger.info("Reading mask file: %s", mask_file[0])
+            mask1 = mrcfile.open(mask_file[0]).data.astype(np.float64)
             mask2 = mask1
         logger.info("Using user-provided mask(s), skipping mask slope optimization")
     else:
-        if args.oneMask:
+        if one_mask:
             map_avg = (map1 + map2) / 2
             logger.info(
                 "Map average: mask threshold automatically set using Otsu method"
             )
             logger.info("Map average: generating adaptive mask")
-            mask1 = _generate_adaptive_mask(map_avg, apix, cutoffRes, args)
+            mask1 = _generate_adaptive_mask(
+                map_avg,
+                pix_size,
+                cutoff_res_val,
+                mask_fraction_thresh,
+                mask_thresh,
+                mask_mass,
+            )
             mask2 = mask1
         else:
-            mask1 = _generate_adaptive_mask(map1, apix, cutoffRes, args)
-            mask2 = _generate_adaptive_mask(map2, apix, cutoffRes, args)
+            mask1 = _generate_adaptive_mask(
+                map1,
+                pix_size,
+                cutoff_res_val,
+                mask_fraction_thresh,
+                mask_thresh,
+                mask_mass,
+            )
+            mask2 = _generate_adaptive_mask(
+                map2,
+                pix_size,
+                cutoff_res_val,
+                mask_fraction_thresh,
+                mask_thresh,
+                mask_mass,
+            )
 
     # Apply soft mask edge (skip when user provides mask)
     map1r = None
     map2r = None
     if not user_mask:
-        if args.maskSoft > 0:
-            mask_soft_px = args.maskSoft / apix
+        mask_soft_val = mask_soft
+        if mask_soft > 0:
+            mask_soft_px = mask_soft_val / pix_size
             logger.info(
                 "User provided mask slope width: %.1f Angstrom (%.1f pixels)",
-                args.maskSoft,
+                mask_soft_val,
                 mask_soft_px,
             )
-        elif args.refineMask:
+        elif refine_mask:
             from scipy.optimize import minimize_scalar
             from scipy.fft import irfftn
 
@@ -213,11 +312,11 @@ def main(args):
                 mask_e = _soft_mask(mask_a, x)
                 m1 = map1 * mask_e
                 m2 = map2 * mask_e
-                fsc_t = helicon.calc_fsc_per_shell(m1, m2, apix)
+                fsc_t = helicon.calc_fsc_per_shell(m1, m2, pix_size)
 
                 m1r = map1r * mask_e
                 m2r = map2r * mask_e
-                fsc_n = helicon.calc_fsc_per_shell(m1r, m2r, apix)
+                fsc_n = helicon.calc_fsc_per_shell(m1r, m2r, pix_size)
 
                 fsc_t_arr = fsc_t[cutoff_i:]
                 fsc_n_arr = fsc_n[cutoff_i:]
@@ -234,11 +333,11 @@ def main(args):
 
                 if logger.isEnabledFor(logging.DEBUG):
                     nshells = len(fsc_t)
-                    saxis_shells = np.arange(nshells) / (map1.shape[0] * apix)
+                    saxis_shells = np.arange(nshells) / (map1.shape[0] * pix_size)
                     res = _find_resolution(saxis_shells[cutoff_i:], fsc_true, 0.143)
                     logger.debug(
                         "\tMask width: %.2f Angstrom (%.2f pixels)\t->\t%.2f Angstrom at FSC=0.143\tfval=%g",
-                        x * apix,
+                        x * pix_size,
                         x,
                         res,
                         score,
@@ -250,34 +349,34 @@ def main(args):
                 _fsc_score,
                 bounds=(0, map1.shape[0] / 3),
                 method="bounded",
-                args=(map1, map2, map1r, map2r, mask1, cutoffRes_i + 2),
+                args=(map1, map2, map1r, map2r, mask1, cutoff_res_i + 2),
                 options={"xatol": 2},
             )
             mask_soft_px = res_opt.x
             logger.info(
                 "Optimal mask slope width: %.1f Angstrom (%.1f pixels)",
-                mask_soft_px * apix,
+                mask_soft_px * pix_size,
                 mask_soft_px,
             )
         else:
-            mask_soft_px = 3 * res_unmasked / apix
+            mask_soft_px = 3 * res_unmasked / pix_size
             logger.info(
                 "Default mask slope width: %.1f Angstrom (%.1f pixels = 3 * %g / %g)",
-                mask_soft_px * apix,
+                mask_soft_px * pix_size,
                 mask_soft_px,
                 res_unmasked,
-                apix,
+                pix_size,
             )
         mask1 = _soft_mask(mask1, mask_soft_px)
         mask2 = _soft_mask(mask2, mask_soft_px)
 
     # Save masks (skip when user provides them)
-    maskdir = str(Path(args.plotFile).parent) or "."
+    maskdir = str(Path(plot_file).parent) or "."
     basename1 = Path(map1_file).stem
     basename2 = Path(map2_file).stem
 
     if not user_mask:
-        if args.oneMask:
+        if one_mask:
             mask1_file = str(
                 Path(maskdir) / (basename1 + "_" + basename2 + ".common_mask.mrc")
             )
@@ -320,7 +419,7 @@ def main(args):
         mrc.set_data(m2.astype(np.float32))
 
     logger.info("Calculating FSC of masked maps (gold FSC)")
-    fsc_result_masked = helicon.calc_fsc(m1, m2, apix, shell_flat=_shell_flat, n=n)
+    fsc_result_masked = helicon.calc_fsc(m1, m2, pix_size, shell_flat=_shell_flat, n=n)
     saxis_m = fsc_result_masked[:, 0]
     fsc_t = fsc_result_masked[:, 1]
 
@@ -331,7 +430,7 @@ def main(args):
     np.savetxt(fscfile, np.column_stack([saxis_m[1:], fsc_t[1:]]))
 
     logger.info("Calculating FSC of phase-randomized masked maps (noise FSC)")
-    fsc_result_noise = helicon.calc_fsc(m1r, m2r, apix, shell_flat=_shell_flat, n=n)
+    fsc_result_noise = helicon.calc_fsc(m1r, m2r, pix_size, shell_flat=_shell_flat, n=n)
     saxis_n = fsc_result_noise[:, 0]
     fsc_n = fsc_result_noise[:, 1]
 
@@ -341,9 +440,9 @@ def main(args):
     # Compute True FSC
     logger.info("Calculating True FSC")
     fsc_true = np.copy(fsc_t)
-    fsc_true[cutoffRes_i + 1 :] = (
-        fsc_t[cutoffRes_i + 1 :] - fsc_n[cutoffRes_i + 1 :]
-    ) / (1 - fsc_n[cutoffRes_i + 1 :])
+    fsc_true[cutoff_res_i + 1 :] = (
+        fsc_t[cutoff_res_i + 1 :] - fsc_n[cutoff_res_i + 1 :]
+    ) / (1 - fsc_n[cutoff_res_i + 1 :])
     fsc_true[np.isnan(fsc_true)] = 1.0
 
     fscfile = fsc_prefix + ".true.txt"
@@ -372,7 +471,7 @@ def main(args):
         (saxis_m[1:], fsc_true[1:], f"corrected ({res_true:.2f} A)"),
     ]
 
-    logger.info("Saving FSC curves: %s", args.plotFile)
+    logger.info("Saving FSC curves: %s", plot_file)
     volumes = [
         (
             "Map 1",
@@ -391,36 +490,38 @@ def main(args):
             ],
         ),
     ]
-    plot_fsc(fsc_curves, args.plotFile, volumes=volumes, showPlot=args.showPlot)
+    plot_fsc(fsc_curves, plot_file, volumes=volumes)
 
-    if args.showPlot:
-        if args.plotFile.lower().endswith(".pdf"):
-            viewers = [
-                "evince",
-                "okular",
-                "zathura",
-                "xpdf",
-                "open",
-            ]  # common PDF viewers
-        else:
-            viewers = ["xdg-open", "open"]  # xdg-open for Linux, open for macOS
+    return {
+        "resolution": res_true,
+        "resolution_fit": res_true_fit,
+        "resolution_unmasked": res_unmasked,
+        "resolution_masked": res_masked,
+        "plot_file": plot_file,
+        "fsc_curves": fsc_curves,
+    }
 
-        success = False
-        for viewer in viewers:
-            try:
-                import subprocess
 
-                subprocess.Popen([viewer, args.plotFile])
-                success = True
-                break
-            except FileNotFoundError:
-                continue
-        if success:
-            logger.info(f"Opening {args.plotFile}...")
-        else:
-            logger.warning(
-                f"Could not find a viewer to open the plot. Please open {args.plotFile} manually."
-            )
+def _show_plot(plot_file):
+    """Show plot using system viewer."""
+    if plot_file.lower().endswith(".pdf"):
+        viewers = ["evince", "okular", "zathura", "xpdf", "open"]
+    else:
+        viewers = ["xdg-open", "open"]
+
+    for viewer in viewers:
+        try:
+            import subprocess
+
+            subprocess.Popen([viewer, plot_file])
+            logger.info("Opening %s...", plot_file)
+            return
+        except FileNotFoundError:
+            continue
+    logger.warning(
+        "Could not find a viewer to open the plot. Please open %s manually.",
+        plot_file,
+    )
 
 
 def _find_resolution(saxis, fsc, threshold):
@@ -656,12 +757,10 @@ def _otsu_threshold_eman(volume, n_bins=256, ignore_zero=True):
     return hmin + (max_bi + 1) * bin_width
 
 
-def _generate_adaptive_mask(volume, apix, cutoff_res, args):
+def _generate_adaptive_mask(
+    volume, apix, cutoff_res, mask_fraction_thresh=-1, mask_thresh=None, mask_mass=0
+):
     """Generate an adaptive mask using seed-and-grow (matching EMAN2 mask.auto3d).
-
-    Low-pass filters the map, applies Otsu thresholding, seeds with
-    the brightest voxels, and grows to connected voxels above the
-    threshold. All operations use the low-pass filtered map.
 
     Parameters
     ----------
@@ -671,8 +770,12 @@ def _generate_adaptive_mask(volume, apix, cutoff_res, args):
         Pixel size in Angstroms.
     cutoff_res : float
         Low-pass cutoff resolution in Angstroms.
-    args : argparse.Namespace
-        CLI arguments with maskFractionThresh, maskThresh, maskMass.
+    mask_fraction_thresh : float, optional
+        Mask threshold as fraction of max pixel value. Default: -1 (auto).
+    mask_thresh : list of float, optional
+        Mask threshold pixel value(s).
+    mask_mass : float, optional
+        Total mass of structure in kDa.
 
     Returns
     -------
@@ -682,9 +785,6 @@ def _generate_adaptive_mask(volume, apix, cutoff_res, args):
     from scipy.ndimage import gaussian_filter, label
 
     # Low-pass filter the map (matching EMAN2 filter.fourier with targetres)
-    # EMAN2 uses exp(-B*ds^2*R^2/4) with B=4*ln(2)*targetres^2 plus a cosine taper.
-    # A Gaussian with sigma=targetres/(2*apix) over-smooths. Calibrated sigma
-    # with divisor=3.81 matches EMAN2's Otsu threshold exactly.
     if cutoff_res > 2 * apix:
         sigma = cutoff_res / (3.81 * apix)
         volume_lp = gaussian_filter(volume, sigma=sigma)
@@ -692,12 +792,12 @@ def _generate_adaptive_mask(volume, apix, cutoff_res, args):
         volume_lp = volume.copy()
 
     # Determine threshold
-    if args.maskFractionThresh > 0:
-        thresh = args.maskFractionThresh * np.max(volume_lp)
-    elif args.maskThresh and args.maskThresh[0] > 0:
-        thresh = args.maskThresh[0]
-    elif args.maskMass > 0:
-        mass_kda = args.maskMass
+    if mask_fraction_thresh > 0:
+        thresh = mask_fraction_thresh * np.max(volume_lp)
+    elif mask_thresh and mask_thresh[0] > 0:
+        thresh = mask_thresh[0]
+    elif mask_mass > 0:
+        mass_kda = mask_mass
         vol_voxels = mass_kda * 1e3 / (0.81 * apix**3)
         sorted_vals = np.sort(volume_lp.ravel())[::-1]
         thresh = sorted_vals[min(int(vol_voxels), len(sorted_vals) - 1)]
