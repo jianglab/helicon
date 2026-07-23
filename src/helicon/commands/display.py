@@ -1244,7 +1244,8 @@ def _open_helical_angle_stats_plot(
         FigureCanvasQTAgg,
         NavigationToolbar2QT,
     )
-    from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QWidget
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMainWindow, QScrollArea, QVBoxLayout, QWidget
 
     figure = result.get("figure")
     if figure is None:
@@ -1255,8 +1256,17 @@ def _open_helical_angle_stats_plot(
     layout.setContentsMargins(0, 0, 0, 0)
     canvas = FigureCanvasQTAgg(figure)
     toolbar = NavigationToolbar2QT(canvas, central)
+    scroll_area = QScrollArea()
+    scroll_area.setWidgetResizable(False)
+    scroll_area.setAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+    )
+    canvas_width = max(1, round(figure.get_figwidth() * figure.dpi))
+    canvas_height = max(1, round(figure.get_figheight() * figure.dpi))
+    canvas.setFixedSize(canvas_width, canvas_height)
+    scroll_area.setWidget(canvas)
     layout.addWidget(toolbar)
-    layout.addWidget(canvas, 1)
+    layout.addWidget(scroll_area, 1)
     canvas.draw_idle()
 
     title = f"Stats — {Path(star_path).name}"
