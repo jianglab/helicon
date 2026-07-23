@@ -1081,7 +1081,7 @@ class FolderBrowserWidget(QWidget):
 
         ext = Path(path).suffix.lower()
         if ext == ".star":
-            name = Path(path).name
+            name = Path(path).name.lower()
             if name.endswith("optimiser.star") or name.endswith("model.star"):
                 _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
                 if _is_class2d:
@@ -1098,13 +1098,19 @@ class FolderBrowserWidget(QWidget):
             if name.endswith("data.star"):
                 _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
                 if _is_class2d:
-                    modes = ["slice", "gallery", "stats", "text", "whereIsMyClass"]
+                    modes = ["slice", "gallery", "text", "whereIsMyClass"]
                     if _folder_is_helical(str(Path(path).parent)):
                         modes.append("helicalPitch")
                     return modes
+                _is_class3d_or_refine3d = any(
+                    p.startswith("Class3D") or p.startswith("Refine3D")
+                    for p in Path(path).parts
+                )
+                if _is_class3d_or_refine3d:
+                    return ["slice", "gallery", "stats", "text"]
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return ["text"]
-            return ["slice", "gallery", "stats", "text"]
+            return ["slice", "gallery", "text"]
         if ext == ".mrcs":
             modes = ["slice", "gallery"]
             _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
@@ -1214,14 +1220,11 @@ class FolderBrowserWidget(QWidget):
                 self._btn_chimerax.setStyleSheet("")
                 self._btn_chimerax.setToolTip("Open this file in ChimeraX")
         if "stats" in modes:
-            # Stats view is not implemented yet; the button stays disabled
-            # with an explanatory tooltip.
-            self._btn_stats.setEnabled(False)
-            self._btn_stats.setStyleSheet(
-                "QPushButton:disabled { color: #7a7a7a; "
-                "background-color: #2b2b2b; border: 1px solid #444; }"
+            self._btn_stats.setEnabled(True)
+            self._btn_stats.setStyleSheet("")
+            self._btn_stats.setToolTip(
+                "Estimate and display per-filament tilt, psi, and rot-angle variance"
             )
-            self._btn_stats.setToolTip("Stats view is not implemented yet.")
         # Label the slice button by what it actually opens: a 2D image for
         # image stacks, a 2D slice through a volume for volumes, otherwise a
         # generic image slice.

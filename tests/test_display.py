@@ -50,6 +50,38 @@ class TestDisplayArgs(object):
         args = parser.parse_args(["./data"])
         assert args.folder == "./data"
 
+    def test_stats_uses_plot_window_category(self):
+        assert "stats" in display._PLOT_MODES
+        assert "stats" not in display._NAPARI_MODES
+
+    def test_helical_angle_stats_paths_use_writable_job_directory(self, tmp_path):
+        input_star = tmp_path / "run_data.star"
+        with patch.object(display.os, "access", return_value=True):
+            output_dir, output_star, plot_file = display._helical_angle_stats_paths(
+                str(input_star)
+            )
+
+        assert output_dir == tmp_path
+        assert output_star == tmp_path / "run_data.helical_angle_variance.star"
+        assert plot_file == tmp_path / "run_data.helical_angle_variance.pdf"
+
+    def test_helical_angle_stats_paths_fall_back_to_temporary_directory(
+        self, tmp_path
+    ):
+        input_star = tmp_path / "job" / "run_data.star"
+        fallback = tmp_path / "temporary-results"
+        with (
+            patch.object(display.os, "access", return_value=False),
+            patch("tempfile.mkdtemp", return_value=str(fallback)),
+        ):
+            output_dir, output_star, plot_file = display._helical_angle_stats_paths(
+                str(input_star)
+            )
+
+        assert output_dir == fallback
+        assert output_star == fallback / "run_data.helical_angle_variance.star"
+        assert plot_file == fallback / "run_data.helical_angle_variance.pdf"
+
 
 class TestDisplayMain(object):
     @patch("helicon.has_napari", return_value=False)
@@ -978,19 +1010,37 @@ class TestFolderBrowser(object):
             assert widget._btn_chimerax.isEnabled()
             assert "Open this file" in widget._btn_chimerax.toolTip()
 
-    def test_stats_button_for_data_star_only(self, tmp_path, qapp):
+    def test_stats_button_for_class3d_and_refine3d_data_star_only(
+        self, tmp_path, qapp
+    ):
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
-        (tmp_path / "data.star").write_text("_data_\n")
+        class3d_dir = tmp_path / "Class3D" / "job001"
+        refine3d_dir = tmp_path / "Refine3D" / "job002"
+        class2d_dir = tmp_path / "Class2D" / "job003"
+        for directory in (class3d_dir, refine3d_dir, class2d_dir):
+            directory.mkdir(parents=True)
+        class3d_star = class3d_dir / "run_data.star"
+        refine3d_star = refine3d_dir / "run_data.star"
+        class2d_star = class2d_dir / "run_data.star"
+        generic_star = tmp_path / "data.star"
+        for star_path in (
+            class3d_star,
+            refine3d_star,
+            class2d_star,
+            generic_star,
+        ):
+            star_path.write_text("_data_\n")
         (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
         (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
 
-        def select(name):
+        def select(path):
+            widget.set_root_path(path.parent)
             idx = None
             for r in range(widget._model.rowCount()):
-                if widget._model.file_path(widget._model.index(r, 0)).endswith(name):
+                if widget._model.file_path(widget._model.index(r, 0)) == str(path):
                     idx = widget._model.index(r, 0)
                     break
             assert idx is not None
@@ -998,16 +1048,19 @@ class TestFolderBrowser(object):
                 idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
             )
 
-        # Shown and disabled (not implemented) for data.star.
-        select("data.star")
-        assert not widget._btn_stats.isHidden()
-        assert not widget._btn_stats.isEnabled()
-        assert "not implemented" in widget._btn_stats.toolTip().lower()
+        for star_path in (class3d_star, refine3d_star):
+            select(star_path)
+            assert not widget._btn_stats.isHidden()
+            assert widget._btn_stats.isEnabled()
+            assert "variance" in widget._btn_stats.toolTip().lower()
 
-        # Not shown for image stacks or volumes.
-        select("particles.mrcs")
+        for star_path in (class2d_star, generic_star):
+            select(star_path)
+            assert widget._btn_stats.isHidden()
+
+        select(tmp_path / "particles.mrcs")
         assert widget._btn_stats.isHidden()
-        select("volume.mrc")
+        select(tmp_path / "volume.mrc")
         assert widget._btn_stats.isHidden()
 
     def test_eps_label_and_mode(self, tmp_path, qapp):

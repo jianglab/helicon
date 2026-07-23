@@ -1078,3 +1078,113 @@ class TestImages2starDenoiseCurvelet(object):
                 self._make_index_d(),
                 param="transform=mct:outdir=denoised",
             )
+
+
+class TestEstimateHelicalAngleVariance:
+    @staticmethod
+    def _data(tmp_path):
+        image_path = str((tmp_path / "particles.mrcs").resolve())
+        return pd.DataFrame(
+            {
+                "rlnImageName": [f"{i:06d}@{image_path}" for i in range(1, 5)],
+                "rlnHelicalTubeID": [1, 1, 2, 2],
+                "rlnHelicalTrackLengthAngst": [0.0, 10.0, 5.0, 5.0],
+                "rlnAngleTilt": [80.0, 82.0, 90.0, 90.0],
+                "rlnAnglePsi": [10.0, 12.0, 20.0, 20.0],
+                "rlnAngleRot": [0.0, 10.0, 30.0, 30.0],
+                "rlnLogLikeliContribution": [-1.0, -2.0, -3.0, -4.0],
+                "rlnMaxValueProbDistribution": [0.9, 0.8, 0.7, 0.6],
+            }
+        )
+
+    def test_reusable_estimator_adds_sigma_columns_and_figure(self, tmp_path):
+        from matplotlib.figure import Figure
+        from helicon.plugins.images2star.estimatehelicalanglevariance import (
+            estimate_helical_angle_variance,
+        )
+
+        result, figure = estimate_helical_angle_variance(self._data(tmp_path))
+
+        assert isinstance(figure, Figure)
+        assert len(figure.axes) >= 28
+        for column in (
+            "rlnAngleTiltSigma",
+            "rlnAnglePsiSigma",
+            "rlnAngleRotSigma",
+        ):
+            assert column in result
+            assert np.isfinite(result[column]).all()
+        assert result.loc[2, "rlnAngleRotSigma"] == 0
+        assert result.loc[3, "rlnAngleRotSigma"] == 0
+        assert "rlnImageName_abs" not in result
+
+    def test_constant_rates_and_single_segment_filaments_plot(self, tmp_path):
+        from helicon.plugins.images2star.estimatehelicalanglevariance import (
+            estimate_helical_angle_variance,
+        )
+
+        data = self._data(tmp_path).iloc[[0, 2]].copy()
+        result, figure = estimate_helical_angle_variance(data)
+
+        assert figure is not None
+        assert (result["rlnAngleRotSigma"] == 0).all()
+
+    def test_missing_required_columns_raise_clear_error(self, tmp_path):
+        from helicon.plugins.images2star.estimatehelicalanglevariance import (
+            estimate_helical_angle_variance,
+        )
+
+        data = self._data(tmp_path).drop(columns=["rlnAnglePsi"])
+        with pytest.raises(ValueError, match="rlnAnglePsi"):
+            estimate_helical_angle_variance(data)
+
+    def test_cli_handler_contract_without_plot(self, tmp_path):
+        from helicon.plugins.images2star.estimatehelicalanglevariance import handle
+
+        args = argparse.Namespace(verbose=1, output_starFile=str(tmp_path / "out.star"))
+        index_d = {"estimateHelicalAngleVariance": 0}
+        result, returned_index = handle(self._data(tmp_path), args, index_d, param=1)
+
+        assert returned_index["estimateHelicalAngleVariance"] == 1
+        assert "rlnAngleTiltSigma" in result
+
+    def test_file_wrapper_writes_artifacts_and_uses_cache(self, tmp_path, monkeypatch):
+        from uuid import uuid4
+
+        from helicon.plugins.images2star.estimatehelicalanglevariance import (
+            estimate_helical_angle_variance_from_star,
+        )
+
+        input_star = tmp_path / f"run_{uuid4().hex}_data.star"
+        input_star.write_text("data_particles\n")
+        output_star = tmp_path / "run_data.helical_angle_variance.star"
+        plot_file = tmp_path / "run_data.helical_angle_variance.pdf"
+        load_calls = []
+
+        def fake_load(*args, **kwargs):
+            load_calls.append(args[0])
+            return self._data(tmp_path)
+
+        def fake_write(data, path):
+            Path(path).write_text("derived star")
+
+        monkeypatch.setattr(helicon, "images2dataframe", fake_load)
+        monkeypatch.setattr(helicon, "dataframe2file", fake_write)
+
+        first = estimate_helical_angle_variance_from_star(
+            str(input_star),
+            str(output_star),
+            str(plot_file),
+        )
+        second = estimate_helical_angle_variance_from_star(
+            str(input_star),
+            str(output_star),
+            str(plot_file),
+        )
+
+        assert len(load_calls) == 1
+        assert output_star.is_file()
+        assert plot_file.is_file()
+        assert first["output_star_file"] == str(output_star)
+        assert second["plot_file"] == str(plot_file)
+        assert second["figure"] is not None

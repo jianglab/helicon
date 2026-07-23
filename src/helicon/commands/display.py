@@ -1234,6 +1234,166 @@ def _launch_truefsc(path: str, parent=None) -> None:
     dialog.exec()
 
 
+def _open_helical_angle_stats_plot(
+    result: dict,
+    star_path: str,
+    reuse_window=None,
+) -> None:
+    """Display a cached helical-angle variance figure in a reusable Qt window."""
+    from matplotlib.backends.backend_qtagg import (
+        FigureCanvasQTAgg,
+        NavigationToolbar2QT,
+    )
+    from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QWidget
+
+    figure = result.get("figure")
+    if figure is None:
+        raise ValueError("helical-angle variance calculation returned no plot")
+
+    central = QWidget()
+    layout = QVBoxLayout(central)
+    layout.setContentsMargins(0, 0, 0, 0)
+    canvas = FigureCanvasQTAgg(figure)
+    toolbar = NavigationToolbar2QT(canvas, central)
+    layout.addWidget(toolbar)
+    layout.addWidget(canvas, 1)
+    canvas.draw_idle()
+
+    title = f"Stats — {Path(star_path).name}"
+    if reuse_window is not None and _is_alive_widget(reuse_window):
+        reuse_window.setWindowTitle(title)
+        reuse_window.setCentralWidget(central)
+        reuse_window.resize(1200, 700)
+        reuse_window.show()
+        reuse_window.raise_()
+        return
+
+    class _StatsWindow(QMainWindow):
+        def closeEvent(self, event):
+            _plot.on_close(self)
+            super().closeEvent(event)
+
+        def changeEvent(self, event):
+            from PySide6.QtCore import QEvent
+
+            if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+                _plot.on_activate(self)
+            super().changeEvent(event)
+
+    window = _StatsWindow()
+    window.setWindowTitle(title)
+    window.setCentralWidget(central)
+    window.resize(1200, 700)
+    _plot.register(window)
+    _install_window_shortcuts(window)
+    window.show()
+
+
+def _helical_angle_stats_paths(path: str) -> tuple[Path, Path, Path]:
+    """Return the output directory, derived STAR path, and plot path."""
+    import tempfile
+
+    input_path = Path(path)
+    input_dir = input_path.parent
+    if os.access(input_dir, os.W_OK):
+        output_dir = input_dir
+    else:
+        output_dir = Path(tempfile.mkdtemp(prefix="helicon_angle_stats_"))
+    output_star = output_dir / f"{input_path.stem}.helical_angle_variance.star"
+    plot_file = output_dir / f"{input_path.stem}.helical_angle_variance.pdf"
+    return output_dir, output_star, plot_file
+
+
+def _launch_helical_angle_stats(
+    path: str,
+    parent=None,
+    reuse_window=None,
+) -> None:
+    """Compute and display Class3D/Refine3D helical-angle variance statistics."""
+    from PySide6.QtCore import QThread, Signal
+    from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QTextEdit, QVBoxLayout
+
+    input_path = Path(path)
+    input_dir = input_path.parent
+    output_dir, output_star, plot_file = _helical_angle_stats_paths(path)
+
+    from helicon.plugins.images2star.estimatehelicalanglevariance import (
+        estimate_helical_angle_variance_from_star,
+    )
+
+    class Worker(QThread):
+        line_received = Signal(str)
+        finished = Signal(object)
+        error = Signal(str)
+
+        def run(self):
+            try:
+                self.line_received.emit(f"Input: {input_path}")
+                self.line_received.emit(f"Output STAR: {output_star}")
+                self.line_received.emit(f"Plot: {plot_file}")
+                self.line_received.emit("")
+                result = estimate_helical_angle_variance_from_star(
+                    str(input_path),
+                    str(output_star),
+                    str(plot_file),
+                )
+                self.finished.emit(result)
+            except Exception as exc:
+                self.error.emit(str(exc))
+
+    class ProgressDialog(QDialog):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("Helical-angle statistics")
+            self.setMinimumSize(550, 300)
+            layout = QVBoxLayout(self)
+
+            self.label = QLabel("Calculating helical-angle statistics...")
+            layout.addWidget(self.label)
+
+            self.text_edit = QTextEdit()
+            self.text_edit.setReadOnly(True)
+            layout.addWidget(self.text_edit)
+
+            self.close_btn = QPushButton("Close")
+            self.close_btn.setEnabled(False)
+            self.close_btn.clicked.connect(self.accept)
+            layout.addWidget(self.close_btn)
+
+        def append_line(self, line):
+            self.text_edit.append(line)
+            scrollbar = self.text_edit.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+        def set_result(self, result):
+            try:
+                _open_helical_angle_stats_plot(
+                    result,
+                    str(input_path),
+                    reuse_window=reuse_window,
+                )
+            except Exception as exc:
+                self.set_error(str(exc))
+                return
+            self.label.setText("Helical-angle statistics completed")
+            if output_dir != input_dir:
+                self.text_edit.append(f"\nResults saved to: {output_dir}")
+            self.close_btn.setEnabled(True)
+
+        def set_error(self, error_msg):
+            self.label.setText("Helical-angle statistics failed")
+            self.text_edit.append(f"\nError: {error_msg}")
+            self.close_btn.setEnabled(True)
+
+    dialog = ProgressDialog(parent)
+    worker = Worker()
+    worker.line_received.connect(dialog.append_line)
+    worker.finished.connect(dialog.set_result)
+    worker.error.connect(dialog.set_error)
+    worker.start()
+    dialog.exec()
+
+
 def _hide_layer_panels(viewer) -> None:
     """Hide the left-side layer list and layer controls dock widgets.
 
@@ -2573,10 +2733,10 @@ _gallery = _DisplayTracker(_is_alive_widget)
 _plot = _DisplayTracker(_is_alive_widget)
 _text = _DisplayTracker(_is_alive_widget)
 
-_NAPARI_MODES = {"slice", "volume", "stats", "3dplot"}
+_NAPARI_MODES = {"slice", "volume", "3dplot"}
 _GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
 _TEXT_MODES = {"text"}
-_PLOT_MODES = {"fsc"}
+_PLOT_MODES = {"fsc", "stats"}
 
 
 def _quit_all_windows():
@@ -3691,6 +3851,14 @@ def main(args: argparse.Namespace) -> None:
             return
         if mode == "trueFSC":
             _launch_truefsc(path, parent=widget)
+            return
+        if mode == "stats":
+            reuse = None if new_window else _plot.active()
+            _launch_helical_angle_stats(
+                path,
+                parent=widget,
+                reuse_window=reuse,
+            )
             return
         tracker = _TRACKER_FOR.get(mode)
         if tracker is None:
