@@ -987,7 +987,8 @@ class FolderBrowserWidget(QWidget):
         self._btn_orthogonal.setToolTip("Interactive XYZ slice viewer for 3D volumes")
         self._btn_fsc = QPushButton("FSC")
         self._btn_fsc.setToolTip(
-            "Display Fourier Shell Correlation curve from model.star"
+            "Display the FSC curve, or the SSNR-derived W_MAP curve for Class3D, "
+            "from model.star"
         )
         self._btn_denovo3d = QPushButton("denovo3D")
         self._btn_denovo3d.setToolTip(

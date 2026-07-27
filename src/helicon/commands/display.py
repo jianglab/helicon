@@ -2950,15 +2950,74 @@ def _open_gallery(
     return gallery.open(reuse_window=reuse_window, tracker=tracker)
 
 
-def _open_fsc_plot(star_path: str, reuse_window=None) -> None:
-    """Display the FSC curve from a RELION model.star file using pyqtgraph.
+def _model_fsc_curves(data, *, use_ssnr_map: bool = False):
+    """Extract resolution curves from parsed RELION model STAR data.
 
-    Reads ``data_model_class_N`` sections and plots resolution vs. FSC
-    for each class.  A horizontal line at FSC = 0.143 marks the
-    gold-standard threshold.
+    Class3D does not use gold-standard half-set refinement, so its
+    ``rlnGoldStandardFsc`` values are zero.  For those jobs, convert
+    ``rlnSsnrMap`` to the FSC-equivalent MAP weight
+    ``W_MAP = SSNR_MAP / (1 + SSNR_MAP)``.
     """
     import numpy as np
 
+    class_sections = {k: v for k, v in data.items() if k.startswith("model_class_")}
+    all_curves = []
+    for key in sorted(class_sections, key=lambda k: int(k.split("_")[-1])):
+        df = class_sections[key]
+        class_num = key.split("_")[-1]
+
+        sf_col = None
+        ang_col = None
+        gold_standard_fsc_col = None
+        fallback_fsc_col = None
+        ssnr_map_col = None
+        for col in df.columns:
+            cl = col.lower().lstrip("_")
+            if "goldstandardfsc" in cl:
+                gold_standard_fsc_col = col
+            elif "fouriershellcorrelation" in cl and "phase" not in cl:
+                fallback_fsc_col = col
+            if cl == "rlnssnrmap":
+                ssnr_map_col = col
+            if cl == "rlnresolution":
+                sf_col = col
+            if cl == "rlnangstromresolution":
+                ang_col = col
+
+        curve_col = (
+            ssnr_map_col
+            if use_ssnr_map
+            else gold_standard_fsc_col or fallback_fsc_col
+        )
+        if sf_col is None or curve_col is None:
+            continue
+
+        spatial_freq = np.asarray(df[sf_col], dtype=np.float64)
+        curve = np.asarray(df[curve_col], dtype=np.float64)
+        if use_ssnr_map:
+            curve = curve / (1.0 + curve)
+
+        order = np.argsort(spatial_freq)
+        spatial_freq = spatial_freq[order]
+        curve = curve[order]
+
+        angstrom = None
+        if ang_col is not None:
+            angstrom = np.asarray(df[ang_col], dtype=np.float64)[order]
+
+        all_curves.append((spatial_freq, curve, f"Class {class_num}", angstrom))
+
+    return all_curves
+
+
+def _open_fsc_plot(star_path: str, reuse_window=None) -> None:
+    """Display the FSC curve from a RELION model.star file using pyqtgraph.
+
+    Reads ``data_model_class_N`` sections and plots resolution vs. FSC for
+    each class.  Class3D jobs use the FSC-equivalent MAP weight calculated
+    from ``rlnSsnrMap``; other jobs use the gold-standard FSC column.  A
+    horizontal line at 0.143 marks the FSC threshold.
+    """
     try:
         import pyqtgraph as pg
         from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
@@ -3000,48 +3059,19 @@ def _open_fsc_plot(star_path: str, reuse_window=None) -> None:
         )
         return
 
-    all_curves = []
-    for key in sorted(class_sections, key=lambda k: int(k.split("_")[-1])):
-        df = class_sections[key]
-        class_num = key.split("_")[-1]
-
-        sf_col = None
-        ang_col = None
-        fsc_col = None
-        for col in df.columns:
-            cl = col.lower()
-            if "goldstandardfsc" in cl:
-                fsc_col = col
-            elif "fouriershellcorrelation" in cl and "phase" not in cl:
-                fsc_col = col
-            if cl in ("_rlnresolution", "rlnresolution"):
-                sf_col = col
-            if cl in ("_rlnangstromresolution", "rlnangstromresolution"):
-                ang_col = col
-
-        if sf_col is None or fsc_col is None:
-            continue
-
-        spatial_freq = np.asarray(df[sf_col], dtype=np.float64)
-        fsc = np.asarray(df[fsc_col], dtype=np.float64)
-
-        order = np.argsort(spatial_freq)
-        spatial_freq = spatial_freq[order]
-        fsc = fsc[order]
-
-        angstrom = None
-        if ang_col is not None:
-            angstrom = np.asarray(df[ang_col], dtype=np.float64)[order]
-
-        all_curves.append((spatial_freq, fsc, f"Class {class_num}", angstrom))
+    is_class3d = any(
+        part.lower().startswith("class3d") for part in Path(star_path).parts
+    )
+    all_curves = _model_fsc_curves(data, use_ssnr_map=is_class3d)
 
     if not all_curves:
         from PySide6.QtWidgets import QMessageBox
 
+        curve_column = "rlnSsnrMap" if is_class3d else "FSC"
         QMessageBox.warning(
             None,
             "Column error",
-            "Could not find resolution/FSC columns in any class section.",
+            f"Could not find resolution/{curve_column} columns in any class section.",
         )
         return
 
@@ -3058,7 +3088,8 @@ def _open_fsc_plot(star_path: str, reuse_window=None) -> None:
     plot = plot_widget.getPlotItem()
     plot.getAxis("bottom").enableAutoSIPrefix(False)
     plot.setLabel("bottom", "Resolution", units="1/Å")
-    plot.setLabel("left", "FSC")
+    curve_label = "W_MAP" if is_class3d else "FSC"
+    plot.setLabel("left", curve_label)
     plot.setYRange(0, 1.05)
     plot.addLegend()
     plot.showGrid(x=True, y=True, alpha=0.3)
@@ -3131,7 +3162,7 @@ def _open_fsc_plot(star_path: str, reuse_window=None) -> None:
         coord_text.setHtml(
             f'<span style="color: #dcdcdc; background-color: rgba(0,0,0,180);'
             f' padding: 2px;">'
-            f"{x:.4f} 1/Å  ({ang} Å)<br>FSC = {y:.4f}</span>"
+            f"{x:.4f} 1/Å  ({ang} Å)<br>{curve_label} = {y:.4f}</span>"
         )
         coord_text.setVisible(True)
         vr = plot.vb.viewRect()

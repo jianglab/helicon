@@ -82,6 +82,50 @@ class TestDisplayArgs(object):
         assert output_star == fallback / "run_data.helical_angle_variance.star"
         assert plot_file == fallback / "run_data.helical_angle_variance.pdf"
 
+    def test_model_fsc_curves_uses_ssnr_map_for_class3d(self):
+        import numpy as np
+        import pandas as pd
+
+        data = {
+            "model_class_1": pd.DataFrame(
+                {
+                    "rlnResolution": [0.3, 0.1, 0.2],
+                    "rlnAngstromResolution": [3.0, 10.0, 5.0],
+                    "rlnGoldStandardFsc": [0.0, 0.0, 0.0],
+                    "rlnSsnrMap": [3.0, 0.0, 1.0],
+                }
+            )
+        }
+
+        curves = display._model_fsc_curves(data, use_ssnr_map=True)
+
+        assert len(curves) == 1
+        spatial_freq, w_map, label, angstrom = curves[0]
+        np.testing.assert_allclose(spatial_freq, [0.1, 0.2, 0.3])
+        np.testing.assert_allclose(w_map, [0.0, 0.5, 0.75])
+        np.testing.assert_allclose(angstrom, [10.0, 5.0, 3.0])
+        assert label == "Class 1"
+
+    def test_model_fsc_curves_keeps_gold_standard_fsc_for_refine3d(self):
+        import numpy as np
+        import pandas as pd
+
+        data = {
+            "model_class_1": pd.DataFrame(
+                {
+                    "_rlnResolution": [0.2, 0.1],
+                    "_rlnGoldStandardFsc": [0.25, 0.75],
+                    "_rlnSsnrMap": [9.0, 9.0],
+                }
+            )
+        }
+
+        curves = display._model_fsc_curves(data, use_ssnr_map=False)
+
+        spatial_freq, fsc, _, _ = curves[0]
+        np.testing.assert_allclose(spatial_freq, [0.1, 0.2])
+        np.testing.assert_allclose(fsc, [0.75, 0.25])
+
 
 class TestDisplayMain(object):
     @patch("helicon.has_napari", return_value=False)
