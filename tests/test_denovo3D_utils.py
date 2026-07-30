@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from helicon.webApps.denovo3D import utils
+from helicon.webApps.lib import helical_projection_utils as utils
 
 
 class TestGenerateXYZProjections(object):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import logging
-from .sortby import _sort_dataframe
+from .sort_by import _sort_dataframe
 
 logger = logging.getLogger(__name__)
 

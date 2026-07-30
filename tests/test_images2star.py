@@ -563,7 +563,7 @@ class TestImages2starBreakFilaments(object):
         return df
 
     def test_breaks_long_filaments(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         data = self._make_data(
             n_micrographs=1, segments_per_filament=100, n_filaments=3
@@ -581,7 +581,7 @@ class TestImages2starBreakFilaments(object):
         assert result["rlnHelicalTubeIDOriginal"].nunique() == 3
 
     def test_preserves_short_filaments(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         data = self._make_data(n_micrographs=1, segments_per_filament=10, n_filaments=3)
         result, idx = handle(
@@ -593,7 +593,7 @@ class TestImages2starBreakFilaments(object):
         assert list(result["rlnHelicalTubeID"]) == [0] * 10 + [1] * 10 + [2] * 10
 
     def test_backs_up_original_tube_id(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         data = self._make_data(
             n_micrographs=1, segments_per_filament=100, n_filaments=2
@@ -606,7 +606,7 @@ class TestImages2starBreakFilaments(object):
         assert set(result["rlnHelicalTubeIDOriginal"]) == {0, 1}
 
     def test_preserves_existing_original_tube_id(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         data = self._make_data(
             n_micrographs=1, segments_per_filament=100, n_filaments=2
@@ -619,7 +619,7 @@ class TestImages2starBreakFilaments(object):
         assert list(result["rlnHelicalTubeIDOriginal"]) == [99] * 200
 
     def test_handles_multiple_micrographs(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         data = self._make_data(n_micrographs=3, segments_per_filament=75, n_filaments=2)
         result, idx = handle(
@@ -630,7 +630,7 @@ class TestImages2starBreakFilaments(object):
         assert result["rlnHelicalTubeID"].nunique() == 24
 
     def test_maintains_segment_order_by_track_length(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         rows = []
         for si in range(99, -1, -1):
@@ -662,7 +662,7 @@ class TestImages2starBreakFilaments(object):
         assert track_vals == [float(i) for i in range(30)]
 
     def test_errors_without_helical_tube_id(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
         from helicon.lib.exceptions import HeliconError
 
         data = pd.DataFrame({"rlnMicrographName": ["a.mrc", "b.mrc"]})
@@ -672,7 +672,7 @@ class TestImages2starBreakFilaments(object):
             )
 
     def test_errors_with_bad_max_segments(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
         from helicon.lib.exceptions import HeliconError
 
         data = self._make_data()
@@ -688,7 +688,7 @@ class TestImages2starBreakFilaments(object):
         assert args.breakFilaments == ["maxSegments=40"]
 
     def test_default_max_segments_is_50(self):
-        from helicon.plugins.images2star.breakfilaments import handle
+        from helicon.plugins.images2star.break_filaments import handle
 
         data = self._make_data(
             n_micrographs=1, segments_per_filament=120, n_filaments=1

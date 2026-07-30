@@ -931,6 +931,21 @@ class FolderBrowserWidget(QWidget):
             QToolButton:hover {
                 background-color: #4a6fa5;
             }
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #cccccc;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 3px 8px;
+            }
+            QPushButton:hover {
+                background-color: #4a6fa5;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #5a82c4;
+                border: 1px solid #6f9bd6;
+            }
             QCheckBox {
                 color: #e8e8e8;
                 spacing: 6px;

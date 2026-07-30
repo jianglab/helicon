@@ -397,7 +397,7 @@ class TestProc3dHandlers(object):
 
     def test_denoise_curvelet3d_handler_mad(self):
         pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.plugins.proc3d.denoise_curvelet import handle
 
         data = self.data.copy().astype(np.float64)
         args = argparse.Namespace(verbose=0)
@@ -418,7 +418,7 @@ class TestProc3dHandlers(object):
 
     def test_denoise_curvelet3d_handler_elbow(self):
         pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.plugins.proc3d.denoise_curvelet import handle
 
         data = self.data.copy().astype(np.float64)
         args = argparse.Namespace(verbose=0)
@@ -438,7 +438,7 @@ class TestProc3dHandlers(object):
 
     def test_denoise_curvelet3d_few_scales_auto(self):
         pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.plugins.proc3d.denoise_curvelet import handle
 
         data = self.data.copy().astype(np.float64)
         args = argparse.Namespace(verbose=0)
@@ -458,7 +458,7 @@ class TestProc3dHandlers(object):
 
     def test_denoise_curvelet3d_handler_mct_mad(self):
         pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.plugins.proc3d.denoise_curvelet import handle
 
         data = self.data.copy().astype(np.float64)
         args = argparse.Namespace(verbose=0)
@@ -479,7 +479,7 @@ class TestProc3dHandlers(object):
 
     def test_denoise_curvelet3d_handler_mct_elbow(self):
         pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.plugins.proc3d.denoise_curvelet import handle
 
         data = self.data.copy().astype(np.float64)
         args = argparse.Namespace(verbose=0)
@@ -498,7 +498,7 @@ class TestProc3dHandlers(object):
         assert index_d["denoiseCurvelet"] == 1
 
     def test_denoise_curvelet3d_mct_unknown_transform_errors(self):
-        from helicon.plugins.proc3d.denoiseCurvelet import handle
+        from helicon.plugins.proc3d.denoise_curvelet import handle
         from helicon.lib.exceptions import HeliconError
 
         data = self.data.copy()
