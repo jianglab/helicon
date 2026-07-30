@@ -29,3 +29,4 @@ helicon.plugins.*.denoisecurvelet*
 .omo/
 AGENTS.md
 tests/output/
+.agents/

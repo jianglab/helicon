@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import helicon
 from helicon.lib.exceptions import HeliconError
-from .selectFile import _select_by_file
+from .select_file import _select_by_file
 
 logger = logging.getLogger(__name__)
 

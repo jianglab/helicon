@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import helicon
 from scipy.sparse import csr_matrix
-from helicon.webApps.denovo3D import solver_linear_regression as solver
+from helicon.webApps.lib import denovo3d_solver as solver
 
 
 class TestSortedHsymCsymPairs(object):

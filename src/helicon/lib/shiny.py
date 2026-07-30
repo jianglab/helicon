@@ -612,7 +612,7 @@ def set_client_url_query_params(query_params):
     return script
 
 
-def launch_shiny_app(app_file, env=None, block=True, query_params=None):
+def launch_shiny_app(app_file, env=None, block=True, query_params=None, reload=False):
     """Launch a Shiny app with automatic browser opening.
 
     Handles WSL2 where Python's webbrowser module fails to open the Windows
@@ -622,7 +622,7 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None):
     Parameters
     ----------
     app_file : str or Path
-        Path to the Shiny app file.
+        Path to the Shiny app file or a module path like "package.module:app".
     env : dict, optional
         Environment variables for the subprocess. Defaults to None (inherits
         current environment).
@@ -632,7 +632,11 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None):
         blocking the Qt event loop).
     query_params : dict, optional
         URL query parameters to append when opening the browser.
+    reload : bool, optional
+        If True, run in dev mode with auto-reload on the app's directory.
+        Defaults to False.
     """
+    import importlib
     import re
     import subprocess
     import sys
@@ -642,13 +646,36 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None):
         "-m",
         "shiny",
         "run",
-        "--no-dev-mode",
+        "--no-dev-mode" if not reload else "--reload",
         "--host",
         "0.0.0.0",
         "--port",
         "0",
-        str(app_file),
     ]
+
+    if isinstance(app_file, str) and ":" in app_file and "/" not in app_file:
+        import importlib.util
+
+        module_name = app_file.split(":")[0]
+        app_dir = None
+        parts = module_name.split(".")
+        for i in range(len(parts), 0, -1):
+            candidate = ".".join(parts[:i])
+            try:
+                spec = importlib.util.find_spec(candidate)
+            except (ImportError, ValueError):
+                continue
+            if spec is not None and hasattr(spec, "origin") and spec.origin is not None:
+                app_dir = str(Path(spec.origin).parent)
+                break
+        if app_dir is not None:
+            cmd += ["--app-dir", app_dir]
+    elif reload:
+        app_dir = str(Path(str(app_file)).parent)
+        cmd += ["--app-dir", app_dir]
+
+    cmd.append(str(app_file))
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -714,11 +741,12 @@ def _open_browser(url):
     import subprocess
     import webbrowser
 
+    print(f"Opening browser at {url}...")
     if _is_wsl():
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ["wslview", url],
+            # stdout=subprocess.DEVNULL,
+            # stderr=subprocess.DEVNULL,
         )
     else:
         webbrowser.open(url)

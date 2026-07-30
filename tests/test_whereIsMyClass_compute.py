@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from unittest.mock import patch, MagicMock
-from helicon.webApps.whereIsMyClass import compute
+from helicon.webApps.lib import whereismyclass_compute as compute
 
 
 class TestGetProjectRootDir(object):
@@ -187,42 +187,6 @@ class TestComputePairDistances(object):
         assert min_len == 0
 
 
-class TestEstimateInterSegmentDistance(object):
-    def test_returns_median_distance(self):
-        data = pd.DataFrame(
-            {
-                "rlnMicrographName": ["m1", "m1", "m1"],
-                "rlnHelicalTubeID": [1, 1, 1],
-                "rlnHelicalTrackLengthAngst": [0.0, 100.0, 300.0],
-            }
-        )
-        result = compute.estimate_inter_segment_distance(data)
-        # distances: [100, 200], median = 150
-        assert result == 150.0
-
-    def test_single_segment_raises_value_error(self):
-        data = pd.DataFrame(
-            {
-                "rlnMicrographName": ["m1"],
-                "rlnHelicalTubeID": [1],
-                "rlnHelicalTrackLengthAngst": [100.0],
-            }
-        )
-        with pytest.raises(ValueError):
-            compute.estimate_inter_segment_distance(data)
-
-    def test_empty_raises_value_error(self):
-        data = pd.DataFrame(
-            columns=[
-                "rlnMicrographName",
-                "rlnHelicalTubeID",
-                "rlnHelicalTrackLengthAngst",
-            ]
-        )
-        with pytest.raises(ValueError):
-            compute.estimate_inter_segment_distance(data)
-
-
 class TestGetClassAbundance(object):
     def test_counts_correctly(self):
         params = pd.DataFrame(
@@ -281,28 +245,6 @@ class TestGetClass2dFromFile(object):
 
         np.testing.assert_array_equal(data, mock_data)
         assert apix == 2.5
-
-
-class TestStarToDataframe(object):
-    def test_returns_dataframe_with_optics(self):
-        mock_data = pd.DataFrame({"rlnClassNumber": [1, 2]})
-        mock_data.attrs["optics"] = pd.DataFrame()
-        mock_data.attrs["starFile"] = "test.star"
-
-        with patch(
-            "starfile.read",
-            return_value={"optics": pd.DataFrame(), "particles": mock_data},
-        ):
-            result = compute.star_to_dataframe("test.star")
-
-        assert isinstance(result, pd.DataFrame)
-        assert "optics" in result.attrs
-        assert "starFile" in result.attrs
-
-    def test_raises_on_missing_optics_or_particles(self):
-        with patch("starfile.read", return_value={"only_table": pd.DataFrame()}):
-            with pytest.raises(AssertionError):
-                compute.star_to_dataframe("test.star")
 
 
 class TestCsToDataframe(object):
@@ -374,7 +316,7 @@ class TestGetClass2dParamsFromFile(object):
 
     def test_accepts_star_file(self):
         with patch(
-            "helicon.webApps.whereIsMyClass.compute.star_to_dataframe",
+            "helicon.webApps.lib.whereismyclass_compute._star_to_dataframe",
             return_value=self.star_data,
         ):
             result = compute.get_class2d_params_from_file("test.star")
@@ -382,7 +324,7 @@ class TestGetClass2dParamsFromFile(object):
 
     def test_accepts_cs_file(self):
         with patch(
-            "helicon.webApps.whereIsMyClass.compute.cs_to_dataframe",
+            "helicon.webApps.lib.whereismyclass_compute.cs_to_dataframe",
             return_value=self.star_data,
         ):
             result = compute.get_class2d_params_from_file("test.cs")
@@ -395,7 +337,7 @@ class TestGetClass2dParamsFromFile(object):
     def test_missing_required_attrs_raises(self):
         bad_data = pd.DataFrame({"rlnClassNumber": [1]})
         with patch(
-            "helicon.webApps.whereIsMyClass.compute.star_to_dataframe",
+            "helicon.webApps.lib.whereismyclass_compute._star_to_dataframe",
             return_value=bad_data,
         ):
             with pytest.raises(ValueError):

@@ -2,7 +2,7 @@ import logging
 import pytest
 import numpy as np
 from unittest.mock import patch, MagicMock, mock_open
-from helicon.webApps.denovo3D import pipeline
+from helicon.webApps.lib import denovo3d_pipeline as pipeline
 
 
 class TestGetImagesFromFile(object):

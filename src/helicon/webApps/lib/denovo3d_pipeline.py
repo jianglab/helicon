@@ -5,46 +5,14 @@ import helicon
 
 logger = logging.getLogger(__name__)
 
+from .image_loader import (
+    get_images_from_url,
+    get_images_from_emdb,
+    get_images_from_file,
+)
 
-@helicon.cache(
-    cache_dir=str(helicon.cache_dir / "denovo3D"), expires_after=7, verbose=0
-)  # 7 days
-def get_images_from_url(url):
-    url_final = helicon.get_direct_url(
-        url
-    )  # convert cloud drive indirect url to direct url
-    fileobj = helicon.download_file_from_url(url_final)
-    if fileobj is None:
-        raise ValueError(
-            f"ERROR: {url} could not be downloaded. If this url points to a cloud drive file, make sure the link is a direct download link instead of a link for preview"
-        )
-    data, apix = get_images_from_file(fileobj.name)
-    return data, apix
-
-
-@helicon.cache(
-    cache_dir=str(helicon.cache_dir / "denovo3D"), expires_after=7, verbose=0
-)  # 7 days
-def get_images_from_emdb(emdb_id):
-    emdb = helicon.dataset.EMDB()
-    data, apix = emdb(emdb_id)
-    if data is None:
-        raise IOError(f"ERROR: failed to download {emdb_id} from EMDB")
-
-    return data, round(apix, 4)
-
-
-def get_images_from_file(imageFile):
-    import mrcfile
-
-    with mrcfile.open(imageFile) as mrc:
-        apix = float(mrc.voxel_size.x)
-        data = mrc.data
-    return data, round(apix, 4)
-
-
-from .solver_linear_regression import lsq_reconstruct
-from .utils import (
+from .denovo3d_solver import lsq_reconstruct
+from .helical_projection_utils import (
     generate_xyz_projections,
     symmetrize_transform_map,
     is_vertical,

@@ -31,16 +31,17 @@ helicon --help
 - **display**:             A file browser for viewing image, map, star, bild, eps, pdf, html, and text files
 
 ### Shiny web apps
-- **denovo3D**:            A Web app that performs de novo helical indexing and 3D reconstruction from a single 2D image
-- **helicalPitch**:        A Web app that helps you determine helical pitch/twist using 2D Classification info
-- **helicalProjection**:   A Web app that helps you compare 2D images with helical structure projections
-- **whereIsMyClass**:      A Web app that maps 2D classes to helical tube/filament images
+- **webApps**:             A Helicon Web app with seven analytical tools as tabs:
+   - *WhereIsMyClass*:     Map 2D classes to helical tube/filament images
+   - *HelicalProjection*:  Compare 2D images with helical structure projections in EMDB
+   - *HILL*:               Helical indexing using Fourier-Bessel layer lines (power spectra/phase difference)
+   - *HelicalPitch*:       Determine helical pitch/twist using 2D Classification info
+   - *Denovo3D*:           De novo helical indexing and 3D reconstruction from a single 2D image
+   - *HelicalLattice*:     Interconversion of 2D Lattice ⇔ Helical Lattice
+   - *HI3D*:               Helical indexing via cylindrical projection of a 3D map
 
 ### Streamlit web apps
 - **ctfSimulation**:       A Web app that simulates 1D/2D TEM contrast transfer function (CTF)
-- **helicalLattice**:      A Web app that illustrates the interconversion of 2D Lattice ⇔ Helical Lattice
-- **hi3d**:                A Web app for helical indexing using the cylindrical projection of a 3D map
-- **hill**:                A Web app for helical indexing using Fourier layer lines of 2D images
 - **map2seq**:             A Web app that identifies the best protein sequence explaining a 3D density map
 - **procart**:             A Web app that plots cartoon illustration of the residue properties of amyloid atomic models
 

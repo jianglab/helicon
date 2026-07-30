@@ -10,6 +10,10 @@ import mrcfile
 import helicon
 import logging
 
+from ...lib.io import star_to_dataframe as _star_to_dataframe
+
+star_to_dataframe = _star_to_dataframe
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,24 +132,6 @@ def compute_pair_distances(helices, lengths=None, target_total_count=-1):
         return np.sort(dists_same_class), min_len
 
 
-def estimate_inter_segment_distance(data):
-    # data must have been sorted by micrograph, rlnHelicalTubeID, and rlnHelicalTrackLengthAngst
-    helices = data.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False)
-
-    import numpy as np
-
-    dists_all = []
-    for _, particles in helices:
-        if len(particles) < 2:
-            continue
-        dists = np.sort(particles["rlnHelicalTrackLengthAngst"].astype(float).values)
-        dists = dists[1:] - dists[:-1]
-        dists_all.append(dists)
-    dists_all = np.hstack(dists_all)
-    dist_seg = np.median(dists_all)  # Angstrom
-    return dist_seg
-
-
 def get_class_abundance(params, nClass):
     abundance = np.zeros(nClass, dtype=int)
     for gn, g in params.groupby("rlnClassNumber"):
@@ -194,9 +180,57 @@ def get_class2d_from_file(classFile):
     return data, round(apix, 4)
 
 
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "whereIsMyClass"), expires_after=7, verbose=0
+)
+def get_class2d_params_from_url(url):
+    url_final = helicon.get_direct_url(url)
+    fileobj = helicon.download_file_from_url(url_final)
+    if fileobj is None:
+        raise ValueError(
+            f"ERROR: {url} could not be downloaded. If this url points to a "
+            "cloud drive file, make sure the link is a direct download link."
+        )
+    return get_class2d_params_from_file(fileobj.name)
+
+
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "whereIsMyClass"), expires_after=7, verbose=0
+)
+def get_class2d_from_url(url):
+    url_final = helicon.get_direct_url(url)
+    fileobj = helicon.download_file_from_url(url_final)
+    if fileobj is None:
+        raise ValueError(
+            f"ERROR: {url} could not be downloaded. If this url points to a "
+            "cloud drive file, make sure the link is a direct download link."
+        )
+    return get_class2d_from_file(fileobj.name)
+
+
+def get_class_file_url(star_url, class_file_stem):
+    """Construct the class images URL from the star/cs URL and the derived class file stem."""
+    from urllib.parse import urljoin
+
+    base = star_url.rsplit("/", 1)[0] + "/"
+    return urljoin(base, class_file_stem)
+
+
+def get_class_file_stem(param_file):
+    """Return the derived class images filename stem (without directory) from a star/cs filename."""
+    f = pathlib.Path(param_file)
+    if f.suffix == ".star":
+        if "Class3D" in f.as_posix():
+            return None  # Class3D has multiple files, harder to derive URL
+        return f.stem[:10] + "classes.mrcs"
+    elif f.suffix == ".cs":
+        return f.stem[:7] + "class_averages.mrc"
+    return None
+
+
 def get_class2d_params_from_file(params_file):
     if params_file.endswith(".star"):
-        params = star_to_dataframe(params_file)
+        params = _star_to_dataframe(params_file)
     elif params_file.endswith(".cs"):
         params = cs_to_dataframe(params_file)
     else:
@@ -210,19 +244,6 @@ def get_class2d_params_from_file(params_file):
     if missing_attrs:
         raise ValueError(f"ERROR: parameters {missing_attrs} are not available")
     return params
-
-
-def star_to_dataframe(starFile):
-    import starfile
-
-    d = starfile.read(starFile, always_dict=True)
-    assert (
-        "optics" in d and "particles" in d
-    ), f"ERROR: {starFile} has {' '.join(d.keys())} but optics and particles are expected"
-    data = d["particles"]
-    data.attrs["optics"] = d["optics"]
-    data.attrs["starFile"] = starFile
-    return data
 
 
 def cs_to_dataframe(cs_file):

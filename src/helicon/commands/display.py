@@ -771,59 +771,71 @@ def _launch_chimerax(path: str) -> None:
         print(f"[helicon] failed to launch ChimeraX: {exc}")
 
 
-def _launch_denovo3d(path: str) -> None:
-    """Open a .mrcs file in the denovo3D Shiny web app.
+def _make_bookmark_query(tab_name: str, params: dict) -> dict:
+    """Build a query_params dict that produces a Shiny bookmark URL.
 
-    Passes the file path as a URL query parameter so the app loads it
-    at startup.
+    Returns a dict suitable for ``launch_shiny_app(query_params=...)`` that
+    produces: ``?_inputs_&helicon_tab="TabName"&_values_&p=...``
     """
+    import json
+
+    return {
+        "_inputs_": "",
+        "helicon_tab": f'"{tab_name}"',
+        "_values_": "",
+        "p": json.dumps(params),
+    }
+
+
+def _launch_denovo3d(path: str) -> None:
+    """Open a .mrcs file in the Helicon Lab Denovo3D tab via bookmark URL."""
     from pathlib import Path
 
     from PySide6.QtWidgets import QMessageBox
 
     from helicon.lib.shiny import launch_shiny_app
 
-    app_file = (
-        Path(__file__).resolve().parent.parent / "webApps" / "denovo3D" / "app.py"
-    )
+    app_file = "helicon.webApps.app:app"
     try:
         launch_shiny_app(
             app_file,
             block=False,
-            query_params={
-                "url_images": str(Path(path).resolve()),
-            },
+            query_params=_make_bookmark_query(
+                "Denovo3D",
+                {
+                    "input_mode_images": "url",
+                    "url_images": str(Path(path).resolve()),
+                },
+            ),
         )
     except Exception as exc:
         QMessageBox.critical(
             None,
-            "denovo3D Launch Error",
-            f"Failed to launch denovo3D:\n{exc}",
+            "Denovo3D Launch Error",
+            f"Failed to launch Denovo3D:\n{exc}",
         )
 
 
 def _launch_whereismyclass(path: str) -> None:
-    """Open a data.star file in the WhereIsMyClass Shiny web app.
-
-    Passes the file path as a URL query parameter so the app loads it
-    at startup.
-    """
+    """Open a star/cs file in the WhereIsMyClass tab via bookmark URL."""
     from pathlib import Path
 
     from PySide6.QtWidgets import QMessageBox
 
     from helicon.lib.shiny import launch_shiny_app
 
-    app_file = (
-        Path(__file__).resolve().parent.parent / "webApps" / "whereIsMyClass" / "app.py"
-    )
+    app_file = "helicon.webApps.app:app"
     try:
         launch_shiny_app(
             app_file,
             block=False,
-            query_params={
-                "url_data": str(Path(path).resolve()),
-            },
+            query_params=_make_bookmark_query(
+                "WhereIsMyClass",
+                {
+                    "input_mode": "url",
+                    "url_star": str(Path(path).resolve()),
+                },
+            ),
         )
     except Exception as exc:
         QMessageBox.critical(
@@ -834,44 +846,26 @@ def _launch_whereismyclass(path: str) -> None:
 
 
 def _launch_helicalprojection(path: str) -> None:
-    """Open a file in the HelicalProjection Shiny web app.
-
-    Downloads the app from GitHub and patches the default URL in the
-    downloaded source so the app loads the local file on startup via
-    ``download_file_from_url``, which supports local file paths.
-    """
-    import tempfile
-    import shutil
-    import urllib.request
-    from contextlib import closing
+    """Open a file in the HelicalProjection tab via bookmark URL."""
     from pathlib import Path
 
     from PySide6.QtWidgets import QMessageBox
 
     from helicon.lib.shiny import launch_shiny_app
 
-    urls = [
-        "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/app.py",
-        "https://raw.githubusercontent.com/jianglab/HelicalProjection/refs/heads/main/compute.py",
-    ]
+    app_file = "helicon.webApps.app:app"
     try:
-        temp_folder = tempfile.mkdtemp()
-        for url in urls:
-            filename = url.split("/")[-1]
-            local_filename = Path(temp_folder) / filename
-            with closing(urllib.request.urlopen(url)) as r:
-                with open(local_filename, "wb") as f:
-                    shutil.copyfileobj(r, f)
-
-        app_file = Path(temp_folder) / "app.py"
-        app_text = app_file.read_text()
-        app_text = app_text.replace(
-            "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
-            str(Path(path).resolve()),
+        launch_shiny_app(
+            app_file,
+            block=False,
+            query_params=_make_bookmark_query(
+                "HelicalProjection",
+                {
+                    "mode_images": "url",
+                    "url_images": str(Path(path).resolve()),
+                },
+            ),
         )
-        app_file.write_text(app_text)
-
-        launch_shiny_app(app_file, block=False)
     except Exception as exc:
         QMessageBox.critical(
             None,
@@ -881,74 +875,50 @@ def _launch_helicalprojection(path: str) -> None:
 
 
 def _launch_helicalpitch(path: str) -> None:
-    """Open a file in the HelicalPitch Shiny web app.
+    """Open a file in the HelicalPitch tab via bookmark URL.
 
-    Downloads the app from GitHub and patches the default URLs in the
-    downloaded source so the app loads the local files on startup via
-    ``download_file_from_url``, which supports local file paths.
+    Derives the companion file (star↔mrcs) from the given path when it
+    exists on disk, so both params and class images are loaded together.
     """
-    import tempfile
-    import shutil
-    import urllib.request
-    from contextlib import closing
+    import re
     from pathlib import Path
 
     from PySide6.QtWidgets import QMessageBox
 
     from helicon.lib.shiny import launch_shiny_app
 
-    urls = [
-        "https://raw.githubusercontent.com/jianglab/HelicalPitch/refs/heads/master/app.py",
-        "https://raw.githubusercontent.com/jianglab/HelicalPitch/refs/heads/master/compute.py",
-    ]
+    app_file = "helicon.webApps.app:app"
     try:
-        temp_folder = tempfile.mkdtemp()
-        for url in urls:
-            filename = url.split("/")[-1]
-            local_filename = Path(temp_folder) / filename
-            with closing(urllib.request.urlopen(url)) as r:
-                with open(local_filename, "wb") as f:
-                    shutil.copyfileobj(r, f)
-
         file_path = Path(path).resolve()
         suffix = file_path.suffix.lower()
 
+        bookmark = {
+            "mode_params": "url",
+            "mode_classes": "url",
+        }
+
         if suffix in (".star", ".cs"):
-            star_file = file_path
-            iter_match = __import__("re").search(r"run_it(\d+)", file_path.name)
+            bookmark["url_params"] = str(file_path)
+            iter_match = re.search(r"run_it(\d+)", file_path.name)
             if iter_match:
                 mrcs_file = (
                     file_path.parent / f"run_it{iter_match.group(1)}_classes.mrcs"
                 )
-                if not mrcs_file.exists():
-                    mrcs_file = None
-            else:
-                mrcs_file = None
+                if mrcs_file.exists():
+                    bookmark["url_classes"] = str(mrcs_file)
         else:
-            mrcs_file = file_path
-            iter_match = __import__("re").search(r"run_it(\d+)", file_path.name)
+            bookmark["url_classes"] = str(file_path)
+            iter_match = re.search(r"run_it(\d+)", file_path.name)
             if iter_match:
                 star_file = file_path.parent / f"run_it{iter_match.group(1)}_data.star"
-                if not star_file.exists():
-                    star_file = None
-            else:
-                star_file = None
+                if star_file.exists():
+                    bookmark["url_params"] = str(star_file)
 
-        app_file = Path(temp_folder) / "app.py"
-        app_text = app_file.read_text()
-        if star_file:
-            app_text = app_text.replace(
-                "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_data.star",
-                str(star_file),
-            )
-        if mrcs_file:
-            app_text = app_text.replace(
-                "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
-                str(mrcs_file),
-            )
-        app_file.write_text(app_text)
-
-        launch_shiny_app(app_file, block=False)
+        launch_shiny_app(
+            app_file,
+            block=False,
+            query_params=_make_bookmark_query("HelicalPitch", bookmark),
+        )
     except Exception as exc:
         QMessageBox.critical(
             None,
@@ -958,36 +928,18 @@ def _launch_helicalpitch(path: str) -> None:
 
 
 def _launch_hill(path: str) -> None:
-    """Open a file in the HILL Shiny web app.
+    """Open a file in the HILL tab of the consolidated Helicon Lab web app.
 
-    Downloads the app from GitHub and launches it.
+    Launches the unified Shiny app and selects the HILL tab with the given file.
     """
-    import tempfile
-    import shutil
-    import urllib.request
-    from contextlib import closing
-    from pathlib import Path
-
     from PySide6.QtWidgets import QMessageBox
-
     from helicon.lib.shiny import launch_shiny_app
 
-    urls = [
-        "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/app.py",
-        "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/compute.py",
-        "https://raw.githubusercontent.com/jianglab/HILL/refs/heads/main/util.py",
-    ]
     try:
-        temp_folder = tempfile.mkdtemp()
-        for url in urls:
-            filename = url.split("/")[-1]
-            local_filename = Path(temp_folder) / filename
-            with closing(urllib.request.urlopen(url)) as r:
-                with open(local_filename, "wb") as f:
-                    shutil.copyfileobj(r, f)
-
-        app_file = Path(temp_folder) / "app.py"
-        launch_shiny_app(app_file, block=False, query_params={"img_file_url": path})
+        params = _make_bookmark_query("HILL", {})
+        params["input_mode"] = "2"
+        params["img_file_url"] = path
+        launch_shiny_app("helicon.webApps.app:app", block=False, query_params=params)
     except Exception as exc:
         QMessageBox.critical(
             None,
@@ -997,89 +949,17 @@ def _launch_hill(path: str) -> None:
 
 
 def _launch_hi3d(path: str) -> None:
-    """Open a file in the HI3D Streamlit web app.
+    """Open a file in the HI3D tab of the consolidated Helicon Lab web app.
 
-    Downloads the app from GitHub and patches the default URL in the
-    downloaded source so the app loads the local file on startup via
-    ``download_file_from_url``, which supports local file paths.
+    Launches the unified Shiny app and selects the HI3D tab with the given file.
     """
-    import tempfile
-    import shutil
-    import urllib.request
-    from contextlib import closing
-    from pathlib import Path
-
     from PySide6.QtWidgets import QMessageBox
-
-    from helicon.lib.shiny import _open_browser
+    from helicon.lib.shiny import launch_shiny_app
 
     try:
-        temp_folder = tempfile.mkdtemp()
-        url = "https://raw.githubusercontent.com/jianglab/HI3D/main/hi3d.py"
-        local_filename = Path(temp_folder) / "hi3d.py"
-        with closing(urllib.request.urlopen(url)) as r:
-            with open(local_filename, "wb") as f:
-                shutil.copyfileobj(r, f)
-
-        app_text = local_filename.read_text()
-        app_text = app_text.replace(
-            "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-10499/map/emd_10499.map.gz",
-            str(Path(path).resolve()),
-        )
-        app_text = app_text.replace(
-            'url_default = get_emdb_map_url("emd-10499")',
-            f'url_default = "{str(Path(path).resolve())}"',
-        )
-        app_text = app_text.replace("index=2", "index=1")
-        local_file = str(Path(path).resolve())
-        app_text = app_text.replace(
-            "def download_file_from_url(url):",
-            f"def download_file_from_url(url):\n"
-            f"    from pathlib import Path as _P\n"
-            f"    if _P(url).is_file():\n"
-            f"        import tempfile\n"
-            f"        fobj = tempfile.NamedTemporaryFile(suffix=_P(url).suffix, delete=False)\n"
-            f"        fobj.write(_P(url).read_bytes())\n"
-            f"        fobj.flush()\n"
-            f"        return fobj\n",
-        )
-        local_filename.write_text(app_text)
-
-        import subprocess
-        import sys
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            str(local_filename),
-            "--server.maxUploadSize",
-            "2048",
-            "--server.enableCORS",
-            "false",
-            "--server.enableXsrfProtection",
-            "false",
-            "--browser.gatherUsageStats",
-            "false",
-            "--server.headless",
-            "true",
-        ]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-
-        import re
-
-        url = None
-        for line in proc.stdout:
-            m = re.search(r"Local URL: (http://localhost:\d+)", line)
-            if m:
-                url = m.group(1)
-                break
-
-        if url:
-            _open_browser(url)
+        params = _make_bookmark_query("HI3D", {})
+        params["img_file_url"] = path
+        launch_shiny_app("helicon.webApps.app:app", block=False, query_params=params)
     except Exception as exc:
         QMessageBox.critical(
             None,

@@ -57,11 +57,11 @@ _USE_NUMBA_PARALLEL = platform.system() != "Darwin"
 
 @jit(
     nopython=True,
-    cache=False,
+    cache=True,
     nogil=True,
     parallel=_USE_NUMBA_PARALLEL,
 )
-def apply_helical_symmetry(
+def _apply_helical_symmetry_jit(
     data,
     apix,
     twist_degree,
@@ -70,7 +70,6 @@ def apply_helical_symmetry(
     fraction=1.0,
     new_size=None,
     new_apix=None,
-    cpu=1,
 ):
     if new_apix is None:
         new_apix = apix
@@ -98,8 +97,6 @@ def apply_helical_symmetry(
     z0 = max(z0, zmid - int(nz0 * fraction + 0.5) // 2)
     z1 = min(z1, zmid + int(nz0 * fraction + 0.5) // 2)
 
-    set_num_threads(cpu)
-
     for hi in hsyms:
         for k in prange(nz):
             k2 = ((k - nz // 2) * new_apix + hi * rise_angstrom) / apix + nz0 // 2
@@ -114,10 +111,10 @@ def apply_helical_symmetry(
                 for j in prange(ny):
                     for i in prange(nx):
                         j2 = (
-                            m[0, 0] * (j - ny // 2) + m[0, 1] * (i - nx / 2)
+                            m[0, 0] * (j - ny // 2) + m[0, 1] * (i - nx // 2)
                         ) * new_apix / apix + ny0 // 2
                         i2 = (
-                            m[1, 0] * (j - ny // 2) + m[1, 1] * (i - nx / 2)
+                            m[1, 0] * (j - ny // 2) + m[1, 1] * (i - nx // 2)
                         ) * new_apix / apix + nx0 // 2
 
                         j2_floor, j2_ceil = int(np.floor(j2)), int(np.ceil(j2))
@@ -163,6 +160,30 @@ def apply_helical_symmetry(
             nx // 2 - nx1 // 2 : nx // 2 + nx1 // 2,
         ]
     return data_work
+
+
+def apply_helical_symmetry(
+    data,
+    apix,
+    twist_degree,
+    rise_angstrom,
+    csym=1,
+    fraction=1.0,
+    new_size=None,
+    new_apix=None,
+    cpu=1,
+):
+    set_num_threads(cpu)
+    return _apply_helical_symmetry_jit(
+        data,
+        apix,
+        twist_degree,
+        rise_angstrom,
+        csym,
+        fraction,
+        new_size,
+        new_apix,
+    )
 
 
 def transform_map(

@@ -19,18 +19,15 @@ napari_commands = [
     "display",
 ]
 shiny_commands = [
-    "denovo3D",
-    "helicalPitch",
-    "helicalProjection",
-    "whereIsMyClass",
+    "webApps",
 ]
 streamlit_commands = [
     "ctfSimulation",
-    "helicalLattice",
-    "hi3d",
-    "hill",
     "map2seq",
     "procart",
+]
+temporary_commands = [
+    "HOM_containerC",
 ]
 
 
