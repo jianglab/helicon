@@ -312,6 +312,13 @@ def where_is_my_class_tab_server(
         url = input.wimc_url_star()
         req(url and url.strip())
 
+        # If the "URL" is a local file path (as passed by the file browser),
+        # resolve the project root so micrographs and the class-selection
+        # checkboxes can be shown, mirroring get_params_from_file().
+        local_path = pathlib.Path(url)
+        if local_path.exists():
+            project_root_dir.set(compute.get_project_root_dir(url))
+
         try:
             df = compute.get_class2d_params_from_url(url)
             helices = df.groupby(["rlnMicrographName", "rlnHelicalTubeID"])

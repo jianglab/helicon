@@ -612,7 +612,68 @@ def set_client_url_query_params(query_params):
     return script
 
 
-def launch_shiny_app(app_file, env=None, block=True, query_params=None, reload=False):
+def encode_query_params(query_params):
+    """Encode a query_params dict into a URL query string (no leading ``?``).
+
+    Keys with an empty string value are emitted bare (e.g. ``_inputs_``);
+    everything else is ``key=urlencoded_value``.  This is the encoding the
+    Shiny bookmark URL format expects, and it is shared by the browser URL
+    builder here and the ``/helicon/navigate`` endpoint of the web app so
+    that a display re-click reproduces the exact launch URL.
+
+    Parameters
+    ----------
+    query_params : dict
+        Mapping of query key to value.
+
+    Returns
+    -------
+    str
+        The encoded query string, e.g. ``_inputs_&helicon_tab=%22X%22``.
+    """
+    import urllib.parse
+
+    parts = []
+    for k, v in query_params.items():
+        if v == "":
+            parts.append(k)
+        else:
+            parts.append(f"{k}={urllib.parse.quote(str(v), safe='')}")
+    return "&".join(parts)
+
+
+def _make_pdeathsig_preexec():
+    """Return a ``preexec_fn`` that ties child lifetime to the parent (Linux).
+
+    Uses ``prctl(PR_SET_PDEATHSIG, SIGTERM)`` so when the parent process
+    exits for any reason (including SIGKILL), the kernel delivers SIGTERM
+    to the child.  Returns ``None`` on non-Linux or if setup is unavailable.
+    """
+    import os
+    import sys
+
+    if sys.platform != "linux":
+        return None
+
+    def _preexec():
+        try:
+            import ctypes
+            import signal as _signal
+
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            PR_SET_PDEATHSIG = 1
+            libc.prctl(PR_SET_PDEATHSIG, int(_signal.SIGTERM))
+            if os.getppid() == 1:
+                os._exit(1)
+        except Exception:
+            pass
+
+    return _preexec
+
+
+def launch_shiny_app(
+    app_file, env=None, block=True, query_params=None, reload=False, url_callback=None
+):
     """Launch a Shiny app with automatic browser opening.
 
     Handles WSL2 where Python's webbrowser module fails to open the Windows
@@ -635,6 +696,10 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None, reload=F
     reload : bool, optional
         If True, run in dev mode with auto-reload on the app's directory.
         Defaults to False.
+    url_callback : callable, optional
+        If given, called with the final app URL (including query params)
+        instead of opening the browser.  Used by the file browser to record
+        the launched URL for tab reuse.
     """
     import importlib
     import re
@@ -676,12 +741,17 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None, reload=F
 
     cmd.append(str(app_file))
 
+    # On Linux, ask the kernel to SIGTERM this child when the parent dies
+    # (including SIGKILL of the parent).  Harmless no-op elsewhere.
+    preexec = _make_pdeathsig_preexec()
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         env=env,
+        preexec_fn=preexec,
     )
 
     if not block:
@@ -695,18 +765,11 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None, reload=F
                     if m:
                         base = f"http://localhost:{m.group(1)}/"
                         if query_params:
-                            import urllib.parse
-
-                            parts = []
-                            for k, v in query_params.items():
-                                if v == "":
-                                    parts.append(k)
-                                else:
-                                    parts.append(
-                                        f"{k}={urllib.parse.quote(str(v), safe='')}"
-                                    )
-                            base += "?" + "&".join(parts)
-                        _open_browser(base)
+                            base += "?" + encode_query_params(query_params)
+                        if url_callback is not None:
+                            url_callback(base)
+                        else:
+                            _open_browser(base)
                         found_url = True
 
         threading.Thread(target=_reader, daemon=True).start()
@@ -722,7 +785,12 @@ def launch_shiny_app(app_file, env=None, block=True, query_params=None, reload=F
             break
 
     if url:
-        _open_browser(url)
+        if query_params:
+            url += "?" + encode_query_params(query_params)
+        if url_callback is not None:
+            url_callback(url)
+        else:
+            _open_browser(url)
 
     proc.wait()
 
@@ -737,16 +805,37 @@ def _is_wsl():
 
 
 def _open_browser(url):
-    """Open a URL in the system browser, with WSL2 support."""
+    """Open a URL in the system browser exactly once.
+
+    Avoids ``webbrowser.open()``: on Linux it tries every registered browser
+    in order (e.g. Opera then ``xdg-open``).  Opera often exits 0 after
+    opening a tab, so Python treats that as failure and falls through to
+    ``xdg-open`` — same URL, two tabs.  One explicit launcher prevents that.
+    """
+    import shutil
     import subprocess
-    import webbrowser
 
     print(f"Opening browser at {url}...")
-    if _is_wsl():
+    if _is_wsl() and shutil.which("wslview"):
         subprocess.Popen(
             ["wslview", url],
-            # stdout=subprocess.DEVNULL,
-            # stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-    else:
-        webbrowser.open(url)
+        return
+    for cmd in ("xdg-open", "gio", "open"):
+        exe = shutil.which(cmd)
+        if exe is None:
+            continue
+        args = [exe, "open", url] if cmd == "gio" else [exe, url]
+        subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return
+    import webbrowser
+
+    webbrowser.open(url, new=2)

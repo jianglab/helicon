@@ -24,6 +24,11 @@ This is the only Shiny web app in helicon; the individual apps
 from __future__ import annotations
 
 import logging
+import os
+import secrets
+import signal
+import threading
+import time
 from pathlib import Path
 
 import ipywidgets.widgets.widget as _ipyw_mod
@@ -80,8 +85,11 @@ _ipyw_mod.Widget.model_id = property(_safe_model_id)
 _ipyw_mod.Widget.get_state = _safe_get_state
 
 from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 from shiny import App, reactive, ui
 
+from ..lib.shiny import encode_query_params
 from .lib.shared_state import project
 
 logger = logging.getLogger(__name__)
@@ -123,6 +131,120 @@ _TAB_MODULE_MAP: dict[str, tuple[str, object]] = {
     "WhereIsMyClass": ("where_is_my_class", where_is_my_class_tab),
     "HelicalLattice": ("helical_lattice", helical_lattice_tab),
 }
+
+
+# ── Display → tab navigation control ─────────────────────────────
+# The file browser (helicon display) launches this app with a per-launch
+# helicon_token in the URL.  A control endpoint pair lets the browser
+# navigate an already-open tab instead of spawning a second server+tab:
+#
+#   POST /helicon/navigate?token=...  {query_params}  → store pending nav
+#   GET  /helicon/pending?token=...                  → consume pending nav
+#
+# The page polls /helicon/pending while open; a pending navigation makes
+# it reload itself with the new query string (Shiny's URL bookmark store
+# restores tab + inputs on load).  The token, learned from session URLs,
+# scopes navigation to the display instance that launched this server.
+
+_YOUNG_SERVER_SECS = 20.0  # a just-launched server is presumed alive
+_STALE_POLL_SECS = 150.0  # hidden tabs poll ~1/min; a longer gap means dead tab
+_IDLE_TIMEOUT_SECS = 600.0  # no poll + no session for 10 min → self-reap
+
+
+class _AppControl:
+    """Per-server state for display-driven tab navigation."""
+
+    def __init__(self):
+        self.seen_tokens: set[str] = set()
+        self.pending: dict | None = None
+        self.active_sessions = 0
+        self.start_ts = time.monotonic()
+        self.last_poll_ts = time.monotonic()
+        self._lock = threading.Lock()
+        self._watchdog_started = False
+
+    def start_session(self) -> None:
+        self.active_sessions += 1
+        self.last_poll_ts = time.monotonic()
+
+    def end_session(self) -> None:
+        self.active_sessions = max(0, self.active_sessions - 1)
+        self.last_poll_ts = time.monotonic()
+
+    def register_token(self, url_search: str) -> None:
+        from urllib.parse import parse_qs
+
+        tokens = parse_qs(url_search.lstrip("?")).get("helicon_token")
+        if tokens:
+            self.seen_tokens.add(tokens[0])
+
+    def is_alive(self) -> bool:
+        now = time.monotonic()
+        return (
+            self.active_sessions > 0
+            or now - self.start_ts < _YOUNG_SERVER_SECS
+            or now - self.last_poll_ts < _STALE_POLL_SECS
+        )
+
+    def navigate(self, token: str, query_params) -> dict:
+        if self.seen_tokens and token not in self.seen_tokens:
+            return {"ok": False, "error": "token mismatch"}
+        if not isinstance(query_params, dict) or not query_params:
+            return {"ok": False, "error": "query_params dict required"}
+        query_string = encode_query_params(query_params)
+        if token:
+            import urllib.parse
+
+            query_string += "&helicon_token=" + urllib.parse.quote(token, safe="")
+        with self._lock:
+            self.pending = {"query_string": query_string}
+        return {"ok": True, "alive": self.is_alive()}
+
+    def poll(self, token: str) -> dict:
+        self.last_poll_ts = time.monotonic()
+        if token not in self.seen_tokens:
+            return {"pending": False}
+        with self._lock:
+            pending = self.pending
+            self.pending = None
+        if pending is None:
+            return {"pending": False}
+        return {"pending": True, "query_string": pending["query_string"]}
+
+    def start_watchdog(self) -> None:
+        if self._watchdog_started:
+            return
+        self._watchdog_started = True
+        threading.Thread(target=self._watchdog_loop, daemon=True).start()
+
+    def _watchdog_loop(self) -> None:
+        while True:
+            time.sleep(30)
+            if (
+                self.active_sessions == 0
+                and time.monotonic() - self.last_poll_ts > _IDLE_TIMEOUT_SECS
+            ):
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+
+
+_control = _AppControl()
+
+
+async def _helicon_pending(request: Request):
+    return JSONResponse(_control.poll(request.query_params.get("token", "")))
+
+
+async def _helicon_navigate(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(
+        _control.navigate(
+            request.query_params.get("token", ""), body.get("query_params")
+        )
+    )
 
 
 # ── Main app UI ────────────────────────────────────────────────────
@@ -368,6 +490,11 @@ def app_ui(request: Request):
                         parts.push('_values_');
                         parts.push('p=' + encodeURIComponent(JSON.stringify(params)));
                     }
+                    var tok = new URLSearchParams(window.location.search).get('helicon_token');
+                    if (tok) {
+                        if (Object.keys(params).length === 0) parts.push('_values_');
+                        parts.push('helicon_token=' + encodeURIComponent(tok));
+                    }
                     var url = '?' + parts.join('&');
                     if (_DEBUG_BOOKMARK) console.log('[bookmark] final URL:', url);
                     window.history.replaceState(null, '', url);
@@ -377,6 +504,25 @@ def app_ui(request: Request):
                     if (_initialCaptureDone) _buildBookmarkUrl();
                 });
             """
+            ),
+            ui.tags.script(
+                """
+                var _heliconToken = new URLSearchParams(window.location.search).get('helicon_token');
+                if (_heliconToken) {
+                    setInterval(function() {
+                        fetch('/helicon/pending?token=' + encodeURIComponent(_heliconToken))
+                            .then(function(r) { return r.json(); })
+                            .then(function(data) {
+                                if (data && data.pending) {
+                                    var url = new URL(window.location.href);
+                                    url.search = '?' + data.query_string;
+                                    window.location.href = url.toString();
+                                }
+                            })
+                            .catch(function() {});
+                    }, 2000);
+                }
+                """
             ),
         ),
         ui.tags.style(
@@ -436,6 +582,18 @@ def app_ui(request: Request):
 
 def server(input, output, session):
     """Top-level server: wires shared state and delegates to tab modules."""
+
+    _control.start_session()
+    _control.start_watchdog()
+
+    @session.on_ended
+    async def _on_webapp_session_ended():
+        _control.end_session()
+
+    # Learns the launch token from the browser URL (reactive-only API).
+    @reactive.effect(priority=1000)
+    def _register_launch_token():
+        _control.register_token(session.clientdata.url_search())
 
     # ── Global unhandled-exception handler ────────────────────
     # Shiny catches exceptions inside reactive effects / render
@@ -564,4 +722,14 @@ app = App(
     server,
     bookmark_store="url",
     static_assets=Path(__file__).parent / "www",
+)
+
+# Insert at the front: Starlette matches routes in order and
+# ``init_starlette_app`` ends its list with a catch-all Mount("/"),
+# which would shadow any routes appended after it.
+app.starlette_app.routes.insert(
+    0, Route("/helicon/pending", _helicon_pending, methods=["GET"])
+)
+app.starlette_app.routes.insert(
+    0, Route("/helicon/navigate", _helicon_navigate, methods=["POST"])
 )
