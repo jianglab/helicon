@@ -50,9 +50,44 @@ class TestDisplayArgs(object):
         args = parser.parse_args(["./data"])
         assert args.folder == "./data"
 
-    def test_stats_uses_plot_window_category(self):
-        assert "stats" in display._PLOT_MODES
-        assert "stats" not in display._NAPARI_MODES
+    def test_stats_uses_napari_window_category(self):
+        assert "stats" in display._NAPARI_MODES
+        assert "stats" not in display._PLOT_MODES
+
+    def test_helical_angle_stats_plot_opens_pdf_in_active_napari(self):
+        viewer = MagicMock()
+        result = {"plot_file": "/job/run_data.helical_angle_variance.pdf"}
+
+        with (
+            patch.object(display._napari, "active", return_value=viewer),
+            patch.object(display, "_create_napari_viewer") as create_viewer,
+            patch.object(display, "_open_file") as open_file,
+        ):
+            display._open_helical_angle_stats_plot(result)
+
+        create_viewer.assert_not_called()
+        open_file.assert_called_once_with(
+            viewer,
+            "/job/run_data.helical_angle_variance.pdf",
+            mode="slice",
+        )
+
+    def test_helical_angle_stats_plot_creates_napari_when_needed(self):
+        viewer = MagicMock()
+        result = {"plot_file": "/job/run_data.helical_angle_variance.pdf"}
+
+        with (
+            patch.object(display._napari, "active", return_value=None),
+            patch.object(display, "_create_napari_viewer", return_value=viewer),
+            patch.object(display, "_open_file") as open_file,
+        ):
+            display._open_helical_angle_stats_plot(result)
+
+        open_file.assert_called_once_with(
+            viewer,
+            "/job/run_data.helical_angle_variance.pdf",
+            mode="slice",
+        )
 
     def test_helical_angle_stats_paths_use_writable_job_directory(self, tmp_path):
         input_star = tmp_path / "run_data.star"

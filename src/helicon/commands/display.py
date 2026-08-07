@@ -1266,65 +1266,16 @@ def _launch_truefsc(path: str, parent=None) -> None:
 
 def _open_helical_angle_stats_plot(
     result: dict,
-    star_path: str,
-    reuse_window=None,
 ) -> None:
-    """Display a cached helical-angle variance figure in a reusable Qt window."""
-    from matplotlib.backends.backend_qtagg import (
-        FigureCanvasQTAgg,
-        NavigationToolbar2QT,
-    )
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QMainWindow, QScrollArea, QVBoxLayout, QWidget
-
-    figure = result.get("figure")
-    if figure is None:
+    """Display a generated helical-angle variance plot in napari."""
+    plot_file = result.get("plot_file")
+    if not plot_file:
         raise ValueError("helical-angle variance calculation returned no plot")
 
-    central = QWidget()
-    layout = QVBoxLayout(central)
-    layout.setContentsMargins(0, 0, 0, 0)
-    canvas = FigureCanvasQTAgg(figure)
-    toolbar = NavigationToolbar2QT(canvas, central)
-    scroll_area = QScrollArea()
-    scroll_area.setWidgetResizable(False)
-    scroll_area.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-    canvas_width = max(1, round(figure.get_figwidth() * figure.dpi))
-    canvas_height = max(1, round(figure.get_figheight() * figure.dpi))
-    canvas.setFixedSize(canvas_width, canvas_height)
-    scroll_area.setWidget(canvas)
-    layout.addWidget(toolbar)
-    layout.addWidget(scroll_area, 1)
-    canvas.draw_idle()
-
-    title = f"Stats — {Path(star_path).name}"
-    if reuse_window is not None and _is_alive_widget(reuse_window):
-        reuse_window.setWindowTitle(title)
-        reuse_window.setCentralWidget(central)
-        reuse_window.resize(1200, 700)
-        reuse_window.show()
-        reuse_window.raise_()
-        return
-
-    class _StatsWindow(QMainWindow):
-        def closeEvent(self, event):
-            _plot.on_close(self)
-            super().closeEvent(event)
-
-        def changeEvent(self, event):
-            from PySide6.QtCore import QEvent
-
-            if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
-                _plot.on_activate(self)
-            super().changeEvent(event)
-
-    window = _StatsWindow()
-    window.setWindowTitle(title)
-    window.setCentralWidget(central)
-    window.resize(1200, 700)
-    _plot.register(window)
-    _install_window_shortcuts(window)
-    window.show()
+    viewer = _napari.active()
+    if viewer is None:
+        viewer = _create_napari_viewer()
+    _open_file(viewer, str(plot_file), mode="slice")
 
 
 def _helical_angle_stats_paths(path: str) -> tuple[Path, Path, Path]:
@@ -1345,7 +1296,6 @@ def _helical_angle_stats_paths(path: str) -> tuple[Path, Path, Path]:
 def _launch_helical_angle_stats(
     path: str,
     parent=None,
-    reuse_window=None,
 ) -> None:
     """Compute and display Class3D/Refine3D helical-angle variance statistics."""
     from PySide6.QtCore import QThread, Signal
@@ -1405,11 +1355,7 @@ def _launch_helical_angle_stats(
 
         def set_result(self, result):
             try:
-                _open_helical_angle_stats_plot(
-                    result,
-                    str(input_path),
-                    reuse_window=reuse_window,
-                )
+                _open_helical_angle_stats_plot(result)
             except Exception as exc:
                 self.set_error(str(exc))
                 return
@@ -2771,10 +2717,10 @@ _gallery = _DisplayTracker(_is_alive_widget)
 _plot = _DisplayTracker(_is_alive_widget)
 _text = _DisplayTracker(_is_alive_widget)
 
-_NAPARI_MODES = {"slice", "volume", "3dplot"}
+_NAPARI_MODES = {"slice", "volume", "3dplot", "stats"}
 _GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
 _TEXT_MODES = {"text"}
-_PLOT_MODES = {"fsc", "stats"}
+_PLOT_MODES = {"fsc"}
 
 
 def _quit_all_windows():
@@ -3920,11 +3866,9 @@ def main(args: argparse.Namespace) -> None:
             _launch_truefsc(path, parent=widget)
             return
         if mode == "stats":
-            reuse = None if new_window else _plot.active()
             _launch_helical_angle_stats(
                 path,
                 parent=widget,
-                reuse_window=reuse,
             )
             return
         tracker = _TRACKER_FOR.get(mode)
