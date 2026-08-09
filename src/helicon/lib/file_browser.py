@@ -1003,7 +1003,8 @@ class FolderBrowserWidget(QWidget):
         self._btn_fsc = QPushButton("FSC")
         self._btn_fsc.setToolTip(
             "Display the FSC curve, or the SSNR-derived W_MAP curve for Class3D, "
-            "from model.star"
+            "from model.star. Pick which refinement iterations to overlay when "
+            "the job directory holds more than one model.star file."
         )
         self._btn_denovo3d = QPushButton("denovo3D")
         self._btn_denovo3d.setToolTip(

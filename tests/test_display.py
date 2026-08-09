@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
 import helicon
@@ -100,9 +101,7 @@ class TestDisplayArgs(object):
         assert output_star == tmp_path / "run_data.helical_angle_variance.star"
         assert plot_file == tmp_path / "run_data.helical_angle_variance.pdf"
 
-    def test_helical_angle_stats_paths_fall_back_to_temporary_directory(
-        self, tmp_path
-    ):
+    def test_helical_angle_stats_paths_fall_back_to_temporary_directory(self, tmp_path):
         input_star = tmp_path / "job" / "run_data.star"
         fallback = tmp_path / "temporary-results"
         with (
@@ -160,6 +159,818 @@ class TestDisplayArgs(object):
         spatial_freq, fsc, _, _ = curves[0]
         np.testing.assert_allclose(spatial_freq, [0.1, 0.2])
         np.testing.assert_allclose(fsc, [0.75, 0.25])
+
+
+class TestFscIterations(object):
+    def test_iteration_model_files_sorts_by_number(self, tmp_path):
+        (tmp_path / "run_it003_model.star").touch()
+        (tmp_path / "run_it001_model.star").touch()
+        (tmp_path / "run_it002_model.star").touch()
+        (tmp_path / "run_it004_half2_model.star").touch()
+        (tmp_path / "run_it004_half1_model.star").touch()
+        (tmp_path / "run_model.star").touch()
+        (tmp_path / "run_data.star").touch()
+        (tmp_path / "run_it001_optimiser.star").touch()
+
+        files = display._iteration_model_files(tmp_path / "run_it004_half2_model.star")
+
+        assert [(p.name, n) for p, n in files] == [
+            ("run_it001_model.star", 1),
+            ("run_it002_model.star", 2),
+            ("run_it003_model.star", 3),
+            ("run_it004_half2_model.star", 4),
+            ("run_model.star", None),
+        ]
+
+    def test_iteration_model_files_collapses_half_files_to_one_iteration(
+        self, tmp_path
+    ):
+        (tmp_path / "run_it001_half1_model.star").touch()
+        (tmp_path / "run_it001_half2_model.star").touch()
+        (tmp_path / "run_it002_half1_model.star").touch()
+        (tmp_path / "run_it002_half2_model.star").touch()
+        (tmp_path / "run_model.star").touch()
+
+        files = display._iteration_model_files(tmp_path / "run_it001_half2_model.star")
+
+        assert [(p.name, n) for p, n in files] == [
+            ("run_it001_half2_model.star", 1),
+            ("run_it002_half2_model.star", 2),
+            ("run_model.star", None),
+        ]
+
+    def test_iteration_model_files_ignores_unrelated_star_files(self, tmp_path):
+        (tmp_path / "run_it001_model.star").touch()
+        (tmp_path / "run_data.star").touch()
+        (tmp_path / "run_optimiser.star").touch()
+        (tmp_path / "other.star").touch()
+
+        files = display._iteration_model_files(tmp_path / "run_it001_model.star")
+
+        assert [p.name for p, _n in files] == ["run_it001_model.star"]
+
+    def test_iteration_model_files_includes_unmarked_selected_file(self, tmp_path):
+        (tmp_path / "run_it001_model.star").touch()
+        (tmp_path / "run_model.star").touch()
+
+        files = display._iteration_model_files(tmp_path / "run_model.star")
+
+        assert [(p.name, n) for p, n in files] == [
+            ("run_it001_model.star", 1),
+            ("run_model.star", None),
+        ]
+
+    def test_iteration_model_files_returns_selected_when_alone(self, tmp_path):
+        (tmp_path / "run_model.star").touch()
+
+        files = display._iteration_model_files(tmp_path / "run_model.star")
+
+        assert [(p.name, n) for p, n in files] == [("run_model.star", None)]
+
+    def test_iteration_label_formats_numbered_and_final_files(self):
+        assert display._iteration_label("run_it025_model.star") == "25"
+        assert display._iteration_label("run_ct1_it001_model.star") == "1"
+        assert display._iteration_label("run_it016_half2_model.star") == "16"
+        assert display._iteration_label("run_model.star") == "final"
+
+    def test_read_fsc_curves_returns_none_for_unreadable_file(self, tmp_path):
+        assert (
+            display._read_fsc_curves(tmp_path / "missing.star", use_ssnr_map=False)
+            is None
+        )
+
+    def test_read_fsc_curves_parses_sibling_file(self, tmp_path):
+        import numpy as np
+        import pandas as pd
+        import starfile
+
+        path = tmp_path / "run_it001_model.star"
+        starfile.write(
+            {
+                "model_class_1": pd.DataFrame(
+                    {
+                        "rlnResolution": [0.1, 0.2],
+                        "rlnGoldStandardFsc": [0.8, 0.2],
+                    }
+                )
+            },
+            str(path),
+            overwrite=True,
+        )
+
+        curves = display._read_fsc_curves(path, use_ssnr_map=False)
+
+        assert curves is not None
+        assert len(curves) == 1
+        spatial_freq, fsc, label, _angstrom = curves[0]
+        np.testing.assert_allclose(spatial_freq, [0.1, 0.2])
+        np.testing.assert_allclose(fsc, [0.8, 0.2])
+        assert label == "Class 1"
+
+    def test_fsc_window_defaults_to_selected_iteration(self, qapp, tmp_path):
+        iterations = [
+            (tmp_path / "run_it001_model.star", 1),
+            (tmp_path / "run_it002_model.star", 2),
+            (tmp_path / "run_it003_model.star", 3),
+        ]
+        curves = {
+            path: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations,
+            curves,
+            default_path=iterations[1][0],
+            is_class3d=False,
+        )
+        try:
+            assert [checkbox.isChecked() for checkbox in window._checkboxes] == [
+                False,
+                True,
+                False,
+            ]
+            assert window._checked_paths() == [iterations[1][0]]
+        finally:
+            window.close()
+
+    def test_fsc_window_falls_back_to_first_when_selected_missing(self, qapp, tmp_path):
+        iterations = [(tmp_path / "run_it001_model.star", 1)]
+        curves = {
+            path: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations,
+            curves,
+            default_path=tmp_path / "missing.star",
+            is_class3d=False,
+        )
+        try:
+            assert window._checked_paths() == [iterations[0][0]]
+        finally:
+            window.close()
+
+    def test_fsc_window_select_and_unselect_all(self, qapp, tmp_path):
+        iterations = [
+            (tmp_path / "run_it001_model.star", 1),
+            (tmp_path / "run_it002_model.star", 2),
+            (tmp_path / "run_it003_model.star", 3),
+        ]
+        curves = {
+            path: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations,
+            curves,
+            default_path=iterations[0][0],
+            is_class3d=False,
+        )
+        try:
+            window._select_all()
+            assert [checkbox.isChecked() for checkbox in window._checkboxes] == [
+                True,
+                True,
+                True,
+            ]
+            assert window._checked_paths() == [p for p, _n in iterations]
+
+            window._unselect_all()
+            assert [checkbox.isChecked() for checkbox in window._checkboxes] == [
+                False,
+                False,
+                False,
+            ]
+            assert window._checked_paths() == []
+        finally:
+            window.close()
+
+    def test_fsc_window_rebuilds_curves_on_toggle(self, qapp, tmp_path):
+        it1 = tmp_path / "run_it001_model.star"
+        it2 = tmp_path / "run_it002_model.star"
+        iterations = [(it1, 1), (it2, 2)]
+        curves = {
+            path: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations, curves, default_path=it1, is_class3d=False
+        )
+        try:
+            legend = window.plot_widget.getPlotItem().legend
+
+            def _labels():
+                return [item[1].item.toPlainText() for item in legend.items]
+
+            # Default: only the selected iteration is plotted.
+            assert len(window._curve_items) == 1
+            assert _labels() == ["1"]
+
+            window._select_all()
+            assert len(window._curve_items) == 2
+            assert _labels() == ["1", "2"]
+
+            window._checkboxes[0].setChecked(False)
+            assert len(window._curve_items) == 1
+            assert _labels() == ["2"]
+
+            window._select_all()
+            assert len(window._curve_items) == 2
+            assert _labels() == ["1", "2"]
+        finally:
+            window.close()
+
+    def test_refine3d_plots_one_curve_per_iteration(self, qapp, tmp_path):
+        it1 = tmp_path / "run_it001_model.star"
+        it2 = tmp_path / "run_it002_model.star"
+        iterations = [(it1, 1), (it2, 2)]
+        curves = {
+            path: [
+                (
+                    np.array([0.1, 0.2]),
+                    np.array([0.8, 0.2]),
+                    "Half 1",
+                    None,
+                ),
+                (
+                    np.array([0.1, 0.2]),
+                    np.array([0.7, 0.3]),
+                    "Half 2",
+                    None,
+                ),
+            ]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations, curves, default_path=it1, is_class3d=False
+        )
+        try:
+            # Refine3D stores two half-set curves, but the plot should show
+            # only one curve for each selected iteration.
+            assert len(window._curve_items) == 1
+            window._select_all()
+            assert len(window._curve_items) == 2
+        finally:
+            window.close()
+
+    def test_fsc_window_many_iterations_stays_narrow_and_scrolls(self, qapp, tmp_path):
+        iterations = [
+            (tmp_path / f"run_it{i:03d}_model.star", i) for i in range(1, 301)
+        ]
+        curves = {
+            path: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations,
+            curves,
+            default_path=iterations[0][0],
+            is_class3d=False,
+        )
+        window.show()
+        qapp.processEvents()
+        try:
+            assert len(window._checkboxes) == 300
+            # The wrapping scroll strip must keep the window a normal width
+            # instead of stretching it to fit every iteration checkbox.
+            assert window.width() < 1000
+            assert window._iter_scroll.maximumHeight() < 80
+            assert window._iter_scroll.verticalScrollBar().maximum() > 0
+            # The "Iterations:" label text lines up with the checkbox row.
+            from PySide6.QtCore import QPoint
+
+            iter_label = window._bar_layout.itemAtPosition(0, 0).widget()
+            label_center = iter_label.mapTo(
+                window, QPoint(0, iter_label.height() // 2)
+            ).y()
+            checkbox_center = (
+                window._checkboxes[0]
+                .mapTo(window, QPoint(0, window._checkboxes[0].height() // 2))
+                .y()
+            )
+            assert abs(label_center - checkbox_center) <= 2
+            # The checkboxes must wrap onto multiple rows inside the strip,
+            # and the strip must not be wider than its viewport (no
+            # off-screen clipping with the horizontal scrollbar disabled).
+            wrapped_rows = {
+                checkbox.geometry().y()
+                for checkbox in window._checkboxes
+                if checkbox.geometry().height() > 0
+            }
+            assert len(wrapped_rows) > 1
+            assert window._iter_scroll.widget().width() <= (
+                window._iter_scroll.viewport().width() + 1
+            )
+            # The "all"/"none" shortcut buttons trail the checkbox strip.
+            assert window._iter_select_all_btn.text() == "all"
+            assert window._iter_unselect_all_btn.text() == "none"
+            assert window._iter_select_all_btn.height() >= 25
+            assert window._iter_unselect_all_btn.height() >= 25
+            assert (
+                window._iter_select_all_btn.height() >= window._checkboxes[0].height()
+            )
+            assert (
+                window._iter_unselect_all_btn.height() >= window._checkboxes[0].height()
+            )
+            assert (
+                window._iter_flow.itemAt(window._iter_flow.count() - 1).widget()
+                is window._iter_button_group
+            )
+            assert (
+                window._iter_select_all_btn.parentWidget() is window._iter_button_group
+            )
+            assert (
+                window._iter_unselect_all_btn.parentWidget()
+                is window._iter_button_group
+            )
+
+            window._select_all()
+            assert len(window._checked_paths()) == 300
+            window._unselect_all()
+            assert window._checked_paths() == []
+        finally:
+            window.close()
+
+    def test_fsc_window_two_iteration_rows_do_not_show_scrollbar(self, qapp, tmp_path):
+        iterations = [(tmp_path / f"run_it{i:03d}_model.star", i) for i in range(1, 5)]
+        curves = {
+            path: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations,
+            curves,
+            default_path=iterations[0][0],
+            is_class3d=False,
+        )
+        window.show()
+        qapp.processEvents()
+        try:
+            assert window._iter_scroll.verticalScrollBar().maximum() == 0
+            assert window._iter_scroll.height() >= (
+                window._checkboxes[0].height() * 2 + window._iter_flow._spacing
+            )
+        finally:
+            window.close()
+
+    def test_fsc_window_has_larger_default_size(self, qapp, tmp_path):
+        model = tmp_path / "run_it001_model.star"
+        curves = {
+            model: [(np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None)]
+        }
+        window = display._FscPlotWindow(
+            [(model, 1)],
+            curves,
+            default_path=model,
+            is_class3d=False,
+        )
+        try:
+            assert window.size().width() == 900
+            assert window.size().height() == 600
+        finally:
+            window.close()
+
+    def test_fsc_window_many_classes_wraps_and_scrolls(self, qapp, tmp_path):
+        it1 = tmp_path / "run_it001_model.star"
+        iterations = [(it1, 1)]
+        curves = {
+            it1: [
+                (
+                    np.array([0.1, 0.2]),
+                    np.array([0.8, 0.2]),
+                    f"Class {index + 1}",
+                    None,
+                )
+                for index in range(40)
+            ]
+        }
+        window = display._FscPlotWindow(
+            iterations, curves, default_path=it1, is_class3d=True
+        )
+        window.show()
+        qapp.processEvents()
+        try:
+            assert len(window._class_checkboxes) == 40
+            # Many classes must wrap onto multiple rows instead of forcing
+            # the window wide on a single row.
+            assert window.width() < 1000
+            assert window._class_scroll.verticalScrollBar().maximum() > 0
+            wrapped_rows = {
+                checkbox.geometry().y()
+                for checkbox in window._class_checkboxes
+                if checkbox.geometry().height() > 0
+            }
+            assert len(wrapped_rows) > 1
+            assert window._class_scroll.widget().width() <= (
+                window._class_scroll.viewport().width() + 1
+            )
+            assert window._checked_class_indices() == list(range(40))
+
+            # Many classes get Select All / Unselect All buttons, trailing
+            # the class checkboxes, with short "all" / "none" labels.
+            assert window._class_select_all_btn.text() == "all"
+            assert window._class_unselect_all_btn.text() == "none"
+            assert window._class_select_all_btn.height() >= 25
+            assert window._class_unselect_all_btn.height() >= 25
+            assert (
+                window._class_select_all_btn.height()
+                >= window._class_checkboxes[0].height()
+            )
+            assert (
+                window._class_unselect_all_btn.height()
+                >= window._class_checkboxes[0].height()
+            )
+            assert window._class_select_all_btn.isVisible()
+            assert window._class_unselect_all_btn.isVisible()
+            assert (
+                window._class_flow.itemAt(window._class_flow.count() - 1).widget()
+                is window._class_button_group
+            )
+            assert (
+                window._class_select_all_btn.parentWidget()
+                is window._class_button_group
+            )
+            assert (
+                window._class_unselect_all_btn.parentWidget()
+                is window._class_button_group
+            )
+            from PySide6.QtCore import QPoint
+
+            def _center_y(widget):
+                return widget.mapTo(window, QPoint(0, widget.height() // 2)).y()
+
+            assert _center_y(window._class_select_all_btn) == _center_y(
+                window._class_unselect_all_btn
+            )
+            assert (
+                abs(
+                    _center_y(window._class_select_all_btn)
+                    - _center_y(window._class_checkboxes[-1])
+                )
+                <= 2
+            )
+
+            window._unselect_all_classes()
+            assert window._checked_class_indices() == []
+            window._select_all_classes()
+            assert window._checked_class_indices() == list(range(40))
+            assert len(window._curve_items) == 40
+        finally:
+            window.close()
+
+    def test_fsc_window_hides_class_row_for_non_class3d(self, qapp, tmp_path):
+        it1 = tmp_path / "run_it001_model.star"
+        iterations = [(it1, 1)]
+        curves = {
+            it1: [
+                (np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None),
+                (np.array([0.1, 0.2]), np.array([0.7, 0.3]), "Class 2", None),
+            ]
+        }
+        window = display._FscPlotWindow(
+            iterations, curves, default_path=it1, is_class3d=False
+        )
+        try:
+            assert window._class_checkboxes == []
+            assert window._class_row.isHidden()
+            assert not window._class_select_all_btn.isVisible()
+            assert not window._class_unselect_all_btn.isVisible()
+        finally:
+            window.close()
+
+    def test_fsc_window_class3d_class_checkboxes_filter_curves(self, qapp, tmp_path):
+        it1 = tmp_path / "run_it001_model.star"
+        it2 = tmp_path / "run_it002_model.star"
+        iterations = [(it1, 1), (it2, 2)]
+        curves = {
+            path: [
+                (np.array([0.1, 0.2]), np.array([0.8, 0.2]), "Class 1", None),
+                (np.array([0.1, 0.2]), np.array([0.7, 0.3]), "Class 2", None),
+            ]
+            for path, _num in iterations
+        }
+        window = display._FscPlotWindow(
+            iterations, curves, default_path=it1, is_class3d=True
+        )
+        window.show()
+        qapp.processEvents()
+        try:
+            legend = window.plot_widget.getPlotItem().legend
+
+            def _labels():
+                return [item[1].item.toPlainText() for item in legend.items]
+
+            from PySide6.QtCore import QPoint
+
+            def _center_y(widget):
+                return widget.mapTo(window, QPoint(0, widget.height() // 2)).y()
+
+            # One checkbox per class, all checked by default, row visible.
+            assert [checkbox.text() for checkbox in window._class_checkboxes] == [
+                "1",
+                "2",
+            ]
+            assert all(checkbox.isChecked() for checkbox in window._class_checkboxes)
+            assert not window._class_row.isHidden()
+            assert window._checked_class_indices() == [0, 1]
+            # The "Classes:" label text lines up with the checkbox row instead
+            # of being centered against the taller scroll strip.
+            class_label = window._class_bar_layout.itemAtPosition(0, 0).widget()
+            assert (
+                abs(_center_y(class_label) - _center_y(window._class_checkboxes[0]))
+                <= 2
+            )
+            # The label and controls occupy two top-aligned columns, so the
+            # label remains stable when the window's vertical size changes.
+            for height in (350, 700, 500):
+                window.resize(700, height)
+                qapp.processEvents()
+                assert class_label.geometry().top() == 0
+                assert window._class_scroll.geometry().top() == 0
+            # Few classes: no Select All / Unselect All buttons needed.
+            assert not window._class_select_all_btn.isVisible()
+            assert not window._class_unselect_all_btn.isVisible()
+
+            # Default: selected iteration only, both classes.
+            assert len(window._curve_items) == 2
+            assert _labels() == ["1 · Class 1", "1 · Class 2"]
+
+            window._select_all()
+            assert len(window._curve_items) == 4
+            assert _labels() == [
+                "1 · Class 1",
+                "1 · Class 2",
+                "2 · Class 1",
+                "2 · Class 2",
+            ]
+
+            # Uncheck Class 2: only Class 1 curves across both iterations.
+            window._class_checkboxes[1].setChecked(False)
+            assert window._checked_class_indices() == [0]
+            assert len(window._curve_items) == 2
+            assert _labels() == ["1 · Class 1", "2 · Class 1"]
+        finally:
+            window.close()
+
+    @staticmethod
+    def _write_model_star(path, fsc_values):
+        import pandas as pd
+        import starfile
+
+        starfile.write(
+            {
+                "model_class_1": pd.DataFrame(
+                    {
+                        "rlnResolution": [0.1, 0.2],
+                        "rlnGoldStandardFsc": fsc_values,
+                    }
+                )
+            },
+            str(path),
+            overwrite=True,
+        )
+
+    @patch.object(display, "_install_window_shortcuts")
+    def test_open_fsc_plot_plots_all_picked_iterations(
+        self, mock_shortcuts, qapp, tmp_path
+    ):
+        it1 = tmp_path / "run_it001_model.star"
+        it2 = tmp_path / "run_it002_model.star"
+        self._write_model_star(it1, [0.8, 0.2])
+        self._write_model_star(it2, [0.9, 0.1])
+
+        display._open_fsc_plot(str(it1))
+        try:
+            windows = list(display._plot.alive())
+            assert len(windows) == 1
+            window = windows[0]
+            assert window.windowTitle() == "FSC — run_it001_model.star (2 iterations)"
+            assert [checkbox.isChecked() for checkbox in window._checkboxes] == [
+                True,
+                False,
+            ]
+            legend = window.plot_widget.getPlotItem().legend
+            labels = [item[1].item.toPlainText() for item in legend.items]
+            assert labels == ["1"]
+            assert len(window._curve_items) == 1
+
+            # Toggle the second iteration on, then play with the buttons.
+            window._checkboxes[1].setChecked(True)
+            labels = [item[1].item.toPlainText() for item in legend.items]
+            assert labels == ["1", "2"]
+            assert len(window._curve_items) == 2
+
+            window._unselect_all()
+            assert len(window._curve_items) == 0
+            window._select_all()
+            assert len(window._curve_items) == 2
+        finally:
+            for window in list(display._plot.alive()):
+                window.close()
+
+    @patch.object(display, "_install_window_shortcuts")
+    def test_open_fsc_plot_single_iteration_uses_iteration_label(
+        self, mock_shortcuts, qapp, tmp_path
+    ):
+        model = tmp_path / "run_it001_model.star"
+        self._write_model_star(model, [0.8, 0.2])
+
+        display._open_fsc_plot(str(model))
+        try:
+            windows = list(display._plot.alive())
+            assert len(windows) == 1
+            window = windows[0]
+            assert window.windowTitle() == "FSC — run_it001_model.star"
+            assert [checkbox.isChecked() for checkbox in window._checkboxes] == [True]
+            legend = window.plot_widget.getPlotItem().legend
+            labels = [item[1].item.toPlainText() for item in legend.items]
+            assert labels == ["1"]
+        finally:
+            for window in list(display._plot.alive()):
+                window.close()
+
+    @patch.object(display, "_install_window_shortcuts")
+    def test_open_fsc_plot_reuses_active_window(self, mock_shortcuts, qapp, tmp_path):
+        job_a = tmp_path / "jobA"
+        job_b = tmp_path / "jobB"
+        job_a.mkdir()
+        job_b.mkdir()
+        model_a = job_a / "run_it001_model.star"
+        model_b1 = job_b / "run_it001_model.star"
+        model_b2 = job_b / "run_it002_model.star"
+        self._write_model_star(model_a, [0.8, 0.2])
+        self._write_model_star(model_b1, [0.8, 0.2])
+        self._write_model_star(model_b2, [0.9, 0.1])
+
+        display._open_fsc_plot(str(model_a))
+        try:
+            windows = list(display._plot.alive())
+            assert len(windows) == 1
+            first = windows[0]
+            assert first.windowTitle() == "FSC — run_it001_model.star"
+            assert len(first._checkboxes) == 1
+
+            display._open_fsc_plot(str(model_b1), reuse_window=first)
+            assert list(display._plot.alive()) == [first]
+            assert first.windowTitle() == "FSC — run_it001_model.star (2 iterations)"
+            assert len(first._checkboxes) == 2
+            assert [checkbox.isChecked() for checkbox in first._checkboxes] == [
+                True,
+                False,
+            ]
+        finally:
+            for window in list(display._plot.alive()):
+                window.close()
+
+    @patch.object(display, "_install_window_shortcuts")
+    def test_open_fsc_plot_class3d_uses_wmap_curves(
+        self, mock_shortcuts, qapp, tmp_path
+    ):
+        import pandas as pd
+        import starfile
+
+        job = tmp_path / "Class3D" / "job001"
+        job.mkdir(parents=True)
+        it1 = job / "run_it001_model.star"
+        it2 = job / "run_it002_model.star"
+        for path, ssnr in ((it1, [2.0, 0.5]), (it2, [3.0, 1.0])):
+            starfile.write(
+                {
+                    "model_class_1": pd.DataFrame(
+                        {
+                            "rlnResolution": [0.1, 0.2],
+                            "rlnSsnrMap": ssnr,
+                        }
+                    ),
+                    "model_class_2": pd.DataFrame(
+                        {
+                            "rlnResolution": [0.1, 0.2],
+                            "rlnSsnrMap": [v * 0.8 for v in ssnr],
+                        }
+                    ),
+                },
+                str(path),
+                overwrite=True,
+            )
+
+        display._open_fsc_plot(str(it1))
+        try:
+            windows = list(display._plot.alive())
+            assert len(windows) == 1
+            window = windows[0]
+            plot = window.plot_widget.getPlotItem()
+            assert plot.axes["left"]["item"].labelText == "W_MAP"
+
+            # One checkbox per class, all checked; default plots only the
+            # selected iteration with W_MAP = SSNR/(1+SSNR).
+            assert [checkbox.text() for checkbox in window._class_checkboxes] == [
+                "1",
+                "2",
+            ]
+            assert len(window._curve_items) == 2
+            np.testing.assert_allclose(
+                window._curve_items[0].yData, [2.0 / 3.0, 0.5 / 1.5]
+            )
+            np.testing.assert_allclose(
+                window._curve_items[1].yData, [1.6 / 2.6, 0.4 / 1.4]
+            )
+
+            window._checkboxes[1].setChecked(True)
+            assert len(window._curve_items) == 4
+            np.testing.assert_allclose(
+                window._curve_items[2].yData, [3.0 / 4.0, 1.0 / 2.0]
+            )
+            labels = [item[1].item.toPlainText() for item in plot.legend.items]
+            assert labels == [
+                "1 · Class 1",
+                "1 · Class 2",
+                "2 · Class 1",
+                "2 · Class 2",
+            ]
+
+            # Uncheck Class 2: only Class 1 curves remain.
+            window._class_checkboxes[1].setChecked(False)
+            assert len(window._curve_items) == 2
+            labels = [item[1].item.toPlainText() for item in plot.legend.items]
+            assert labels == ["1 · Class 1", "2 · Class 1"]
+        finally:
+            for window in list(display._plot.alive()):
+                window.close()
+
+    @patch.object(display, "_install_window_shortcuts")
+    def test_open_fsc_plot_reuse_switches_job_type(
+        self, mock_shortcuts, qapp, tmp_path
+    ):
+        import pandas as pd
+        import starfile
+
+        refine_dir = tmp_path / "Refine3D" / "job001"
+        class3d_dir = tmp_path / "Class3D" / "job002"
+        refine_dir.mkdir(parents=True)
+        class3d_dir.mkdir(parents=True)
+        refine_model = refine_dir / "run_it001_model.star"
+        class3d_model = class3d_dir / "run_it001_model.star"
+
+        starfile.write(
+            {
+                "model_class_1": pd.DataFrame(
+                    {
+                        "rlnResolution": [0.1, 0.2],
+                        "rlnGoldStandardFsc": [0.8, 0.2],
+                    }
+                )
+            },
+            str(refine_model),
+            overwrite=True,
+        )
+        starfile.write(
+            {
+                "model_class_1": pd.DataFrame(
+                    {
+                        "rlnResolution": [0.1, 0.2],
+                        "rlnSsnrMap": [2.0, 0.5],
+                    }
+                ),
+                "model_class_2": pd.DataFrame(
+                    {
+                        "rlnResolution": [0.1, 0.2],
+                        "rlnSsnrMap": [1.6, 0.4],
+                    }
+                ),
+            },
+            str(class3d_model),
+            overwrite=True,
+        )
+
+        display._open_fsc_plot(str(refine_model))
+        try:
+            windows = list(display._plot.alive())
+            assert len(windows) == 1
+            first = windows[0]
+            plot = first.plot_widget.getPlotItem()
+            assert plot.axes["left"]["item"].labelText == "FSC"
+            assert first._class_checkboxes == []
+
+            # Reuse the window for a Class3D job: label, class checkboxes and
+            # curves all switch to the new job.
+            display._open_fsc_plot(str(class3d_model), reuse_window=first)
+            assert list(display._plot.alive()) == [first]
+            assert plot.axes["left"]["item"].labelText == "W_MAP"
+            assert [checkbox.text() for checkbox in first._class_checkboxes] == [
+                "1",
+                "2",
+            ]
+            assert not first._class_row.isHidden()
+            assert len(first._curve_items) == 2
+            np.testing.assert_allclose(
+                first._curve_items[0].yData, [2.0 / 3.0, 0.5 / 1.5]
+            )
+            np.testing.assert_allclose(
+                first._curve_items[1].yData, [1.6 / 2.6, 0.4 / 1.4]
+            )
+        finally:
+            for window in list(display._plot.alive()):
+                window.close()
 
 
 class TestDisplayMain(object):
@@ -1089,9 +1900,7 @@ class TestFolderBrowser(object):
             assert widget._btn_chimerax.isEnabled()
             assert "Open this file" in widget._btn_chimerax.toolTip()
 
-    def test_stats_button_for_class3d_and_refine3d_data_star_only(
-        self, tmp_path, qapp
-    ):
+    def test_stats_button_for_class3d_and_refine3d_data_star_only(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
