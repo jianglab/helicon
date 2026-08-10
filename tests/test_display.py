@@ -1176,13 +1176,11 @@ class TestDisplayMain(object):
         args = parser.parse_args([])
         with (
             patch.object(display, "_set_macos_app_identity") as mock_identity,
-            patch.object(display, "_macos_menu_debug_report") as mock_debug,
             patch.object(display, "_force_macos_menu_realization") as mock_force,
         ):
             with patch.dict(sys.modules, {"napari": None}):
                 display.main(args)
         mock_identity.assert_not_called()
-        mock_debug.assert_not_called()
         mock_force.assert_not_called()
         mock_app_exec.assert_called_once()
 
@@ -1336,6 +1334,260 @@ class TestDisplayMain(object):
     def test_main_has_docstring(self):
         assert display.main.__doc__ is not None
         assert "napari" in display.main.__doc__.lower()
+
+
+class TestTextWindowEditing(object):
+    """The text window is an editor: editable buffer, Save As…, prompts."""
+
+    def _open(self, tmp_path, name="notes.txt", content="hello"):
+        p = tmp_path / name
+        p.write_text(content)
+        win = display._open_text_window(str(p))
+        assert win is not None
+        return p, win
+
+    def _append_text(self, win, text):
+        from PySide6.QtGui import QTextCursor
+
+        cursor = win._text_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        win._text_edit.setTextCursor(cursor)
+        win._text_edit.insertPlainText(text)
+
+    def test_text_window_is_editable(self, qapp, tmp_path):
+        _, win = self._open(tmp_path)
+        try:
+            assert win._text_edit.isReadOnly() is False
+        finally:
+            win.close()
+
+    def test_edit_marks_title_modified(self, qapp, tmp_path):
+        _, win = self._open(tmp_path)
+        try:
+            self._append_text(win, " more")
+            assert win._text_edit.document().isModified()
+            assert " *" in win.windowTitle()
+        finally:
+            win._text_edit.document().setModified(False)
+            win.close()
+
+    def test_save_as_writes_new_file_and_keeps_original(self, qapp, tmp_path):
+        p, win = self._open(tmp_path, content="hello")
+        try:
+            target = tmp_path / "notes_edited.txt"
+            with patch(
+                "PySide6.QtWidgets.QFileDialog.getSaveFileName",
+                return_value=(str(target), "All Files (*)"),
+            ):
+                win._save_as()
+            assert target.read_text() == "hello"
+            assert p.read_text() == "hello"
+            assert not win._text_edit.document().isModified()
+            assert "*" not in win.windowTitle()
+            assert win._source_path == str(target)
+        finally:
+            win.close()
+
+    def test_close_prompts_and_can_save(self, qapp, tmp_path):
+        from PySide6.QtWidgets import QMessageBox
+
+        p, win = self._open(tmp_path, content="hello")
+        try:
+            self._append_text(win, " world")
+            target = tmp_path / "saved.txt"
+            with (
+                patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Save,
+                ),
+                patch(
+                    "PySide6.QtWidgets.QFileDialog.getSaveFileName",
+                    return_value=(str(target), "All Files (*)"),
+                ),
+            ):
+                win.close()
+            assert not win.isVisible()
+            assert target.read_text() == "hello world"
+            assert p.read_text() == "hello"
+        finally:
+            if win.isVisible():
+                win.close()
+
+    def test_close_cancel_keeps_window(self, qapp, tmp_path):
+        from PySide6.QtWidgets import QMessageBox
+
+        p, win = self._open(tmp_path, content="hello")
+        try:
+            self._append_text(win, " world")
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ):
+                win.close()
+            assert win.isVisible()
+            assert "hello world" in win._text_edit.toPlainText()
+        finally:
+            win._text_edit.document().setModified(False)
+            win.close()
+
+    def test_close_discard_keeps_original(self, qapp, tmp_path):
+        from PySide6.QtWidgets import QMessageBox
+
+        p, win = self._open(tmp_path, content="hello")
+        try:
+            self._append_text(win, " world")
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                win.close()
+            assert not win.isVisible()
+            assert p.read_text() == "hello"
+        finally:
+            if win.isVisible():
+                win.close()
+
+    def test_reuse_prompts_before_replacing_unsaved(self, qapp, tmp_path):
+        from PySide6.QtWidgets import QMessageBox
+
+        _, win = self._open(tmp_path, name="a.txt", content="aaa")
+        try:
+            self._append_text(win, " (edited)")
+            p2 = tmp_path / "b.txt"
+            p2.write_text("bbb")
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                display._open_text_window(str(p2), reuse_window=win)
+            assert win._text_edit.toPlainText() == "bbb"
+            assert win._source_path == str(p2)
+            assert "b.txt" in win.windowTitle()
+            assert "*" not in win.windowTitle()
+        finally:
+            win.close()
+
+    def test_reuse_cancel_keeps_current_buffer(self, qapp, tmp_path):
+        from PySide6.QtWidgets import QMessageBox
+
+        _, win = self._open(tmp_path, name="a.txt", content="aaa")
+        try:
+            self._append_text(win, " (edited)")
+            p2 = tmp_path / "b.txt"
+            p2.write_text("bbb")
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ):
+                display._open_text_window(str(p2), reuse_window=win)
+            assert "aaa (edited)" in win._text_edit.toPlainText()
+        finally:
+            win._text_edit.document().setModified(False)
+            win.close()
+
+
+class TestNapariDockIcon(object):
+    """napari replaces the app icon; the monkey-patch keeps the Helicon icon."""
+
+    @staticmethod
+    def _fake_qt_main_window():
+        """A stand-in for ``napari._qt.qt_main_window._QtMainWindow``."""
+        return type("_QtMainWindow", (), {"__init__": lambda self, *a, **k: None})
+
+    @staticmethod
+    def _fake_module(qt_main_window):
+        return MagicMock(QtMainWindow=qt_main_window, _QtMainWindow=qt_main_window)
+
+    def test_patch_targets_private_main_window_class(self, qapp):
+        """napari >= 0.5 calls the class _QtMainWindow; it must be patched."""
+        qt_main_window = self._fake_qt_main_window()
+        with patch.dict(
+            sys.modules,
+            {"napari._qt.qt_main_window": MagicMock(_QtMainWindow=qt_main_window)},
+        ):
+            display._patch_napari_icon()
+        assert getattr(qt_main_window, "_helicon_icon_patched", False)
+        instance = object.__new__(qt_main_window)
+        qt_main_window.__init__(instance, viewer=None, window=None)
+        assert str(instance._window_icon).endswith("resources/icon.svg")
+
+    def test_load_napari_patches_icon(self, qapp):
+        fake_napari = MagicMock()
+        with (
+            patch.dict(sys.modules, {"napari": fake_napari}),
+            patch.object(display, "_patch_napari_value_bug") as mock_value,
+            patch.object(display, "_patch_napari_icon") as mock_icon,
+        ):
+            result = display._load_napari()
+        assert result is fake_napari
+        mock_value.assert_called_once_with()
+        mock_icon.assert_called_once_with()
+
+    def test_patch_installs_helicon_window_icon(self, qapp):
+        qt_main_window = self._fake_qt_main_window()
+        with patch.dict(
+            sys.modules,
+            {"napari._qt.qt_main_window": self._fake_module(qt_main_window)},
+        ):
+            display._patch_napari_icon()
+        assert getattr(qt_main_window, "_helicon_icon_patched", False)
+        instance = object.__new__(qt_main_window)
+        qt_main_window.__init__(instance, viewer=None, window=None)
+        assert str(instance._window_icon).endswith("resources/icon.svg")
+
+    def test_patch_is_idempotent(self, qapp):
+        qt_main_window = self._fake_qt_main_window()
+        with patch.dict(
+            sys.modules,
+            {"napari._qt.qt_main_window": self._fake_module(qt_main_window)},
+        ):
+            display._patch_napari_icon()
+            wrapped = qt_main_window.__init__
+            display._patch_napari_icon()
+        assert qt_main_window.__init__ is wrapped
+
+    def test_patch_noop_when_qt_main_window_unavailable(self, qapp):
+        class _MissingQtMainWindow:
+            @property
+            def QtMainWindow(self):
+                raise ImportError("napari qt_main_window unavailable")
+
+        with patch.dict(
+            sys.modules,
+            {"napari._qt.qt_main_window": _MissingQtMainWindow()},
+        ):
+            display._patch_napari_icon()
+
+    def test_patch_noop_when_icon_svg_missing(self, qapp):
+        class _FakePath:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def parent(self):
+                return self
+
+            def __truediv__(self, other):
+                return self
+
+            def is_file(self):
+                return False
+
+        qt_main_window = self._fake_qt_main_window()
+        with (
+            patch.dict(
+                sys.modules,
+                {"napari._qt.qt_main_window": self._fake_module(qt_main_window)},
+            ),
+            patch.object(display, "Path", _FakePath),
+        ):
+            display._patch_napari_icon()
+        assert not getattr(qt_main_window, "_helicon_icon_patched", False)
 
 
 class TestGeometryPersistence(object):
@@ -1691,6 +1943,45 @@ class TestOpenFile(object):
         args, kwargs = mock_viewer.add_image.call_args
         assert kwargs["name"] == "fig.eps"
 
+    def test_open_eps_falls_back_to_quicklook_on_macos(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        import shutil
+
+        from PySide6.QtGui import QImage
+
+        monkeypatch.setattr(sys, "platform", "darwin")
+        src_png = tmp_path / "rendered.png"
+        img = QImage(16, 16, QImage.Format.Format_ARGB32)
+        img.fill(0xFFFFFFFF)
+        img.save(str(src_png))
+
+        def fake_which(name):
+            if name in ("gs", "ghostscript"):
+                return None
+            if name == "qlmanage":
+                return "/usr/bin/qlmanage"
+            return None
+
+        def fake_run(args, **kwargs):
+            # qlmanage writes <filename>.png into the -o directory.
+            out_dir = args[args.index("-o") + 1]
+            shutil.copy(str(src_png), str(Path(out_dir) / "fig.eps.png"))
+            return type("R", (), {"returncode": 0})()
+
+        with (
+            patch("shutil.which", side_effect=fake_which),
+            patch("subprocess.run", fake_run),
+            patch.object(display, "print") as mock_print,
+        ):
+            mock_viewer = MagicMock()
+            display._open_eps(mock_viewer, "/d/fig.eps")
+
+        mock_viewer.add_image.assert_called_once()
+        mock_print.assert_not_called()
+        args, kwargs = mock_viewer.add_image.call_args
+        assert kwargs["name"] == "fig.eps"
+
     def test_open_eps_without_ghostscript_prints_message(self):
         with (
             patch("shutil.which", return_value=None),
@@ -1907,6 +2198,32 @@ class TestFolderBrowser(object):
 
         assert widget._model._root_path == str(selected)
 
+    def test_open_terminal_launches_in_current_folder(self, tmp_path, qapp):
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        # The action must exist in the File menu and launch the host terminal
+        # rooted at the folder currently shown in the browser.
+        assert widget._open_terminal_action.text() == "Open Terminal"
+        assert "Open Terminal" in [a.text() for a in widget._file_menu.actions()]
+        with patch.object(file_browser, "_spawn_detached") as mock_spawn:
+            widget._open_terminal_action.trigger()
+        mock_spawn.assert_called_once()
+        assert mock_spawn.call_args[0][0][-1] == str(tmp_path)
+
+    def test_open_terminal_darwin_uses_native_terminal(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with patch.object(file_browser, "platform") as mock_platform:
+            mock_platform.system.return_value = "Darwin"
+            with patch.object(file_browser, "_spawn_detached") as mock_spawn:
+                file_browser._open_terminal("/some/folder")
+        mock_spawn.assert_called_once_with(["open", "-a", "Terminal", "/some/folder"])
+
     def test_invalid_browser_theme_falls_back_to_system(self, qapp):
         from PySide6.QtCore import QSettings
         from helicon.lib.file_browser import _saved_theme
@@ -2111,23 +2428,62 @@ class TestFolderBrowser(object):
         assert len(new_window_results) == 1
         assert "image.mrc" in new_window_results[0]
 
-    def test_is_image_stack_classification(self):
+    def test_is_image_stack_classification(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
         from helicon.lib.file_browser import FolderBrowserWidget
 
-        assert FolderBrowserWidget._is_image_stack(None, "/d/particles.mrcs")
-        assert FolderBrowserWidget._is_image_stack(None, "/d/data.star")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._is_image_stack("/d/particles.mrcs")
+        assert widget._is_image_stack("/d/data.star")
         # Metadata star files are not image stacks.
-        assert not FolderBrowserWidget._is_image_stack(None, "/d/run1_optimiser.star")
-        # Volumes keep the "Image Slice" label, so are not image stacks.
-        assert not FolderBrowserWidget._is_image_stack(None, "/d/map.mrc")
-        assert not FolderBrowserWidget._is_image_stack(None, "/d/map.map")
+        assert not widget._is_image_stack("/d/run1_optimiser.star")
+        assert not widget._is_image_stack("/d/20170629_00049_frameImage.star")
+        # Genuine volumes (nz > 1) keep the "2D Slice" label, so are not
+        # image stacks.
+        vol_path = tmp_path / "map.mrc"
+        with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+        assert not widget._is_image_stack(str(vol_path))
+        # Single-slice (nz == 1) mrc files are 2D image stacks.
+        single_path = tmp_path / "single.mrc"
+        with _real_mrcfile.new(str(single_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((1, 8, 8), dtype=np.float32))
+        assert widget._is_image_stack(str(single_path))
+
+    def test_frameimage_star_opens_as_text(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget, _get_file_type_label
+
+        star_file = tmp_path / "20170629_00049_frameImage.star"
+        star_file.write_text("dummy")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        assert widget._display_modes_for(str(star_file)) == ["text"]
+        assert not widget._is_image_stack(str(star_file))
+        assert _get_file_type_label(str(star_file)) == "Metadata"
+
+        # AutoPick result files are metadata too, not image stacks.
+        autopick_file = tmp_path / "20170629_00049_frameImage_autopick.star"
+        autopick_file.write_text("dummy")
+        assert widget._display_modes_for(str(autopick_file)) == ["text"]
+        assert not widget._is_image_stack(str(autopick_file))
+        assert _get_file_type_label(str(autopick_file)) == "Metadata"
 
     def test_slice_button_label_for_image_stack(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
-        (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+        vol_path = tmp_path / "volume.mrc"
+        with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (1.5, 1.5, 1.5)
+        single_path = tmp_path / "single.mrc"
+        with _real_mrcfile.new(str(single_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((1, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (2.0, 2.0, 2.0)
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
 
         def select(name):
@@ -2147,6 +2503,10 @@ class TestFolderBrowser(object):
         select("volume.mrc")
         assert widget._btn_slice.text() == "2D Slice"
 
+        # A single-slice (nz == 1) mrc is a 2D image, not a volume.
+        select("single.mrc")
+        assert widget._btn_slice.text() == "2D Image"
+
     def test_pdf_button_label(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
@@ -2162,10 +2522,19 @@ class TestFolderBrowser(object):
         assert widget._btn_slice.text() == "PDF"
 
     def test_chimerax_button_shown_for_volumes(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
-        (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+        vol_path = tmp_path / "volume.mrc"
+        with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (1.5, 1.5, 1.5)
+        single_path = tmp_path / "single.mrc"
+        with _real_mrcfile.new(str(single_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((1, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (2.0, 2.0, 2.0)
         (tmp_path / "particles.mrcs").write_bytes(b"\x00" * 1024)
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
 
@@ -2183,6 +2552,10 @@ class TestFolderBrowser(object):
         select("volume.mrc")
         assert not widget._btn_chimerax.isHidden()
         assert widget._btn_chimerax.text() == "ChimeraX"
+
+        # Single-slice (nz == 1) mrc files must not offer ChimeraX.
+        select("single.mrc")
+        assert widget._btn_chimerax.isHidden()
 
         # Image stacks must not offer the ChimeraX button.
         select("particles.mrcs")
@@ -2225,12 +2598,17 @@ class TestFolderBrowser(object):
         assert called["args"] == ["/fake/ChimeraX", "/d/map.mrc"]
 
     def test_chimerax_button_disabled_when_not_installed(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
         from helicon.lib import file_browser
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         with patch.object(file_browser, "_find_chimerax", lambda: None):
-            (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+            vol_path = tmp_path / "volume.mrc"
+            with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+                mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+                mrc.voxel_size = (1.5, 1.5, 1.5)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
             idx = widget._model.index(0, 0)
             widget._tree.selectionModel().select(
@@ -2241,12 +2619,17 @@ class TestFolderBrowser(object):
             assert "not found" in widget._btn_chimerax.toolTip().lower()
 
     def test_chimerax_button_enabled_when_installed(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
         from helicon.lib import file_browser
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
 
         with patch.object(file_browser, "_find_chimerax", lambda: "/x/ChimeraX"):
-            (tmp_path / "volume.mrc").write_bytes(b"\x00" * 1024)
+            vol_path = tmp_path / "volume.mrc"
+            with _real_mrcfile.new(str(vol_path), overwrite=True) as mrc:
+                mrc.set_data(np.zeros((4, 8, 8), dtype=np.float32))
+                mrc.voxel_size = (1.5, 1.5, 1.5)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
             idx = widget._model.index(0, 0)
             widget._tree.selectionModel().select(
@@ -2306,7 +2689,7 @@ class TestFolderBrowser(object):
         select(tmp_path / "volume.mrc")
         assert widget._btn_stats.isHidden()
 
-    def test_eps_label_and_mode(self, tmp_path, qapp):
+    def test_eps_has_slice_mode_and_eps_button(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
 
         (tmp_path / "fig.eps").write_bytes(b"\x00" * 16)
@@ -2322,8 +2705,11 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
-        # EPS is a known type with no display modes (no button shown).
-        assert widget._display_modes_for(str(tmp_path / "fig.eps")) == []
+        # EPS rasterizes to a 2D image, so it reuses the slice mode (button
+        # labelled "EPS", mirroring the "PDF" label for .pdf files).
+        assert widget._display_modes_for(str(tmp_path / "fig.eps")) == ["slice"]
+        assert not widget._btn_slice.isHidden()
+        assert widget._btn_slice.text() == "EPS"
 
     def test_pdf_has_image_slice_mode(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
@@ -2345,6 +2731,41 @@ class TestFolderBrowser(object):
         assert widget._display_modes_for(str(star_file)) == [
             "text",
             "2dclasses",
+        ]
+
+    def test_display_modes_class2d_data_star_helical_gated(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        # Non-helical Class2D job: helical web apps (WhereIsMyClass,
+        # HelicalPitch) must not be offered.
+        plain_dir = tmp_path / "Class2D" / "job001"
+        plain_dir.mkdir(parents=True)
+        (plain_dir / "run_it100_model.star").write_text(
+            "data_images\n\n_rlnIsHelix  0\n"
+        )
+        plain_star = plain_dir / "run_it100_data.star"
+        plain_star.write_text("dummy")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._display_modes_for(str(plain_star)) == [
+            "slice",
+            "gallery",
+            "text",
+        ]
+
+        # Helical Class2D job: the helical web apps are offered.
+        helical_dir = tmp_path / "Class2D" / "job002"
+        helical_dir.mkdir(parents=True)
+        (helical_dir / "run_it100_model.star").write_text(
+            "data_images\n\n_rlnIsHelix  1\n"
+        )
+        helical_star = helical_dir / "run_it100_data.star"
+        helical_star.write_text("dummy")
+        assert widget._display_modes_for(str(helical_star)) == [
+            "slice",
+            "gallery",
+            "text",
+            "whereIsMyClass",
+            "helicalPitch",
         ]
 
     def test_display_modes_class3d_optimiser_star(self, tmp_path, qapp):
@@ -2374,6 +2795,72 @@ class TestFolderBrowser(object):
             "fsc",
             "trueFSC",
         ]
+
+    def test_ps_ctf_treated_as_mrc(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
+        from helicon.lib.file_browser import (
+            FolderBrowserWidget,
+            _get_file_type_label,
+        )
+
+        # RELION writes CTF power spectra as single-slice MRC maps with a
+        # ``.ctf`` suffix; they must behave exactly like a 2D MRC stack.
+        ctf_file = tmp_path / "20170629_00049_frameImage_PS.ctf"
+        with _real_mrcfile.new(str(ctf_file), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((1, 8, 8), dtype=np.float32))
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        assert widget._display_modes_for(str(ctf_file)) == ["slice", "gallery"]
+        assert widget._is_image_stack(str(ctf_file))
+        assert not widget._is_volume(str(ctf_file))
+        assert _get_file_type_label(str(ctf_file)) == "MRC"
+
+    def test_raster_images_have_slice_button(self, tmp_path, qapp):
+        from helicon.lib.file_browser import (
+            FolderBrowserWidget,
+            _get_file_type_label,
+        )
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        for suffix in (
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".tif",
+            ".tiff",
+            ".bmp",
+            ".gif",
+            ".webp",
+        ):
+            img_file = tmp_path / f"image{suffix}"
+            img_file.write_bytes(b"\x00" * 64)
+            assert widget._display_modes_for(str(img_file)) == ["slice"]
+            assert widget._is_image_stack(str(img_file))
+            assert _get_file_type_label(str(img_file)) == suffix.lstrip(".").upper()
+
+    def test_html_has_browser_button(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html><body>hi</body></html>")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        assert widget._display_modes_for(str(html_file)) == ["html"]
+
+        idx = None
+        for r in range(widget._model.rowCount()):
+            if widget._model.file_path(widget._model.index(r, 0)) == str(html_file):
+                idx = widget._model.index(r, 0)
+                break
+        assert idx is not None
+        widget._tree.selectionModel().select(
+            idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
+        )
+        assert not widget._btn_html.isHidden()
+        assert widget._btn_html.isEnabled()
+        assert widget._btn_html.text() == "Browser"
 
     def test_file_browser_model_filter_wildcard(self, tmp_path):
         from helicon.lib.file_browser import FileBrowserModel, COL_NAME
@@ -2911,7 +3398,33 @@ class TestOrthogonalViewer:
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
         with patch.object(widget, "_volume_has_nz_gt1", return_value=False):
             modes = widget._display_modes_for(str(mrc_path))
-        assert "orthogonal" not in modes
+        # A single-slice (nz == 1) mrc is a 2D stack: no volume, no
+        # ChimeraX, no orthogonal viewer.
+        assert modes == ["slice", "gallery"]
+
+    def test_display_modes_mrc_with_nz_gt1_includes_volume_and_chimerax(
+        self, tmp_path, qapp
+    ):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        mrc_path = tmp_path / "volume.mrc"
+        mrc_path.write_bytes(b"\x00" * 1024)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(widget, "_volume_has_nz_gt1", return_value=True):
+            modes = widget._display_modes_for(str(mrc_path))
+        assert modes == ["slice", "volume", "gallery", "chimerax", "orthogonal"]
+
+    def test_display_modes_real_single_slice_mrc_is_2d_stack(self, tmp_path, qapp):
+        import numpy as np
+        import mrcfile as _real_mrcfile
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        mrc_path = tmp_path / "20170629_00049_frameImage_PS.mrc"
+        with _real_mrcfile.new(str(mrc_path), overwrite=True) as mrc:
+            mrc.set_data(np.zeros((1, 8, 8), dtype=np.float32))
+            mrc.voxel_size = (2.0, 2.0, 2.0)
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._display_modes_for(str(mrc_path)) == ["slice", "gallery"]
 
     def test_display_modes_map_with_nz_gt1_includes_orthogonal(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget

@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import os
+import platform
+import shutil
+import shlex
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -276,6 +281,29 @@ def _is_text_file(path: str) -> bool:
         return False
 
 
+# MRC-format image extensions. RELION/CTFFIND write CTF power spectra as MRC
+# maps with a ``.ctf`` suffix (e.g. ``*_PS.ctf``), so those are treated as
+# MRC images too.
+_MRC_EXTENSIONS = {".mrc", ".mrcs", ".map", ".ctf"}
+
+# MRC extensions that may hold a 3D volume; ``.mrcs`` is always a 2D stack.
+_MRC_VOLUME_EXTENSIONS = {".mrc", ".map", ".ctf"}
+
+# Common raster image formats opened as 2D images (napari's built-in
+# readers handle them, e.g. PNG, JPEG, TIFF).
+_RASTER_IMAGE_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".tif",
+        ".tiff",
+        ".bmp",
+        ".gif",
+        ".webp",
+    }
+)
+
 # Extensions with dedicated handlers/labels.  Everything else falls back
 # to known text extension checks or uppercased extensions.
 _KNOWN_EXTENSIONS = frozenset(
@@ -283,6 +311,7 @@ _KNOWN_EXTENSIONS = frozenset(
         ".mrc",
         ".mrcs",
         ".map",
+        ".ctf",
         ".star",
         ".bild",
         ".pdf",
@@ -293,6 +322,9 @@ _KNOWN_EXTENSIONS = frozenset(
         ".tiff",
         ".jpg",
         ".jpeg",
+        ".bmp",
+        ".gif",
+        ".webp",
         ".html",
         ".htm",
     }
@@ -367,6 +399,10 @@ def _get_file_type_label(filepath: str) -> str:
     if ext == ".eps":
         return "EPS"
 
+    if ext == ".ctf":
+        # RELION CTF power spectra are MRC maps with a .ctf suffix.
+        return "MRC"
+
     if ext in _KNOWN_TEXT_EXTENSIONS:
         return "Text"
 
@@ -390,7 +426,7 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
     n_images = ""
     pixel_size = ""
 
-    if ext in (".mrc", ".mrcs", ".map"):
+    if ext in _MRC_EXTENSIONS:
         try:
             import mrcfile
 
@@ -424,7 +460,7 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
         except Exception:
             pass
 
-    elif ext in (".png", ".jpg", ".jpeg"):
+    elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"):
         try:
             from PIL import Image
 
@@ -626,6 +662,8 @@ _METADATA_STAR_SUFFIXES = (
     "sampling.star",
     "job.star",
     "extractpick.star",
+    "frameimage.star",
+    "autopick.star",
 )
 
 
@@ -940,6 +978,7 @@ class FolderBrowserWidget(QMainWindow):
         ("_btn_2dclasses", "2dclasses"),
         ("_btn_orthogonal", "orthogonal"),
         ("_btn_fsc", "fsc"),
+        ("_btn_html", "html"),
         ("_btn_denovo3d", "denovo3D"),
         ("_btn_whereismyclass", "whereIsMyClass"),
         ("_btn_helicalprojection", "helicalProjection"),
@@ -970,6 +1009,11 @@ class FolderBrowserWidget(QMainWindow):
         self._open_folder_action.setShortcut(QKeySequence.StandardKey.Open)
         self._open_folder_action.triggered.connect(self._open_folder)
         self._file_menu.addAction(self._open_folder_action)
+
+        self._open_terminal_action = QAction("Open Terminal", self)
+        self._open_terminal_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
+        self._open_terminal_action.triggered.connect(self._open_terminal)
+        self._file_menu.addAction(self._open_terminal_action)
 
         self._recent_menu = self._file_menu.addMenu("Recent Folders")
         self._recent_menu.aboutToShow.connect(self._refresh_recent_menu)
@@ -1012,7 +1056,9 @@ class FolderBrowserWidget(QMainWindow):
 
         self._path_edit = QLineEdit(start_dir)
         self._path_edit.returnPressed.connect(self._go_to_path)
-        nav_layout.addWidget(self._path_edit)
+        # Stretch factor 1 makes the path box expand to fill all space up to
+        # the filter controls at the right end of the row.
+        nav_layout.addWidget(self._path_edit, 1)
 
         self._recent_combo = QComboBox()
         self._recent_combo.setPlaceholderText("Recent")
@@ -1036,25 +1082,22 @@ class FolderBrowserWidget(QMainWindow):
         self._theme_combo.currentTextChanged.connect(self._on_theme_changed)
         self._theme_combo.hide()
 
-        layout.addLayout(nav_layout)
-
-        filter_layout = QHBoxLayout()
-        filter_layout.setContentsMargins(4, 4, 4, 4)
-        filter_layout.setSpacing(4)
+        # Filter controls at the right end of the navigation row, next to the
+        # current-folder input box.
 
         filter_label = QLabel("Filter:")
-        filter_layout.addWidget(filter_label)
+        nav_layout.addWidget(filter_label)
 
         self._filter_edit = QLineEdit("*")
         self._filter_edit.setPlaceholderText("e.g. *.mrc, *.tif")
         self._filter_edit.returnPressed.connect(self._apply_filter)
-        filter_layout.addWidget(self._filter_edit)
+        nav_layout.addWidget(self._filter_edit)
 
         self._regex_cb = QCheckBox("Regex")
         self._regex_cb.stateChanged.connect(self._apply_filter)
-        filter_layout.addWidget(self._regex_cb)
+        nav_layout.addWidget(self._regex_cb)
 
-        layout.addLayout(filter_layout)
+        layout.addLayout(nav_layout)
 
         self._model = FileBrowserModel(start_dir)
 
@@ -1236,6 +1279,8 @@ class FolderBrowserWidget(QMainWindow):
             "from model.star. Pick which refinement iterations to overlay when "
             "the job directory holds more than one model.star file."
         )
+        self._btn_html = QPushButton("Browser")
+        self._btn_html.setToolTip("Open this file in your web browser")
         self._btn_denovo3d = QPushButton("denovo3D")
         self._btn_denovo3d.setToolTip(
             "Open this file in the denovo3D web app for de novo helical indexing"
@@ -1380,9 +1425,11 @@ class FolderBrowserWidget(QMainWindow):
             if name.endswith("data.star"):
                 _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
                 if _is_class2d:
-                    modes = ["slice", "gallery", "text", "whereIsMyClass"]
+                    # WhereIsMyClass and HelicalPitch are helical web apps and
+                    # only make sense for helical 2D class averages.
+                    modes = ["slice", "gallery", "text"]
                     if _folder_is_helical(str(Path(path).parent)):
-                        modes.append("helicalPitch")
+                        modes.extend(["whereIsMyClass", "helicalPitch"])
                     return modes
                 _is_class3d_or_refine3d = any(
                     p.startswith("Class3D") or p.startswith("Refine3D")
@@ -1402,21 +1449,34 @@ class FolderBrowserWidget(QMainWindow):
             if _helical:
                 modes.append("denovo3D")
             return modes
-        if ext in (".mrc", ".map"):
-            modes = ["slice", "volume", "gallery", "chimerax"]
-            if self._volume_has_nz_gt1(path):
-                modes.append("orthogonal")
-            _is_class3d_or_refine3d = any(
-                p.startswith("Class3D") or p.startswith("Refine3D")
-                for p in Path(path).parts
-            )
-            if _is_class3d_or_refine3d and _folder_is_helical(str(Path(path).parent)):
-                modes.append("hi3d")
+        if ext in _MRC_VOLUME_EXTENSIONS:
+            _has_volume = self._volume_has_nz_gt1(path)
+            if _has_volume:
+                modes = ["slice", "volume", "gallery", "chimerax", "orthogonal"]
+            else:
+                # Single-slice (nz == 1) or unreadable .mrc/.map files are
+                # treated as 2D image stacks, not 3D volumes.
+                modes = ["slice", "gallery"]
+            if _has_volume:
+                _is_class3d_or_refine3d = any(
+                    p.startswith("Class3D") or p.startswith("Refine3D")
+                    for p in Path(path).parts
+                )
+                if _is_class3d_or_refine3d and _folder_is_helical(
+                    str(Path(path).parent)
+                ):
+                    modes.append("hi3d")
             return modes
         if ext == ".bild":
             return ["text", "3dplot", "chimerax"]
         if ext == ".pdf":
             return ["slice"]
+        if ext == ".eps":
+            return ["slice"]
+        if ext in _RASTER_IMAGE_EXTENSIONS:
+            return ["slice"]
+        if ext in (".html", ".htm"):
+            return ["html"]
         if ext in _KNOWN_EXTENSIONS:
             return []
 
@@ -1426,7 +1486,7 @@ class FolderBrowserWidget(QMainWindow):
         return []
 
     def _volume_has_nz_gt1(self, path: str) -> bool:
-        """Return True if a .mrc/.map file has more than one Z slice."""
+        """Return True if an MRC-format file has more than one Z slice."""
         try:
             import mrcfile
 
@@ -1442,9 +1502,11 @@ class FolderBrowserWidget(QMainWindow):
     def _is_image_stack(self, path: str) -> bool:
         """Return True for files that are stacks of 2D images.
 
-        This covers ``.mrcs`` particle stacks and data ``.star`` files (which
-        reference many individual 2D images). Volumes such as ``.mrc`` /
-        ``.map`` are not stacks and keep the "Image Slice" label instead.
+        This covers ``.mrcs`` particle stacks, data ``.star`` files (which
+        reference many individual 2D images), and single-slice ``.mrc`` /
+        ``.map`` files (nz == 1) that carry one 2D image, plus common raster
+        image formats (PNG, JPEG, TIFF, ...). Genuine volumes (nz > 1) are
+        not stacks and keep the "2D Slice" label instead.
         """
         from pathlib import Path
 
@@ -1452,21 +1514,28 @@ class FolderBrowserWidget(QMainWindow):
         if ext == ".mrcs":
             return True
         if ext == ".star":
-            name = Path(path).name
+            name = Path(path).name.lower()
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return False
+            return True
+        if ext in _MRC_VOLUME_EXTENSIONS:
+            return not self._volume_has_nz_gt1(path)
+        if ext in _RASTER_IMAGE_EXTENSIONS:
             return True
         return False
 
     def _is_volume(self, path: str) -> bool:
-        """Return True for 3D volume files (``.mrc`` / ``.map``).
+        """Return True for genuine 3D volume files (MRC-format files with more
+        than one Z slice).
 
         These expose both a 2D-slice mode and a 3D-volume mode; the slice
         button is labelled "2D Slice" to distinguish it from a 2D image.
         """
         from pathlib import Path
 
-        return Path(path).suffix.lower() in (".mrc", ".map")
+        return Path(
+            path
+        ).suffix.lower() in _MRC_VOLUME_EXTENSIONS and self._volume_has_nz_gt1(path)
 
     def _on_selection_changed(self, selected, deselected) -> None:
         indexes = self._tree.selectionModel().selectedIndexes()
@@ -1510,10 +1579,12 @@ class FolderBrowserWidget(QMainWindow):
         # Label the slice button by the file/display type.
         if Path(path).suffix.lower() == ".pdf":
             self._btn_slice.setText("PDF")
+        elif Path(path).suffix.lower() == ".eps":
+            self._btn_slice.setText("EPS")
+        elif "volume" in modes:
+            self._btn_slice.setText("2D Slice")
         elif self._is_image_stack(str(path)):
             self._btn_slice.setText("2D Image")
-        elif self._is_volume(str(path)):
-            self._btn_slice.setText("2D Slice")
         else:
             self._btn_slice.setText("Image Slice")
         self._current_path = str(path)
@@ -1618,6 +1689,10 @@ class FolderBrowserWidget(QMainWindow):
         )
         if path:
             self._navigate_to(path)
+
+    def _open_terminal(self) -> None:
+        """Open the host OS terminal in the currently displayed folder."""
+        _open_terminal(self._model._root_path)
 
     def _go_up(self) -> None:
         current = self._model._root_path
@@ -1899,3 +1974,69 @@ def _find_chimerax() -> str | None:
         if found:
             return found
     return None
+
+
+def _open_terminal(folder: str | None = None) -> None:
+    """Launch the host OS native terminal, optionally in *folder*.
+
+    The terminal is started detached so it keeps running when Helicon quits.
+    Platform-specific launch strategies are tried in order; the first one
+    whose executable exists wins.
+    """
+    target = folder if folder else os.getcwd()
+    system = platform.system()
+
+    if system == "Darwin":
+        # `open -a Terminal <dir>` opens the native Terminal.app in <dir>.
+        _spawn_detached(["open", "-a", "Terminal", target])
+        return
+
+    if system == "Windows":
+        # Prefer the modern Windows Terminal, then fall back to cmd.exe.
+        if shutil.which("wt"):
+            _spawn_detached(["wt", "-d", target])
+            return
+        # ``/d`` skips cmd's AutoRun; ``/k`` keeps the window open.
+        _spawn_detached(["cmd.exe", "/d", "/k", "cd", "/d", target])
+        return
+
+    # Linux (including WSL): try common terminal emulators in order.
+    candidates = (
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "xterm",
+    )
+    exe = next((c for c in candidates if shutil.which(c)), None)
+    if exe:
+        _spawn_detached([exe, "--working-directory", target])
+        return
+
+    # No graphical terminal found: fall back to a plain shell in the target
+    # directory so the user still gets a usable prompt (e.g. over SSH).
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    _spawn_detached([shell, "-c", f"cd {shlex.quote(target)} && exec {shell}"])
+
+
+def _spawn_detached(cmd: list[str]) -> None:
+    """Start ``cmd`` detached so it outlives the Helicon process."""
+    try:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | (
+                subprocess.DETACHED_PROCESS
+                if hasattr(subprocess, "DETACHED_PROCESS")
+                else 0
+            )
+        subprocess.Popen(
+            cmd,
+            cwd=os.getcwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+            **kwargs,
+        )
+    except Exception as exc:
+        print(f"[helicon] failed to launch terminal: {exc}")

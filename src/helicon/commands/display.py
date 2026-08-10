@@ -229,45 +229,6 @@ def _macos_menu_item_count(ns_app) -> int:
     return int(count or 0)
 
 
-def _macos_menu_titles(ns_app) -> list[str]:
-    """Return the titles of the top-level items in NSApp's main menu."""
-    import ctypes
-
-    main_menu = _macos_msg(ns_app, _macos_sel("mainMenu"))
-    if not main_menu:
-        return []
-    count = _macos_msg(
-        main_menu,
-        _macos_sel("numberOfItems"),
-        restype=ctypes.c_long,
-        argtypes=[],
-    )
-    titles = []
-    for index in range(int(count or 0)):
-        item = _macos_msg(
-            main_menu,
-            _macos_sel("itemAtIndex:"),
-            ctypes.c_long(index),
-            argtypes=[ctypes.c_long],
-        )
-        if not item:
-            titles.append("?")
-            continue
-        title_ns = _macos_msg(item, _macos_sel("title"))
-        c_string = (
-            _macos_msg(
-                title_ns,
-                _macos_sel("UTF8String"),
-                restype=ctypes.c_char_p,
-                argtypes=[],
-            )
-            if title_ns
-            else None
-        )
-        titles.append(c_string.decode("utf-8", "replace") if c_string else "?")
-    return titles
-
-
 def _macos_frontmost_pid() -> int:
     """Return the PID of the frontmost application, or -1 on failure."""
     import ctypes
@@ -289,63 +250,6 @@ def _macos_frontmost_pid() -> int:
             argtypes=[],
         )
     )
-
-
-def _macos_frontmost_name() -> str:
-    """Return the localized name of the frontmost application, or \"?\"."""
-    import ctypes
-
-    workspace = _macos_msg(
-        _macos_class("NSWorkspace"),
-        _macos_sel("sharedWorkspace"),
-    )
-    if not workspace:
-        return "?"
-    front = _macos_msg(workspace, _macos_sel("frontmostApplication"))
-    if not front:
-        return "?"
-    name_ns = _macos_msg(front, _macos_sel("localizedName"))
-    if not name_ns:
-        return "?"
-    c_string = _macos_msg(
-        name_ns,
-        _macos_sel("UTF8String"),
-        restype=ctypes.c_char_p,
-        argtypes=[],
-    )
-    return c_string.decode("utf-8", "replace") if c_string else "?"
-
-
-def _macos_menu_debug_report(tag: str = "") -> None:
-    """Log the live Cocoa menu/activation state when HELICON_MAC_MENU_DEBUG=1."""
-    if sys.platform != "darwin" or not os.environ.get("HELICON_MAC_MENU_DEBUG"):
-        return
-    try:
-        import ctypes
-
-        ns_app = _macos_ns_app()
-        frontmost = _macos_frontmost_pid()
-        frontmost_name = _macos_frontmost_name()
-        policy = _macos_msg(
-            ns_app,
-            _macos_sel("activationPolicy"),
-            restype=ctypes.c_long,
-            argtypes=[],
-        )
-        is_active = _macos_msg(
-            ns_app, _macos_sel("isActive"), restype=ctypes.c_bool, argtypes=[]
-        )
-        main_menu = _macos_msg(ns_app, _macos_sel("mainMenu"))
-        item_count = _macos_menu_item_count(ns_app)
-        titles = _macos_menu_titles(ns_app)
-        print(
-            f"[helicon.macmenu]{tag} activationPolicy={policy} isActive={is_active} "
-            f"frontmost={frontmost_name}({frontmost}) self={os.getpid()} "
-            f"mainMenu={hex(main_menu or 0)} items={item_count} titles={titles}",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"[helicon.macmenu] debug report failed: {exc}", flush=True)
 
 
 def _macos_native_windows() -> list:
@@ -509,6 +413,7 @@ def _load_napari():
     import napari
 
     _patch_napari_value_bug()
+    _patch_napari_icon()
     return napari
 
 
@@ -1100,7 +1005,9 @@ def _save_geometry(dock, viewer):
         save_cols()
 
 
-_MRC_EXTENSIONS = {".mrc", ".mrcs", ".map"}
+# MRC-format image extensions. RELION/CTFFIND write CTF power spectra as MRC
+# maps with a ``.ctf`` suffix (e.g. ``*_PS.ctf``).
+_MRC_EXTENSIONS = {".mrc", ".mrcs", ".map", ".ctf"}
 
 # Star files that describe pipelines/optimisation rather than image data;
 # opened as text, not as image/volume stacks.
@@ -1111,6 +1018,8 @@ _METADATA_STAR_SUFFIXES = (
     "sampling.star",
     "job.star",
     "extractpick.star",
+    "frameimage.star",
+    "autopick.star",
 )
 
 
@@ -2440,7 +2349,7 @@ def _open_text_window(path, reuse_window=None):
 
     try:
         from PySide6.QtWidgets import QMainWindow, QTextEdit
-        from PySide6.QtGui import QFont
+        from PySide6.QtGui import QFont, QShortcut, QKeySequence
     except ImportError:
         return
 
@@ -2453,7 +2362,11 @@ def _open_text_window(path, reuse_window=None):
     if reuse_window is not None:
         try:
             if reuse_window.isVisible():
+                if not reuse_window._maybe_save_before_replace(Path(path).name):
+                    return reuse_window
+                reuse_window._source_path = path
                 reuse_window._text_edit.setPlainText(content)
+                reuse_window._text_edit.document().setModified(False)
                 reuse_window.setWindowTitle(f"Helicon - {Path(path).name}")
                 reuse_window.show()
                 reuse_window.raise_()
@@ -2471,9 +2384,9 @@ def _open_text_window(path, reuse_window=None):
                 QLineEdit,
                 QToolButton,
             )
-            from PySide6.QtGui import QShortcut, QKeySequence, QTextCursor
             from PySide6.QtCore import Qt
 
+            self._source_path = path
             self.setProperty("helicon_theme_window", True)
             self.setStyleSheet(_display_theme_stylesheet())
             self.setPalette(_display_theme_palette())
@@ -2486,12 +2399,29 @@ def _open_text_window(path, reuse_window=None):
             layout.setSpacing(0)
 
             te = QTextEdit(self)
-            te.setReadOnly(True)
+            # Editable: the buffer can be edited and saved to a *new* file via
+            # Save As…; the original file on disk is never overwritten.
+            te.setReadOnly(False)
             te.setFont(QFont("Courier New", 12))
             te.setLineWrapMode(QTextEdit.WidgetWidth)
             te.setStyleSheet(_display_theme_stylesheet())
             self._text_edit = te
             layout.addWidget(te, 1)
+
+            action_bar = QWidget()
+            action_bar.setStyleSheet(_display_theme_stylesheet())
+            action_layout = QHBoxLayout(action_bar)
+            action_layout.setContentsMargins(6, 4, 6, 4)
+            action_layout.setSpacing(6)
+
+            save_btn = QToolButton()
+            save_btn.setText("Save As…")
+            save_btn.setToolTip("Save the edited text to a new file (Ctrl+Shift+S)")
+            save_btn.setStyleSheet(_display_theme_stylesheet())
+            save_btn.clicked.connect(self._save_as)
+            action_layout.addWidget(save_btn)
+            action_layout.addStretch(1)
+            layout.addWidget(action_bar)
 
             find_bar = QWidget()
             find_bar.setStyleSheet(_display_theme_stylesheet())
@@ -2529,7 +2459,87 @@ def _open_text_window(path, reuse_window=None):
             wrap_sc = QShortcut(QKeySequence("Ctrl+Shift+W"), self)
             wrap_sc.activated.connect(self._toggle_wrap)
 
+            save_as_sc = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
+            save_as_sc.activated.connect(self._save_as)
+
             _install_window_shortcuts(self)
+
+            self._text_edit.document().modificationChanged.connect(self._on_modified)
+
+        def _on_modified(self, modified: bool) -> None:
+            title = f"Helicon - {Path(self._source_path).name}"
+            if modified:
+                title += " *"
+            self.setWindowTitle(title)
+
+        def _save_as(self) -> None:
+            from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+            source = Path(self._source_path)
+            default = str(source.with_name(f"{source.stem}_edited{source.suffix}"))
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save As…",
+                default,
+                "All Files (*)",
+            )
+            if not filename:
+                return
+            try:
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(self._text_edit.toPlainText())
+            except OSError as exc:
+                QMessageBox.warning(
+                    self, "Save failed", f"Could not write {filename}:\n{exc}"
+                )
+                return
+            self._source_path = filename
+            self._text_edit.document().setModified(False)
+            self.statusBar().showMessage(f"Saved to {filename}", 4000)
+
+        def _maybe_save_before_replace(self, new_name: str) -> bool:
+            """Return True if it is safe to replace the buffer with *new_name*."""
+            if not self._text_edit.document().isModified():
+                return True
+            from PySide6.QtWidgets import QMessageBox
+
+            return self._confirm_unsaved(
+                f"Save changes to {Path(self._source_path).name} "
+                f"before opening {new_name}?"
+            )
+
+        def _maybe_save_before_close(self) -> bool:
+            """Return True if it is safe to close the window."""
+            if not self._text_edit.document().isModified():
+                return True
+            return self._confirm_unsaved(
+                f"Save changes to {Path(self._source_path).name} before closing?"
+            )
+
+        def _confirm_unsaved(self, message: str) -> bool:
+            """Ask Save / Discard / Cancel for unsaved changes.
+
+            Returns True when the buffer may be discarded (saved or discarded
+            explicitly); False when the user cancelled.
+            """
+            from PySide6.QtWidgets import QMessageBox
+
+            buttons = (
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            )
+            ret = QMessageBox.question(
+                self,
+                "Unsaved changes",
+                message,
+                buttons,
+                QMessageBox.StandardButton.Save,
+            )
+            if ret == QMessageBox.StandardButton.Save:
+                self._save_as()
+                return not self._text_edit.document().isModified()
+            return ret == QMessageBox.StandardButton.Discard
 
         def _toggle_find_bar(self, show: bool) -> None:
             if show:
@@ -2571,6 +2581,10 @@ def _open_text_window(path, reuse_window=None):
                 self.statusBar().showMessage("Word wrap: OFF", 2000)
 
         def closeEvent(self, event):
+            if self._text_edit.document().isModified():
+                if not self._maybe_save_before_close():
+                    event.ignore()
+                    return
             _text.on_close(self)
             super().closeEvent(event)
 
@@ -2668,50 +2682,28 @@ def _open_pdf(viewer, path: str) -> None:
 
 
 def _open_eps(viewer, path: str) -> None:
-    """Open an EPS (PostScript) file by rasterizing it with Ghostscript.
+    """Open an EPS (PostScript) file by rasterizing it to a PNG.
 
     Qt has no PostScript interpreter, so EPS cannot be read by QPdfDocument
-    or QImageReader. We shell out to ``gs`` to render the EPS to a PNG and
-    then display that image, reusing the same white-background compositing
-    and contrast logic as the PDF viewer.
+    or QImageReader. We rasterize with Ghostscript (``gs``) when available,
+    falling back to Quick Look (``qlmanage``) on macOS, then display the
+    image reusing the same white-background compositing and contrast logic
+    as the PDF viewer.
     """
-    import shutil
-    import subprocess
-    import tempfile
-
     import numpy as np
     from PySide6.QtGui import QImage
 
-    gs = shutil.which("gs") or shutil.which("ghostscript")
-    if gs is None:
+    out_path = _rasterize_eps(path)
+    if out_path is None:
         print(
             "[helicon] Ghostscript (gs) is required to display EPS files but "
-            "was not found on your PATH."
+            "was not found on your PATH. Install it with "
+            "'conda install -c conda-forge ghostscript' or "
+            "'brew install ghostscript'."
         )
         return
 
-    tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    tmp_png.close()
-    out_path = tmp_png.name
-
     try:
-        subprocess.run(
-            [
-                gs,
-                "-dQUIET",
-                "-dNOPAUSE",
-                "-dBATCH",
-                "-dSAFER",
-                "-dEPSCrop",
-                "-sDEVICE=png16m",
-                "-r150",
-                f"-sOutputFile={out_path}",
-                path,
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
         img = QImage(out_path)
         if img.isNull():
             print(f"[helicon] failed to render EPS: {path}")
@@ -2726,9 +2718,7 @@ def _open_eps(viewer, path: str) -> None:
         # Composite onto white background
         composite = alpha * rgb + (1.0 - alpha) * 255.0
 
-        from pathlib import Path as _Path
-
-        name = _Path(path).name
+        name = Path(path).name
         contrast = _auto_contrast(composite)
         layer = viewer.add_image(
             composite,
@@ -2743,13 +2733,80 @@ def _open_eps(viewer, path: str) -> None:
             float(composite.max()),
         )
         _reset_view(viewer)
-    except (subprocess.CalledProcessError, OSError) as exc:  # pragma: no cover
-        print(f"[helicon] failed to display EPS {path}: {exc}")
     finally:
         try:
             os.remove(out_path)
         except OSError:
             pass
+        # qlmanage writes into its own temp dir; drop the empty dir as well.
+        try:
+            os.rmdir(Path(out_path).parent)
+        except OSError:
+            pass
+
+
+def _rasterize_eps(path: str) -> str | None:
+    """Rasterize an EPS file to a PNG and return its path, or None on failure.
+
+    Tries Ghostscript first (all platforms), then Quick Look (``qlmanage``)
+    on macOS. The caller owns the returned temporary file and is expected
+    to remove it.
+    """
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    gs = shutil.which("gs") or shutil.which("ghostscript")
+    if gs is not None:
+        tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp_png.close()
+        try:
+            subprocess.run(
+                [
+                    gs,
+                    "-dQUIET",
+                    "-dNOPAUSE",
+                    "-dBATCH",
+                    "-dSAFER",
+                    "-dEPSCrop",
+                    "-sDEVICE=png16m",
+                    "-r150",
+                    f"-sOutputFile={tmp_png.name}",
+                    path,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            return tmp_png.name
+        except (subprocess.CalledProcessError, OSError):
+            try:
+                os.remove(tmp_png.name)
+            except OSError:
+                pass
+
+    if sys.platform == "darwin":
+        qlmanage = shutil.which("qlmanage")
+        if qlmanage is not None:
+            out_dir = tempfile.mkdtemp(prefix="helicon_eps_")
+            try:
+                result = subprocess.run(
+                    [qlmanage, "-t", "-s", "2048", "-o", out_dir, path],
+                    capture_output=True,
+                    timeout=60,
+                )
+            except (subprocess.SubprocessError, OSError):
+                result = None
+            candidate = Path(out_dir) / f"{Path(path).name}.png"
+            if result is not None and result.returncode == 0 and candidate.is_file():
+                return str(candidate)
+            try:
+                os.rmdir(out_dir)
+            except OSError:
+                pass
+
+    return None
 
 
 def _capped_cylinder_mesh(p1, p2, radius, segments=24):
@@ -2969,6 +3026,51 @@ def _patch_napari_value_bug() -> None:
 
         _NapariImage._update_thumbnail = _safe_update_thumbnail
         _NapariImage._helicon_thumb_patched = True
+
+
+def _patch_napari_icon() -> None:
+    """Point napari's window icon at the Helicon icon.
+
+    napari's ``_QtMainWindow`` calls ``QApplication.setWindowIcon`` with the
+    napari logo both when a viewer is created and whenever the theme changes
+    (``_update_logo``). On macOS that call also swaps the Dock icon away from
+    Helicon. ``_QtMainWindow._get_window_icon`` intentionally reads a
+    ``_window_icon`` attribute when present (napari's documented extension
+    point for custom window icons), so we install the Helicon icon there:
+    every napari ``setWindowIcon`` call then installs the Helicon logo, and
+    no napari code path can replace it afterwards.
+
+    napari renders window icons through ``QSvgRenderer``, so the resource is
+    an SVG embedding a downscaled copy of the Helicon PNG.
+    """
+    try:
+        from napari._qt.qt_main_window import (
+            _QtMainWindow as _NapariMainWindow,
+        )
+    except Exception:
+        try:
+            # napari < 0.5 exported the (then public) QtMainWindow name.
+            from napari._qt.qt_main_window import (
+                QtMainWindow as _NapariMainWindow,
+            )
+        except Exception:
+            return
+    if getattr(_NapariMainWindow, "_helicon_icon_patched", False):
+        return
+    svg_path = Path(__file__).parent.parent / "resources" / "icon.svg"
+    if not svg_path.is_file():
+        return
+    try:
+        orig_init = _NapariMainWindow.__init__
+
+        def _init_with_helicon_icon(self, *args, **kwargs):
+            self._window_icon = str(svg_path)
+            return orig_init(self, *args, **kwargs)
+
+        _NapariMainWindow.__init__ = _init_with_helicon_icon
+        _NapariMainWindow._helicon_icon_patched = True
+    except Exception:
+        pass
 
 
 def _is_metadata_star(path: str) -> bool:
@@ -3454,7 +3556,7 @@ _gallery = _DisplayTracker(_is_alive_widget)
 _plot = _DisplayTracker(_is_alive_widget)
 _text = _DisplayTracker(_is_alive_widget)
 
-_NAPARI_MODES = {"slice", "volume", "3dplot", "stats"}
+_NAPARI_MODES = {"slice", "volume", "3dplot", "stats", "html"}
 _GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
 _TEXT_MODES = {"text"}
 _PLOT_MODES = {"fsc"}
@@ -5324,7 +5426,6 @@ def main(args: argparse.Namespace) -> None:
             """Evaluate the last activation attempt; retry if still needed."""
             count = _macos_menu_item_count(_macos_ns_app())
             frontmost = _macos_frontmost_pid()
-            _macos_menu_debug_report(f" attempt={attempt}")
             if count >= 2 and frontmost == os.getpid():
                 if not menu_state["refreshed"]:
                     # The menu is fully installed and we are frontmost, but the
@@ -5341,17 +5442,8 @@ def main(args: argparse.Namespace) -> None:
                 # placeholder). Re-apply the "Helicon" identity now that the
                 # menu exists so the top-left menu reads Helicon.
                 _set_macos_app_identity("Helicon")
-                print(
-                    f"[helicon.macmenu] menu realized at attempt={attempt}",
-                    flush=True,
-                )
                 return
             if attempt >= 12:
-                print(
-                    "[helicon.macmenu] gave up: Helicon never became the "
-                    "frontmost app, so macOS keeps showing another menu bar",
-                    flush=True,
-                )
                 return
             QTimer.singleShot(
                 250,
@@ -5360,19 +5452,13 @@ def main(args: argparse.Namespace) -> None:
 
         def _macos_menu_refresh(attempt: int) -> None:
             """Resign, activate the launch-time frontmost app, then come back."""
-            _macos_menu_debug_report(f" refresh-start attempt={attempt}")
             _macos_resign_active()
             alternate = menu_state.get("alternate_pid") or 0
             if alternate and alternate != os.getpid():
                 QTimer.singleShot(90, lambda: _macos_activate_pid(alternate))
-                QTimer.singleShot(
-                    90, lambda: _macos_menu_debug_report(" refresh-alternate")
-                )
             QTimer.singleShot(240, _macos_activate_and_front)
-            QTimer.singleShot(240, lambda: _macos_menu_debug_report(" refresh-self"))
             QTimer.singleShot(420, lambda: _realize_macos_menu_check(attempt))
 
-        _macos_menu_debug_report(" t0")
         QTimer.singleShot(150, lambda: _realize_macos_menu(1, True))
 
     try:

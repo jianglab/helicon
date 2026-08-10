@@ -59,32 +59,6 @@ class TestImageGalleryWidget:
         images = [np.full((40, 40), float(i), dtype=np.float32) for i in range(n)]
         return images
 
-
-def test_gallery_label_background_colors_are_valid(qapp):
-    from PySide6.QtGui import QColor
-    from helicon.lib.gallery_widget import _gallery_theme_colors
-    from PySide6.QtCore import QSettings
-
-    settings = QSettings("helicon", "display")
-    old_theme = settings.value("theme", None)
-    try:
-        settings.setValue("theme", "Light")
-        light = QColor(_gallery_theme_colors()["label_background"])
-        assert light.isValid()
-        assert light.alpha() == 210
-        assert light.red() == 255
-
-        settings.setValue("theme", "Dark")
-        dark = QColor(_gallery_theme_colors()["label_background"])
-        assert dark.isValid()
-        assert dark.alpha() == 140
-        assert dark.red() == 0
-    finally:
-        if old_theme is None:
-            settings.remove("theme")
-        else:
-            settings.setValue("theme", old_theme)
-
     def test_only_visible_images_read(self, qapp):
         images = self._fake_stack(1000)
         read_log = []
@@ -109,6 +83,33 @@ def test_gallery_label_background_colors_are_valid(qapp):
         # full 1000-image stack.
         assert len(painted) < 1000
         assert max(painted) < 1000
+        widget.deleteLater()
+
+    def test_wide_image_auto_fits_on_first_paint(self, qapp):
+        # A single 3710x3838 movie frame is wider than the viewport at the
+        # default scale of 1.0; the first paint must shrink the zoom so the
+        # tile is actually drawn instead of leaving a blank canvas.
+        from PySide6.QtGui import QPaintEvent
+
+        image = np.zeros((3838, 3710), dtype=np.float16)
+        image[100:200, 100:200] = 16.0
+        read_log = []
+
+        def read_fn(i):
+            read_log.append(i)
+            return image
+
+        widget = ImageGalleryWidget()
+        widget.set_data(read_fn, 1, 3710, 3838, np.float16)
+        widget.resize(800, 600)
+        widget.paintEvent(QPaintEvent(widget.rect()))
+
+        assert read_log == [0]
+        assert widget._scale < 1.0
+        assert (
+            widget._panel.visible_row_col(widget._canvas_width(), 600, widget._scale)[2]
+            >= 1
+        )
         widget.deleteLater()
 
     def test_ctrl_wheel_zoom_changes_column_count(self, qapp):
@@ -192,6 +193,32 @@ def test_gallery_label_background_colors_are_valid(qapp):
 
         assert emitted == []
         widget.deleteLater()
+
+
+def test_gallery_label_background_colors_are_valid(qapp):
+    from PySide6.QtGui import QColor
+    from helicon.lib.gallery_widget import _gallery_theme_colors
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("helicon", "display")
+    old_theme = settings.value("theme", None)
+    try:
+        settings.setValue("theme", "Light")
+        light = QColor(_gallery_theme_colors()["label_background"])
+        assert light.isValid()
+        assert light.alpha() == 210
+        assert light.red() == 255
+
+        settings.setValue("theme", "Dark")
+        dark = QColor(_gallery_theme_colors()["label_background"])
+        assert dark.isValid()
+        assert dark.alpha() == 140
+        assert dark.red() == 0
+    finally:
+        if old_theme is None:
+            settings.remove("theme")
+        else:
+            settings.setValue("theme", old_theme)
 
 
 def _wheel_event(delta, ctrl=False):
@@ -383,10 +410,8 @@ class TestOpenGalleryDispatch:
 
     def test_close_removes_from_tracker(self, qapp):
         tracker = display._DisplayTracker(display._is_alive_widget)
-        old_tracker_windows = display._gallery._windows[:]
-        old_tracker_active = display._gallery._active
+        old_tracker_windows = dict(display._gallery._windows)
         display._gallery._windows.clear()
-        display._gallery._active = None
         try:
             images_a = [np.full((20, 20), 0.0, dtype=np.float32) for _ in range(10)]
             images_b = [np.full((20, 20), 1.0, dtype=np.float32) for _ in range(10)]
@@ -422,8 +447,7 @@ class TestOpenGalleryDispatch:
             assert tracker.active() is None
         finally:
             display._gallery._windows.clear()
-            display._gallery._windows.extend(old_tracker_windows)
-            display._gallery._active = old_tracker_active
+            display._gallery._windows.update(old_tracker_windows)
 
 
 class TestGallerySave:
@@ -475,7 +499,9 @@ class TestGallerySave:
         captured = {}
         with patch(
             "helicon.commands.display._save_qimage",
-            side_effect=lambda qimg, parent: captured.update({"qimg": qimg}),
+            side_effect=lambda qimg, parent, default_name=None: captured.update(
+                {"qimg": qimg}
+            ),
         ):
             w._save_as()
 
@@ -513,13 +539,12 @@ class TestGallerySave:
         QApplication.processEvents()
 
         captured = {}
-        real_save = display._save_qimage
-
-        def _fake(qimg, parent, default_name=None):
-            captured["default_name"] = default_name
-            return real_save(qimg, parent, default_name=default_name)
-
-        with patch("helicon.commands.display._save_qimage", side_effect=_fake):
+        with patch(
+            "helicon.commands.display._save_qimage",
+            side_effect=lambda qimg, parent, default_name=None: captured.update(
+                {"default_name": default_name}
+            ),
+        ):
             w._save_as()
         assert captured["default_name"] == "stack_a.mrcs"
 
@@ -548,7 +573,9 @@ class TestGallerySave:
         captured = {}
         with patch(
             "helicon.commands.display._save_qimage",
-            side_effect=lambda qimg, parent: captured.update({"qimg": qimg}),
+            side_effect=lambda qimg, parent, default_name=None: captured.update(
+                {"qimg": qimg}
+            ),
         ):
             w._save_as()
 

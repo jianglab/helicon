@@ -869,6 +869,16 @@ class ImageGalleryWidget(QWidget):
         )
         return panel.max_y < 0
 
+    def _fit_scale_for_width(self, canvas_w: int) -> float:
+        """Largest zoom scale that keeps at least one column visible.
+
+        Wide frames (e.g. a 3710 px movie micrograph) do not fit a single
+        column at the default scale of 1.0; this clamps the scale so the
+        first paint is not a blank canvas.
+        """
+        available = max(1, canvas_w - self._panel.min_sep)
+        return max(1e-3, min(20.0, available / max(1, self._img_w)))
+
     def _max_scroll(self, view_h: int) -> int:
         """Maximum vertical scroll offset (negative) for the current layout."""
         self._panel.visible_row_col(
@@ -948,6 +958,17 @@ class ImageGalleryWidget(QWidget):
         res = self._panel.visible_row_col(
             canvas_w, size.height(), self._scale, 0, self._scroll_y
         )
+        if res is None:
+            # No column fits at the current zoom: shrink until at least one
+            # column is visible so wide single images are drawn, not blanked.
+            # Reserve the scrollbar width so the fit stays valid even when a
+            # vertical scrollbar appears after shrinking.
+            self._scale = self._fit_scale_for_width(self._canvas_width(with_sb=True))
+            needs_sb = self._needs_scrollbar()
+            canvas_w = self._canvas_width(with_sb=needs_sb)
+            res = self._panel.visible_row_col(
+                canvas_w, size.height(), self._scale, 0, self._scroll_y
+            )
         if res is None:
             painter.end()
             return
