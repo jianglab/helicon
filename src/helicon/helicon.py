@@ -36,6 +36,86 @@ class HeliconArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: error: {message}\n")
 
 
+def _maybe_reexec_macos_display() -> None:
+    """Relaunch ``helicon display`` under a Helicon-named executable on macOS.
+
+    Dock and menu-bar titles are derived from the process executable basename.
+    Console-script launches inherit ``python3.14`` unless the process is
+    re-exec'd from a real executable file whose basename is ``Helicon``.
+
+    A symlink is not enough here: macOS resolves the symlink at ``exec`` time
+    and the Dock reads the *resolved* executable path, so only the menu-bar
+    title changes. To also fix the Dock hover tooltip we copy the running
+    interpreter into a file named ``Helicon`` and re-exec it, teaching the
+    copy where its standard library lives via ``PYTHONHOME`` (a copied conda
+    binary otherwise fails to locate its site-packages).
+    """
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("HELICON_MACOS_IDENTITY") == "1":
+        return
+    if "display" not in sys.argv:
+        return
+
+    try:
+        import ctypes
+        import ctypes.util
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        if hasattr(libc, "setprogname"):
+            libc.setprogname(b"Helicon")
+
+        bin_dir = Path(tempfile.gettempdir()) / "helicon_bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        helicon_bin = bin_dir / "Helicon"
+        python_bin = Path(sys.executable).resolve()
+
+        # A legacy launch may have left a symlink pointing at the real
+        # interpreter. A symlink is useless here: macOS resolves it at exec
+        # time, so the Dock would keep reporting ``python3.14``. Remove it so
+        # we copy a real executable instead of exec'ing through the link (which
+        # would also make ``shutil.copy2`` write onto the shared interpreter).
+        if helicon_bin.is_symlink():
+            helicon_bin.unlink()
+
+        # Refresh the cached copy whenever the interpreter changes (upgrade,
+        # different machine, cleared temp dir, etc.). Compare size + mtime so a
+        # pristine cached copy is not rewritten on every launch. ``is_file()``
+        # follows symlinks, so we only reach this check after the symlink has
+        # been removed above.
+        refresh = not helicon_bin.exists()
+        if not refresh:
+            try:
+                src_stat = python_bin.stat()
+                dst_stat = helicon_bin.stat()
+                refresh = (
+                    src_stat.st_size != dst_stat.st_size
+                    or src_stat.st_mtime_ns != dst_stat.st_mtime_ns
+                )
+            except OSError:
+                refresh = True
+        if refresh:
+            shutil.copy2(python_bin, helicon_bin)
+
+        env = os.environ.copy()
+        env["HELICON_MACOS_IDENTITY"] = "1"
+        env["PYTHONHOME"] = str(Path(sys.prefix).resolve())
+        cmd = [str(helicon_bin)] + sys.argv
+        os.execve(str(helicon_bin), cmd, env)
+    except Exception as exc:  # pragma: no cover - macOS only, env dependent
+        # Keep the original process if the identity relaunch fails. This
+        # leaves the Dock/menu name as the python executable, so surface the
+        # failure rather than hiding it.
+        try:
+            logger.debug("macOS identity relaunch skipped: %s", exc)
+        except Exception:
+            pass
+        return
+
+
 def _get_commands(
     cli_commands: list,
     napari_commands: list,
@@ -130,6 +210,7 @@ def _get_commands(
 
 
 def main():
+    _maybe_reexec_macos_display()
     _get_commands(
         cli_commands=cli_commands,
         napari_commands=napari_commands,

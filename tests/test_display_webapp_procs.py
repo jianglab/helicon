@@ -90,6 +90,25 @@ def test_reuse_navigates_most_recent(monkeypatch):
     assert newer.proc.poll() is None
 
 
+def test_reuse_passes_saved_theme(monkeypatch):
+    existing = _WebAppState(_dummy_proc(), "tok_theme")
+    existing.base_url = "http://localhost:3333/"
+    _WEB_APP_INSTANCES.append(existing)
+
+    calls = []
+
+    def fake_urlopen(req, timeout=10):
+        calls.append(json.loads(req.data.decode())["query_params"])
+        return _FakeResponse({"ok": True, "alive": True})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("helicon.commands.display._get_display_theme", lambda: "Light")
+
+    _launch_or_reuse_web_app("WhereIsMyClass", {"helicon_tab": '"X"'})
+
+    assert calls == [{"helicon_tab": '"X"', "helicon_theme": "Light"}]
+
+
 def test_reuse_falls_back_to_next_instance(monkeypatch):
     dead_url = _WebAppState(_dummy_proc(), "tok_dead")
     dead_url.base_url = "http://localhost:1111/"

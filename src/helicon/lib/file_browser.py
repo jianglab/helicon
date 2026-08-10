@@ -11,6 +11,7 @@ from .cache import cache
 
 from PySide6.QtWidgets import (
     QWidget,
+    QMainWindow,
     QTreeView,
     QVBoxLayout,
     QHBoxLayout,
@@ -23,13 +24,17 @@ from PySide6.QtWidgets import (
     QPushButton,
     QCheckBox,
     QComboBox,
+    QFileDialog,
+    QMenuBar,
 )
 from PySide6.QtGui import (
+    QPalette,
     QStandardItemModel,
     QStandardItem,
     QKeySequence,
     QShortcut,
     QAction,
+    QActionGroup,
 )
 from PySide6.QtCore import (
     QModelIndex,
@@ -44,6 +49,160 @@ from PySide6.QtCore import (
 )
 
 __all__ = ["FolderBrowserWidget"]
+
+_THEMES = ("Dark", "Light", "System")
+_DEFAULT_THEME = "System"
+
+_THEME_COLORS = {
+    "Dark": {
+        "window": "#2d2d2d",
+        "input": "#3c3c3c",
+        "text": "#cccccc",
+        "strong_text": "#e8e8e8",
+        "border": "#555555",
+        "header_border": "#2d2d2d",
+        "hover": "#3a3a3a",
+        "accent": "#4a6fa5",
+        "pressed": "#5a82c4",
+        "accent_border": "#6f9bd6",
+        "disabled": "#7a7a7a",
+        "disabled_bg": "#2b2b2b",
+    },
+    "Light": {
+        "window": "#f4f4f4",
+        "input": "#ffffff",
+        "text": "#202020",
+        "strong_text": "#202020",
+        "border": "#b8b8b8",
+        "header_border": "#d2d2d2",
+        "hover": "#e8eef7",
+        "accent": "#4a78b8",
+        "pressed": "#36649f",
+        "accent_border": "#2e5d9c",
+        "disabled": "#888888",
+        "disabled_bg": "#e5e5e5",
+    },
+}
+
+
+def _saved_theme() -> str:
+    """Return the persisted browser theme, falling back to the default."""
+    value = str(QSettings("helicon", "display").value("theme", _DEFAULT_THEME))
+    return value if value in _THEMES else _DEFAULT_THEME
+
+
+def _save_theme(theme: str) -> None:
+    """Persist a valid browser theme for the next display launch."""
+    if theme in _THEMES:
+        QSettings("helicon", "display").setValue("theme", theme)
+
+
+def _resolved_theme(theme: str) -> str:
+    """Resolve ``System`` to the current Qt light/dark palette."""
+    if theme != "System":
+        return theme if theme in _THEME_COLORS else _DEFAULT_THEME
+    window = QApplication.palette().color(QPalette.ColorRole.Window)
+    return "Dark" if window.lightness() < 128 else "Light"
+
+
+def _browser_stylesheet(colors: dict[str, str]) -> str:
+    """Build the shared stylesheet for the browser and launch buttons."""
+    return f"""
+        QWidget {{
+            background-color: {colors["window"]};
+            color: {colors["text"]};
+        }}
+        QTreeView {{
+            font-size: 12px;
+            background-color: {colors["window"]};
+            color: {colors["text"]};
+            border: none;
+        }}
+        QTreeView::item:selected {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+        }}
+        QTreeView::item:hover {{ background-color: {colors["hover"]}; }}
+        QHeaderView::section {{
+            padding: 4px;
+            font-weight: bold;
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["header_border"]};
+        }}
+        QLineEdit, QComboBox {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            padding: 3px;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            selection-background-color: {colors["accent"]};
+        }}
+        QToolButton, QPushButton {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            padding: 3px 8px;
+        }}
+        QMenuBar {{
+            background-color: {colors["window"]};
+            color: {colors["text"]};
+            border-bottom: 1px solid {colors["border"]};
+        }}
+        QMenuBar::item {{
+            background-color: transparent;
+            padding: 4px 8px;
+        }}
+        QMenuBar::item:selected, QMenu::item:selected {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+        }}
+        QMenu {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+        }}
+        QMenu::item {{
+            padding: 4px 24px 4px 8px;
+        }}
+        QToolButton:hover, QPushButton:hover {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+        }}
+        QToolButton:pressed, QPushButton:pressed {{
+            background-color: {colors["pressed"]};
+            border: 1px solid {colors["accent_border"]};
+        }}
+        QCheckBox {{ color: {colors["strong_text"]}; spacing: 6px; }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            background-color: {colors["input"]};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {colors["accent"]};
+            border: 1px solid {colors["accent_border"]};
+            image: none;
+        }}
+    """
+
+
+def _disabled_button_stylesheet(colors: dict[str, str]) -> str:
+    """Return the explicit disabled style used for unavailable launchers."""
+    return (
+        "QPushButton:disabled { "
+        f"color: {colors['disabled']}; "
+        f"background-color: {colors['disabled_bg']}; "
+        f"border: 1px solid {colors['border']}; }}"
+    )
+
 
 _IMAGE_EXTENSIONS = {
     ".mrc",
@@ -118,7 +277,7 @@ def _is_text_file(path: str) -> bool:
 
 
 # Extensions with dedicated handlers/labels.  Everything else falls back
-# to a UTF-8 decode test (_is_text_file) before being labelled "unknown".
+# to known text extension checks or uppercased extensions.
 _KNOWN_EXTENSIONS = frozenset(
     {
         ".mrc",
@@ -139,13 +298,50 @@ _KNOWN_EXTENSIONS = frozenset(
     }
 )
 
+_KNOWN_TEXT_EXTENSIONS = frozenset(
+    {
+        ".txt",
+        ".py",
+        ".pyi",
+        ".md",
+        ".rst",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".xml",
+        ".log",
+        ".out",
+        ".sh",
+        ".zsh",
+        ".bash",
+        ".csv",
+        ".tsv",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".env",
+        ".c",
+        ".h",
+        ".cpp",
+        ".hpp",
+        ".cc",
+        ".js",
+        ".ts",
+        ".css",
+        ".mod",
+        ".inp",
+        ".dat",
+    }
+)
+
 
 def _get_file_type_label(filepath: str) -> str:
     """Return a human-readable type label for the file browser.
 
     Detection order:
     1. Known file types by suffix (.mrc, .mrcs, .star, .bild, etc.)
-    2. Pure-text fallback via UTF-8 decode -> "Text"
+    2. Known text extensions -> "Text"
     3. Anything else -> uppercased extension (or "File" if no extension)
     """
     name = Path(filepath).name.lower()
@@ -171,11 +367,11 @@ def _get_file_type_label(filepath: str) -> str:
     if ext == ".eps":
         return "EPS"
 
+    if ext in _KNOWN_TEXT_EXTENSIONS:
+        return "Text"
+
     if ext in _KNOWN_EXTENSIONS:
         return ext.lstrip(".").upper()
-
-    if _is_text_file(filepath):
-        return "Text"
 
     return ext.lstrip(".").upper() if ext else "File"
 
@@ -704,7 +900,7 @@ class InfoWorker(QThread):
             self.info_ready.emit(filepath, info, n_images, pixel_size, self._epoch)
 
 
-class FolderBrowserWidget(QWidget):
+class FolderBrowserWidget(QMainWindow):
     """A folder browser widget for selecting image and volume files.
 
     Displays a tree view of files with columns for name, size, type,
@@ -760,9 +956,37 @@ class FolderBrowserWidget(QWidget):
             start_dir = os.getcwd()
         start_dir = str(Path(start_dir).resolve())
 
-        layout = QVBoxLayout(self)
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        self._menu_bar = self.menuBar()
+        self._file_menu = self._menu_bar.addMenu("File")
+        self._view_menu = self._menu_bar.addMenu("View")
+
+        self._open_folder_action = QAction("Open Folder…", self)
+        self._open_folder_action.setShortcut(QKeySequence.StandardKey.Open)
+        self._open_folder_action.triggered.connect(self._open_folder)
+        self._file_menu.addAction(self._open_folder_action)
+
+        self._recent_menu = self._file_menu.addMenu("Recent Folders")
+        self._recent_menu.aboutToShow.connect(self._refresh_recent_menu)
+        self._refresh_recent_menu()
+
+        self._theme_menu = self._view_menu.addMenu("Theme")
+        self._theme_actions = {}
+        self._theme_action_group = QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+        for theme in _THEMES:
+            action = QAction(theme, self)
+            action.setCheckable(True)
+            action.setData(theme)
+            action.triggered.connect(self._on_theme_action_triggered)
+            self._theme_action_group.addAction(action)
+            self._theme_menu.addAction(action)
+            self._theme_actions[theme] = action
 
         nav_layout = QHBoxLayout()
         nav_layout.setContentsMargins(4, 4, 4, 4)
@@ -802,15 +1026,21 @@ class FolderBrowserWidget(QWidget):
         _add_recent_folder(start_dir)
         self._refresh_recent_combo()
         self._recent_combo.activated.connect(self._on_recent_selected)
-        nav_layout.addWidget(self._recent_combo)
+        self._recent_combo.hide()
+
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItems(_THEMES)
+        self._theme_combo.setCurrentText(_saved_theme())
+        self._theme_combo.setToolTip("Choose the file browser and launch-button theme")
+        self._theme_combo.setFixedWidth(90)
+        self._theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        self._theme_combo.hide()
 
         layout.addLayout(nav_layout)
 
         filter_layout = QHBoxLayout()
         filter_layout.setContentsMargins(4, 4, 4, 4)
         filter_layout.setSpacing(4)
-
-        from PySide6.QtWidgets import QLabel, QCheckBox
 
         filter_label = QLabel("Filter:")
         filter_layout.addWidget(filter_label)
@@ -1044,6 +1274,8 @@ class FolderBrowserWidget(QWidget):
         action_layout.addWidget(self._new_window_cb)
         self._action_bar.hide()
 
+        self._apply_theme(self._theme_combo.currentText())
+
         for attr, mode in self._DISPLAY_BUTTONS:
             btn = getattr(self, attr)
             btn.clicked.connect(partial(self._emit_display, mode))
@@ -1065,6 +1297,39 @@ class FolderBrowserWidget(QWidget):
         # the background so the browser opens instantly (these columns start
         # empty and are populated by worker threads).
         self._populate_file_info_async()
+
+    def _on_theme_changed(self, theme: str) -> None:
+        """Persist and immediately apply a newly selected browser theme."""
+        _save_theme(theme)
+        self._apply_theme(theme)
+        try:
+            from helicon.commands.display import _refresh_display_theme_windows
+
+            _refresh_display_theme_windows()
+        except Exception:
+            # Keep the browser usable when auxiliary display dependencies are
+            # unavailable or display.py is imported without the full Qt stack.
+            pass
+
+    def _on_theme_action_triggered(self, checked: bool = False) -> None:
+        """Apply the theme selected from the View menu."""
+        action = self.sender()
+        if isinstance(action, QAction):
+            theme = str(action.data())
+            self._theme_combo.setCurrentText(theme)
+
+    def _apply_theme(self, theme: str) -> None:
+        """Apply a theme to the file browser and its launch buttons."""
+        colors = _THEME_COLORS[_resolved_theme(theme)]
+        stylesheet = _browser_stylesheet(colors)
+        self.setStyleSheet(stylesheet)
+        self._tree.setStyleSheet(stylesheet)
+        self._recent_combo.setStyleSheet(stylesheet)
+        self._theme_combo.setStyleSheet(stylesheet)
+        for name, action in self._theme_actions.items():
+            action.setChecked(name == theme)
+        for attr, _mode in self._DISPLAY_BUTTONS:
+            getattr(self, attr).setStyleSheet("")
 
     def _on_double_clicked(self, index: QModelIndex) -> None:
         path = self._model.file_path(index)
@@ -1150,6 +1415,8 @@ class FolderBrowserWidget(QWidget):
             return modes
         if ext == ".bild":
             return ["text", "3dplot", "chimerax"]
+        if ext == ".pdf":
+            return ["slice"]
         if ext in _KNOWN_EXTENSIONS:
             return []
 
@@ -1224,10 +1491,8 @@ class FolderBrowserWidget(QWidget):
                 self._btn_chimerax.setEnabled(False)
                 # Explicit disabled styling so the button is unambiguously
                 # greyed-out regardless of the active Qt theme.
-                self._btn_chimerax.setStyleSheet(
-                    "QPushButton:disabled { color: #7a7a7a; "
-                    "background-color: #2b2b2b; border: 1px solid #444; }"
-                )
+                colors = _THEME_COLORS[_resolved_theme(_saved_theme())]
+                self._btn_chimerax.setStyleSheet(_disabled_button_stylesheet(colors))
                 self._btn_chimerax.setToolTip(
                     "ChimeraX not found. Install it from "
                     "https://www.cgl.ucsf.edu/chimerax/ or add it to your PATH."
@@ -1242,10 +1507,10 @@ class FolderBrowserWidget(QWidget):
             self._btn_stats.setToolTip(
                 "Estimate and display per-filament tilt, psi, and rot-angle variance"
             )
-        # Label the slice button by what it actually opens: a 2D image for
-        # image stacks, a 2D slice through a volume for volumes, otherwise a
-        # generic image slice.
-        if self._is_image_stack(str(path)):
+        # Label the slice button by the file/display type.
+        if Path(path).suffix.lower() == ".pdf":
+            self._btn_slice.setText("PDF")
+        elif self._is_image_stack(str(path)):
             self._btn_slice.setText("2D Image")
         elif self._is_volume(str(path)):
             self._btn_slice.setText("2D Slice")
@@ -1312,6 +1577,7 @@ class FolderBrowserWidget(QWidget):
         self._path_edit.setText(path)
         _add_recent_folder(path)
         self._refresh_recent_combo()
+        self._refresh_recent_menu()
         self._populate_file_info_async()
 
     def _refresh_recent_combo(self) -> None:
@@ -1321,9 +1587,36 @@ class FolderBrowserWidget(QWidget):
         self._recent_combo.setCurrentIndex(-1)
         self._recent_combo.blockSignals(False)
 
+    def _refresh_recent_menu(self) -> None:
+        """Populate the File menu's recent-folder submenu."""
+        self._recent_menu.clear()
+        recent = _get_recent_folders()
+        if not recent:
+            action = self._recent_menu.addAction("No recent folders")
+            action.setEnabled(False)
+            return
+        for path in recent:
+            action = self._recent_menu.addAction(path)
+            action.triggered.connect(partial(self._on_recent_path_selected, path))
+
+    def _on_recent_path_selected(self, path: str) -> None:
+        """Navigate to a folder selected from the File menu."""
+        if Path(path).is_dir():
+            self._navigate_to(path)
+
     def _on_recent_selected(self, index: int) -> None:
         path = self._recent_combo.itemText(index)
         if path and Path(path).is_dir():
+            self._navigate_to(path)
+
+    def _open_folder(self) -> None:
+        """Show a folder chooser and navigate to the selected directory."""
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Open Folder",
+            self._model._root_path,
+        )
+        if path:
             self._navigate_to(path)
 
     def _go_up(self) -> None:

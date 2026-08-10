@@ -94,6 +94,14 @@ from .lib.shared_state import project
 
 logger = logging.getLogger(__name__)
 
+_WEB_THEMES = {"Dark", "Light", "System"}
+
+
+def _web_theme(request: Request) -> str:
+    """Return the requested web-app theme, defaulting safely to Dark."""
+    theme = str(request.query_params.get("helicon_theme", "Dark"))
+    return theme if theme in _WEB_THEMES else "Dark"
+
 
 # ── Tab module imports ────────────────────────────────────────────
 # Each tab module provides:
@@ -116,7 +124,6 @@ from .tabs.where_is_my_class_tab import (
 
 from .tabs import hill_tab, hi3d_tab, denovo3d_tab, helical_projection_tab
 from .tabs import helical_pitch_tab, where_is_my_class_tab, helical_lattice_tab
-
 
 # ── Bookmark module map ─────────────────────────────────────────
 # Maps tab names to (module_prefix, tab_module) for constructing full
@@ -251,10 +258,30 @@ async def _helicon_navigate(request: Request):
 
 
 def app_ui(request: Request):
+    theme = _web_theme(request)
+    initial_theme = "dark" if theme in {"Dark", "System"} else "light"
     return ui.page_fillable(
         ui.head_content(
             ui.tags.title("Helicon"),
             ui.tags.link(rel="icon", type="image/png", href="icon.png"),
+            ui.tags.script(
+                f"""
+                (function() {{
+                    var requested = {theme!r};
+                    function applyTheme() {{
+                        var dark = requested === 'Dark' ||
+                            (requested === 'System' && window.matchMedia &&
+                             window.matchMedia('(prefers-color-scheme: dark)').matches);
+                        document.documentElement.dataset.heliconTheme = dark ? 'dark' : 'light';
+                    }}
+                    applyTheme();
+                    if (requested === 'System' && window.matchMedia) {{
+                        window.matchMedia('(prefers-color-scheme: dark)')
+                            .addEventListener('change', applyTheme);
+                    }}
+                }})();
+                """
+            ),
             ui.tags.script(
                 """
                 var _BOOKMARK_TABS = {
@@ -495,6 +522,10 @@ def app_ui(request: Request):
                         if (Object.keys(params).length === 0) parts.push('_values_');
                         parts.push('helicon_token=' + encodeURIComponent(tok));
                     }
+                    var currentTheme = new URLSearchParams(window.location.search).get('helicon_theme');
+                    if (currentTheme) {
+                        parts.push('helicon_theme=' + encodeURIComponent(currentTheme));
+                    }
                     var url = '?' + parts.join('&');
                     if (_DEBUG_BOOKMARK) console.log('[bookmark] final URL:', url);
                     window.history.replaceState(null, '', url);
@@ -526,7 +557,24 @@ def app_ui(request: Request):
             ),
         ),
         ui.tags.style(
-            """
+            f"""
+            :root {{
+                --helicon-page-bg: #2d2d2d;
+                --helicon-text: #cccccc;
+                --helicon-navbar-bg: #1f2937;
+            }}
+            :root[data-helicon-theme="light"] {{
+                --helicon-page-bg: #f4f4f4;
+                --helicon-text: #202020;
+                --helicon-navbar-bg: #d9e2f0;
+            }}
+            html, body, .bslib-page-fill {{
+                background-color: var(--helicon-page-bg) !important;
+                color: var(--helicon-text);
+            }}
+            .navbar, .navbar-default, .navbar-inverse {{
+                background-color: var(--helicon-navbar-bg) !important;
+            }}
             * { font-size: 10pt; padding: 0; border: 0; margin: 0; }
            aside { --_padding-icon: 10px; }
             html, body { height: 100%; margin: 0; padding: 0; overflow-x: hidden; }
@@ -570,7 +618,7 @@ def app_ui(request: Request):
                 style="color: inherit; text-decoration: none; font-weight: bold; font-size: 12pt;",
             ),
             navbar_options=ui.navbar_options(
-                underline=False, bg="#1f2937", theme="dark"
+                underline=False, bg="#1f2937", theme=initial_theme
             ),
             fillable=True,
             gap=0,

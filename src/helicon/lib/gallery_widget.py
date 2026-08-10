@@ -41,6 +41,92 @@ import math
 import numpy as np
 
 
+def _gallery_theme_colors() -> dict[str, str]:
+    """Return colors for custom-painted gallery widgets."""
+    from helicon.lib.file_browser import _THEME_COLORS, _resolved_theme, _saved_theme
+
+    resolved = _resolved_theme(_saved_theme())
+    colors = _THEME_COLORS[resolved]
+    if resolved == "Light":
+        return {
+            "background": "#ffffff",
+            "panel": colors["window"],
+            "text": colors["text"],
+            "input": colors["input"],
+            "border": colors["border"],
+            "accent": colors["accent"],
+            "muted": "#707070",
+            # QColor does not parse CSS rgba() strings reliably in Qt6;
+            # use 8-digit ARGB hex so the painter preserves the alpha.
+            "label_background": "#d2ffffff",
+            "scrollbar": "#d0d0d0",
+            "scrollbar_thumb": "#a0a0a0",
+        }
+    return {
+        "background": "#2d2d2d",
+        "panel": "#3a3a3a",
+        "text": "#e8e8e8",
+        "input": "#555555",
+        "border": "#777777",
+        "accent": "#5a82c4",
+        "muted": "#aaaaaa",
+        "label_background": "#8c000000",
+        "scrollbar": "#1f1f1f",
+        "scrollbar_thumb": "#5a5a5a",
+    }
+
+
+def _gallery_qss(colors: dict[str, str]) -> str:
+    """Return a theme-aware stylesheet for gallery controls."""
+    return f"""
+        QWidget {{
+            background-color: {colors["panel"]};
+            color: {colors["text"]};
+        }}
+        QLabel, QCheckBox, QRadioButton {{
+            color: {colors["text"]};
+        }}
+        QSlider::groove:horizontal {{
+            background: {colors["border"]};
+            height: 4px;
+        }}
+        QSlider::handle:horizontal {{
+            background: {colors["text"]};
+            width: 12px;
+            margin: -4px 0;
+            border-radius: 6px;
+        }}
+        QPushButton, QComboBox, QDoubleSpinBox {{
+            color: {colors["text"]};
+            background: {colors["input"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            padding: 3px;
+        }}
+        QPushButton:hover {{
+            background: {colors["accent"]};
+        }}
+        QComboBox QAbstractItemView {{
+            color: {colors["text"]};
+            background: {colors["input"]};
+        }}
+    """
+
+
+def _apply_gallery_theme(widget: QWidget) -> None:
+    """Refresh gallery child widgets after the shared theme changes."""
+    for child in [widget, *widget.findChildren(QWidget)]:
+        apply_theme = getattr(child, "_apply_display_theme", None)
+        if apply_theme is not None:
+            apply_theme()
+        else:
+            colors = _gallery_theme_colors()
+            palette = child.palette()
+            palette.setColor(child.backgroundRole(), QColor(colors["panel"]))
+            child.setPalette(palette)
+            child.update()
+
+
 class GalleryPanel:
     """
     Given the widget viewport size, a zoom ``scale``, and the per-image rendered
@@ -204,29 +290,32 @@ class _ControlPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        colors = _gallery_theme_colors()
         self.setFixedWidth(self.PANEL_WIDTH)
         self.setAutoFillBackground(True)
         palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor("#3a3a3a"))
+        palette.setColor(self.backgroundRole(), QColor(colors["panel"]))
         self.setPalette(palette)
+        self.setStyleSheet(_gallery_qss(colors))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        lbl_style = "color: #e0e0e0; font-size: 11px;"
+        lbl_style = f"color: {colors['text']}; font-size: 11px;"
         slider_style = (
-            "QSlider::groove:horizontal { background: #555; height: 4px; }"
-            "QSlider::handle:horizontal { background: #ccc; width: 12px; "
+            f"QSlider::groove:horizontal {{ background: {colors['border']}; height: 4px; }}"
+            f"QSlider::handle:horizontal {{ background: {colors['text']}; width: 12px; "
             "margin: -4px 0; border-radius: 6px; }"
         )
         btn_style = (
-            "QPushButton { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            f"QPushButton {{ color: {colors['text']}; background: {colors['input']}; "
+            f"border: 1px solid {colors['border']}; "
             "border-radius: 3px; padding: 4px; }"
-            "QPushButton:hover { background: #666; }"
+            f"QPushButton:hover {{ background: {colors['border']}; }}"
         )
-        radio_style = "QRadioButton { color: #e0e0e0; font-size: 11px; }"
-        chk_style = "QCheckBox { color: #e0e0e0; font-size: 11px; }"
+        radio_style = f"QRadioButton {{ color: {colors['text']}; font-size: 11px; }}"
+        chk_style = f"QCheckBox {{ color: {colors['text']}; font-size: 11px; }}"
 
         # --- Brightness ---
         root.addWidget(self._label("Brightness", lbl_style))
@@ -306,7 +395,7 @@ class _ControlPanel(QWidget):
         root.addSpacing(6)
         self._z_thickness_sep = QFrame()
         self._z_thickness_sep.setFrameShape(QFrame.HLine)
-        self._z_thickness_sep.setStyleSheet("color: #555;")
+        self._z_thickness_sep.setStyleSheet(f"color: {colors['border']};")
         self._z_thickness_sep.setVisible(False)
         root.addWidget(self._z_thickness_sep)
 
@@ -317,7 +406,8 @@ class _ControlPanel(QWidget):
         self._z_thickness_spin.setSingleStep(1.0)
         self._z_thickness_spin.setValue(0.0)
         self._z_thickness_spin.setStyleSheet(
-            "QDoubleSpinBox { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            f"QDoubleSpinBox {{ color: {colors['text']}; background: {colors['input']}; "
+            f"border: 1px solid {colors['border']}; "
             "border-radius: 3px; padding: 3px; }"
         )
         self._z_thickness_spin.setSuffix(" Å")
@@ -330,15 +420,17 @@ class _ControlPanel(QWidget):
         root.addSpacing(6)
         self._sort_sep = QFrame()
         self._sort_sep.setFrameShape(QFrame.HLine)
-        self._sort_sep.setStyleSheet("color: #555;")
+        self._sort_sep.setStyleSheet(f"color: {colors['border']};")
         self._sort_sep.setVisible(False)
         root.addWidget(self._sort_sep)
 
         combo_style = (
-            "QComboBox { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            f"QComboBox {{ color: {colors['text']}; background: {colors['input']}; "
+            f"border: 1px solid {colors['border']}; "
             "border-radius: 3px; padding: 3px; font-size: 11px; }"
             "QComboBox::drop-down { border: none; }"
-            "QComboBox QAbstractItemView { color: #e0e0e0; background: #3a3a3a; }"
+            f"QComboBox QAbstractItemView {{ color: {colors['text']}; "
+            f"background: {colors['panel']}; }}"
         )
         self._sort_column_combo = QComboBox()
         self._sort_column_combo.setStyleSheet(combo_style)
@@ -357,6 +449,17 @@ class _ControlPanel(QWidget):
         root.addWidget(self._sort_reverse_chk)
 
         root.addStretch(1)
+
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to the gallery adjustment controls."""
+        colors = _gallery_theme_colors()
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor(colors["panel"]))
+        self.setPalette(palette)
+        self.setStyleSheet(_gallery_qss(colors))
+        for child in self.findChildren(QWidget):
+            child.setStyleSheet("")
+        self.update()
 
     def show_z_thickness(self, visible: bool = True, maximum: float = 99999.0) -> None:
         self._z_thickness_sep.setVisible(visible)
@@ -421,13 +524,23 @@ class _HistogramWidget(QWidget):
         self.setFixedHeight(self.HIST_HEIGHT)
         self.setAutoFillBackground(True)
         palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor("#2d2d2d"))
+        palette.setColor(
+            self.backgroundRole(), QColor(_gallery_theme_colors()["background"])
+        )
         self.setPalette(palette)
         self._bins: np.ndarray | None = None
         self._brightness = 0.0
         self._contrast = 1.0
         self._gamma = 1.0
         self._log_transform = False
+
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to the histogram canvas."""
+        colors = _gallery_theme_colors()
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor(colors["background"]))
+        self.setPalette(palette)
+        self.update()
 
     def update_histogram(
         self,
@@ -482,7 +595,8 @@ class _HistogramWidget(QWidget):
         from PySide6.QtCore import QPointF
 
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#2d2d2d"))
+        colors = _gallery_theme_colors()
+        painter.fillRect(self.rect(), QColor(colors["background"]))
         if self._bins is None or self._bins.sum() == 0:
             painter.end()
             return
@@ -494,7 +608,7 @@ class _HistogramWidget(QWidget):
         max_bin = max(1, int(self._bins.max()))
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(120, 120, 120))
+        painter.setBrush(QColor(colors["muted"]))
         for i in range(256):
             bx = margin + int(i * draw_w / 255)
             bw = max(1, int(draw_w / 256))
@@ -509,7 +623,7 @@ class _HistogramWidget(QWidget):
             px = margin + i * draw_w / 255.0
             py = margin + draw_h - y_vals[i] * draw_h
             pts.append(QPointF(px, py))
-        painter.setPen(QColor(230, 230, 230))
+        painter.setPen(QColor(colors["text"]))
         painter.setBrush(Qt.NoBrush)
         painter.drawPolyline(pts)
 
@@ -543,7 +657,9 @@ class ImageGalleryWidget(QWidget):
         self.setContentsMargins(0, 0, 0, 0)
         self.setAutoFillBackground(True)
         palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor("#2d2d2d"))
+        palette.setColor(
+            self.backgroundRole(), QColor(_gallery_theme_colors()["background"])
+        )
         self.setPalette(palette)
 
         self._read_fn = None
@@ -572,6 +688,14 @@ class ImageGalleryWidget(QWidget):
         self._show_labels = True
         self._adjust_scope = "all"
         self._selected_idx: int | None = None
+
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to the thumbnail canvas."""
+        colors = _gallery_theme_colors()
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor(colors["background"]))
+        self.setPalette(palette)
+        self.update()
 
     # --------------------------------------------------------------- setters
     def set_brightness(self, val: float) -> None:
@@ -811,9 +935,11 @@ class ImageGalleryWidget(QWidget):
         # screen.
         self._coords = {}
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#2d2d2d"))
+        colors = _gallery_theme_colors()
+        painter.fillRect(self.rect(), QColor(colors["background"]))
 
         if not self.has_data():
+            painter.end()
             return
 
         size = self.size()
@@ -823,6 +949,7 @@ class ImageGalleryWidget(QWidget):
             canvas_w, size.height(), self._scale, 0, self._scroll_y
         )
         if res is None:
+            painter.end()
             return
         rowstart, visiblerows, visiblecols = res
 
@@ -834,8 +961,8 @@ class ImageGalleryWidget(QWidget):
         label_font = painter.font()
         label_font.setPixelSize(max(9, min(13, int(self._panel.rendered_h * 0.28))))
         painter.setFont(label_font)
-        label_color = QColor("#e8e8e8")
-        label_bg = QColor(0, 0, 0, 140)
+        label_color = QColor(colors["text"])
+        label_bg = QColor(colors["label_background"])
 
         for r in range(rowstart, rowstart + visiblerows + 1):
             row_count = min(visiblecols, max(0, self._n - r * visiblecols))
@@ -887,10 +1014,10 @@ class ImageGalleryWidget(QWidget):
 
         if needs_sb:
             track = self._scrollbar_rect()
-            painter.fillRect(track, QColor("#1f1f1f"))
+            painter.fillRect(track, QColor(colors["scrollbar"]))
             thumb_rect = self._scrollbar_thumb_rect()
             if thumb_rect is not None:
-                painter.fillRect(thumb_rect, QColor("#5a5a5a"))
+                painter.fillRect(thumb_rect, QColor(colors["scrollbar_thumb"]))
 
     # ------------------------------------------------------------- interaction
     def wheelEvent(self, event) -> None:
@@ -1064,7 +1191,9 @@ class _SliceView(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAutoFillBackground(True)
         pal = self.palette()
-        pal.setColor(self.backgroundRole(), _DARK_BG)
+        pal.setColor(
+            self.backgroundRole(), QColor(_gallery_theme_colors()["background"])
+        )
         self.setPalette(pal)
 
         self._image: np.ndarray | None = None
@@ -1083,6 +1212,15 @@ class _SliceView(QWidget):
         self._drag_last: QPoint | None = None
         self._border_color = QColor(255, 255, 255)
         self._axis_label = axis_label
+
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to this custom-painted slice view."""
+        colors = _gallery_theme_colors()
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(colors["background"]))
+        self.setPalette(pal)
+        self._border_color = QColor(colors["text"])
+        self.update()
 
     def set_image(self, data: np.ndarray | None) -> None:
         self._image = data
@@ -1166,7 +1304,8 @@ class _SliceView(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), _DARK_BG)
+        colors = _gallery_theme_colors()
+        painter.fillRect(self.rect(), QColor(colors["background"]))
 
         if self._image is None or self._image.size == 0:
             painter.end()
@@ -1179,8 +1318,11 @@ class _SliceView(QWidget):
         oy = (h - ih * scale) / 2 + self._pan_y
 
         arr = self._apply_bcg(self._image)
-        gray = (arr * 255).astype(np.uint8)
-        qimg = QImage(gray.data, iw, ih, iw, QImage.Format_Grayscale8)
+        # QImage requires a contiguous, stable buffer. This is especially
+        # important for the transposed X slice, which is a NumPy view.
+        gray = np.ascontiguousarray((arr * 255).astype(np.uint8))
+        qimg = QImage(gray.data, iw, ih, gray.strides[0], QImage.Format_Grayscale8)
+        qimg = qimg.copy()
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.drawImage(
             QRectF(ox, oy, iw * scale, ih * scale), qimg, QRectF(0, 0, iw, ih)
@@ -1211,7 +1353,7 @@ class _SliceView(QWidget):
         painter.drawRect(0, 0, w - 1, h - 1)
 
         if self._axis_label:
-            painter.setPen(QColor(255, 255, 255))
+            painter.setPen(QColor(colors["text"]))
             painter.setFont(QFont("Arial", 14, QFont.Bold))
             painter.drawText(6, 18, self._axis_label)
 
@@ -1253,27 +1395,30 @@ class _ControlBar(QWidget):
 
     def __init__(self, nx: int, ny: int, nz: int, parent=None):
         super().__init__(parent)
+        colors = _gallery_theme_colors()
         self.setMinimumWidth(120)
         self.setAutoFillBackground(True)
         pal = self.palette()
-        pal.setColor(self.backgroundRole(), QColor("#333333"))
+        pal.setColor(self.backgroundRole(), QColor(colors["panel"]))
         self.setPalette(pal)
+        self.setStyleSheet(_gallery_qss(colors))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        lbl = "QLabel { color: #ffffff; font-size: 11px; }"
+        lbl = f"QLabel {{ color: {colors['text']}; font-size: 11px; }}"
         sld = (
-            "QSlider::groove:horizontal { background: #555; height: 4px; }"
-            "QSlider::handle:horizontal { background: #aaa; width: 12px; "
+            f"QSlider::groove:horizontal {{ background: {colors['border']}; height: 4px; }}"
+            f"QSlider::handle:horizontal {{ background: {colors['text']}; width: 12px; "
             "margin: -4px 0; border-radius: 3px; }"
         )
-        val_lbl = "QLabel { color: #ffffff; font-size: 10px; }"
+        val_lbl = f"QLabel {{ color: {colors['text']}; font-size: 10px; }}"
         btn = (
-            "QPushButton { color: #e0e0e0; background: #555; border: 1px solid #777; "
+            f"QPushButton {{ color: {colors['text']}; background: {colors['input']}; "
+            f"border: 1px solid {colors['border']}; "
             "border-radius: 3px; padding: 4px; font-size: 11px; }"
-            "QPushButton:hover { background: #666; }"
+            f"QPushButton:hover {{ background: {colors['accent']}; }}"
         )
 
         def _label(text):
@@ -1352,6 +1497,17 @@ class _ControlBar(QWidget):
         )
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
 
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to the orthogonal-view controls."""
+        colors = _gallery_theme_colors()
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(colors["panel"]))
+        self.setPalette(pal)
+        self.setStyleSheet(_gallery_qss(colors))
+        for child in self.findChildren(QWidget):
+            child.setStyleSheet("")
+        self.update()
+
     @staticmethod
     def _slider_to_zoom(v: int) -> float:
         return 10.0 ** (2.0 * v / 1000.0 - 1.0)
@@ -1403,23 +1559,25 @@ class _BCGPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        colors = _gallery_theme_colors()
         self.setFixedWidth(180)
         self.setAutoFillBackground(True)
         pal = self.palette()
-        pal.setColor(self.backgroundRole(), QColor("#333333"))
+        pal.setColor(self.backgroundRole(), QColor(colors["panel"]))
         self.setPalette(pal)
+        self.setStyleSheet(_gallery_qss(colors))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        lbl = "QLabel { color: #ffffff; font-size: 11px; }"
+        lbl = f"QLabel {{ color: {colors['text']}; font-size: 11px; }}"
         sld = (
-            "QSlider::groove:horizontal { background: #555; height: 4px; }"
-            "QSlider::handle:horizontal { background: #aaa; width: 12px; "
+            f"QSlider::groove:horizontal {{ background: {colors['border']}; height: 4px; }}"
+            f"QSlider::handle:horizontal {{ background: {colors['text']}; width: 12px; "
             "margin: -4px 0; border-radius: 3px; }"
         )
-        val_lbl = "QLabel { color: #ffffff; font-size: 10px; }"
+        val_lbl = f"QLabel {{ color: {colors['text']}; font-size: 10px; }}"
 
         def _label(text):
             return QLabel(text)
@@ -1466,6 +1624,17 @@ class _BCGPanel(QWidget):
         self._c_slider.valueChanged.connect(self._emit)
         self._g_slider.valueChanged.connect(self._emit)
 
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to the BCG controls."""
+        colors = _gallery_theme_colors()
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(colors["panel"]))
+        self.setPalette(pal)
+        self.setStyleSheet(_gallery_qss(colors))
+        for child in self.findChildren(QWidget):
+            child.setStyleSheet("")
+        self.update()
+
     def _emit(self) -> None:
         self.bcg_changed.emit(*self.get_bcg())
 
@@ -1480,8 +1649,9 @@ class _BCGPanel(QWidget):
 class OrthogonalViewerWidget(QWidget):
     """Interactive three-panel orthogonal slice viewer for 3D volumes.
 
-    Displays XY (bottom-left), XZ (top-left), and YZ (top-right) slices
-    with linked navigation, pan, zoom, cross-hair cursor, and movie mode.
+    Displays Z, X, and Y slices in that order. The Z panel has X horizontal
+    and Y vertical axes; the X panel has Z horizontal and Y vertical axes;
+    and the Y panel has X horizontal and Z vertical axes.
 
     Parameters
     ----------
@@ -1518,14 +1688,24 @@ class OrthogonalViewerWidget(QWidget):
         self._setup_ui()
         self._sync_views(source_idx=-1)
 
+    def _apply_display_theme(self) -> None:
+        """Apply the current theme to all orthogonal-view components."""
+        colors = _gallery_theme_colors()
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor(colors["panel"]))
+        self.setPalette(palette)
+        for view in (self._xy_view, self._xz_view, self._yz_view, self._ctrl):
+            view._apply_display_theme()
+        self.update()
+
     def _setup_ui(self) -> None:
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self._xy_view = _SliceView(axis_label="Z")
-        self._xz_view = _SliceView(axis_label="Y")
-        self._yz_view = _SliceView(axis_label="X")
+        self._xz_view = _SliceView(axis_label="X")
+        self._yz_view = _SliceView(axis_label="Y")
 
         self._xy_view.set_border_color(QColor(0, 200, 0))
         self._xz_view.set_border_color(QColor(200, 0, 0))
@@ -1533,9 +1713,10 @@ class OrthogonalViewerWidget(QWidget):
 
         self._ctrl = _ControlBar(self._nx, self._ny, self._nz)
 
-        layout.addWidget(self._xz_view, 0, 0)
-        layout.addWidget(self._yz_view, 0, 1)
-        layout.addWidget(self._xy_view, 1, 0)
+        # Arrange the three orthogonal panels in Z, X, Y order.
+        layout.addWidget(self._xy_view, 0, 0)
+        layout.addWidget(self._xz_view, 0, 1)
+        layout.addWidget(self._yz_view, 1, 0)
         layout.addWidget(self._ctrl, 1, 1)
 
         layout.setColumnStretch(0, 1)
@@ -1577,19 +1758,23 @@ class OrthogonalViewerWidget(QWidget):
     def _sync_views(self, source_idx: int = -1) -> None:
         x, y, z = self._pos
 
+        # Z panel: X horizontal, Y vertical.
         self._xy_view.set_image(self._get_slice(0, z))
         self._xy_view.set_crosshair(x, y, _COLOR_X, _COLOR_Y)
 
-        self._xz_view.set_image(self._get_slice(1, y))
-        self._xz_view.set_crosshair(x, z, _COLOR_X, _COLOR_Z)
+        # X panel: Z horizontal, Y vertical. The native (Z, Y) slice is
+        # transposed so that its columns are Z and rows are Y.
+        self._xz_view.set_image(self._get_slice(2, x).T)
+        self._xz_view.set_crosshair(z, y, _COLOR_Z, _COLOR_Y)
 
-        self._yz_view.set_image(self._get_slice(2, x))
-        self._yz_view.set_crosshair(y, z, _COLOR_Y, _COLOR_Z)
+        # Y panel: X horizontal, Z vertical.
+        self._yz_view.set_image(self._get_slice(1, y))
+        self._yz_view.set_crosshair(x, z, _COLOR_X, _COLOR_Z)
 
         self._ctrl.set_position(x, y, z)
         self.view_changed.emit()
 
-    _MOVIE_AXES = [2, 1, 0]
+    _MOVIE_AXES = [2, 0, 1]
 
     def _on_click(self, panel_idx: int, dx: float, dy: float) -> None:
         self._selected_panel_idx = panel_idx
@@ -1598,10 +1783,10 @@ class OrthogonalViewerWidget(QWidget):
             self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
             self._pos[1] = int(np.clip(round(dy), 0, self._ny - 1))
         elif panel_idx == 1:
-            self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
-            self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
+            self._pos[2] = int(np.clip(round(dx), 0, self._nz - 1))
+            self._pos[1] = int(np.clip(round(dy), 0, self._ny - 1))
         else:
-            self._pos[1] = int(np.clip(round(dx), 0, self._ny - 1))
+            self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
             self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
         self._sync_views(source_idx=panel_idx)
 

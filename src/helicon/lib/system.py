@@ -162,12 +162,9 @@ def has_napari() -> bool:
     bool
         True if napari can be imported, False otherwise.
     """
-    try:
-        import napari
+    import importlib.util
 
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("napari") is not None
 
 
 def has_curvelet_fdct() -> bool:

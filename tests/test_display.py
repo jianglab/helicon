@@ -27,6 +27,15 @@ def qapp():
 
 
 class TestDisplayArgs(object):
+    def test_application_identity_is_helicon(self, qapp):
+        display._set_application_identity(qapp)
+        assert qapp.applicationName() == "Helicon"
+        assert qapp.applicationDisplayName() == "Helicon"
+
+    def test_qt_argv_uses_helicon_as_program_name(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["python3.14", "display", "/tmp"])
+        assert display._qt_argv() == ["Helicon", "display", "/tmp"]
+
     def test_add_args_has_folder_argument(self):
         parser = argparse.ArgumentParser()
         display.add_args(parser)
@@ -89,6 +98,47 @@ class TestDisplayArgs(object):
             "/job/run_data.helical_angle_variance.pdf",
             mode="slice",
         )
+
+    def test_napari_theme_maps_saved_theme(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        try:
+            for saved, expected in (
+                ("Dark", "dark"),
+                ("Light", "light"),
+                ("System", "system"),
+            ):
+                settings.setValue("theme", saved)
+                assert display._napari_display_theme() == expected
+        finally:
+            settings.remove("theme")
+
+    def test_refresh_napari_theme_updates_open_viewers(self, monkeypatch, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        viewer = MagicMock()
+        monkeypatch.setattr(display._napari, "alive", lambda: [viewer])
+        settings.setValue("theme", "Light")
+        try:
+            display._refresh_napari_theme()
+            assert viewer.theme == "light"
+            assert viewer.background_color == "#ffffff"
+        finally:
+            settings.remove("theme")
+
+    def test_napari_canvas_background_maps_saved_theme(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        try:
+            settings.setValue("theme", "Dark")
+            assert display._napari_canvas_background() == "#202020"
+            settings.setValue("theme", "Light")
+            assert display._napari_canvas_background() == "#ffffff"
+        finally:
+            settings.remove("theme")
 
     def test_helical_angle_stats_paths_use_writable_job_directory(self, tmp_path):
         input_star = tmp_path / "run_data.star"
@@ -290,6 +340,100 @@ class TestFscIterations(object):
                 False,
             ]
             assert window._checked_paths() == [iterations[1][0]]
+        finally:
+            window.close()
+
+    def test_fsc_plot_canvas_follows_saved_theme(self, qapp, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        path = tmp_path / "run_it001_model.star"
+        curves = {
+            path: [
+                (
+                    np.array([0.1, 0.2]),
+                    np.array([0.8, 0.2]),
+                    "Class 1",
+                    None,
+                )
+            ]
+        }
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Light")
+        window = display._FscPlotWindow(
+            [(path, 1)],
+            curves,
+            default_path=path,
+            is_class3d=False,
+        )
+        try:
+            assert window.plot_widget.backgroundBrush().color().name() == "#ffffff"
+            assert (
+                window.plot_widget.getPlotItem()
+                .getAxis("bottom")
+                .textPen()
+                .color()
+                .name()
+                == "#202020"
+            )
+        finally:
+            window.close()
+            settings.remove("theme")
+
+    def test_fsc_controls_follow_saved_theme(self, qapp, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        path = tmp_path / "run_it001_model.star"
+        curves = {
+            path: [
+                (
+                    np.array([0.1, 0.2]),
+                    np.array([0.8, 0.2]),
+                    "Class 1",
+                    None,
+                )
+            ]
+        }
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Dark")
+        window = display._FscPlotWindow(
+            [(path, 1)],
+            curves,
+            default_path=path,
+            is_class3d=False,
+        )
+        try:
+            assert window.palette().window().color().name() == "#2d2d2d"
+            assert (
+                window._iter_select_all_btn.palette().button().color().name()
+                == "#3c3c3c"
+            )
+        finally:
+            window.close()
+            settings.remove("theme")
+
+    def test_fsc_button_width_fits_all_and_none_labels(self, qapp, tmp_path):
+        path = tmp_path / "run_it001_model.star"
+        curves = {
+            path: [
+                (
+                    np.array([0.1, 0.2]),
+                    np.array([0.8, 0.2]),
+                    "Class 1",
+                    None,
+                )
+            ]
+        }
+        window = display._FscPlotWindow(
+            [(path, 1)],
+            curves,
+            default_path=path,
+            is_class3d=False,
+        )
+        try:
+            assert (
+                window._iter_select_all_btn.width()
+                >= window._iter_unselect_all_btn.fontMetrics().horizontalAdvance("none")
+            )
         finally:
             window.close()
 
@@ -974,13 +1118,87 @@ class TestFscIterations(object):
 
 
 class TestDisplayMain(object):
-    @patch("helicon.has_napari", return_value=False)
-    def test_main_raises_error_when_napari_not_installed(self, mock_has_napari):
+    def test_has_napari_does_not_import_napari(self, monkeypatch):
+        import importlib.util
+
+        monkeypatch.delitem(sys.modules, "napari", raising=False)
+        with patch.object(importlib.util, "find_spec", return_value=None):
+            assert helicon.has_napari() is False
+        assert "napari" not in sys.modules
+
+    @patch.object(display, "_prepare_process_identity")
+    @patch.object(display, "_set_application_identity")
+    @patch.object(display, "_install_dock_save_hook")
+    @patch.object(display, "_restore_geometry")
+    @patch.object(display, "FolderBrowserWidget")
+    @patch("PySide6.QtWidgets.QApplication.exec", return_value=0)
+    def test_main_starts_without_importing_napari(
+        self,
+        mock_app_exec,
+        mock_widget_class,
+        mock_restore,
+        mock_dock_save_hook,
+        mock_set_identity,
+        mock_prepare_identity,
+    ):
+        mock_widget = MagicMock()
+        mock_widget_class.return_value = mock_widget
         parser = argparse.ArgumentParser()
         display.add_args(parser)
         args = parser.parse_args([])
-        with pytest.raises(HeliconDependencyError):
+        with patch.dict(sys.modules, {"napari": None}):
             display.main(args)
+        mock_app_exec.assert_called_once()
+        mock_widget_class.assert_called_once_with(start_dir=os.getcwd())
+
+    @patch.object(display, "_prepare_process_identity")
+    @patch.object(display, "_set_application_identity")
+    @patch.object(display, "_install_dock_save_hook")
+    @patch.object(display, "_restore_geometry")
+    @patch.object(display, "FolderBrowserWidget")
+    @patch("PySide6.QtWidgets.QApplication.exec", return_value=0)
+    def test_main_skips_macos_menu_tricks_on_other_platforms(
+        self,
+        mock_app_exec,
+        mock_widget_class,
+        mock_restore,
+        mock_dock_save_hook,
+        mock_set_identity,
+        mock_prepare_identity,
+        monkeypatch,
+    ):
+        """Non-mac platforms must never run the macOS menu/activation code."""
+        monkeypatch.setattr(display.sys, "platform", "linux")
+        mock_widget = MagicMock()
+        mock_widget_class.return_value = mock_widget
+        parser = argparse.ArgumentParser()
+        display.add_args(parser)
+        args = parser.parse_args([])
+        with (
+            patch.object(display, "_set_macos_app_identity") as mock_identity,
+            patch.object(display, "_macos_menu_debug_report") as mock_debug,
+            patch.object(display, "_force_macos_menu_realization") as mock_force,
+        ):
+            with patch.dict(sys.modules, {"napari": None}):
+                display.main(args)
+        mock_identity.assert_not_called()
+        mock_debug.assert_not_called()
+        mock_force.assert_not_called()
+        mock_app_exec.assert_called_once()
+
+    def test_force_macos_menu_realization_noop_on_other_platforms(self, monkeypatch):
+        """The activation helper must be inert when not on macOS."""
+        monkeypatch.setattr(display.sys, "platform", "linux")
+        with (
+            patch.object(display, "_macos_ns_app") as mock_ns_app,
+            patch.object(display, "_macos_resign_active") as mock_resign,
+            patch.object(display, "_macos_activate_and_front") as mock_front,
+        ):
+            result = display._force_macos_menu_realization(full_cycle=True)
+        assert result is None
+        mock_ns_app.assert_not_called()
+        mock_resign.assert_not_called()
+        mock_front.assert_not_called()
 
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
@@ -1002,8 +1220,10 @@ class TestDisplayMain(object):
     @patch.object(display, "_restore_geometry")
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
+    @patch("PySide6.QtWidgets.QApplication.exec", return_value=0)
     def test_main_creates_dock_without_viewer(
         self,
+        mock_app_exec,
         mock_widget_class,
         mock_has_napari,
         mock_restore,
@@ -1024,13 +1244,16 @@ class TestDisplayMain(object):
             mock_widget_class.assert_called_once_with(start_dir=os.getcwd())
             mock_widget.setWindowFlags.assert_called_once()
             mock_widget.show.assert_called_once()
-            mock_napari.run.assert_called_once()
+            mock_app_exec.assert_called_once()
         finally:
             del sys.modules["napari"]
 
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
-    def test_main_restores_and_saves_geometry(self, mock_widget_class, mock_has_napari):
+    @patch("PySide6.QtWidgets.QApplication.exec", return_value=0)
+    def test_main_restores_and_saves_geometry(
+        self, mock_app_exec, mock_widget_class, mock_has_napari
+    ):
         mock_napari = MagicMock()
         mock_widget = MagicMock()
         mock_widget_class.return_value = mock_widget
@@ -1056,8 +1279,10 @@ class TestDisplayMain(object):
     @patch.object(display, "_restore_geometry")
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
+    @patch("PySide6.QtWidgets.QApplication.exec", return_value=0)
     def test_main_uses_provided_folder(
         self,
+        mock_app_exec,
         mock_widget_class,
         mock_has_napari,
         mock_restore,
@@ -1082,8 +1307,10 @@ class TestDisplayMain(object):
     @patch.object(display, "_restore_geometry")
     @patch("helicon.has_napari", return_value=True)
     @patch.object(display, "FolderBrowserWidget")
+    @patch("PySide6.QtWidgets.QApplication.exec", return_value=0)
     def test_main_connects_file_selected_signal(
         self,
+        mock_app_exec,
         mock_widget_class,
         mock_has_napari,
         mock_restore,
@@ -1575,6 +1802,120 @@ class TestAutoContrast(object):
 
 
 class TestFolderBrowser(object):
+    def test_text_display_window_uses_saved_theme(self, tmp_path, qapp):
+        from PySide6.QtCore import QSettings
+
+        text_path = tmp_path / "example.txt"
+        text_path.write_text("hello")
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Light")
+        try:
+            assert "background-color: #f4f4f4" in display._display_theme_stylesheet()
+            palette = display._display_theme_palette()
+            assert palette.window().color().name() == "#f4f4f4"
+        finally:
+            settings.remove("theme")
+
+    def test_launched_qt_display_styles_follow_saved_theme(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Light")
+        try:
+            stylesheet = display._display_theme_stylesheet()
+            assert "background-color: #f4f4f4" in stylesheet
+            assert "color: #202020" in stylesheet
+        finally:
+            settings.remove("theme")
+
+    def test_browser_theme_is_persisted(self, tmp_path, qapp):
+        from PySide6.QtCore import QSettings
+        from helicon.lib.file_browser import FolderBrowserWidget, _saved_theme
+
+        settings = QSettings("helicon", "display")
+        settings.remove("theme")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._theme_combo.currentText() == "System"
+
+        widget._theme_combo.setCurrentText("Light")
+        assert _saved_theme() == "Light"
+
+        widget.close()
+        restored = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert restored._theme_combo.currentText() == "Light"
+        settings.remove("theme")
+
+    def test_browser_has_file_and_view_menus(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        assert [action.text() for action in widget._menu_bar.actions()] == [
+            "File",
+            "View",
+        ]
+        assert widget._file_menu.title() == "File"
+        assert widget._view_menu.title() == "View"
+        assert widget._open_folder_action.text() == "Open Folder…"
+        assert widget._theme_menu.title() == "Theme"
+        assert set(widget._theme_actions) == {"Dark", "Light", "System"}
+
+    def test_theme_menu_action_persists_selection(self, tmp_path, qapp):
+        from PySide6.QtCore import QSettings
+        from helicon.lib.file_browser import FolderBrowserWidget, _saved_theme
+
+        settings = QSettings("helicon", "display")
+        settings.remove("theme")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        try:
+            widget._theme_actions["Light"].trigger()
+            assert _saved_theme() == "Light"
+            assert widget._theme_actions["Light"].isChecked()
+            assert not widget._theme_actions["Dark"].isChecked()
+        finally:
+            settings.remove("theme")
+
+    def test_recent_folders_are_available_from_file_menu(self, tmp_path, qapp):
+        from PySide6.QtCore import QSettings
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        recent = tmp_path / "recent"
+        recent.mkdir()
+        settings = QSettings("helicon", "display")
+        settings.setValue("recent_folders", [str(recent)])
+        try:
+            widget = FolderBrowserWidget(start_dir=str(tmp_path))
+            actions = widget._recent_menu.actions()
+            assert [action.text() for action in actions] == [str(recent)]
+        finally:
+            settings.remove("recent_folders")
+
+    def test_open_folder_action_navigates_to_selected_directory(self, tmp_path, qapp):
+        from PySide6.QtWidgets import QFileDialog
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        selected = tmp_path / "selected"
+        selected.mkdir()
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        with patch.object(
+            QFileDialog,
+            "getExistingDirectory",
+            return_value=str(selected),
+        ):
+            widget._open_folder_action.trigger()
+
+        assert widget._model._root_path == str(selected)
+
+    def test_invalid_browser_theme_falls_back_to_system(self, qapp):
+        from PySide6.QtCore import QSettings
+        from helicon.lib.file_browser import _saved_theme
+
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "not-a-theme")
+        assert _saved_theme() == "System"
+        settings.remove("theme")
+
     def test_format_size_bytes(self):
         from helicon.lib.file_browser import _format_size
 
@@ -1806,6 +2147,20 @@ class TestFolderBrowser(object):
         select("volume.mrc")
         assert widget._btn_slice.text() == "2D Slice"
 
+    def test_pdf_button_label(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+        from PySide6.QtCore import QItemSelectionModel
+
+        pdf_file = tmp_path / "figure.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4\nplaceholder")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        index = widget._model.index(0, 0)
+        widget._tree.selectionModel().select(
+            index, QItemSelectionModel.Select | QItemSelectionModel.Clear
+        )
+
+        assert widget._btn_slice.text() == "PDF"
+
     def test_chimerax_button_shown_for_volumes(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
         from PySide6.QtCore import QItemSelectionModel
@@ -1969,6 +2324,15 @@ class TestFolderBrowser(object):
         )
         # EPS is a known type with no display modes (no button shown).
         assert widget._display_modes_for(str(tmp_path / "fig.eps")) == []
+
+    def test_pdf_has_image_slice_mode(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        pdf_file = tmp_path / "figure.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4\nplaceholder")
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+
+        assert widget._display_modes_for(str(pdf_file)) == ["slice"]
 
     def test_display_modes_class2d_model_star(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
@@ -2625,16 +2989,37 @@ class TestOrthogonalViewer:
 
     def test_orthogonal_viewer_widget_instantiates(self, qapp):
         import numpy as np
+        from PySide6.QtCore import QSettings
         from helicon.lib.gallery_widget import OrthogonalViewerWidget
 
         vol = np.random.rand(8, 10, 12).astype(np.float32)
-        w = OrthogonalViewerWidget(vol, apix=2.0, name="test.mrc")
-        assert w is not None
-        assert w._nx == 12
-        assert w._ny == 10
-        assert w._nz == 8
-        assert w._pos == [6, 5, 4]
-        w.deleteLater()
+        settings = QSettings("helicon", "display")
+        old_theme = settings.value("theme", None)
+        try:
+            settings.setValue("theme", "Light")
+            w = OrthogonalViewerWidget(vol, apix=2.0, name="test.mrc")
+            assert w is not None
+            assert w._nx == 12
+            assert w._ny == 10
+            assert w._nz == 8
+            assert w._pos == [6, 5, 4]
+            assert (
+                w._xy_view.palette().color(w._xy_view.backgroundRole()).name()
+                == "#ffffff"
+            )
+            assert w._ctrl.palette().color(w._ctrl.backgroundRole()).name() != "#333333"
+            settings.setValue("theme", "Dark")
+            w._apply_display_theme()
+            assert (
+                w._xy_view.palette().color(w._xy_view.backgroundRole()).name()
+                == "#2d2d2d"
+            )
+            w.deleteLater()
+        finally:
+            if old_theme is None:
+                settings.remove("theme")
+            else:
+                settings.setValue("theme", old_theme)
 
     def test_orthogonal_viewer_get_slice(self, qapp):
         import numpy as np
@@ -2650,6 +3035,26 @@ class TestOrthogonalViewer:
         np.testing.assert_array_equal(sl, vol[:, :, 3])
         w.deleteLater()
 
+    def test_orthogonal_viewer_panel_order_is_z_x_y(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        w = OrthogonalViewerWidget(np.zeros((8, 8, 8), dtype=np.float32))
+        layout = w.layout()
+        positions = {}
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            row, column, row_span, column_span = layout.getItemPosition(i)
+            positions[item.widget()] = (row, column, row_span, column_span)
+
+        assert positions[w._xy_view][:2] == (0, 0)  # Z
+        assert positions[w._xz_view][:2] == (0, 1)  # X
+        assert positions[w._yz_view][:2] == (1, 0)  # Y
+        assert w._xy_view._axis_label == "Z"
+        assert w._xz_view._axis_label == "X"
+        assert w._yz_view._axis_label == "Y"
+        w.deleteLater()
+
     def test_orthogonal_viewer_click_updates_position(self, qapp):
         import numpy as np
         from helicon.lib.gallery_widget import OrthogonalViewerWidget
@@ -2660,10 +3065,10 @@ class TestOrthogonalViewer:
         assert w._pos[0] == 5
         assert w._pos[1] == 3
         w._on_click(1, 2.0, 7.0)
-        assert w._pos[0] == 2
-        assert w._pos[2] == 7
+        assert w._pos[2] == 2
+        assert w._pos[1] == 7
         w._on_click(2, 6.0, 1.0)
-        assert w._pos[1] == 6
+        assert w._pos[0] == 6
         assert w._pos[2] == 1
         w.deleteLater()
 
@@ -2746,3 +3151,140 @@ class TestDisplayButtonSorting:
             and not layout.itemAt(i).widget().isHidden()
         ]
         assert visible_labels == ["3D Volume", "Image Slice"]
+
+
+class TestReexecMacosDisplay:
+    """macOS re-exec of ``helicon display`` under a Helicon-named binary."""
+
+    def test_skips_when_not_macos(self, monkeypatch):
+        import helicon.helicon as cli
+
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+        monkeypatch.setattr(
+            cli.os,
+            "execve",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not exec")),
+        )
+        assert cli._maybe_reexec_macos_display() is None
+
+    def test_skips_after_identity_reexec(self, monkeypatch):
+        import helicon.helicon as cli
+
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.setenv("HELICON_MACOS_IDENTITY", "1")
+        monkeypatch.setattr(
+            cli.os,
+            "execve",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not exec")),
+        )
+        assert cli._maybe_reexec_macos_display() is None
+
+    def test_skips_unless_display_in_argv(self, monkeypatch):
+        import helicon.helicon as cli
+
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.delenv("HELICON_MACOS_IDENTITY", raising=False)
+        monkeypatch.setattr(cli.sys, "argv", ["helicon", "proc3d"])
+        monkeypatch.setattr(
+            cli.os,
+            "execve",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not exec")),
+        )
+        assert cli._maybe_reexec_macos_display() is None
+
+    def test_reexec_copies_interpreter_as_Helicon(self, monkeypatch, tmp_path):
+        import helicon.helicon as cli
+
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.delenv("HELICON_MACOS_IDENTITY", raising=False)
+        monkeypatch.setattr(cli.sys, "argv", ["helicon", "display", "--folder", "."])
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+        python_bin = tmp_path / "python3.14"
+        python_bin.write_bytes(b"\x0a\x0b\x0c\x0d" * 16)
+        python_bin.chmod(0o755)
+        monkeypatch.setattr(cli.sys, "executable", str(python_bin))
+        monkeypatch.setattr(cli.sys, "prefix", str(tmp_path / "env"))
+
+        captured = {}
+
+        def fake_execve(path, cmd, env):
+            captured["path"] = path
+            captured["cmd"] = list(cmd)
+            captured["env"] = dict(env)
+
+        monkeypatch.setattr(cli.os, "execve", fake_execve)
+
+        cli._maybe_reexec_macos_display()
+
+        helicon_copy = tmp_path / "helicon_bin" / "Helicon"
+        assert helicon_copy.is_file()
+        assert helicon_copy.read_bytes() == python_bin.read_bytes()
+        assert captured["path"] == str(helicon_copy)
+        assert captured["cmd"][0] == str(helicon_copy)
+        # argv[1] is the original script that the interpreter should run.
+        assert captured["cmd"][1] == "helicon"
+        assert captured["cmd"][2:] == ["display", "--folder", "."]
+        assert captured["env"]["HELICON_MACOS_IDENTITY"] == "1"
+        assert captured["env"]["PYTHONHOME"] == str((tmp_path / "env").resolve())
+
+    def test_reexec_replaces_legacy_symlink_with_real_copy(self, monkeypatch, tmp_path):
+        """A leftover ``Helicon`` symlink (from older launches) must be replaced
+        by a real executable so the Dock does not resolve back to ``python``."""
+        import helicon.helicon as cli
+
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.delenv("HELICON_MACOS_IDENTITY", raising=False)
+        monkeypatch.setattr(cli.sys, "argv", ["helicon", "display"])
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+        python_bin = tmp_path / "python3.14"
+        python_bin.write_bytes(b"\x0a\x0b\x0c\x0d" * 16)
+        python_bin.chmod(0o755)
+        monkeypatch.setattr(cli.sys, "executable", str(python_bin))
+        monkeypatch.setattr(cli.sys, "prefix", str(tmp_path / "env"))
+
+        bin_dir = tmp_path / "helicon_bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        helicon_symlink = bin_dir / "Helicon"
+        helicon_symlink.symlink_to(python_bin)
+
+        captured = {}
+
+        def fake_execve(path, cmd, env):
+            captured["path"] = path
+            captured["env"] = dict(env)
+
+        monkeypatch.setattr(cli.os, "execve", fake_execve)
+
+        cli._maybe_reexec_macos_display()
+
+        assert helicon_symlink.is_symlink() is False
+        assert helicon_symlink.is_file()
+        assert helicon_symlink.read_bytes() == python_bin.read_bytes()
+        assert captured["path"] == str(helicon_symlink)
+        assert captured["env"]["HELICON_MACOS_IDENTITY"] == "1"
+
+    def test_reexec_does_not_loop_after_success(self, monkeypatch, tmp_path):
+        """The identity guard is set on the re-exec env so the child returns early."""
+        import helicon.helicon as cli
+
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.delenv("HELICON_MACOS_IDENTITY", raising=False)
+        monkeypatch.setattr(cli.sys, "argv", ["helicon", "display"])
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+        python_bin = tmp_path / "python3.14"
+        python_bin.write_bytes(b"x" * 32)
+        python_bin.chmod(0o755)
+        monkeypatch.setattr(cli.sys, "executable", str(python_bin))
+        monkeypatch.setattr(cli.sys, "prefix", str(tmp_path / "env"))
+
+        captured = {}
+
+        def fake_execve(path, cmd, env):
+            captured["env"] = dict(env)
+
+        monkeypatch.setattr(cli.os, "execve", fake_execve)
+        cli._maybe_reexec_macos_display()
+        assert captured["env"]["HELICON_MACOS_IDENTITY"] == "1"

@@ -24,13 +24,9 @@ if sys.platform == "darwin":
         import ctypes
         import ctypes.util
 
-        ctypes.CDLL(ctypes.util.find_library("c")).setprogname(b"helicon")
-        from AppKit import NSApplication, NSBundle
-
-        bundle = NSBundle.mainBundle()
-        if bundle is not None:
-            bundle.infoDictionary().setObject_forKey_("helicon", "CFBundleName")
-        NSApplication.sharedApplication().setActivationPolicy_(0)
+        ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True).setprogname(
+            b"Helicon"
+        )
     except Exception:
         pass
 
@@ -65,6 +61,572 @@ except ImportError:  # pragma: no cover - only without the Qt stack
 _FscPlotBase = QMainWindow if QMainWindow is not None else object
 _FlowLayoutBase = QLayout if QLayout is not None else object
 _FlowContainerBase = QWidget if QWidget is not None else object
+
+
+def _prepare_process_identity() -> None:
+    """Set the process name used by Qt and desktop environments."""
+    if sys.argv:
+        sys.argv[0] = "Helicon"
+
+
+def _set_application_identity(app) -> None:
+    """Set the user-facing application name used by Qt menus and windows."""
+    _prepare_process_identity()
+    app.setApplicationName("Helicon")
+    app.setApplicationDisplayName("Helicon")
+    _set_macos_app_identity("Helicon")
+
+
+def _set_macos_app_identity(name: str = "Helicon") -> None:
+    """Set process name and application menu title via macOS Cocoa APIs."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        ctypes.cdll.LoadLibrary(ctypes.util.find_library("Foundation"))
+        ctypes.cdll.LoadLibrary(ctypes.util.find_library("AppKit"))
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        msg_send = objc.objc_msgSend
+        msg_send.restype = ctypes.c_void_p
+
+        ns_proc_info = objc.objc_getClass(b"NSProcessInfo")
+        proc_info_sel = objc.sel_registerName(b"processInfo")
+        set_proc_name_sel = objc.sel_registerName(b"setProcessName:")
+        ns_string_cls = objc.objc_getClass(b"NSString")
+        str_sel = objc.sel_registerName(b"stringWithUTF8String:")
+
+        msg_send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+        ns_name = msg_send(ns_string_cls, str_sel, name.encode("utf-8"))
+
+        msg_send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        proc = msg_send(ns_proc_info, proc_info_sel)
+        if proc:
+            msg_send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            msg_send(proc, set_proc_name_sel, ns_name)
+
+        ns_app_cls = objc.objc_getClass(b"NSApplication")
+        shared_app_sel = objc.sel_registerName(b"sharedApplication")
+        msg_send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        ns_app = msg_send(ns_app_cls, shared_app_sel)
+        if ns_app:
+            main_menu_sel = objc.sel_registerName(b"mainMenu")
+            main_menu = msg_send(ns_app, main_menu_sel)
+            if main_menu:
+                item_at_idx_sel = objc.sel_registerName(b"itemAtIndex:")
+                msg_send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
+                item0 = msg_send(main_menu, item_at_idx_sel, 0)
+                if item0:
+                    set_title_sel = objc.sel_registerName(b"setTitle:")
+                    submenu_sel = objc.sel_registerName(b"submenu")
+                    msg_send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                    sub = msg_send(item0, submenu_sel)
+                    msg_send.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.c_void_p,
+                        ctypes.c_void_p,
+                    ]
+                    if sub:
+                        msg_send(sub, set_title_sel, ns_name)
+                    msg_send(item0, set_title_sel, ns_name)
+    except Exception:
+        pass
+
+
+def _qt_argv() -> list[str]:
+    """Return argv with a stable executable name for Qt desktop identity."""
+    return ["Helicon", *sys.argv[1:]]
+
+
+def _macos_ns_app():
+    """Return the shared NSApplication pointer via safe ctypes dispatch."""
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+    import ctypes.util
+
+    ctypes.cdll.LoadLibrary(ctypes.util.find_library("Foundation"))
+    ctypes.cdll.LoadLibrary(ctypes.util.find_library("AppKit"))
+    objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+    objc.objc_getClass.restype = ctypes.c_void_p
+    objc.objc_getClass.argtypes = [ctypes.c_char_p]
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = [ctypes.c_char_p]
+    objc.objc_msgSend.restype = ctypes.c_void_p
+    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    return objc.objc_msgSend(
+        objc.objc_getClass(b"NSApplication"),
+        objc.sel_registerName(b"sharedApplication"),
+    )
+
+
+def _macos_msg(receiver, selector, *args, restype=ctypes.c_void_p, argtypes=()):
+    """Send an Objective-C message with a freshly typed ``objc_msgSend``.
+
+    ``objc_msgSend`` is variadic; reusing the ctypes closure across calls with
+    mismatched signatures poisons the libffi state and can segfault. Each call
+    here re-declares ``restype``/``argtypes`` immediately before dispatch.
+    """
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+    import ctypes.util
+
+    objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+    objc.objc_msgSend.restype = restype
+    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *argtypes]
+    return objc.objc_msgSend(receiver, selector, *args)
+
+
+def _macos_sel(name: str):
+    """Register and return an Objective-C selector."""
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+    import ctypes.util
+
+    objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = [ctypes.c_char_p]
+    return objc.sel_registerName(name.encode("utf-8"))
+
+
+def _macos_class(name: str):
+    """Return the Objective-C class object for *name*."""
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+    import ctypes.util
+
+    objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+    objc.objc_getClass.restype = ctypes.c_void_p
+    objc.objc_getClass.argtypes = [ctypes.c_char_p]
+    return objc.objc_getClass(name.encode("utf-8"))
+
+
+def _macos_menu_item_count(ns_app) -> int:
+    """Return the number of top-level items in NSApp's main menu, or -1."""
+    if not ns_app:
+        return -1
+    import ctypes
+
+    main_menu = _macos_msg(ns_app, _macos_sel("mainMenu"))
+    if not main_menu:
+        return -1
+    count = _macos_msg(
+        main_menu,
+        _macos_sel("numberOfItems"),
+        restype=ctypes.c_long,
+        argtypes=[],
+    )
+    return int(count or 0)
+
+
+def _macos_menu_titles(ns_app) -> list[str]:
+    """Return the titles of the top-level items in NSApp's main menu."""
+    import ctypes
+
+    main_menu = _macos_msg(ns_app, _macos_sel("mainMenu"))
+    if not main_menu:
+        return []
+    count = _macos_msg(
+        main_menu,
+        _macos_sel("numberOfItems"),
+        restype=ctypes.c_long,
+        argtypes=[],
+    )
+    titles = []
+    for index in range(int(count or 0)):
+        item = _macos_msg(
+            main_menu,
+            _macos_sel("itemAtIndex:"),
+            ctypes.c_long(index),
+            argtypes=[ctypes.c_long],
+        )
+        if not item:
+            titles.append("?")
+            continue
+        title_ns = _macos_msg(item, _macos_sel("title"))
+        c_string = (
+            _macos_msg(
+                title_ns,
+                _macos_sel("UTF8String"),
+                restype=ctypes.c_char_p,
+                argtypes=[],
+            )
+            if title_ns
+            else None
+        )
+        titles.append(c_string.decode("utf-8", "replace") if c_string else "?")
+    return titles
+
+
+def _macos_frontmost_pid() -> int:
+    """Return the PID of the frontmost application, or -1 on failure."""
+    import ctypes
+
+    workspace = _macos_msg(
+        _macos_class("NSWorkspace"),
+        _macos_sel("sharedWorkspace"),
+    )
+    if not workspace:
+        return -1
+    front = _macos_msg(workspace, _macos_sel("frontmostApplication"))
+    if not front:
+        return -1
+    return int(
+        _macos_msg(
+            front,
+            _macos_sel("processIdentifier"),
+            restype=ctypes.c_int,
+            argtypes=[],
+        )
+    )
+
+
+def _macos_frontmost_name() -> str:
+    """Return the localized name of the frontmost application, or \"?\"."""
+    import ctypes
+
+    workspace = _macos_msg(
+        _macos_class("NSWorkspace"),
+        _macos_sel("sharedWorkspace"),
+    )
+    if not workspace:
+        return "?"
+    front = _macos_msg(workspace, _macos_sel("frontmostApplication"))
+    if not front:
+        return "?"
+    name_ns = _macos_msg(front, _macos_sel("localizedName"))
+    if not name_ns:
+        return "?"
+    c_string = _macos_msg(
+        name_ns,
+        _macos_sel("UTF8String"),
+        restype=ctypes.c_char_p,
+        argtypes=[],
+    )
+    return c_string.decode("utf-8", "replace") if c_string else "?"
+
+
+def _macos_menu_debug_report(tag: str = "") -> None:
+    """Log the live Cocoa menu/activation state when HELICON_MAC_MENU_DEBUG=1."""
+    if sys.platform != "darwin" or not os.environ.get("HELICON_MAC_MENU_DEBUG"):
+        return
+    try:
+        import ctypes
+
+        ns_app = _macos_ns_app()
+        frontmost = _macos_frontmost_pid()
+        frontmost_name = _macos_frontmost_name()
+        policy = _macos_msg(
+            ns_app,
+            _macos_sel("activationPolicy"),
+            restype=ctypes.c_long,
+            argtypes=[],
+        )
+        is_active = _macos_msg(
+            ns_app, _macos_sel("isActive"), restype=ctypes.c_bool, argtypes=[]
+        )
+        main_menu = _macos_msg(ns_app, _macos_sel("mainMenu"))
+        item_count = _macos_menu_item_count(ns_app)
+        titles = _macos_menu_titles(ns_app)
+        print(
+            f"[helicon.macmenu]{tag} activationPolicy={policy} isActive={is_active} "
+            f"frontmost={frontmost_name}({frontmost}) self={os.getpid()} "
+            f"mainMenu={hex(main_menu or 0)} items={item_count} titles={titles}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[helicon.macmenu] debug report failed: {exc}", flush=True)
+
+
+def _macos_native_windows() -> list:
+    """Return the native NSWindow pointers of Qt's visible top-level windows."""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return []
+    windows = []
+    for widget in app.topLevelWidgets():
+        if widget.isVisible() and widget.winId():
+            ns_window = _macos_msg(int(widget.winId()), _macos_sel("window"))
+            if ns_window:
+                windows.append(ns_window)
+    return windows
+
+
+def _macos_activate_and_front() -> None:
+    """Activate the app and make its visible windows key and front natively.
+
+    ``activateWithOptions:`` is the modern replacement for the deprecated
+    ``activateIgnoringOtherApps:``; the flags 1|2 = ActivateAllWindows |
+    ActivateIgnoreOtherApps. ``makeKeyAndOrderFront:`` on the NSWindow is the
+    native equivalent of the click that makes the window key and the app's
+    menu bar visible. Qt's ``activateWindow()`` can silently no-op while the
+    app is starting up, so drive the native windows directly as well.
+    """
+    import ctypes
+
+    ns_app = _macos_ns_app()
+    if not ns_app:
+        return
+    # NSApplicationActivationPolicyRegular = 0. NSInteger is a long on arm64;
+    # passing c_int here silently truncates and breaks the call.
+    _macos_msg(
+        ns_app,
+        _macos_sel("setActivationPolicy:"),
+        ctypes.c_long(0),
+        restype=ctypes.c_bool,
+        argtypes=[ctypes.c_long],
+    )
+    current = _macos_msg(
+        _macos_class("NSRunningApplication"),
+        _macos_sel("currentApplication"),
+    )
+    if current:
+        _macos_msg(
+            current,
+            _macos_sel("activateWithOptions:"),
+            ctypes.c_ulong(3),
+            restype=None,
+            argtypes=[ctypes.c_ulong],
+        )
+    for ns_window in _macos_native_windows():
+        _macos_msg(
+            ns_window,
+            _macos_sel("makeKeyAndOrderFront:"),
+            None,  # sender: nil
+            restype=None,
+            argtypes=[ctypes.c_void_p],
+        )
+    # Qt-level nudge so the cocoa plugin installs/syncs the native menu bar.
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is not None:
+        for window in app.topLevelWidgets():
+            if window.isVisible():
+                window.activateWindow()
+                window.raise_()
+        app.processEvents()
+
+
+def _macos_resign_active() -> None:
+    """Resign active with a regular activation policy.
+
+    NSApplicationActivationPolicyRegular = 0. NSInteger is a long on arm64;
+    passing c_int here silently truncates and breaks the call.
+    """
+    import ctypes
+
+    ns_app = _macos_ns_app()
+    if not ns_app:
+        return
+    _macos_msg(
+        ns_app,
+        _macos_sel("setActivationPolicy:"),
+        ctypes.c_long(0),
+        restype=ctypes.c_bool,
+        argtypes=[ctypes.c_long],
+    )
+    _macos_msg(ns_app, _macos_sel("deactivate"), restype=None, argtypes=[])
+
+
+def _macos_activate_pid(pid: int) -> None:
+    """Activate another running application by process id.
+
+    Used to reproduce the "click another app" half of the manual focus cycle:
+    the window server only swaps the displayed menu bar through a real
+    resign/activate transition, and activating the app that was frontmost at
+    launch makes that transition explicit.
+    """
+    if not pid or pid == os.getpid():
+        return
+    import ctypes
+
+    running = _macos_msg(
+        _macos_class("NSRunningApplication"),
+        _macos_sel("runningApplicationWithProcessIdentifier:"),
+        ctypes.c_int(int(pid)),
+        argtypes=[ctypes.c_int],
+    )
+    if running:
+        _macos_msg(
+            running,
+            _macos_sel("activateWithOptions:"),
+            ctypes.c_ulong(2),  # ActivateIgnoreOtherApps
+            restype=None,
+            argtypes=[ctypes.c_ulong],
+        )
+
+
+def _force_macos_menu_realization(full_cycle: bool = True) -> None:
+    """Reproduce the click-away-and-back focus cycle that realizes the menu.
+
+    On macOS a QMainWindow's ``File``/``View`` menus are a native NSMenu that
+    Qt installs into the application's shared top-of-screen menu bar. Launched
+    from a terminal the app is often never granted a real activation cycle, so
+    the menu bar stays blank until the user clicks another app and back.
+
+    This mirrors that cycle with real timing: resign active now, then on a
+    later event-loop turn re-activate and make the windows key and front —
+    exactly the two-step transition a manual click produces. Pass
+    ``full_cycle=False`` for follow-up pings that only re-activate and re-key
+    the window without another resign (which would flicker).
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        ns_app = _macos_ns_app()
+        if not ns_app:
+            return
+        if full_cycle:
+            # Resign active first, exactly like switching to another app.
+            _macos_resign_active()
+            # Re-activate on a separate event-loop turn so the window server
+            # observes a genuine resign -> re-activate transition (a same-turn
+            # deactivate+activate is coalesced and never shows the menu).
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(120, _macos_activate_and_front)
+        else:
+            _macos_activate_and_front()
+    except Exception:
+        pass
+
+
+def _load_napari():
+    """Import napari only when a napari-backed display is requested."""
+    import napari
+
+    _patch_napari_value_bug()
+    return napari
+
+
+def _display_theme_stylesheet() -> str:
+    """Return the shared Qt stylesheet for button-launched display windows."""
+    from helicon.lib.file_browser import (
+        _THEME_COLORS,
+        _resolved_theme,
+        _saved_theme,
+    )
+
+    colors = _THEME_COLORS[_resolved_theme(_saved_theme())]
+    return f"""
+        QWidget {{
+            background-color: {colors["window"]};
+            color: {colors["text"]};
+        }}
+        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            padding: 3px;
+        }}
+        QToolButton, QPushButton {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            padding: 3px 8px;
+        }}
+        QToolButton:hover, QPushButton:hover {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+        }}
+        QToolButton:pressed, QPushButton:pressed {{
+            background-color: {colors["pressed"]};
+            border: 1px solid {colors["accent_border"]};
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            selection-background-color: {colors["accent"]};
+        }}
+    """
+
+
+def _display_theme_palette():
+    """Build a Qt palette matching the persisted display theme."""
+    from PySide6.QtGui import QPalette, QColor
+    from helicon.lib.file_browser import (
+        _THEME_COLORS,
+        _resolved_theme,
+        _saved_theme,
+    )
+
+    colors = _THEME_COLORS[_resolved_theme(_saved_theme())]
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(colors["window"]))
+    palette.setColor(QPalette.ColorRole.Base, QColor(colors["input"]))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors["window"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(colors["text"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(colors["text"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(colors["input"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors["text"]))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(colors["accent"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    return palette
+
+
+def _display_plot_theme_colors() -> dict[str, str]:
+    """Return colors for plot widgets in the resolved display theme."""
+    from helicon.lib.file_browser import _resolved_theme, _saved_theme
+
+    if _resolved_theme(_saved_theme()) == "Light":
+        return {
+            "background": "#ffffff",
+            "foreground": "#202020",
+            "grid": "#909090",
+            "crosshair": "#707070",
+            "tooltip_background": "rgba(255,255,255,220)",
+            "tooltip_foreground": "#202020",
+        }
+    return {
+        "background": "#202020",
+        "foreground": "#dcdcdc",
+        "grid": "#a0a0a0",
+        "crosshair": "#969696",
+        "tooltip_background": "rgba(0,0,0,180)",
+        "tooltip_foreground": "#dcdcdc",
+    }
+
+
+def _refresh_display_theme_windows() -> None:
+    """Reapply the saved theme to already-open auxiliary display windows."""
+    if QLayout is None:
+        return
+    from PySide6.QtWidgets import QApplication
+
+    stylesheet = _display_theme_stylesheet()
+    palette = _display_theme_palette()
+    for window in QApplication.topLevelWidgets():
+        if window.property("helicon_theme_window"):
+            window.setStyleSheet(stylesheet)
+            window.setPalette(palette)
+            for child in window.findChildren(QWidget):
+                child.setStyleSheet(stylesheet)
+                child.setPalette(palette)
+            apply_theme = getattr(window, "_apply_display_theme", None)
+            if apply_theme is not None:
+                apply_theme()
+            try:
+                from helicon.lib.gallery_widget import _apply_gallery_theme
+
+                _apply_gallery_theme(window)
+            except Exception:
+                pass
+    _refresh_napari_theme()
 
 
 class _FlowLayout(_FlowLayoutBase):
@@ -359,12 +921,50 @@ def _launch_or_reuse_web_app(
     new_window : bool, optional
         If True, spawn a coexisting instance. Defaults to False.
     """
+    query_params = dict(query_params)
+    query_params["helicon_theme"] = _get_display_theme()
+
     if not new_window:
         for state in _web_app_alive():
             if _navigate_web_app(state, query_params):
                 return
 
     _spawn_web_app(query_params)
+
+
+def _get_display_theme() -> str:
+    """Return the persisted file-browser/web-app theme."""
+    from helicon.lib.file_browser import _saved_theme
+
+    return _saved_theme()
+
+
+def _napari_display_theme() -> str:
+    """Map the saved Helicon theme to napari's theme names."""
+    theme = _get_display_theme()
+    return {"Dark": "dark", "Light": "light", "System": "system"}[theme]
+
+
+def _napari_canvas_background() -> str:
+    """Return the napari canvas background for the saved display theme."""
+    from helicon.lib.file_browser import _resolved_theme
+
+    if _resolved_theme(_get_display_theme()) == "Light":
+        return "#ffffff"
+    return "#202020"
+
+
+def _refresh_napari_theme() -> None:
+    """Apply the saved theme to all currently open napari viewers."""
+    try:
+        theme = _napari_display_theme()
+        background = _napari_canvas_background()
+        for viewer in _napari.alive():
+            viewer.theme = theme
+            viewer.background_color = background
+    except Exception:
+        # napari is optional and may not be initialized yet.
+        pass
 
 
 def _get_qsettings():
@@ -632,27 +1232,7 @@ class _SliceDirectionWidget:
             combo = QComboBox(self_slider)
             combo.addItems(["Z", "Y", "X"])
             combo.setFixedSize(60, 22)
-            combo.setStyleSheet(
-                """
-                QComboBox {
-                    background-color: #3c3c3c;
-                    color: #cccccc;
-                    border: 1px solid #555555;
-                    border-radius: 3px;
-                    padding: 1px 4px 1px 4px;
-                    font-size: 11px;
-                }
-                QComboBox::drop-down {
-                    border: none;
-                    width: 16px;
-                }
-                QComboBox QAbstractItemView {
-                    background-color: #3c3c3c;
-                    color: #cccccc;
-                    selection-background-color: #4a6fa5;
-                }
-            """
-            )
+            combo.setStyleSheet(_display_theme_stylesheet())
 
             # Suppress the popup entirely — cycle through items on click instead
             combo.showPopup = lambda: None
@@ -1370,6 +1950,7 @@ def _launch_truefsc(path: str, parent=None) -> None:
     class ProgressDialog(QDialog):
         def __init__(self, parent=None):
             super().__init__(parent)
+            self.setStyleSheet(_display_theme_stylesheet())
             self.setWindowTitle("trueFSC")
             self.setMinimumSize(500, 300)
             layout = QVBoxLayout(self)
@@ -1488,6 +2069,7 @@ def _launch_helical_angle_stats(
     class ProgressDialog(QDialog):
         def __init__(self, parent=None):
             super().__init__(parent)
+            self.setStyleSheet(_display_theme_stylesheet())
             self.setWindowTitle("Helical-angle statistics")
             self.setMinimumSize(550, 300)
             layout = QVBoxLayout(self)
@@ -1800,7 +2382,7 @@ def _install_panel_toggle(viewer) -> None:
         pass
 
 
-def _create_napari_viewer(title="helicon display"):
+def _create_napari_viewer(title="Helicon display"):
     """Create a new napari viewer with standard helicon customizations.
 
     Sets up the ``_SliceDirectionWidget`` and hides the layer panels so
@@ -1809,7 +2391,7 @@ def _create_napari_viewer(title="helicon display"):
     """
     from unittest.mock import MagicMock
 
-    import napari
+    napari = _load_napari()
 
     try:
         new_viewer = napari.Viewer(title=title)
@@ -1820,6 +2402,11 @@ def _create_napari_viewer(title="helicon display"):
             "available.\nTry setting QT_QPA_PLATFORM=offscreen or "
             "updating your GPU drivers."
         ) from exc
+    try:
+        new_viewer.theme = _napari_display_theme()
+        new_viewer.background_color = _napari_canvas_background()
+    except Exception:
+        pass
     _napari.register(new_viewer)
     _hide_layer_panels(new_viewer)
     try:
@@ -1867,7 +2454,7 @@ def _open_text_window(path, reuse_window=None):
         try:
             if reuse_window.isVisible():
                 reuse_window._text_edit.setPlainText(content)
-                reuse_window.setWindowTitle(f"helicon - {Path(path).name}")
+                reuse_window.setWindowTitle(f"Helicon - {Path(path).name}")
                 reuse_window.show()
                 reuse_window.raise_()
                 return reuse_window
@@ -1887,7 +2474,10 @@ def _open_text_window(path, reuse_window=None):
             from PySide6.QtGui import QShortcut, QKeySequence, QTextCursor
             from PySide6.QtCore import Qt
 
-            self.setWindowTitle(f"helicon - {Path(path).name}")
+            self.setProperty("helicon_theme_window", True)
+            self.setStyleSheet(_display_theme_stylesheet())
+            self.setPalette(_display_theme_palette())
+            self.setWindowTitle(f"Helicon - {Path(path).name}")
             self.resize(700, 500)
 
             central = QWidget()
@@ -1899,24 +2489,19 @@ def _open_text_window(path, reuse_window=None):
             te.setReadOnly(True)
             te.setFont(QFont("Courier New", 12))
             te.setLineWrapMode(QTextEdit.WidgetWidth)
-            te.setStyleSheet("background-color: #2d2d2d; color: #cccccc; border: none;")
+            te.setStyleSheet(_display_theme_stylesheet())
             self._text_edit = te
             layout.addWidget(te, 1)
 
             find_bar = QWidget()
-            find_bar.setStyleSheet(
-                "background-color: #3c3c3c; border-top: 1px solid #555;"
-            )
+            find_bar.setStyleSheet(_display_theme_stylesheet())
             find_layout = QHBoxLayout(find_bar)
             find_layout.setContentsMargins(6, 4, 6, 4)
             find_layout.setSpacing(6)
 
             find_input = QLineEdit()
             find_input.setPlaceholderText("Find…")
-            find_input.setStyleSheet(
-                "background-color: #2d2d2d; color: #cccccc; "
-                "border: 1px solid #555; border-radius: 3px; padding: 3px;"
-            )
+            find_input.setStyleSheet(_display_theme_stylesheet())
             find_input.returnPressed.connect(self._find_next)
             self._find_input = find_input
 
@@ -1924,11 +2509,7 @@ def _open_text_window(path, reuse_window=None):
             close_btn.setText("✕")
             close_btn.setToolTip("Close find bar")
             close_btn.clicked.connect(lambda: self._toggle_find_bar(False))
-            close_btn.setStyleSheet(
-                "QToolButton { background: transparent; border: none; "
-                "color: #cccccc; padding: 2px 6px; }"
-                "QToolButton:hover { color: #ffffff; }"
-            )
+            close_btn.setStyleSheet(_display_theme_stylesheet())
 
             find_layout.addWidget(find_input, 1)
             find_layout.addWidget(close_btn)
@@ -3339,6 +3920,9 @@ class _FscPlotWindow(_FscPlotBase):
         parent=None,
     ):
         super().__init__(parent)
+        self.setProperty("helicon_theme_window", True)
+        self.setStyleSheet(_display_theme_stylesheet())
+        self.setPalette(_display_theme_palette())
         self._is_class3d = bool(is_class3d)
         self._paths: list[Path] = []
         self._curves_by_path: dict = {}
@@ -3346,6 +3930,11 @@ class _FscPlotWindow(_FscPlotBase):
         self._class_checkboxes = []
         self._curve_items = []
         self._plot = None
+        self._legend = None
+        self._threshold_line = None
+        self._threshold_label = None
+        self._crosshair_lines = []
+        self._coord_text = None
         self._bar_layout = None
         self._class_bar_layout = None
         self._class_row = None
@@ -3421,7 +4010,10 @@ class _FscPlotWindow(_FscPlotBase):
 
         select_all_btn = QPushButton("all")
         button_height = max(row_height, select_all_btn.sizeHint().height())
-        button_width = select_all_btn.sizeHint().width()
+        button_width = max(
+            select_all_btn.sizeHint().width(),
+            QPushButton("none").sizeHint().width(),
+        )
         iter_scroll.setMaximumHeight(button_height * 2 + checkbox_spacing)
         select_all_btn.setFixedHeight(button_height)
         select_all_btn.setFixedWidth(button_width)
@@ -3513,7 +4105,7 @@ class _FscPlotWindow(_FscPlotBase):
         curve_label = "W_MAP" if self._is_class3d else "FSC"
         plot.setLabel("left", curve_label)
         plot.setYRange(0, 1.05)
-        plot.addLegend()
+        self._legend = plot.addLegend()
         plot.showGrid(x=True, y=True, alpha=0.3)
 
         top_axis = plot.getAxis("top")
@@ -3529,8 +4121,10 @@ class _FscPlotWindow(_FscPlotBase):
         threshold_pen = pg.mkPen(
             color=(220, 50, 50), width=1, style=Qt.PenStyle.DashLine
         )
-        plot.addItem(pg.InfiniteLine(pos=0.143, angle=0, pen=threshold_pen))
+        self._threshold_line = pg.InfiniteLine(pos=0.143, angle=0, pen=threshold_pen)
+        plot.addItem(self._threshold_line)
         threshold_label = pg.TextItem("0.143", color=(220, 50, 50), anchor=(0, 0))
+        self._threshold_label = threshold_label
         threshold_label.setZValue(5)
         plot.addItem(threshold_label, ignoreBounds=True)
 
@@ -3546,9 +4140,11 @@ class _FscPlotWindow(_FscPlotBase):
         )
         vline = pg.InfiniteLine(angle=90, pen=crosshair_pen, movable=False)
         hline = pg.InfiniteLine(angle=0, pen=crosshair_pen, movable=False)
+        self._crosshair_lines = [vline, hline]
         plot.addItem(vline, ignoreBounds=True)
         plot.addItem(hline, ignoreBounds=True)
         coord_text = pg.TextItem(anchor=(0, 1), color=(220, 220, 220))
+        self._coord_text = coord_text
         coord_text.setZValue(20)
         plot.addItem(coord_text, ignoreBounds=True)
 
@@ -3564,7 +4160,8 @@ class _FscPlotWindow(_FscPlotBase):
             hline.setVisible(True)
             ang = f"{1.0 / x:.2f}" if x > 0 else "∞"
             coord_text.setHtml(
-                f'<span style="color: #dcdcdc; background-color: rgba(0,0,0,180);'
+                f'<span style="color: {self._plot_theme_colors["tooltip_foreground"]};'
+                f' background-color: {self._plot_theme_colors["tooltip_background"]};'
                 f' padding: 2px;">'
                 f"{x:.4f} 1/Å  ({ang} Å)<br>{curve_label} = {y:.4f}</span>"
             )
@@ -3581,6 +4178,57 @@ class _FscPlotWindow(_FscPlotBase):
         plot_widget.scene().sigMouseMoved.connect(_on_mouse_moved)
 
         self.setCentralWidget(central)
+        self._apply_display_theme()
+
+    def _apply_display_theme(self) -> None:
+        """Apply the saved theme to the pyqtgraph canvas and decorations."""
+        if self._plot is None:
+            return
+
+        from PySide6.QtCore import Qt
+
+        import pyqtgraph as pg
+
+        colors = _display_plot_theme_colors()
+        self._plot_theme_colors = colors
+        self.plot_widget.setBackground(colors["background"])
+
+        for axis_name in ("left", "bottom", "top", "right"):
+            axis = self._plot.getAxis(axis_name)
+            axis.setPen(colors["foreground"])
+            axis.setTextPen(colors["foreground"])
+            axis.setTickPen(colors["foreground"])
+
+        curve_label = "W_MAP" if self._is_class3d else "FSC"
+        self._plot.setLabel(
+            "bottom", "Resolution", units="1/Å", color=colors["foreground"]
+        )
+        self._plot.setLabel("left", curve_label, color=colors["foreground"])
+        self._plot.getAxis("top").setLabel(
+            "Resolution", units="Å", color=colors["foreground"]
+        )
+        self._plot.showGrid(x=True, y=True, alpha=0.3)
+
+        if self._threshold_line is not None:
+            self._threshold_line.setPen(
+                pg.mkPen(color=(220, 50, 50), width=1, style=Qt.PenStyle.DashLine)
+            )
+        if self._threshold_label is not None:
+            self._threshold_label.setColor((220, 50, 50))
+        for line in self._crosshair_lines:
+            line.setPen(
+                pg.mkPen(
+                    color=colors["crosshair"],
+                    width=1,
+                    style=Qt.PenStyle.DashLine,
+                )
+            )
+        if self._coord_text is not None:
+            self._coord_text.setColor(colors["tooltip_foreground"])
+
+        if self._legend is not None:
+            for _sample, label in self._legend.items:
+                label.setText(label.text, color=colors["foreground"])
 
     def set_data(
         self,
@@ -3787,6 +4435,7 @@ class _FscPlotWindow(_FscPlotBase):
                 self._curve_items.append(
                     plot.plot(spatial_freq, fsc, pen=pen, name=curve_name)
                 )
+        self._apply_display_theme()
 
     def closeEvent(self, event):
         _plot.on_close(self)
@@ -4079,7 +4728,7 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         _SliceDirectionWidget.set_stack_mode(False)
 
     if viewer is not None:
-        viewer.title = f"helicon - {Path(path).name}"
+        viewer.title = f"Helicon - {Path(path).name}"
         # Remember the opened file name so the Save-As dialog can pre-fill it
         # (mirrors ImageGalleryWidget._source_name).  napari only populates
         # layer.source.path when a file is loaded via viewer.open(); most
@@ -4386,16 +5035,17 @@ def _run_standalone() -> None:
 
     Expects ``sys.argv[1]`` = file path and optional ``sys.argv[2]`` = mode.
     """
-    import os
+    _prepare_process_identity()
+    from PySide6.QtWidgets import QApplication
 
-    import napari
-
-    _patch_napari_value_bug()
+    app = QApplication.instance() or QApplication(_qt_argv())
+    _set_application_identity(app)
+    napari = _load_napari()
 
     path = sys.argv[1]
     mode = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 
-    viewer = _create_napari_viewer(title=Path(path).name)
+    viewer = _create_napari_viewer(title=f"Helicon - {Path(path).name}")
     _install_panel_toggle(viewer)
     try:
         _open_file(viewer, path, mode=mode)
@@ -4417,12 +5067,6 @@ def main(args: argparse.Namespace) -> None:
     args : argparse.Namespace
         Parsed CLI arguments.
     """
-    if not helicon.has_napari():
-        raise HeliconDependencyError(
-            "napari is required for the display command. "
-            'Install it with: pip install "helicon[napari]"'
-        )
-
     if FolderBrowserWidget is None:
         raise HeliconDependencyError(
             "Qt widgets are required for the display command. "
@@ -4433,31 +5077,13 @@ def main(args: argparse.Namespace) -> None:
     from PySide6.QtWidgets import QWidget, QApplication
     from PySide6.QtGui import QShortcut, QKeySequence
 
-    app = QApplication.instance() or QApplication(sys.argv)
-
-    import napari
-
-    _patch_napari_value_bug()
+    _prepare_process_identity()
+    app = QApplication.instance() or QApplication(_qt_argv())
+    _set_application_identity(app)
 
     start_dir = args.folder if args.folder else os.getcwd()
 
-    if sys.platform == "darwin":
-        try:
-            from AppKit import NSApplication
-
-            nsapp = NSApplication.sharedApplication()
-            nsapp.activateIgnoringOtherApps_(True)
-            menu = nsapp.mainMenu()
-            if menu and menu.numberOfItems() > 0:
-                menu.itemAtIndex_(0).submenu().setTitle_("helicon")
-        except Exception:
-            pass
-
-    app = QApplication.instance()
     if app is not None:
-        app.setApplicationName("helicon")
-        from pathlib import Path
-
         _icon_path = Path(__file__).parent.parent / "resources" / "icon.png"
         if _icon_path.is_file():
             from PySide6.QtGui import QIcon
@@ -4527,7 +5153,7 @@ def main(args: argparse.Namespace) -> None:
         """
         if sys.platform == "darwin":
             try:
-                new_viewer = _create_napari_viewer(title=f"helicon - {Path(path).name}")
+                new_viewer = _create_napari_viewer(title=f"Helicon - {Path(path).name}")
             except Exception as exc:  # pragma: no cover - environment dependent
                 print(f"[helicon] failed to open new display window: {exc}")
                 return
@@ -4657,8 +5283,97 @@ def main(args: argparse.Namespace) -> None:
     widget.file_selected_new_window.connect(_on_file_selected_new_window)
     widget.display_requested.connect(_on_display_requested)
     widget.setWindowFlags(Qt.WindowType.Window)
-    widget.setWindowTitle("helicon - Files")
+    widget.setWindowTitle("Helicon - Files")
     widget.show()
+
+    # On macOS the application-name menu item is only realized once the
+    # QMainWindow's native menu bar is installed by the event loop. Re-apply
+    # the identity after the window is shown so the top-left menu reads
+    # "Helicon" instead of the inherited "python3.14". Also nudge the app to
+    # become active so macOS renders the (initially blank) native menu bar.
+    if sys.platform == "darwin":
+        QTimer.singleShot(0, lambda: _set_macos_app_identity("Helicon"))
+
+        menu_state = {
+            # App that was frontmost at launch (typically the terminal) —
+            # used to reproduce the "click another app" half of the cycle.
+            "alternate_pid": _macos_frontmost_pid(),
+            "refreshed": False,
+        }
+
+        def _realize_macos_menu(attempt: int, full_cycle: bool) -> None:
+            """Reproduce the click-away-and-back cycle until the menu exists.
+
+            Launched from a terminal the app is often never granted a real
+            activation cycle, so the native File/View menu bar stays blank
+            until the user clicks another app and back. Repeat the resign/
+            re-activate cycle until NSApp's main menu actually contains the
+            File/View items and Helicon is the frontmost application (that is
+            what makes macOS display its menu bar), or give up after a short
+            cap. The first two attempts do the full cycle; later ones only
+            re-activate to avoid flicker in case Qt merely needed a late
+            window-activation.
+            """
+            _force_macos_menu_realization(full_cycle=full_cycle)
+            # A full cycle resigns now and re-activates 120 ms later, so its
+            # result cannot be judged until after that delayed activation.
+            delay = 280 if full_cycle else 30
+            QTimer.singleShot(delay, lambda: _realize_macos_menu_check(attempt))
+
+        def _realize_macos_menu_check(attempt: int) -> None:
+            """Evaluate the last activation attempt; retry if still needed."""
+            count = _macos_menu_item_count(_macos_ns_app())
+            frontmost = _macos_frontmost_pid()
+            _macos_menu_debug_report(f" attempt={attempt}")
+            if count >= 2 and frontmost == os.getpid():
+                if not menu_state["refreshed"]:
+                    # The menu is fully installed and we are frontmost, but the
+                    # window server may still be showing the menu bar from
+                    # before File/View were installed (or the previous app's).
+                    # Repeat the user's manual action: resign, briefly bring
+                    # the launch-time frontmost app forward, then come back —
+                    # now that the menu exists, the re-activation re-reads it.
+                    menu_state["refreshed"] = True
+                    _macos_menu_refresh(attempt)
+                    return
+                # The activation cycle rebuilds the native menu bar, which can
+                # reset the application-menu title (observed as "Apple", Qt's
+                # placeholder). Re-apply the "Helicon" identity now that the
+                # menu exists so the top-left menu reads Helicon.
+                _set_macos_app_identity("Helicon")
+                print(
+                    f"[helicon.macmenu] menu realized at attempt={attempt}",
+                    flush=True,
+                )
+                return
+            if attempt >= 12:
+                print(
+                    "[helicon.macmenu] gave up: Helicon never became the "
+                    "frontmost app, so macOS keeps showing another menu bar",
+                    flush=True,
+                )
+                return
+            QTimer.singleShot(
+                250,
+                lambda: _realize_macos_menu(attempt + 1, attempt < 3),
+            )
+
+        def _macos_menu_refresh(attempt: int) -> None:
+            """Resign, activate the launch-time frontmost app, then come back."""
+            _macos_menu_debug_report(f" refresh-start attempt={attempt}")
+            _macos_resign_active()
+            alternate = menu_state.get("alternate_pid") or 0
+            if alternate and alternate != os.getpid():
+                QTimer.singleShot(90, lambda: _macos_activate_pid(alternate))
+                QTimer.singleShot(
+                    90, lambda: _macos_menu_debug_report(" refresh-alternate")
+                )
+            QTimer.singleShot(240, _macos_activate_and_front)
+            QTimer.singleShot(240, lambda: _macos_menu_debug_report(" refresh-self"))
+            QTimer.singleShot(420, lambda: _realize_macos_menu_check(attempt))
+
+        _macos_menu_debug_report(" t0")
+        QTimer.singleShot(150, lambda: _realize_macos_menu(1, True))
 
     try:
         from unittest.mock import MagicMock
@@ -4701,7 +5416,7 @@ def main(args: argparse.Namespace) -> None:
         except (ValueError, OSError):
             pass
 
-    napari.run()
+    app.exec()
 
 
 def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

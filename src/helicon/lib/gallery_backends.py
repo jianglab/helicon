@@ -65,6 +65,10 @@ class BaseGallery:
 
         from PySide6.QtWidgets import QMainWindow
         from helicon.lib.gallery_widget import ImageGalleryWidget
+        from helicon.commands.display import (
+            _display_theme_palette,
+            _display_theme_stylesheet,
+        )
 
         read_fn = self._read_fn if self._read_fn is not None else self._read_image
         widget = ImageGalleryWidget()
@@ -84,7 +88,13 @@ class BaseGallery:
         self._setup_panel(container, widget)
 
         if reuse_window is not None:
-            reuse_window.setWindowTitle(f"helicon - {Path(self.star_path).name}")
+            reuse_window.setProperty("helicon_theme_window", True)
+            reuse_window.setStyleSheet(_display_theme_stylesheet())
+            reuse_window.setPalette(_display_theme_palette())
+            from helicon.lib.gallery_widget import _apply_gallery_theme
+
+            _apply_gallery_theme(reuse_window)
+            reuse_window.setWindowTitle(f"Helicon - {Path(self.star_path).name}")
             reuse_window.setCentralWidget(container)
             reuse_window.show()
             reuse_window.raise_()
@@ -108,7 +118,13 @@ class BaseGallery:
                 super().changeEvent(event)
 
         window = _GalleryWindow()
-        window.setWindowTitle(f"helicon - {Path(self.star_path).name}")
+        window.setProperty("helicon_theme_window", True)
+        window.setStyleSheet(_display_theme_stylesheet())
+        window.setPalette(_display_theme_palette())
+        from helicon.lib.gallery_widget import _apply_gallery_theme
+
+        _apply_gallery_theme(window)
+        window.setWindowTitle(f"Helicon - {Path(self.star_path).name}")
         window.setCentralWidget(container)
         tile = 128 + widget._panel.min_sep
         window.resize(5 * tile + widget._sb_width, 5 * tile)
@@ -167,13 +183,23 @@ class OrthogonalGallery:
 
         from PySide6.QtWidgets import QMainWindow
         from helicon.lib.gallery_widget import OrthogonalViewerWidget
-        from helicon.commands.display import _wrap_gallery_with_panel
+        from helicon.commands.display import (
+            _display_theme_palette,
+            _display_theme_stylesheet,
+            _wrap_gallery_with_panel,
+        )
 
         widget = OrthogonalViewerWidget(self._volume, apix=self._apix, name=self._name)
         container = _wrap_gallery_with_panel(widget)
 
         if reuse_window is not None:
-            reuse_window.setWindowTitle(f"helicon - {self._name}")
+            reuse_window.setProperty("helicon_theme_window", True)
+            reuse_window.setStyleSheet(_display_theme_stylesheet())
+            reuse_window.setPalette(_display_theme_palette())
+            from helicon.lib.gallery_widget import _apply_gallery_theme
+
+            _apply_gallery_theme(reuse_window)
+            reuse_window.setWindowTitle(f"Helicon - {self._name}")
             reuse_window.setCentralWidget(container)
             reuse_window.show()
             reuse_window.raise_()
@@ -197,7 +223,13 @@ class OrthogonalGallery:
                 super().changeEvent(event)
 
         window = _OrthWindow()
-        window.setWindowTitle(f"helicon - {self._name}")
+        window.setProperty("helicon_theme_window", True)
+        window.setStyleSheet(_display_theme_stylesheet())
+        window.setPalette(_display_theme_palette())
+        from helicon.lib.gallery_widget import _apply_gallery_theme
+
+        _apply_gallery_theme(window)
+        window.setWindowTitle(f"Helicon - {self._name}")
         window.setCentralWidget(container)
         window.resize(800, 600)
         if tracker is not None:

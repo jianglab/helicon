@@ -59,6 +59,32 @@ class TestImageGalleryWidget:
         images = [np.full((40, 40), float(i), dtype=np.float32) for i in range(n)]
         return images
 
+
+def test_gallery_label_background_colors_are_valid(qapp):
+    from PySide6.QtGui import QColor
+    from helicon.lib.gallery_widget import _gallery_theme_colors
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("helicon", "display")
+    old_theme = settings.value("theme", None)
+    try:
+        settings.setValue("theme", "Light")
+        light = QColor(_gallery_theme_colors()["label_background"])
+        assert light.isValid()
+        assert light.alpha() == 210
+        assert light.red() == 255
+
+        settings.setValue("theme", "Dark")
+        dark = QColor(_gallery_theme_colors()["label_background"])
+        assert dark.isValid()
+        assert dark.alpha() == 140
+        assert dark.red() == 0
+    finally:
+        if old_theme is None:
+            settings.remove("theme")
+        else:
+            settings.setValue("theme", old_theme)
+
     def test_only_visible_images_read(self, qapp):
         images = self._fake_stack(1000)
         read_log = []
@@ -352,7 +378,7 @@ class TestOpenGalleryDispatch:
             reuse_window=window,
         )
         assert id(returned) == old_id
-        assert window.windowTitle() == "helicon - stack_b.mrcs"
+        assert window.windowTitle() == "Helicon - stack_b.mrcs"
         assert window.centralWidget() is not old_widget
 
     def test_close_removes_from_tracker(self, qapp):
