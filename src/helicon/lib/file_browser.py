@@ -1019,6 +1019,12 @@ class FolderBrowserWidget(QMainWindow):
         self._recent_menu.aboutToShow.connect(self._refresh_recent_menu)
         self._refresh_recent_menu()
 
+        self._file_menu.addSeparator()
+        self._quit_action = QAction("Quit", self)
+        self._quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        self._quit_action.triggered.connect(self._quit)
+        self._file_menu.addAction(self._quit_action)
+
         self._theme_menu = self._view_menu.addMenu("Theme")
         self._theme_actions = {}
         self._theme_action_group = QActionGroup(self)
@@ -1032,6 +1038,10 @@ class FolderBrowserWidget(QMainWindow):
             self._theme_menu.addAction(action)
             self._theme_actions[theme] = action
 
+        self._help_menu = self._menu_bar.addMenu("Help")
+        self._docs_action = QAction("Documentation", self)
+        self._docs_action.triggered.connect(self._open_documentation)
+        self._help_menu.addAction(self._docs_action)
         nav_layout = QHBoxLayout()
         nav_layout.setContentsMargins(4, 4, 4, 4)
         nav_layout.setSpacing(4)
@@ -1157,8 +1167,7 @@ class FolderBrowserWidget(QMainWindow):
         self._tree.setIndentation(20)
         self._tree.setExpandsOnDoubleClick(False)
 
-        self._tree.setStyleSheet(
-            """
+        self._tree.setStyleSheet("""
             QTreeView {
                 font-size: 12px;
                 background-color: #2d2d2d;
@@ -1178,11 +1187,9 @@ class FolderBrowserWidget(QMainWindow):
                 color: #cccccc;
                 border: 1px solid #2d2d2d;
             }
-            """
-        )
+            """)
 
-        self.setStyleSheet(
-            """
+        self.setStyleSheet("""
             QWidget {
                 background-color: #2d2d2d;
                 color: #cccccc;
@@ -1241,8 +1248,7 @@ class FolderBrowserWidget(QMainWindow):
             QCheckBox::indicator:checked:hover {
                 background-color: #5a82c4;
             }
-            """
-        )
+            """)
 
         layout.addWidget(self._tree)
 
@@ -1694,6 +1700,18 @@ class FolderBrowserWidget(QMainWindow):
         """Open the host OS terminal in the currently displayed folder."""
         _open_terminal(self._model._root_path)
 
+    def _quit(self) -> None:
+        """Exit the application (File → Quit / Ctrl+Q)."""
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+        else:
+            self.close()
+
+    def _open_documentation(self) -> None:
+        """Open the Helicon user docs in the system browser."""
+        _open_url("https://helicon.readthedocs.io")
+
     def _go_up(self) -> None:
         current = self._model._root_path
         parent = str(Path(current).parent)
@@ -1976,12 +1994,156 @@ def _find_chimerax() -> str | None:
     return None
 
 
+def _is_wsl() -> bool:
+    """Return True when running inside Windows Subsystem for Linux."""
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8", errors="ignore") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _open_url(url: str) -> None:
+    """Open *url* in the system browser (WSL/Linux/macOS-safe)."""
+    try:
+        from helicon.lib.shiny import _open_browser
+
+        _open_browser(url)
+        return
+    except Exception:
+        pass
+    import webbrowser
+
+    webbrowser.open(url, new=2)
+
+def _dbus_name_has_owner(name: str) -> bool:
+    """Return True if *name* is currently owned on the session bus."""
+    try:
+        result = subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.DBus",
+                "--object-path",
+                "/org/freedesktop/DBus",
+                "--method",
+                "org.freedesktop.DBus.NameHasOwner",
+                name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "(true," in (result.stdout or "").replace(" ", "")
+
+
+def _gnome_terminal_usable() -> bool:
+    """Return True when ``gnome-terminal`` is safe to launch.
+
+    ``gnome-terminal`` talks to a D-Bus service.  On bare SSH/X11-forwarded
+    Linux sessions that service is often listed as activatable but fails
+    after a long timeout (~120s), which made File → Open Terminal appear to
+    do nothing.  Only try it when the service is already up or the desktop
+    looks like a real GNOME session that can activate it.
+    """
+    if not shutil.which("gnome-terminal"):
+        return False
+    if _dbus_name_has_owner("org.gnome.Terminal"):
+        return True
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+    session = (os.environ.get("DESKTOP_SESSION") or "").lower()
+    return "gnome" in desktop or "gnome" in session
+
+
+def _resolves_to_gnome_terminal(exe: str) -> bool:
+    """Return True if *exe* ultimately invokes gnome-terminal."""
+    path = shutil.which(exe)
+    if not path:
+        return False
+    name = Path(path).name.lower()
+    if "gnome-terminal" in name:
+        return True
+    try:
+        real = Path(path).resolve().name.lower()
+    except OSError:
+        return False
+    return "gnome-terminal" in real
+
+
+def _linux_terminal_candidates(target: str) -> list[tuple[str, list[str]]]:
+    """Build ordered ``(executable, args)`` launch candidates for Linux.
+
+    Order: ``$TERMINAL`` if set, then lightweight X11 emulators, then
+    desktop ones.  ``gnome-terminal`` is included only when
+    :func:`_gnome_terminal_usable` is true.  ``x-terminal-emulator`` is
+    last because on Debian it often wraps gnome-terminal and inherits the
+    same D-Bus hang over SSH/X11.
+    """
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    shell_cd = f"cd {shlex.quote(target)} && exec {shell}"
+    # Prefer ``--flag=value``: lxterminal (and some others) treat a separate
+    # ``--working-directory DIR`` as unknown and print usage then exit 0.
+    workdir = [f"--working-directory={target}"]
+
+    candidates: list[tuple[str, list[str]]] = []
+
+    preferred = (os.environ.get("TERMINAL") or "").strip()
+    if preferred and shutil.which(preferred):
+        candidates.append((preferred, list(workdir)))
+
+    known: list[tuple[str, list[str]]] = [
+        ("lxterminal", list(workdir)),
+        ("xfce4-terminal", list(workdir)),
+        ("mate-terminal", list(workdir)),
+        ("konsole", [f"--workdir={target}"]),
+        ("tilix", list(workdir)),
+        ("terminator", list(workdir)),
+        ("kitty", ["--directory", target]),
+        ("alacritty", ["--working-directory", target]),
+        ("wezterm", ["start", "--cwd", target]),
+        ("foot", ["--working-directory", target]),
+        ("qterminal", list(workdir)),
+        ("xterm", ["-e", shell, "-c", shell_cd]),
+        ("uxterm", ["-e", shell, "-c", shell_cd]),
+        ("x-terminal-emulator", list(workdir)),
+    ]
+    if _gnome_terminal_usable():
+        known.insert(0, ("gnome-terminal", list(workdir)))
+    else:
+        # Drop the Debian alternatives wrapper when it points at
+        # gnome-terminal; otherwise we mark spawn "success" while the
+        # child hangs ~120s on a dead D-Bus activation.
+        known = [
+            (exe, args)
+            for exe, args in known
+            if exe != "x-terminal-emulator"
+            or not _resolves_to_gnome_terminal(exe)
+        ]
+
+    seen = {c[0] for c in candidates}
+    for exe, args in known:
+        if exe in seen:
+            continue
+        if shutil.which(exe):
+            candidates.append((exe, args))
+            seen.add(exe)
+    return candidates
+
+
 def _open_terminal(folder: str | None = None) -> None:
     """Launch the host OS native terminal, optionally in *folder*.
 
     The terminal is started detached so it keeps running when Helicon quits.
     Platform-specific launch strategies are tried in order; the first one
-    whose executable exists wins.
+    that actually starts wins.  On Linux, candidates that exit immediately
+    (missing flags, bad args) are skipped so a working emulator is used.
     """
     target = folder if folder else os.getcwd()
     system = platform.system()
@@ -2000,36 +2162,49 @@ def _open_terminal(folder: str | None = None) -> None:
         _spawn_detached(["cmd.exe", "/d", "/k", "cd", "/d", target])
         return
 
-    # Linux (including WSL): try common terminal emulators in order.
-    candidates = (
-        "x-terminal-emulator",
-        "gnome-terminal",
-        "konsole",
-        "xfce4-terminal",
-        "xterm",
-    )
-    exe = next((c for c in candidates if shutil.which(c)), None)
-    if exe:
-        _spawn_detached([exe, "--working-directory", target])
-        return
+    if _is_wsl():
+        # WSL distros usually lack a working X terminal (xterm breaks under
+        # WSLg), so launch the Windows side through interop instead.
+        if shutil.which("wt.exe"):
+            if _spawn_detached(["wt.exe", "wsl", "--cd", target]):
+                return
+        if shutil.which("wsl.exe"):
+            if _spawn_detached(["wsl.exe", "--cd", target]):
+                return
 
-    # No graphical terminal found: fall back to a plain shell in the target
-    # directory so the user still gets a usable prompt (e.g. over SSH).
+    for exe, args in _linux_terminal_candidates(target):
+        if _spawn_detached([exe, *args], check_early_exit=True):
+            return
+
     shell = os.environ.get("SHELL") or "/bin/sh"
     _spawn_detached([shell, "-c", f"cd {shlex.quote(target)} && exec {shell}"])
 
 
-def _spawn_detached(cmd: list[str]) -> None:
-    """Start ``cmd`` detached so it outlives the Helicon process."""
+def _spawn_detached(cmd: list[str], check_early_exit: bool = False) -> bool:
+    """Start ``cmd`` detached so it outlives the Helicon process.
+
+    Parameters
+    ----------
+    cmd : list of str
+        Command and arguments to launch.
+    check_early_exit : bool, optional
+        If True, wait briefly and treat a non-zero exit as failure so the
+        caller can try the next candidate.  Defaults to False.
+
+    Returns
+    -------
+    bool
+        True if the process appears to have started successfully.
+    """
     try:
-        kwargs = {}
+        kwargs: dict = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | (
                 subprocess.DETACHED_PROCESS
                 if hasattr(subprocess, "DETACHED_PROCESS")
                 else 0
             )
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd=os.getcwd(),
             stdin=subprocess.DEVNULL,
@@ -2040,3 +2215,14 @@ def _spawn_detached(cmd: list[str]) -> None:
         )
     except Exception as exc:
         print(f"[helicon] failed to launch terminal: {exc}")
+        return False
+
+    if not check_early_exit:
+        return True
+
+    try:
+        code = proc.wait(timeout=0.4)
+    except subprocess.TimeoutExpired:
+        return True
+    # Exit 0 can mean a healthy hand-off (gnome-terminal → server).
+    return code == 0

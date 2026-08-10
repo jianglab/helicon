@@ -167,18 +167,24 @@ def _macos_ns_app():
     )
 
 
-def _macos_msg(receiver, selector, *args, restype=ctypes.c_void_p, argtypes=()):
+def _macos_msg(receiver, selector, *args, restype=None, argtypes=()):
     """Send an Objective-C message with a freshly typed ``objc_msgSend``.
 
     ``objc_msgSend`` is variadic; reusing the ctypes closure across calls with
     mismatched signatures poisons the libffi state and can segfault. Each call
     here re-declares ``restype``/``argtypes`` immediately before dispatch.
+
+    ``restype`` defaults to ``ctypes.c_void_p``; the default is applied inside
+    the function so this module can import on non-macOS platforms where
+    ``ctypes`` is not imported at module level.
     """
     if sys.platform != "darwin":
         return None
     import ctypes
     import ctypes.util
 
+    if restype is None:
+        restype = ctypes.c_void_p
     objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
     objc.objc_msgSend.restype = restype
     objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *argtypes]

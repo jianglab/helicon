@@ -2144,13 +2144,36 @@ class TestFolderBrowser(object):
         assert [action.text() for action in widget._menu_bar.actions()] == [
             "File",
             "View",
+            "Help",
         ]
         assert widget._file_menu.title() == "File"
         assert widget._view_menu.title() == "View"
+        assert widget._help_menu.title() == "Help"
         assert widget._open_folder_action.text() == "Open Folder…"
+        assert widget._quit_action.text() == "Quit"
+        assert widget._docs_action.text() == "Documentation"
         assert widget._theme_menu.title() == "Theme"
         assert set(widget._theme_actions) == {"Dark", "Light", "System"}
+        file_labels = [a.text() for a in widget._file_menu.actions()]
+        assert "Quit" in file_labels
+        assert "Documentation" in [a.text() for a in widget._help_menu.actions()]
 
+    def test_quit_action_quits_application(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(qapp, "quit") as mock_quit:
+            widget._quit_action.trigger()
+        mock_quit.assert_called_once()
+
+    def test_documentation_action_opens_readthedocs(self, tmp_path, qapp):
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(file_browser, "_open_url") as mock_open:
+            widget._docs_action.trigger()
+        mock_open.assert_called_once_with("https://helicon.readthedocs.io")
     def test_theme_menu_action_persists_selection(self, tmp_path, qapp):
         from PySide6.QtCore import QSettings
         from helicon.lib.file_browser import FolderBrowserWidget, _saved_theme
@@ -2208,10 +2231,15 @@ class TestFolderBrowser(object):
         # rooted at the folder currently shown in the browser.
         assert widget._open_terminal_action.text() == "Open Terminal"
         assert "Open Terminal" in [a.text() for a in widget._file_menu.actions()]
-        with patch.object(file_browser, "_spawn_detached") as mock_spawn:
+        with patch.object(
+            file_browser, "_spawn_detached", return_value=True
+        ) as mock_spawn:
             widget._open_terminal_action.trigger()
         mock_spawn.assert_called_once()
-        assert mock_spawn.call_args[0][0][-1] == str(tmp_path)
+        cmd = mock_spawn.call_args[0][0]
+        assert any(
+            arg == str(tmp_path) or arg.endswith(f"={tmp_path}") for arg in cmd
+        )
 
     def test_open_terminal_darwin_uses_native_terminal(self):
         from unittest.mock import patch
@@ -2220,9 +2248,197 @@ class TestFolderBrowser(object):
 
         with patch.object(file_browser, "platform") as mock_platform:
             mock_platform.system.return_value = "Darwin"
-            with patch.object(file_browser, "_spawn_detached") as mock_spawn:
+            with patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn:
                 file_browser._open_terminal("/some/folder")
         mock_spawn.assert_called_once_with(["open", "-a", "Terminal", "/some/folder"])
+
+    def test_open_terminal_wsl_prefers_windows_terminal(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=True),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn,
+        ):
+            mock_platform.system.return_value = "Linux"
+            mock_shutil.which.side_effect = lambda c: c if c == "wt.exe" else None
+            file_browser._open_terminal("/some/folder")
+        mock_spawn.assert_called_once_with(["wt.exe", "wsl", "--cd", "/some/folder"])
+
+    def test_open_terminal_wsl_falls_back_to_wsl_exe(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=True),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn,
+        ):
+            mock_platform.system.return_value = "Linux"
+            mock_shutil.which.side_effect = lambda c: c if c == "wsl.exe" else None
+            file_browser._open_terminal("/some/folder")
+        mock_spawn.assert_called_once_with(["wsl.exe", "--cd", "/some/folder"])
+
+    def test_open_terminal_wsl_without_interop_uses_x_terminals(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=True),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(file_browser, "_gnome_terminal_usable", return_value=True),
+            patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn,
+        ):
+            mock_platform.system.return_value = "Linux"
+            mock_shutil.which.side_effect = lambda c: (
+                c if c == "gnome-terminal" else None
+            )
+            file_browser._open_terminal("/some/folder")
+        mock_spawn.assert_called_once_with(
+            ["gnome-terminal", "--working-directory=/some/folder"],
+            check_early_exit=True,
+        )
+
+    def test_open_terminal_linux_uses_xterm_e_flag(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=False),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(file_browser, "_gnome_terminal_usable", return_value=False),
+            patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn,
+        ):
+            mock_platform.system.return_value = "Linux"
+            mock_shutil.which.side_effect = lambda c: c if c == "xterm" else None
+            file_browser._open_terminal("/some/folder")
+        cmd = mock_spawn.call_args[0][0]
+        assert cmd[0] == "xterm"
+        assert cmd[1] == "-e"
+        shell = os.environ.get("SHELL") or "/bin/sh"
+        assert cmd[-1] == f"cd /some/folder && exec {shell}"
+        assert mock_spawn.call_args[1].get("check_early_exit") is True
+
+    def test_open_terminal_linux_skips_gnome_without_session(self):
+        """SSH/X11 hosts often have gnome-terminal installed but no D-Bus service."""
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=False),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(file_browser, "_gnome_terminal_usable", return_value=False),
+            patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn,
+        ):
+            mock_platform.system.return_value = "Linux"
+            available = {"gnome-terminal", "lxterminal", "xterm"}
+            mock_shutil.which.side_effect = lambda c: c if c in available else None
+            file_browser._open_terminal("/some/folder")
+        mock_spawn.assert_called_once_with(
+            ["lxterminal", "--working-directory=/some/folder"],
+            check_early_exit=True,
+        )
+
+    def test_open_terminal_linux_falls_through_on_early_exit(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        def spawn_side_effect(cmd, check_early_exit=False):
+            return cmd[0] != "lxterminal"
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=False),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(file_browser, "_gnome_terminal_usable", return_value=False),
+            patch.object(
+                file_browser, "_spawn_detached", side_effect=spawn_side_effect
+            ) as mock_spawn,
+        ):
+            mock_platform.system.return_value = "Linux"
+            available = {"lxterminal", "xterm"}
+            mock_shutil.which.side_effect = lambda c: c if c in available else None
+            file_browser._open_terminal("/some/folder")
+        assert mock_spawn.call_count == 2
+        assert mock_spawn.call_args_list[0][0][0][0] == "lxterminal"
+        assert mock_spawn.call_args_list[1][0][0][0] == "xterm"
+
+    def test_open_terminal_linux_honours_terminal_env(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "platform") as mock_platform,
+            patch.object(file_browser, "_is_wsl", return_value=False),
+            patch.object(file_browser, "shutil") as mock_shutil,
+            patch.object(file_browser, "_gnome_terminal_usable", return_value=False),
+            patch.object(
+                file_browser, "_spawn_detached", return_value=True
+            ) as mock_spawn,
+            patch.dict(os.environ, {"TERMINAL": "kitty"}, clear=False),
+        ):
+            mock_platform.system.return_value = "Linux"
+            mock_shutil.which.side_effect = lambda c: c if c in {"kitty", "xterm"} else None
+            file_browser._open_terminal("/some/folder")
+        mock_spawn.assert_called_once_with(
+            ["kitty", "--working-directory=/some/folder"],
+            check_early_exit=True,
+        )
+
+    def test_gnome_terminal_usable_requires_session_or_owner(self):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"),
+            patch.object(file_browser, "_dbus_name_has_owner", return_value=False),
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": ""}, clear=False),
+        ):
+            assert file_browser._gnome_terminal_usable() is False
+
+        with (
+            patch.object(file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"),
+            patch.object(file_browser, "_dbus_name_has_owner", return_value=False),
+            patch.dict(
+                os.environ,
+                {"XDG_CURRENT_DESKTOP": "GNOME", "DESKTOP_SESSION": "gnome"},
+                clear=False,
+            ),
+        ):
+            assert file_browser._gnome_terminal_usable() is True
+
+        with (
+            patch.object(file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"),
+            patch.object(file_browser, "_dbus_name_has_owner", return_value=True),
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": ""}, clear=False),
+        ):
+            assert file_browser._gnome_terminal_usable() is True
 
     def test_invalid_browser_theme_falls_back_to_system(self, qapp):
         from PySide6.QtCore import QSettings

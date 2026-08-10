@@ -575,13 +575,13 @@ def app_ui(request: Request):
             .navbar, .navbar-default, .navbar-inverse {{
                 background-color: var(--helicon-navbar-bg) !important;
             }}
-            * { font-size: 10pt; padding: 0; border: 0; margin: 0; }
-           aside { --_padding-icon: 10px; }
-            html, body { height: 100%; margin: 0; padding: 0; overflow-x: hidden; }
-            .nav { padding: 0 8px; }
-            .layout-sidebar { gap: 4px !important; }
-            .sidebar { padding-right: 4px !important; }
-             .main { padding-left: 4px !important; }
+            * {{ font-size: 10pt; padding: 0; border: 0; margin: 0; }}
+           aside {{ --_padding-icon: 10px; }}
+            html, body {{ height: 100%; margin: 0; padding: 0; overflow-x: hidden; }}
+            .nav {{ padding: 0 8px; }}
+            .layout-sidebar {{ gap: 4px !important; }}
+            .sidebar {{ padding-right: 4px !important; }}
+             .main {{ padding-left: 4px !important; }}
            /* bslib-page-fill puts 1rem padding + 1rem gap on <body>, which is a
               column flex container. When a child of <body> also becomes a flex
               column container (the case for div.container-fluid.html-fill-container
@@ -596,7 +596,7 @@ def app_ui(request: Request):
               grow:1 child a clean main-axis to fill, so the tab content spans
               the entire height of the viewport. The navbar already hovers at
               the top so the 1rem gap was never visually meaningful anyway. */
-           body.bslib-page-fill { padding: 0 !important; gap: 0 !important; }
+           body.bslib-page-fill {{ padding: 0 !important; gap: 0 !important; }}
         """
         ),
         ui.navset_bar(
