@@ -409,7 +409,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         )
         return ui.p(
             ui.a(f"All {n} helical structures in EMDB", href=url, target="_blank"),
-            style="font-size:9pt; color:#555; margin-top:2px;",
+                style="font-size:9pt; color:var(--bs-secondary-color); margin-top:2px;",
         )
 
     # ── EMDB info ───────────────────────────────────────────
@@ -437,7 +437,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
             return ui.p(
                 ui.a(f"EMD-{emd_id}", href=entry_url, target="_blank"),
                 rest,
-                style="font-size:9pt; color:#555; margin-top:2px;",
+            style="font-size:9pt; color:var(--bs-secondary-color); margin-top:2px;",
             )
         except Exception:
             return None
@@ -647,7 +647,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         info = map_info_text()
         if not info:
             return None
-        return ui.p(info, style="font-size:9pt; color:#555; margin-top:4px;")
+        return ui.p(info, style="font-size:9pt; color:var(--bs-secondary-color); margin-top:4px;")
 
     @reactive.effect
     def _update_section():

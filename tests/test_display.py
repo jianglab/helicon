@@ -1123,6 +1123,51 @@ class TestFscIterations(object):
                 window.close()
 
 
+class TestInstallWindowShortcuts(object):
+    def _quit_shortcuts(self, window):
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        quit_key = QKeySequence(QKeySequence.StandardKey.Quit)
+        return [sc for sc in window.findChildren(QShortcut) if sc.key() == quit_key]
+
+    def test_installs_close_and_quit_shortcuts_when_none_bound(self, qapp):
+        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtWidgets import QMainWindow
+
+        win = QMainWindow()
+        display._install_window_shortcuts(win)
+
+        keys = [sc.key() for sc in win.findChildren(QShortcut)]
+        assert QKeySequence("Ctrl+W") in keys
+        assert QKeySequence(QKeySequence.StandardKey.Quit) in keys
+
+    def test_skips_quit_shortcut_when_action_already_binds_it(self, qapp):
+        from PySide6.QtGui import QAction, QKeySequence
+        from PySide6.QtWidgets import QMainWindow
+
+        win = QMainWindow()
+        action = QAction("Quit", win)
+        action.setShortcut(QKeySequence.StandardKey.Quit)
+        win.menuBar().addMenu("File").addAction(action)
+
+        display._install_window_shortcuts(win)
+        assert self._quit_shortcuts(win) == []
+
+    def test_browser_window_gets_no_duplicate_quit_shortcut(self, tmp_path, qapp):
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        # The browser owns its File -> Quit action (Ctrl+Q); the generic
+        # window shortcuts must not add a second binding for it.
+        display._install_window_shortcuts(widget)
+        assert self._quit_shortcuts(widget) == []
+        # Ctrl+W (close) is still installed for the browser window.
+        keys = [sc.key() for sc in widget.findChildren(QShortcut)]
+        assert QKeySequence("Ctrl+W") in keys
+
+
 class TestDisplayMain(object):
     def test_has_napari_does_not_import_napari(self, monkeypatch):
         import importlib.util
@@ -1495,6 +1540,95 @@ class TestTextWindowEditing(object):
         finally:
             win._text_edit.document().setModified(False)
             win.close()
+
+
+class TestWslgPlatform(object):
+    """Under WSLg, prefer the xcb (X11) Qt platform so window icons reach
+    the Windows taskbar (Wayland cannot carry icons, so WSLg falls back to
+    the Tux placeholder)."""
+
+    @staticmethod
+    def _patch_xcb_available(monkeypatch, value=True):
+        monkeypatch.setattr(display, "_xcb_platform_available", lambda: value)
+
+    def test_wslg_env_forces_xcb(self, monkeypatch):
+        self._patch_xcb_available(monkeypatch)
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert os.environ["QT_QPA_PLATFORM"] == "xcb"
+
+    def test_wsl_interop_env_forces_xcb(self, monkeypatch):
+        self._patch_xcb_available(monkeypatch)
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.setenv("WSL_INTEROP", "/run/WSL/1_interop")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert os.environ["QT_QPA_PLATFORM"] == "xcb"
+
+    def test_wslg_env_keeps_wayland_when_xcb_unavailable(self, monkeypatch):
+        self._patch_xcb_available(monkeypatch, value=False)
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert "QT_QPA_PLATFORM" not in os.environ
+
+    def test_warns_when_xcb_unavailable_under_wslg(self, monkeypatch, capsys):
+        # The silent Wayland fallback leaves the Tux taskbar icon with no
+        # explanation; the warning must name the missing system library so
+        # the user knows how to restore the icon.
+        self._patch_xcb_available(monkeypatch, value=False)
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert "QT_QPA_PLATFORM" not in os.environ
+        err = capsys.readouterr().err
+        assert "libxcb-cursor0" in err
+        assert "apt install" in err
+
+    def test_explicit_platform_is_respected(self, monkeypatch):
+        self._patch_xcb_available(monkeypatch)
+        monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert os.environ["QT_QPA_PLATFORM"] == "offscreen"
+
+    def test_noop_outside_wsl(self, monkeypatch):
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert "QT_QPA_PLATFORM" not in os.environ
+
+    def test_noop_without_wayland(self, monkeypatch):
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.setenv("DISPLAY", ":0")
+        display._force_x11_platform_under_wslg()
+        assert "QT_QPA_PLATFORM" not in os.environ
+
+    def test_noop_without_x_server(self, monkeypatch):
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.delenv("DISPLAY", raising=False)
+        display._force_x11_platform_under_wslg()
+        assert "QT_QPA_PLATFORM" not in os.environ
+
+    def test_xcb_plugin_probe_returns_bool(self):
+        assert isinstance(display._xcb_platform_available(), bool)
 
 
 class TestNapariDockIcon(object):
@@ -2158,11 +2292,13 @@ class TestFolderBrowser(object):
         assert widget._open_folder_action.text() == "Open Folder…"
         assert widget._quit_action.text() == "Quit"
         assert widget._docs_action.text() == "Documentation"
+        assert widget._home_page_action.text() == "Home Page"
         assert widget._theme_menu.title() == "Theme"
         assert set(widget._theme_actions) == {"Dark", "Light", "System"}
         file_labels = [a.text() for a in widget._file_menu.actions()]
         assert "Quit" in file_labels
         assert "Documentation" in [a.text() for a in widget._help_menu.actions()]
+        assert "Home Page" in [a.text() for a in widget._help_menu.actions()]
 
     def test_quit_action_quits_application(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
@@ -2180,6 +2316,15 @@ class TestFolderBrowser(object):
         with patch.object(file_browser, "_open_url") as mock_open:
             widget._docs_action.trigger()
         mock_open.assert_called_once_with("https://helicon.readthedocs.io")
+
+    def test_home_page_action_opens_website(self, tmp_path, qapp):
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        with patch.object(file_browser, "_open_url") as mock_open:
+            widget._home_page_action.trigger()
+        mock_open.assert_called_once_with("https://jianglab.science.psu.edu/helicon")
 
     def test_theme_menu_action_persists_selection(self, tmp_path, qapp):
         from PySide6.QtCore import QSettings
@@ -3281,6 +3426,119 @@ class TestAsyncFileInfo(object):
             assert widget._model.item(row, COL_PIXELSIZE).text() != ""
 
 
+class TestFolderCounts:
+    def test_format_item_count(self):
+        from helicon.lib.file_browser import _format_item_count
+
+        assert _format_item_count(0) == "0 items"
+        assert _format_item_count(1) == "1 item"
+        assert _format_item_count(42) == "42 items"
+
+    def test_count_excludes_hidden_entries(self, tmp_path):
+        from helicon.lib.file_browser import _count_folder_entries
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "a.mrc").write_bytes(b"\x00")
+        (sub / ".hidden").write_bytes(b"\x00")
+        assert _count_folder_entries(str(sub)) == 1
+        assert _count_folder_entries(str(tmp_path / "missing")) == 0
+
+    def test_populate_folder_counts_async(self, tmp_path, qapp):
+        from PySide6.QtWidgets import QApplication
+
+        from helicon.lib.file_browser import (
+            COL_SIZE,
+            FolderBrowserWidget,
+            ROLE_SORT,
+        )
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "a.mrc").write_bytes(b"\x00" * 512)
+        (sub / "b.mrc").write_bytes(b"\x00" * 512)
+        (tmp_path / "empty").mkdir()
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        widget._populate_folder_counts_async()
+        import time
+
+        deadline = time.time() + 10
+        while any(t.isRunning() for t in widget._count_threads) and (
+            time.time() < deadline
+        ):
+            QApplication.processEvents()
+        QApplication.processEvents()
+
+        model = widget._model
+        for row, folderpath in model.folder_rows():
+            assert model.item(row, COL_SIZE).text() != ""
+        sub_row = model._row_for_filepath(str(sub))
+        assert model.item(sub_row, COL_SIZE).text() == "2 items"
+        assert model.item(sub_row, COL_SIZE).data(ROLE_SORT) == 2
+        empty_row = model._row_for_filepath(str(tmp_path / "empty"))
+        assert model.item(empty_row, COL_SIZE).text() == "0 items"
+        assert model.item(empty_row, COL_SIZE).data(ROLE_SORT) == 0
+
+    def test_initial_folder_counts_on_construction(self, tmp_path, qapp):
+        from PySide6.QtWidgets import QApplication
+
+        from helicon.lib.file_browser import COL_SIZE, FolderBrowserWidget
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "a.mrc").write_bytes(b"\x00" * 512)
+
+        # The initial directory must get its folder counts filled in the
+        # background without any explicit refresh/navigation call.
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        import time
+
+        deadline = time.time() + 10
+        while any(t.isRunning() for t in widget._count_threads) and (
+            time.time() < deadline
+        ):
+            QApplication.processEvents()
+        QApplication.processEvents()
+
+        sub_row = widget._model._row_for_filepath(str(sub))
+        assert widget._model.item(sub_row, COL_SIZE).text() == "1 item"
+
+    def test_filter_reload_restores_cached_counts(self, tmp_path, qapp):
+        from PySide6.QtWidgets import QApplication
+
+        from helicon.lib.file_browser import COL_SIZE, FolderBrowserWidget
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "a.mrc").write_bytes(b"\x00" * 512)
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        import time
+
+        deadline = time.time() + 10
+        while any(t.isRunning() for t in widget._count_threads) and (
+            time.time() < deadline
+        ):
+            QApplication.processEvents()
+        QApplication.processEvents()
+        assert widget._model._folder_counts[str(sub)] == 1
+
+        # Filter reload rebuilds the rows; the count must come back from the
+        # cache instead of staying blank.
+        widget._apply_filter()
+        deadline = time.time() + 10
+        while any(t.isRunning() for t in widget._count_threads) and (
+            time.time() < deadline
+        ):
+            QApplication.processEvents()
+        QApplication.processEvents()
+
+        sub_row = widget._model._row_for_filepath(str(sub))
+        assert widget._model.item(sub_row, COL_SIZE).text() == "1 item"
+        assert widget._model._folder_counts[str(sub)] == 1
+
+
 class TestSaveQimage:
     def test_saves_png_to_chosen_path(self, qapp, tmp_path):
         from PySide6.QtGui import QImage
@@ -4073,8 +4331,8 @@ class TestImages2StarDialog(object):
 
             assert dialog._data is not None
             assert len(dialog._data) == 2
-            assert "rows" in dialog._status.text()
-            assert "optics" in dialog._status.text()
+            assert "rows" in dialog._status.toPlainText()
+            assert "optics" in dialog._status.toPlainText()
             assert dialog._btn_save.isEnabled()
             model = dialog._table.model()
             assert model.rowCount() == 2
@@ -4105,6 +4363,57 @@ class TestImages2StarDialog(object):
             assert dialog._optics_table.model() is None
             assert dialog._optics_label.isHidden()
             assert dialog._optics_table.isHidden()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_edit_mode_does_not_clip_dense_row_text(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            table = dialog._table
+            index = table.model().index(0, 1)
+            table.edit(index)
+            self._pump(qapp)
+            editor = table.indexWidget(index)
+            assert editor is not None
+            # Rows are sized to the frameless editor's sizeHint (plus one,
+            # since the cell rect is one pixel shorter than the row); the
+            # editor must keep at least 3px of slack over the font or the
+            # cell text is clipped top and bottom while editing.
+            assert editor.contentsRect().height() >= editor.fontMetrics().height() + 3
+            assert editor.height() <= table.verticalHeader().sectionSize(0)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_load_path_reuses_window_with_new_dataset(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+            first = dialog._data
+
+            # Reuse: reload a different file into the same window.
+            dialog.load_path("other.star")
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            assert dialog._data is not first
+            assert "other.star" in dialog.windowTitle()
+            assert dialog._btn_save.isEnabled()
+            assert dialog._table.model().rowCount() == 2
+
+            # The transformation stack survives the reload.
+            dialog._stack_model.add("select", "rlnImageName")
+            dialog.load_path("third.star")
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+            assert dialog._stack_model.rowCount() == 1
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -4179,8 +4488,8 @@ class TestImages2StarDialog(object):
             late_index = model.index(1234, 0)
             assert model.data(late_index) == "frame_1234.mrc"
             assert dialog._particles_label.text() == "Particles"
-            assert "capped" not in dialog._status.text()
-            assert f"{n:,} rows" in dialog._status.text()
+            assert "capped" not in dialog._status.toPlainText()
+            assert f"{n:,} rows" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -4218,12 +4527,21 @@ class TestImages2StarDialog(object):
             dialog._load_worker.wait()
             self._pump(qapp)
 
-            # Matches the file browser's compactness: 12px font and table
-            # rows sized from those metrics instead of the style default.
+            # Matches the file browser's compactness: 12px font, and rows
+            # sized to the frameless editor's sizeHint plus one pixel (the
+            # cell rect is one pixel shorter than the row) so editing never
+            # clips the text, instead of the style default.
+            from PySide6.QtWidgets import QLineEdit
+
+            sample = QLineEdit()
+            sample.setFont(dialog._table.font())
+            sample.setFrame(False)
+            sample.setContentsMargins(0, 0, 0, 0)
+            sample.setTextMargins(0, 0, 0, 0)
             for table in (dialog._table, dialog._optics_table):
                 assert table.fontInfo().pixelSize() == 12
                 vh = table.verticalHeader()
-                assert vh.defaultSectionSize() == vh.fontMetrics().height()
+                assert vh.defaultSectionSize() == sample.sizeHint().height() + 1
                 assert vh.minimumSectionSize() <= vh.fontMetrics().height()
             assert (
                 dialog._table.rowHeight(0)
@@ -4461,17 +4779,28 @@ class TestImages2StarDialog(object):
             dialog.deleteLater()
             self._pump(qapp)
 
-    def test_status_line_sits_at_bottom(self, qapp):
+    def test_save_and_close_share_transformations_action_row(self, qapp):
         dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
         try:
             dialog._load_worker.wait()
             self._pump(qapp)
+            dialog.resize(940, 760)
+            dialog.show()
+            self._pump(qapp)
 
-            layout = dialog.layout()
-            # The status label is the last item in the main layout, below the
-            # button row, so transient messages read as a bottom status bar.
-            assert layout.indexOf(dialog._status) == layout.count() - 1
-            assert layout.indexOf(dialog._status) > layout.indexOf(dialog._btn_save)
+            # Save As and Close sit in the transformations action row, not in
+            # the status band, so the status message gets the full width.
+            assert dialog._status.parent() is dialog
+            ops_group = dialog._ops_group
+            assert dialog._btn_save.parent() is ops_group
+            assert dialog._btn_close.parent() is ops_group
+            # The status band is as wide as the window (no buttons flanking it).
+            assert (
+                dialog._status.geometry().width()
+                >= dialog.width() - dialog.layout().contentsMargins().left() * 2
+            )
+            assert dialog._btn_save.isVisible()
+            assert dialog._btn_close.isVisible()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -4560,8 +4889,8 @@ class TestImages2StarDialog(object):
 
             assert captured["data"] is dialog._data
             assert captured["path"] == out
-            assert "Saved" in dialog._status.text()
-            assert "out.star" in dialog._status.text()
+            assert "Saved" in dialog._status.toPlainText()
+            assert "out.star" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -4577,8 +4906,8 @@ class TestImages2StarDialog(object):
             self._pump(qapp)
 
             assert dialog._data is None
-            assert "Failed to load dataset" in dialog._status.text()
-            assert "RuntimeError" in dialog._status.text()
+            assert "Failed to load dataset" in dialog._status.toPlainText()
+            assert "RuntimeError" in dialog._status.toPlainText()
             assert not dialog._btn_save.isEnabled()
         finally:
             dialog.close()
@@ -4614,7 +4943,7 @@ class TestImages2StarDialog(object):
             self._pump(qapp)
 
             assert out.is_file()
-            assert "Saved" in dialog._status.text()
+            assert "Saved" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -4708,7 +5037,7 @@ class TestImages2StarDialog(object):
             dialog._btn_add.click()
 
             assert dialog._stack_model.rowCount() == 0
-            assert "Cannot add --select" in dialog._status.text()
+            assert "Cannot add --select" in dialog._status.toPlainText()
             assert not dialog._btn_apply.isEnabled()
         finally:
             dialog.close()
@@ -4733,7 +5062,7 @@ class TestImages2StarDialog(object):
             model = dialog._table.model()
             assert model.rowCount() == 2
             assert model.columnCount() == 3
-            assert "2 operation(s)" in dialog._status.text()
+            assert "2 operation(s)" in dialog._status.toPlainText()
             assert "modified" in dialog.windowTitle()
             assert dialog._optics_table.model().rowCount() == 1
             assert dialog._btn_reset.isEnabled()
@@ -5095,7 +5424,7 @@ class TestImages2StarDialog(object):
             command = dialog._command_text()
             dialog._copy_command(command)
             assert qapp.clipboard().text() == command
-            assert "Command copied to clipboard" in dialog._status.text()
+            assert "Command copied to clipboard" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5225,7 +5554,7 @@ class TestImages2StarDialog(object):
 
             assert len(captured["data"]) == 2
             assert captured["path"] == out
-            assert "Saved" in dialog._status.text()
+            assert "Saved" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5241,8 +5570,8 @@ class TestImages2StarDialog(object):
             dialog._btn_apply.click()
 
             assert len(dialog._data) == 4  # unchanged
-            assert "Transform failed" in dialog._status.text()
-            assert "rlnNoSuchColumn" in dialog._status.text()
+            assert "Transform failed" in dialog._status.toPlainText()
+            assert "rlnNoSuchColumn" in dialog._status.toPlainText()
             assert not dialog._btn_reset.isEnabled()
         finally:
             dialog.close()
@@ -5262,12 +5591,12 @@ class TestImages2StarDialog(object):
 
             dialog._btn_apply.click()
 
-            assert "Transform failed" in dialog._status.text()
+            assert "Transform failed" in dialog._status.toPlainText()
             assert "color: #b3261e" in dialog._status.styleSheet()
 
             # A subsequent info message clears the error styling.
             dialog._set_status("back to normal")
-            assert dialog._status.styleSheet() == ""
+            assert "color:" not in dialog._status.styleSheet()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5318,8 +5647,8 @@ class TestImages2StarDialog(object):
             dialog._btn_apply.click()
 
             assert len(dialog._data) == 4  # unchanged
-            assert "Transform failed" in dialog._status.text()
-            assert "rlnNoSuchColumn" in dialog._status.text()
+            assert "Transform failed" in dialog._status.toPlainText()
+            assert "rlnNoSuchColumn" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5445,7 +5774,7 @@ class TestImages2StarDialog(object):
             assert len(particles) == 2
             assert particles["rlnDefocusU"].tolist() == [1.0, 2.0]
             assert particles["rlnDefocusV"].tolist() == [20.0, 5.0]
-            assert "Saved" in dialog._status.text()
+            assert "Saved" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5530,7 +5859,7 @@ class TestImages2StarDialog(object):
             # Double-clicking a header only sorts; the label is copied via
             # the right-click context menu instead.
             assert qapp.clipboard().text() == "sentinel"
-            assert "rlnImageName" not in dialog._status.text()
+            assert "rlnImageName" not in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5548,14 +5877,14 @@ class TestImages2StarDialog(object):
 
             actions[0].trigger()  # Copy column label
             assert qapp.clipboard().text() == "rlnAngleRot"
-            assert "rlnAngleRot" in dialog._status.text()
+            assert "rlnAngleRot" in dialog._status.toPlainText()
 
             actions[1].trigger()  # Copy all column labels
             assert qapp.clipboard().text().splitlines() == [
                 "rlnImageName",
                 "rlnAngleRot",
             ]
-            assert "2 column labels" in dialog._status.text()
+            assert "2 column labels" in dialog._status.toPlainText()
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5569,6 +5898,183 @@ class TestImages2StarDialog(object):
 
             dialog._optics_table._copy_header_label(1)
             assert qapp.clipboard().text() == "rlnPixelSize"
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_tolerant_loader_keeps_table_and_records_warnings(self, tmp_path):
+        from helicon.lib.exceptions import HeliconIOError
+        from helicon.lib.images2star_widget import _images2dataframe_tolerant
+
+        present = tmp_path / "present.mrc"
+        present.write_bytes(b"x")
+        missing = tmp_path / "missing.mrc"
+
+        data = pd.DataFrame(
+            {
+                "rlnImageName": [f"1@{missing}", f"2@{present}"],
+                "rlnAngleRot": [1.0, 2.0],
+            }
+        )
+        data.attrs["convention"] = "relion"
+
+        with patch(
+            "helicon.images2dataframe",
+            side_effect=[
+                HeliconIOError(f"cannot find image {missing} in file x.star"),
+                data,
+            ],
+        ):
+            result = _images2dataframe_tolerant("x.star")
+
+        # The table from the star file is still returned...
+        assert len(result) == 2
+        assert result["rlnAngleRot"].tolist() == [1.0, 2.0]
+        # ...with the resolution failure recorded beside it.
+        assert len(result.attrs["load_warnings"]) == 2
+        assert f"cannot find image {missing}" in result.attrs["load_warnings"][0]
+        assert str(missing) in result.attrs["missing_files"]
+        assert str(present) not in result.attrs["missing_files"]
+
+    def test_tolerant_loader_reraises_fatal_errors(self):
+        from helicon.lib.exceptions import HeliconIOError
+        from helicon.lib.images2star_widget import _images2dataframe_tolerant
+
+        with patch(
+            "helicon.images2dataframe",
+            side_effect=[
+                HeliconIOError("cannot find image missing.mrc in file x.star"),
+                HeliconIOError("cannot parse x.star"),
+            ],
+        ):
+            with pytest.raises(HeliconIOError, match="cannot find image missing.mrc"):
+                _images2dataframe_tolerant("x.star")
+
+    def test_tolerant_loader_also_reports_missing_micrographs(self, tmp_path):
+        from helicon.lib.images2star_widget import _images2dataframe_tolerant
+
+        present = tmp_path / "present.mrc"
+        present.write_bytes(b"x")
+        missing_mg = tmp_path / "missing_frames.mrcs"
+
+        data = pd.DataFrame(
+            {
+                "rlnImageName": [f"1@{present}", f"2@{present}"],
+                "rlnMicrographName": [str(missing_mg), str(missing_mg)],
+            }
+        )
+        data.attrs["convention"] = "relion"
+
+        # Strict load succeeds (particles resolve) but the micrograph file is
+        # silently missing; it still must be reported.
+        with patch("helicon.images2dataframe", return_value=data):
+            result = _images2dataframe_tolerant("x.star")
+
+        assert result.attrs["missing_files"] == [str(missing_mg)]
+        assert len(result.attrs["load_warnings"]) == 1
+        assert "micrograph" in result.attrs["load_warnings"][0].lower()
+
+    def test_missing_file_cells_are_colored_red(self, qapp, tmp_path):
+        from helicon.lib.images2star_widget import _DataFramePreviewModel
+
+        present = tmp_path / "present.mrc"
+        present.write_bytes(b"x")
+        missing = tmp_path / "missing.mrc"
+
+        data = pd.DataFrame(
+            {
+                "rlnImageName": [
+                    f"1@{present}",
+                    f"1@{missing}",
+                ],
+                "rlnAngleRot": [1.0, 2.0],
+            }
+        )
+        model = _DataFramePreviewModel(
+            data, missing_files=[str(missing)], parent=qapp.activeWindow()
+        )
+        try:
+            ok_index = model.index(0, 0)
+            bad_index = model.index(1, 0)
+            num_index = model.index(1, 1)
+            # Only the cell referencing the missing file is flagged.
+            assert model.data(ok_index, Qt.ItemDataRole.ForegroundRole) is None
+            assert model.data(num_index, Qt.ItemDataRole.ForegroundRole) is None
+            color = model.data(bad_index, Qt.ItemDataRole.ForegroundRole)
+            assert color is not None
+            assert color.isValid()
+        finally:
+            model.deleteLater()
+            self._pump(qapp)
+
+    def test_status_row_caps_at_five_lines_and_scrolls(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            status = dialog._status
+            line_h = status.fontMetrics().lineSpacing()
+
+            dialog._set_status("a single line")
+            self._pump(qapp)
+            assert status.height() < 2 * line_h
+
+            dialog._set_status("\n".join(f"row {i}" for i in range(12)))
+            self._pump(qapp)
+            assert status.height() == 5 * line_h + 4
+            assert status.verticalScrollBar().maximum() > 0
+            assert status.isReadOnly()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_transformations_block_in_draggable_splitter(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            dialog.show()
+            self._pump(qapp)
+
+            # A drag bar separates the previews from the transformations
+            # block, and the block defaults to its compact height (about
+            # half of the tall block the vertical button column needed).
+            assert dialog._main_splitter.count() == 2
+            assert dialog._main_splitter.handle(1) is not None
+            ops_default = dialog._main_splitter.sizes()[1]
+            assert ops_default <= 2 * dialog._ops_group.sizeHint().height()
+
+            # Dragging the handle open must not be undone by a re-show
+            # (small per-pixel handle redistribution is fine).
+            h = dialog._main_splitter.height()
+            dialog._main_splitter.setSizes([int(h * 0.4), int(h * 0.6)])
+            dialog.show()
+            self._pump(qapp)
+            preview, ops = dialog._main_splitter.sizes()
+            assert abs(preview - int(h * 0.4)) <= 3
+            assert abs(ops - int(h * 0.6)) <= 3
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_load_warnings_show_as_error_beside_the_table(self, qapp):
+        data = self._df_with_optics()
+        data.attrs["load_warnings"] = ["HeliconIOError: cannot find image missing.mrc"]
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            # The table is still populated despite the warnings...
+            assert dialog._table.model().rowCount() == 2
+            # ...and the summary plus the error message are both shown.
+            status = dialog._status.toPlainText()
+            assert "2 rows" in status
+            assert "cannot find image missing.mrc" in status
+            assert dialog._status_error is True
         finally:
             dialog.close()
             dialog.deleteLater()

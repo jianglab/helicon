@@ -49,11 +49,12 @@ except ImportError:
 # window is only ever constructed from Qt code paths.
 try:
     from PySide6.QtWidgets import QLayout, QMainWindow, QWidget
-    from PySide6.QtCore import QPoint, QRect, QSize
+    from PySide6.QtCore import QObject, QPoint, QRect, QSize
 except ImportError:  # pragma: no cover - only without the Qt stack
     QLayout = None
     QMainWindow = None
     QWidget = None
+    QObject = None
     QPoint = None
     QRect = None
     QSize = None
@@ -143,6 +144,70 @@ def _set_macos_app_identity(name: str = "Helicon") -> None:
 def _qt_argv() -> list[str]:
     """Return argv with a stable executable name for Qt desktop identity."""
     return ["Helicon", *sys.argv[1:]]
+
+
+def _xcb_platform_available() -> bool:
+    """Return True when Qt's xcb platform plugin can actually be loaded.
+
+    Since Qt 6.5 the xcb plugin refuses to load when ``libxcb-cursor0``
+    is missing, which is common on minimal WSL images.  Probing the
+    plugin (load, then unload) detects that before ``QApplication`` is
+    created, so the app can fall back to the Wayland platform instead of
+    aborting at startup.
+    """
+    try:
+        from PySide6.QtCore import QLibraryInfo, QPluginLoader
+        from pathlib import Path
+
+        platforms = (
+            Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)) / "platforms"
+        )
+        for name in ("libqxcb.so", "qxcb.dll"):
+            candidate = platforms / name
+            if not candidate.is_file():
+                continue
+            loader = QPluginLoader(str(candidate))
+            if loader.load():
+                loader.unload()
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _force_x11_platform_under_wslg() -> None:
+    """Prefer the X11 (xcb) Qt platform when running under WSLg.
+
+    WSLg's native Wayland protocol cannot carry window icons, so Qt
+    windows launched under WSLg Wayland always show the fallback Tux in
+    the Windows taskbar.  WSLg provides an X server (Xwayland), where
+    window icons are delivered via ``_NET_WM_ICON``.  Switching to xcb
+    therefore lets the Helicon icon reach the Windows taskbar.
+
+    The switch is only made when the xcb platform plugin is loadable
+    (``_xcb_platform_available``); otherwise the app keeps the working
+    Wayland platform rather than aborting at startup and warns about the
+    missing system dependency.  An explicitly set ``QT_QPA_PLATFORM``
+    (e.g. ``offscreen`` for headless use) is always respected, as is a
+    missing X server.
+    """
+    if "QT_QPA_PLATFORM" in os.environ:
+        return
+    is_wsl = os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP")
+    if not is_wsl or not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    if not os.environ.get("DISPLAY"):
+        return
+    if not _xcb_platform_available():
+        print(
+            "[helicon] WSLg detected, but the xcb Qt platform plugin cannot "
+            "load (missing system library libxcb-cursor0?). Falling back to "
+            "Wayland, so window icons will not appear in the Windows "
+            "taskbar. Install it with: sudo apt install libxcb-cursor0",
+            file=sys.stderr,
+        )
+        return
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 
 def _macos_ns_app():
@@ -1916,16 +1981,75 @@ def _launch_truefsc(path: str, parent=None) -> None:
     dialog.exec()
 
 
-def _open_images2star_tools(path: str, parent=None) -> None:
-    """Open the Images2Star tools panel (preview + save) for a dataset."""
+class _Images2StarActivationFilter(QObject):
+    """Forward panel focus changes to the images2star window tracker.
+
+    Mirrors how the gallery/text/FSC windows report activation so that
+    ``tracker.active()`` always points at the most recently focused panel
+    (reuse target when the ``New`` checkbox is off).
+    """
+
+    def __init__(self, window, tracker):
+        super().__init__(window)
+        self._window = window
+        self._tracker = tracker
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+
+        if event.type() == QEvent.Type.ActivationChange and obj.isActiveWindow():
+            self._tracker.on_activate(self._window)
+        return False
+
+
+def _open_images2star_tools(
+    path: str, parent=None, reuse_window=None, tracker=None
+) -> None:
+    """Open the Images2Star tools panel (preview + save) for a dataset.
+
+    Follows the gallery/text/FSC lifecycle: with ``reuse_window`` the panel
+    reloads the new file in place; otherwise a fresh non-modal panel is shown
+    (the file browser stays usable) and registered with ``tracker`` so later
+    clicks reuse it unless the ``New`` checkbox is checked.
+    """
     from pathlib import Path
 
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QMessageBox
 
     from helicon.lib.images2star_widget import Images2StarDialog
 
     try:
-        Images2StarDialog(str(Path(path).resolve()), parent=parent).exec()
+        path = str(Path(path).resolve())
+        if (
+            reuse_window is not None
+            and _is_alive_widget(reuse_window)
+            and isinstance(reuse_window, Images2StarDialog)
+        ):
+            reuse_window.load_path(path)
+            reuse_window.show()
+            reuse_window.raise_()
+            reuse_window.activateWindow()
+            return
+
+        dialog = Images2StarDialog(path, parent=parent)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setModal(False)
+        if tracker is not None:
+            tracker.register(dialog)
+            dialog.destroyed.connect(lambda *_: tracker.on_close(dialog))
+            _Images2StarActivationFilter(dialog, tracker)
+        # Offset the panel at least half of its own width from the parent
+        # so the two windows sit side by side instead of fully overlapping
+        # the file browser (the dialog already resized itself in __init__).
+        if parent:
+            parent_geo = parent.geometry()
+            offset_x = max(dialog.width(), parent_geo.width()) // 2
+            dialog.move(parent_geo.x() + offset_x, parent_geo.y() + 40)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
     except Exception as exc:
         QMessageBox.critical(
             None,
@@ -3579,18 +3703,20 @@ _napari = _DisplayTracker(_is_alive_viewer)
 _gallery = _DisplayTracker(_is_alive_widget)
 _plot = _DisplayTracker(_is_alive_widget)
 _text = _DisplayTracker(_is_alive_widget)
+_images2star = _DisplayTracker(_is_alive_widget)
 
 _NAPARI_MODES = {"slice", "volume", "3dplot", "stats", "html"}
 _GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
 _TEXT_MODES = {"text"}
 _PLOT_MODES = {"fsc"}
+_IMAGES2STAR_MODES = {"images2star"}
 
 
 def _quit_all_windows():
     """Close every tracked window and the file browser, then quit."""
     from PySide6.QtWidgets import QApplication
 
-    for tracker in (_napari, _gallery, _text, _plot):
+    for tracker in (_napari, _gallery, _text, _plot, _images2star):
         for w in list(tracker.alive()):
             try:
                 w.close()
@@ -3605,13 +3731,20 @@ def _quit_all_windows():
 
 def _install_window_shortcuts(window):
     """Install Ctrl+W (close) and Ctrl+Q (quit) on *window*."""
-    from PySide6.QtGui import QShortcut, QKeySequence
+    from PySide6.QtGui import QAction, QShortcut, QKeySequence
 
     close_sc = QShortcut(QKeySequence("Ctrl+W"), window)
     close_sc.activated.connect(window.close)
 
-    quit_sc = QShortcut(QKeySequence.StandardKey.Quit, window)
-    quit_sc.activated.connect(_quit_all_windows)
+    # The file browser already binds Ctrl+Q to its File -> Quit action.
+    # Installing a second Ctrl+Q handler in the same window makes the
+    # shortcut ambiguous: Qt emits an "Ambiguous shortcut overload" warning
+    # and neither binding fires reliably. Skip the shortcut when the window
+    # already provides a matching action.
+    quit_key = QKeySequence(QKeySequence.StandardKey.Quit)
+    if not any(a.shortcut() == quit_key for a in window.findChildren(QAction)):
+        quit_sc = QShortcut(quit_key, window)
+        quit_sc.activated.connect(_quit_all_windows)
 
 
 _TRACKER_FOR: dict[str, _DisplayTracker] = {}
@@ -3623,6 +3756,10 @@ for _m in _TEXT_MODES:
     _TRACKER_FOR[_m] = _text
 for _m in _PLOT_MODES:
     _TRACKER_FOR[_m] = _plot
+for _m in _IMAGES2STAR_MODES:
+    _TRACKER_FOR[_m] = _images2star
+for _m in _IMAGES2STAR_MODES:
+    _TRACKER_FOR[_m] = _images2star
 
 
 def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
@@ -5162,6 +5299,7 @@ def _run_standalone() -> None:
     Expects ``sys.argv[1]`` = file path and optional ``sys.argv[2]`` = mode.
     """
     _prepare_process_identity()
+    _force_x11_platform_under_wslg()
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(_qt_argv())
@@ -5204,6 +5342,7 @@ def main(args: argparse.Namespace) -> None:
     from PySide6.QtGui import QShortcut, QKeySequence
 
     _prepare_process_identity()
+    _force_x11_platform_under_wslg()
     app = QApplication.instance() or QApplication(_qt_argv())
     _set_application_identity(app)
 
@@ -5336,6 +5475,13 @@ def main(args: argparse.Namespace) -> None:
             _open_text_window(path, reuse_window=tracker.active())
         elif tracker is _plot:
             _open_fsc_plot(path, reuse_window=tracker.active())
+        elif tracker is _images2star:
+            _open_images2star_tools(
+                path,
+                parent=widget,
+                reuse_window=tracker.active(),
+                tracker=tracker,
+            )
 
     def _on_file_selected_new_window(path):
         tracker, mode = _categorize_file(path)
@@ -5375,9 +5521,6 @@ def main(args: argparse.Namespace) -> None:
                 parent=widget,
             )
             return
-        if mode == "images2star":
-            _open_images2star_tools(path, parent=widget)
-            return
         tracker = _TRACKER_FOR.get(mode)
         if tracker is None:
             return
@@ -5406,6 +5549,13 @@ def main(args: argparse.Namespace) -> None:
                 _open_text_window(path, reuse_window=reuse)
             elif tracker is _plot:
                 _open_fsc_plot(path, reuse_window=reuse)
+            elif tracker is _images2star:
+                _open_images2star_tools(
+                    path,
+                    parent=widget,
+                    reuse_window=reuse,
+                    tracker=tracker,
+                )
 
     widget = FolderBrowserWidget(start_dir=start_dir)
     widget.file_selected.connect(_on_file_selected)

@@ -443,6 +443,7 @@ def process_one_task(
         reconstruct_diameter_3d_pixel,
         reconstruct_length_2d_pixel,
         reconstruct_length_3d_pixel,
+        rec3d_xform if return_3d else None,
     )
     result = (
         score,

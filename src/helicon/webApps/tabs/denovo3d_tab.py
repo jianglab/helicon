@@ -12,6 +12,7 @@ instead of ``render_plotly``, and ``input_action_button`` instead of
 import asyncio
 import itertools
 import logging
+import mrcfile
 import pathlib
 import random
 import tempfile
@@ -781,25 +782,6 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             id=f"{prefix}_card",
         )
 
-    # ── Sync reactive values from sidebar inputs ─────────────────────
-
-    @reactive.effect
-    def _sync_params_from_shared():
-        t = project.twist()
-        r = project.rise()
-        c = project.csym()
-        a = project.apix()
-        if t:
-            ui.update_numeric("dn_twist_min", value=t)
-            ui.update_numeric("dn_twist_max", value=t)
-        if r:
-            ui.update_numeric("dn_rise_min", value=r)
-            ui.update_numeric("dn_rise_max", value=r)
-        if c:
-            ui.update_numeric("dn_csym", value=c)
-        if a:
-            ui.update_numeric("dn_apix", value=a)
-
     # ── Render: sidebar dynamic UI ───────────────────────────────────
 
     @render.ui
@@ -1362,54 +1344,12 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     def dn_download_map():
         req(len(reconstruction_results()) == 1)
         result = reconstruction_results()[0]
-        (
-            score,
-            (
-                rec3d_x_proj,
-                rec3d_y_proj,
-                rec3d_z_sections,
-                rec3d,
-                _d2d,
-                _d3d,
-                _l2d,
-                _l3d,
-            ),
-            (
-                _data,
-                _imageFile,
-                _imageIndex,
-                apix3d,
-                _apix2d,
-                twist,
-                rise,
-                csym,
-                _tilt,
-                _psi,
-                _dy,
-            ),
-        ) = result
+        _score, return_data, _params = result
+        *_projection_data, rec3d_map = return_data
 
-        imgs = all_images()
-        if isinstance(imgs.data, np.ndarray):
-            if len(imgs.data.shape) < 3:
-                ny, nx = imgs.data.shape
-            else:
-                _, ny, nx = imgs.data.shape
-        else:
-            ny, nx = imgs.data[int(_imageIndex) - 1].shape
-
+        req(rec3d_map is not None)
         apix = input_data().apix
-        rec3d_map = helicon.apply_helical_symmetry(
-            data=rec3d[0],
-            apix=apix3d,
-            twist_degree=twist,
-            rise_angstrom=rise,
-            csym=csym,
-            fraction=1.0,
-            new_size=(nx, ny, ny),
-            new_apix=apix,
-            cpu=input.dn_cpu(),
-        ).astype(np.float32)
+        rec3d_map = np.asarray(rec3d_map, dtype=np.float32)
 
         with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
             with mrcfile.new(temp.name, overwrite=True) as mrc:
@@ -1420,7 +1360,9 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
     @render.ui
     def dn_download_map_section():
-        req(len(reconstruction_results()) == 1)
+        res = reconstruction_results()
+        req(len(res) == 1)
+        req(res[0][1][8] is not None)
         from htmltools import tags
 
         return ui.div(

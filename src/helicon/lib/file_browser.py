@@ -1664,7 +1664,6 @@ class FolderBrowserWidget(QMainWindow):
         sort_order = self._tree.header().sortIndicatorOrder()
         self._model.sort(sort_col, sort_order)
         self._path_edit.setText(path)
-        _add_recent_folder(path)
         self._refresh_recent_combo()
         self._refresh_recent_menu()
         self._populate_file_info_async()

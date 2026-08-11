@@ -22,14 +22,20 @@ from PySide6.QtCore import (
     QThread,
     Signal,
 )
-from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QShortcut, QTextOption
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QKeySequence,
+    QShortcut,
+    QTextOption,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -40,13 +46,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyledItemDelegate,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 import helicon
-from helicon.lib.exceptions import HeliconError
+from helicon.lib.exceptions import HeliconError, HeliconIOError
 from helicon.lib.images2star_engine import (
     apply_options,
     gui_operation_specs,
@@ -63,12 +70,17 @@ _OUTPUT_FILTER = "RELION STAR (*.star);;CryoSPARC v2 (*.cs);;CSV (*.csv)"
 # typography and padding so the dialog feels as dense as the rest of the
 # display app. The table font is set through the same stylesheet mechanism
 # the browser uses so both resolve identically regardless of display scale.
+# Header sections keep only horizontal padding: the row-number gutter (the
+# vertical header) is rendered at the table's row height, and any top/bottom
+# padding would shrink its content area below the digit glyph height,
+# clipping the numbers (the horizontal header sections size themselves from
+# the font, so they need no vertical cushion either).
 _COMPACT_QSS = """
     QTableView {
         font-size: 12px;
     }
     QHeaderView::section {
-        padding: 3px;
+        padding: 0 3px;
         font-weight: bold;
     }
     QSplitter::handle {
@@ -214,10 +226,11 @@ class _DataFramePreviewModel(QAbstractTableModel):
     manual corrections); values that cannot be parsed are rejected.
     """
 
-    def __init__(self, data: pd.DataFrame, parent=None):
+    def __init__(self, data: pd.DataFrame, missing_files=(), parent=None):
         super().__init__(parent)
         self._data = data
         self._order = np.arange(len(data), dtype=int)
+        self._missing_files = set(missing_files)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._order)
@@ -231,7 +244,13 @@ class _DataFramePreviewModel(QAbstractTableModel):
         return super().flags(index) | Qt.ItemFlag.ItemIsEditable
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or role not in (
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if self._missing_files and self._cell_is_missing(index):
+                return QColor(self._error_color())
+            return None
+        if role not in (
             Qt.ItemDataRole.DisplayRole,
             Qt.ItemDataRole.EditRole,
         ):
@@ -245,6 +264,24 @@ class _DataFramePreviewModel(QAbstractTableModel):
             except UnicodeDecodeError:
                 value = repr(value)
         return str(value)
+
+    def _cell_is_missing(self, index) -> bool:
+        """Return True when the cell references a file not found on disk."""
+        value = self._data.iat[self._order[index.row()], index.column()]
+        if value is None:
+            return False
+        return str(value).split("@")[-1] in self._missing_files
+
+    @staticmethod
+    def _error_color() -> str:
+        """Return the theme's error color used to flag missing-file cells."""
+        from helicon.lib.file_browser import (
+            _THEME_COLORS,
+            _resolved_theme,
+            _saved_theme,
+        )
+
+        return _THEME_COLORS[_resolved_theme(_saved_theme())].get("error", "#b3261e")
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
@@ -507,6 +544,90 @@ class _CopyableTableView(QTableView):
         menu.exec(header.viewport().mapToGlobal(pos))
 
 
+class _DenseEditDelegate(QStyledItemDelegate):
+    """Fit the edit editor into the tables' dense rows.
+
+    Rows are sized from the editor's own sizeHint, but the editor still must
+    not add its default frame and margins: those would eat the slack and clip
+    the cell text at the top and bottom while editing. The editor is given
+    the full cell rect, no frame and no margins so its text area matches the
+    rendered cell text exactly.
+    """
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            editor.setFrame(False)
+            editor.setContentsMargins(0, 0, 0, 0)
+            editor.setTextMargins(0, 0, 0, 0)
+        return editor
+
+    def updateEditorGeometry(self, editor, option, index):
+        rect = option.rect
+        if rect.height() < editor.fontMetrics().height():
+            rect.setHeight(editor.fontMetrics().height())
+        editor.setGeometry(rect)
+
+
+def _missing_filename_values(data: pd.DataFrame) -> list[str]:
+    """Return referenced image/micrograph paths that do not exist on disk.
+
+    Missing micrograph files never raise (they are normalized with
+    ``ignore_bad_micrograph_path=1`` by design), and a tolerant particle
+    load leaves unresolved entries at their raw path, so an existence check
+    is the single source of truth for what is unavailable.
+    """
+    seen: set[str] = set()
+    missing: list[str] = []
+    for column in ("rlnImageName", "rlnMicrographName", "rlnMicrographMovieName"):
+        if column not in data:
+            continue
+        for value in data[column].dropna().unique():
+            filename = str(value).split("@")[-1]
+            if filename in seen:
+                continue
+            seen.add(filename)
+            if not Path(filename).exists():
+                missing.append(filename)
+    return missing
+
+
+def _images2dataframe_tolerant(path: str) -> pd.DataFrame:
+    """Load ``path`` into a DataFrame, keeping the table on image errors.
+
+    The strict load fails the moment one referenced image file cannot be
+    found (e.g. a shared or not-yet-mounted filesystem), even though the
+    star file itself parsed fine. In that case retry with
+    ``ignore_bad_particle_path=1`` so every row from the file is still
+    shown. Missing image and micrograph files found afterwards are recorded
+    in ``data.attrs["load_warnings"]`` (for the status bar) and
+    ``data.attrs["missing_files"]`` (to flag the offending table cells).
+    """
+    try:
+        data = helicon.images2dataframe(path, target_convention="relion")
+    except HeliconIOError as exc:
+        try:
+            data = helicon.images2dataframe(
+                path,
+                target_convention="relion",
+                ignore_bad_particle_path=1,
+            )
+        except Exception:
+            raise exc
+        data.attrs["load_warnings"] = [f"HeliconIOError: {exc}"]
+    missing = _missing_filename_values(data)
+    if missing:
+        warnings = list(data.attrs.get("load_warnings", []))
+        n = len(missing)
+        shown = ", ".join(missing[:20])
+        if n > 20:
+            shown += ", \u2026"
+        warnings.append(f"{n} image/micrograph file(s) not found: {shown}")
+        data.attrs["load_warnings"] = warnings
+        data.attrs["missing_files"] = missing
+    return data
+
+
 class Images2StarDialog(QDialog):
     """Preview and save an image dataset with the images2star engine.
 
@@ -528,9 +649,7 @@ class Images2StarDialog(QDialog):
         self.setProperty("helicon_theme_window", True)
         self._status_error = False
         self._path = str(Path(path).resolve())
-        self._loader = loader or (
-            lambda p: helicon.images2dataframe(p, target_convention="relion")
-        )
+        self._loader = loader or _images2dataframe_tolerant
         self._saver = saver or helicon.dataframe2file
         self._specs = gui_operation_specs()
         self._source_data: pd.DataFrame | None = None
@@ -539,9 +658,11 @@ class Images2StarDialog(QDialog):
         self._sort_active = False
         self._last_output: str | None = None
         self._workers: list[QThread] = []
+        self._load_seq = 0
+        self._sized_once = False
 
         self.setWindowTitle(f"Images2Star - {Path(self._path).name}")
-        self.resize(940, 760)
+        self.resize(940, 800)
 
         compact = QFont()
         compact.setPixelSize(12)
@@ -575,7 +696,6 @@ class Images2StarDialog(QDialog):
         self._splitter.addWidget(self._optics_pane)
         self._splitter.setStretchFactor(0, 2)
         self._splitter.setStretchFactor(1, 1)
-        layout.addWidget(self._splitter, 2)
         self._table.horizontalHeader().sortIndicatorChanged.connect(
             self._on_sort_indicator_changed
         )
@@ -585,35 +705,57 @@ class Images2StarDialog(QDialog):
         self._table.labelCopied.connect(self._on_label_copied)
         self._optics_table.labelCopied.connect(self._on_label_copied)
 
-        layout.addWidget(self._make_operations_group())
+        # The previews and the transformations block share one outer vertical
+        # splitter so a drag bar separates the optics pane from the options
+        # stack (each is also resizable). The transformations block defaults
+        # to half of the height its contents would naturally request.
+        self._ops_group = self._make_operations_group()
+        self._main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._main_splitter.setChildrenCollapsible(True)
+        self._main_splitter.addWidget(self._splitter)
+        self._main_splitter.addWidget(self._ops_group)
+        self._main_splitter.setStretchFactor(0, 3)
+        self._main_splitter.setStretchFactor(1, 1)
+        layout.addWidget(self._main_splitter, 1)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
-        buttons.addStretch(1)
+        self._status = QPlainTextEdit()
+        self._status.setReadOnly(True)
+        self._status.setPlainText("Loading dataset\u2026")
+        self._status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self._status.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._status.document().setDocumentMargin(0)
+        self._status.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._status.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        line_h = self._status.fontMetrics().lineSpacing()
+        self._status.setMinimumHeight(line_h + 2)
+        self._status.setMaximumHeight(5 * line_h + 4)
+        policy = self._status.sizePolicy()
+        policy.setVerticalPolicy(QSizePolicy.Policy.Fixed)
+        self._status.setSizePolicy(policy)
+        self._fit_status_height()
+        buttons.addWidget(self._status, 1)
         self._btn_save = self._compact_button(QPushButton("Save As\u2026"))
         self._btn_save.setEnabled(False)
         self._btn_save.setToolTip(
             "Write the current dataset to a RELION STAR, CryoSPARC, or CSV file"
         )
         self._btn_save.clicked.connect(self._choose_output)
-        buttons.addWidget(self._btn_save)
         self._btn_close = self._compact_button(QPushButton("Close"))
         self._btn_close.clicked.connect(self.reject)
-        buttons.addWidget(self._btn_close)
-        layout.addLayout(buttons)
-
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(separator)
-
-        self._status = QLabel("Loading dataset\u2026")
-        self._status.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        # Save As and Close share the transformations action row (kept out of
+        # the status band so the message can use the full width).
+        self._ops_buttons_row.insertWidget(
+            self._ops_buttons_row.count() - 1, self._btn_save
         )
-        self._status.setWordWrap(True)
-        layout.addWidget(self._status)
+        self._ops_buttons_row.insertWidget(
+            self._ops_buttons_row.count() - 1, self._btn_close
+        )
+        layout.addLayout(buttons)
 
         self._load_worker = _LoadWorker(self._path, self._loader, parent=self)
         self._workers.append(self._load_worker)
@@ -635,6 +777,39 @@ class Images2StarDialog(QDialog):
         """Close the dialog (letting workers finish) and quit the app."""
         self.close()
         QApplication.quit()
+
+    def load_path(self, path: str) -> None:
+        """Reload this panel from a new file, reusing the same window.
+
+        The transformation stack is kept (it is a recipe the user may want to
+        apply to another dataset); the preview tables and dirty state are
+        reset until the new dataset finishes loading.
+        """
+        self._path = str(Path(path).resolve())
+        self.setWindowTitle(f"Images2Star - {Path(self._path).name}")
+        self._source_data = None
+        self._data = None
+        self._dirty = False
+        self._sort_active = False
+        self._last_output = None
+        self._btn_save.setEnabled(False)
+        self._set_status("Loading dataset\u2026")
+
+        # Guard against a slower previous load finishing after this one: only
+        # the most recent request may populate the previews.
+        self._load_seq += 1
+        seq = self._load_seq
+        worker = _LoadWorker(self._path, self._loader, parent=self)
+        self._workers.append(worker)
+        worker.loaded.connect(
+            lambda data: self._on_loaded(data) if seq == self._load_seq else None
+        )
+        worker.failed.connect(
+            lambda message: (
+                self._on_load_failed(message) if seq == self._load_seq else None
+            )
+        )
+        worker.start()
 
     def _apply_display_theme(self) -> None:
         """Apply the persisted display theme to the dialog and its children.
@@ -660,7 +835,7 @@ class Images2StarDialog(QDialog):
             child.setStyleSheet(stylesheet)
             child.setPalette(palette)
         if self._status_error:
-            self._status.setStyleSheet(self._status_error_stylesheet())
+            self._status.setStyleSheet(self._status_stylesheet(error=True))
 
     # ------------------------------------------------------------------
     # Operations stack panel
@@ -670,6 +845,27 @@ class Images2StarDialog(QDialog):
         """Give a button the browser's fixed 26px action-bar height."""
         button.setFixedHeight(26)
         return button
+
+    def _apply_default_split_sizes(self) -> None:
+        """Give the transformations block a compact default height.
+
+        Runs once on first show, when the splitter's real height is known.
+        The block defaults to the height its (compact) contents request --
+        about half of the taller block the vertical button column used to
+        demand -- and the drag bar lets the user expand it.
+        """
+        total = self._main_splitter.height()
+        if total <= 0:
+            return
+        ops = self._ops_group.sizeHint().height()
+        self._main_splitter.setSizes([max(total - ops, 0), ops])
+
+    def showEvent(self, event) -> None:
+        """Apply the default split once so user drags are never reset."""
+        super().showEvent(event)
+        if not self._sized_once:
+            self._sized_once = True
+            self._apply_default_split_sizes()
 
     def _make_operations_group(self) -> QGroupBox:
         """Build the ordered option-stack editor (add/apply/reset)."""
@@ -718,10 +914,21 @@ class Images2StarDialog(QDialog):
             lambda *_: self._update_ops_buttons()
         )
         self._install_move_shortcuts()
+        # Ignore the list's height hint so the block can sit at its compact
+        # default height and only grow when the splitter is dragged open.
+        # A two-row minimum keeps the stack readable at that default.
+        self._stack_view.setSizePolicy(
+            self._stack_view.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Ignored,
+        )
+        self._stack_view.setMinimumHeight(
+            2 * self._stack_view.fontMetrics().lineSpacing()
+        )
         stack_row.addWidget(self._stack_view, 1)
+        outer.addLayout(stack_row)
 
-        side = QVBoxLayout()
-        side.setSpacing(4)
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(4)
         self._btn_apply = self._compact_button(QPushButton("Apply"))
         self._btn_apply.setToolTip(
             "Run the stacked options through the images2star engine and "
@@ -757,10 +964,12 @@ class Images2StarDialog(QDialog):
             self._btn_cmd,
             self._btn_reset,
         ):
-            side.addWidget(button)
-        side.addStretch(1)
-        stack_row.addLayout(side)
-        outer.addLayout(stack_row)
+            buttons_row.addWidget(button)
+        buttons_row.addStretch(1)
+        # Save As and Close join this action row (added in __init__ once the
+        # buttons exist), so the bottom band holds only the status message.
+        self._ops_buttons_row = buttons_row
+        outer.addLayout(buttons_row)
 
         self._ops_combo.currentIndexChanged.connect(self._update_param_placeholder)
         self._update_param_placeholder()
@@ -1058,17 +1267,24 @@ class Images2StarDialog(QDialog):
         compact.setPixelSize(12)
         table.setFont(compact)
         # Qt leaves QTableView rows at the style default (~30px) regardless
-        # of the font; size them from the compact font metrics so rows are as
-        # dense as the file browser's tree (15px rows there).
+        # of the font. Size rows from the frameless editor's own sizeHint
+        # (one pixel taller, since the cell rect given to the editor is one
+        # pixel shorter than the row): the editor then gets exactly the
+        # height it needs, so editing never clips the text, whatever the
+        # font metrics, style or display scale.
+        sample = QLineEdit()
+        sample.setFont(table.font())
+        sample.setFrame(False)
+        sample.setContentsMargins(0, 0, 0, 0)
+        sample.setTextMargins(0, 0, 0, 0)
         header = table.verticalHeader()
         header.setMinimumSectionSize(table.fontMetrics().height())
-        # The file browser's tree renders 15px rows at this font; use the
-        # metrics height verbatim so the tables are equally dense.
-        header.setDefaultSectionSize(table.fontMetrics().height())
+        header.setDefaultSectionSize(sample.sizeHint().height() + 1)
         table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
             | QAbstractItemView.EditTrigger.EditKeyPressed
         )
+        table.setItemDelegate(_DenseEditDelegate(table))
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         # Keep scrolling through large virtual models cheap: per-pixel
@@ -1106,15 +1322,23 @@ class Images2StarDialog(QDialog):
         self._refresh_preview(self._data)
         # Initial split gives particles the bulk and optics a compact strip;
         # later refreshes keep whatever sizes the user dragged to.
-        self._splitter.setSizes([540, 150])
+        # Use proportional sizes based on available height instead of fixed pixels.
+        h = self._splitter.height()
+        if h > 0:
+            self._splitter.setSizes([int(h * 2 / 3), int(h / 3)])
         self._btn_save.setEnabled(True)
-        self._set_status(self._summary(self._data))
+        warnings = list(data.attrs.get("load_warnings", []))
+        message = self._summary(self._data)
+        if warnings:
+            message = f"{message}\n" + "\n".join(warnings)
+        self._set_status(message, error=bool(warnings))
         self._update_ops_buttons()
 
     def _refresh_preview(self, data: pd.DataFrame) -> None:
         """Repopulate the particle/optics preview tables from ``data``."""
         self._table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
-        model = _DataFramePreviewModel(data, parent=self)
+        missing_files = data.attrs.get("missing_files", ())
+        model = _DataFramePreviewModel(data, missing_files=missing_files, parent=self)
         model.dataChanged.connect(self._on_cell_edited)
         self._table.setModel(model)
         self._table.show()
@@ -1124,7 +1348,9 @@ class Images2StarDialog(QDialog):
             self._optics_table.horizontalHeader().setSortIndicator(
                 -1, Qt.SortOrder.AscendingOrder
             )
-            optics_model = _DataFramePreviewModel(optics, parent=self)
+            optics_model = _DataFramePreviewModel(
+                optics, missing_files=missing_files, parent=self
+            )
             optics_model.dataChanged.connect(self._on_cell_edited)
             self._optics_table.setModel(optics_model)
             self._optics_table.show()
@@ -1149,13 +1375,37 @@ class Images2StarDialog(QDialog):
         )
 
     def _set_status(self, message: str, error: bool = False) -> None:
-        """Show a message in the status bar, coloring errors with theme red."""
-        self._status.setText(message)
-        self._status_error = error
-        self._status.setStyleSheet(self._status_error_stylesheet() if error else "")
+        """Show a message in the status row, coloring errors with theme red.
 
-    def _status_error_stylesheet(self) -> str:
-        """Return the stylesheet for the theme-aware error text color."""
+        The row is capped at five lines; longer messages (e.g. the list of
+        missing files) scroll inside the widget instead of growing the window.
+        """
+        self._status.setPlainText(message)
+        self._status_error = error
+        self._status.setStyleSheet(self._status_stylesheet(error))
+        self._fit_status_height()
+
+    def _fit_status_height(self) -> None:
+        """Size the status row to its content, capped at five rows.
+
+        A taller row would otherwise expand to the layout's shared height;
+        this keeps the default single-line band compact while longer
+        messages (e.g. the missing-file list) grow up to five rows and then
+        scroll inside the widget. The padding shares the extra pixel the
+        document needs per line so rows up to five never scroll.
+        """
+        line_h = self._status.fontMetrics().lineSpacing()
+        rows = max(self._status.blockCount(), 1)
+        self._status.setFixedHeight(min(rows, 5) * line_h + 4)
+
+    def _status_stylesheet(self, error: bool) -> str:
+        """Return the stylesheet for the read-only status row.
+
+        The base rules are repeated here (not left to the group-level QSS)
+        because setting a widget-level stylesheet replaces the stylesheet of
+        the whole widget, so the compact framing would otherwise be lost as
+        soon as the error color is applied.
+        """
         from helicon.lib.file_browser import (
             _THEME_COLORS,
             _resolved_theme,
@@ -1163,7 +1413,10 @@ class Images2StarDialog(QDialog):
         )
 
         colors = _THEME_COLORS[_resolved_theme(_saved_theme())]
-        return f"color: {colors.get('error', '#b3261e')};"
+        parts = ["font-size: 12px;", "border: none;", "background: transparent;"]
+        if error:
+            parts.insert(0, f"color: {colors.get('error', '#b3261e')};")
+        return "QPlainTextEdit { " + " ".join(parts) + " }"
 
     def _on_load_failed(self, message: str) -> None:
         """Report a failed dataset load and keep the panel usable."""

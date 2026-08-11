@@ -209,8 +209,54 @@ def _get_commands(
         sys.exit(1)
 
 
+def _has_display() -> bool:
+    """Return True if a graphical display is available on this host.
+
+    On macOS and Windows a display is always assumed. On Linux/Unix a
+    non-empty ``$DISPLAY`` (X11) or ``$WAYLAND_DISPLAY`` (Wayland) is
+    required. An explicit ``QT_QPA_PLATFORM=offscreen`` (or similar
+    headless platform) is treated as headless regardless of the display
+    variables.
+    """
+    if sys.platform == "darwin" or sys.platform == "win32":
+        return True
+    qt_platform = os.environ.get("QT_QPA_PLATFORM", "")
+    if qt_platform and qt_platform.split(":")[0] in {"offscreen", "minimal", "vnc"}:
+        return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _maybe_launch_display_default() -> bool:
+    """When ``helicon`` is run with no subcommand, launch ``display``
+    if a GUI is available; otherwise fall through to the standard
+    subcommand help. Returns True if display was (or will be) launched.
+    """
+    if len(sys.argv) != 1:
+        return False
+    if not helicon.has_napari():
+        return False
+    if not _has_display():
+        return False
+    sys.argv = [sys.argv[0], "display"] + sys.argv[1:]
+    return True
+
+
 def main():
+    launched_display = _maybe_launch_display_default()
     _maybe_reexec_macos_display()
+    if launched_display:
+        from argparse import Namespace
+        from importlib import import_module
+
+        display_mod = import_module("helicon.commands.display")
+        try:
+            display_mod.main(Namespace(folder=None))
+        except HeliconExit:
+            sys.exit(0)
+        except HeliconError as e:
+            logger.error(f"ERROR: {e}")
+            sys.exit(1)
+        return
     _get_commands(
         cli_commands=cli_commands,
         napari_commands=napari_commands,

@@ -98,9 +98,9 @@ _WEB_THEMES = {"Dark", "Light", "System"}
 
 
 def _web_theme(request: Request) -> str:
-    """Return the requested web-app theme, defaulting safely to Dark."""
-    theme = str(request.query_params.get("helicon_theme", "Dark"))
-    return theme if theme in _WEB_THEMES else "Dark"
+    """Return the requested web-app theme, defaulting to Light."""
+    theme = str(request.query_params.get("helicon_theme", "Light"))
+    return theme if theme in _WEB_THEMES else "Light"
 
 
 # ── Tab module imports ────────────────────────────────────────────
@@ -272,7 +272,17 @@ def app_ui(request: Request):
                         var dark = requested === 'Dark' ||
                             (requested === 'System' && window.matchMedia &&
                              window.matchMedia('(prefers-color-scheme: dark)').matches);
-                        document.documentElement.dataset.heliconTheme = dark ? 'dark' : 'light';
+                        var themeName = dark ? 'dark' : 'light';
+                        document.documentElement.dataset.heliconTheme = themeName;
+                        document.documentElement.setAttribute('data-bs-theme', themeName);
+                        if (document.body) {{
+                            document.body.setAttribute('data-bs-theme', themeName);
+                        }}
+                    }}
+                    if (document.readyState === 'loading') {{
+                        document.addEventListener('DOMContentLoaded', applyTheme);
+                    }} else {{
+                        applyTheme();
                     }}
                     applyTheme();
                     if (requested === 'System' && window.matchMedia) {{
@@ -558,15 +568,15 @@ def app_ui(request: Request):
         ),
         ui.tags.style(
             f"""
-            :root {{
-                --helicon-page-bg: #2d2d2d;
-                --helicon-text: #cccccc;
-                --helicon-navbar-bg: #1f2937;
+            :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {{
+                --helicon-page-bg: #1e1e1e;
+                --helicon-text: #e0e0e0;
+                --helicon-navbar-bg: #1a202c;
             }}
-            :root[data-helicon-theme="light"] {{
-                --helicon-page-bg: #f4f4f4;
-                --helicon-text: #202020;
-                --helicon-navbar-bg: #d9e2f0;
+            [data-bs-theme="light"], :root[data-helicon-theme="light"] {{
+                --helicon-page-bg: #f8f9fa;
+                --helicon-text: #212529;
+                --helicon-navbar-bg: #1a202c;
             }}
             html, body, .bslib-page-fill {{
                 background-color: var(--helicon-page-bg) !important;
@@ -575,28 +585,67 @@ def app_ui(request: Request):
             .navbar, .navbar-default, .navbar-inverse {{
                 background-color: var(--helicon-navbar-bg) !important;
             }}
+            .navbar .nav-link, .navbar-brand {{
+                color: #ffffff !important;
+            }}
+            [data-bs-theme="dark"] .card {{
+                background-color: #262626 !important;
+                color: #e0e0e0 !important;
+                border-color: #3d3d3d !important;
+            }}
+            [data-bs-theme="dark"] .card-header {{
+                background-color: #1a1a1a !important;
+                color: #ffffff !important;
+                border-bottom: 1px solid #3d3d3d !important;
+            }}
+            [data-bs-theme="dark"] .form-control,
+            [data-bs-theme="dark"] .form-select,
+            [data-bs-theme="dark"] select,
+            [data-bs-theme="dark"] input[type="text"],
+            [data-bs-theme="dark"] input[type="number"],
+            [data-bs-theme="dark"] textarea {{
+                background-color: #2b2b2b !important;
+                color: #ffffff !important;
+                border-color: #4a4a4a !important;
+            }}
+            [data-bs-theme="dark"] label,
+            [data-bs-theme="dark"] .form-label,
+            [data-bs-theme="dark"] .form-check-label {{
+                color: #e0e0e0 !important;
+            }}
+            [data-bs-theme="light"] .card {{
+                background-color: #ffffff !important;
+                color: #212529 !important;
+                border-color: #dee2e6 !important;
+            }}
+            [data-bs-theme="light"] .card-header {{
+                background-color: #f1f3f5 !important;
+                color: #212529 !important;
+                font-weight: 600;
+            }}
+            [data-bs-theme="light"] .form-control,
+            [data-bs-theme="light"] .form-select,
+            [data-bs-theme="light"] select,
+            [data-bs-theme="light"] input[type="text"],
+            [data-bs-theme="light"] input[type="number"],
+            [data-bs-theme="light"] textarea {{
+                background-color: #ffffff !important;
+                color: #212529 !important;
+                border-color: #ced4da !important;
+            }}
+            [data-bs-theme="light"] label,
+            [data-bs-theme="light"] .form-label,
+            [data-bs-theme="light"] .form-check-label {{
+                color: #212529 !important;
+            }}
             * {{ font-size: 10pt; padding: 0; border: 0; margin: 0; }}
-           aside {{ --_padding-icon: 10px; }}
+            aside {{ --_padding-icon: 10px; }}
             html, body {{ height: 100%; margin: 0; padding: 0; overflow-x: hidden; }}
             .nav {{ padding: 0 8px; }}
             .layout-sidebar {{ gap: 4px !important; }}
             .sidebar {{ padding-right: 4px !important; }}
-             .main {{ padding-left: 4px !important; }}
-           /* bslib-page-fill puts 1rem padding + 1rem gap on <body>, which is a
-              column flex container. When a child of <body> also becomes a flex
-              column container (the case for div.container-fluid.html-fill-container
-              wrapping navset_bar content), the parent's gap+padding interact with
-              flex-basis:auto in a way that keeps flex-grow:1 from consuming the
-              leftover vertical space. The result is that the
-              div.container-fluid.html-fill-item.html-fill-container under <body>
-              stops ~100px short of the body's bottom, leaving a visible white
-              stripe after dynamic content (Bokeh plots) is injected.
-
-              Removing body padding+gap gives the column flex container + its
-              grow:1 child a clean main-axis to fill, so the tab content spans
-              the entire height of the viewport. The navbar already hovers at
-              the top so the 1rem gap was never visually meaningful anyway. */
-           body.bslib-page-fill {{ padding: 0 !important; gap: 0 !important; }}
+            .main {{ padding-left: 4px !important; }}
+            body.bslib-page-fill {{ padding: 0 !important; gap: 0 !important; }}
         """
         ),
         ui.navset_bar(

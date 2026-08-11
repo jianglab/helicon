@@ -117,6 +117,23 @@ class TestProcessOneTask(object):
         assert isinstance(rec3d, np.ndarray)
         assert len(rec3d.shape) == 3
 
+    def test_with_return_3d_contains_symmetrized_map(self):
+        params = dict(self.base_params, data=self.data, return_3d=True)
+        result = pipeline.process_one_task(**params)
+        assert result is not None
+        score, return_data, param_tuple = result
+        symmetrized_map = return_data[8]
+        assert isinstance(symmetrized_map, np.ndarray)
+        assert len(symmetrized_map.shape) == 3
+        assert symmetrized_map.shape[-1] >= return_data[3][0].shape[-1]
+
+    def test_without_return_3d_has_no_symmetrized_map(self):
+        params = dict(self.base_params, data=self.data, return_3d=False)
+        result = pipeline.process_one_task(**params)
+        assert result is not None
+        score, return_data, param_tuple = result
+        assert return_data[8] is None
+
     def test_with_fsc_test(self):
         params = dict(self.base_params, data=self.data, fsc_test=1)
         result = pipeline.process_one_task(**params)
