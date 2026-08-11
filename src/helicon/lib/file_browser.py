@@ -72,6 +72,7 @@ _THEME_COLORS = {
         "accent_border": "#6f9bd6",
         "disabled": "#7a7a7a",
         "disabled_bg": "#2b2b2b",
+        "error": "#ff6b6b",
     },
     "Light": {
         "window": "#f4f4f4",
@@ -86,6 +87,7 @@ _THEME_COLORS = {
         "accent_border": "#2e5d9c",
         "disabled": "#888888",
         "disabled_bg": "#e5e5e5",
+        "error": "#b3261e",
     },
 }
 
@@ -986,6 +988,7 @@ class FolderBrowserWidget(QMainWindow):
         ("_btn_hill", "hill"),
         ("_btn_hi3d", "hi3d"),
         ("_btn_truefsc", "trueFSC"),
+        ("_btn_images2star", "images2star"),
     ]
 
     def __init__(self, start_dir: str | Path | None = None, parent=None):
@@ -1313,6 +1316,11 @@ class FolderBrowserWidget(QMainWindow):
         )
         self._btn_truefsc = QPushButton("trueFSC")
         self._btn_truefsc.setToolTip("Compute True FSC curve from the two half-maps")
+        self._btn_images2star = QPushButton("Images2Star")
+        self._btn_images2star.setToolTip(
+            "Open the Images2Star tools panel to preview and transform "
+            "this dataset, then save a new RELION STAR/CryoSPARC file"
+        )
         self._new_window_cb = QCheckBox("New")
         self._new_window_cb.setToolTip(
             "<div style='white-space: normal; width: 200px;'>Create a new display window instead of reusing the current one. Most recently clicked/focused display window will be used as the display target if there are two or more display windows</div>"
@@ -1433,7 +1441,7 @@ class FolderBrowserWidget(QMainWindow):
                 if _is_class2d:
                     # WhereIsMyClass and HelicalPitch are helical web apps and
                     # only make sense for helical 2D class averages.
-                    modes = ["slice", "gallery", "text"]
+                    modes = ["slice", "gallery", "text", "images2star"]
                     if _folder_is_helical(str(Path(path).parent)):
                         modes.extend(["whereIsMyClass", "helicalPitch"])
                     return modes
@@ -1442,10 +1450,14 @@ class FolderBrowserWidget(QMainWindow):
                     for p in Path(path).parts
                 )
                 if _is_class3d_or_refine3d:
-                    return ["slice", "gallery", "stats", "text"]
+                    return ["slice", "gallery", "stats", "text", "images2star"]
             if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
                 return ["text"]
-            return ["slice", "gallery", "text"]
+            return ["slice", "gallery", "text", "images2star"]
+        if ext == ".cs":
+            # CryoSPARC .cs files are npz archives; images2star is the one
+            # display action that can turn them into something else.
+            return ["images2star"]
         if ext == ".mrcs":
             modes = ["slice", "gallery"]
             _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
@@ -2018,6 +2030,7 @@ def _open_url(url: str) -> None:
 
     webbrowser.open(url, new=2)
 
+
 def _dbus_name_has_owner(name: str) -> bool:
     """Return True if *name* is currently owned on the session bus."""
     try:
@@ -2123,8 +2136,7 @@ def _linux_terminal_candidates(target: str) -> list[tuple[str, list[str]]]:
         known = [
             (exe, args)
             for exe, args in known
-            if exe != "x-terminal-emulator"
-            or not _resolves_to_gnome_terminal(exe)
+            if exe != "x-terminal-emulator" or not _resolves_to_gnome_terminal(exe)
         ]
 
     seen = {c[0] for c in candidates}

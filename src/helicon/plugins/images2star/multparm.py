@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import helicon
+from helicon.lib.exceptions import HeliconError
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ def handle(data, args, index_d, param):
     if len(param) == 2:
         var, val = param
         if var not in data:
-            logger.error(
-                "parameter %s does not exist. Cannot multiply it by another value", var
+            raise HeliconError(
+                f"parameter {var} does not exist. Cannot multiply it by another value"
             )
         data[var] *= float(val)
         index_d[option_name] += 1

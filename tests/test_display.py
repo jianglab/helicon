@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
 import helicon
@@ -11,11 +12,16 @@ from helicon.commands import display
 from helicon.lib.exceptions import HeliconDependencyError
 
 try:
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt, QModelIndex
+    from PySide6.QtWidgets import QAbstractItemView, QApplication
 except ImportError:
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtCore import Qt, QModelIndex
+    from PyQt5.QtWidgets import QAbstractItemView, QApplication
+
+try:
+    from helicon.lib.images2star_widget import Images2StarDialog
+except ImportError:
+    Images2StarDialog = None
 
 
 @pytest.fixture(scope="session")
@@ -2174,6 +2180,7 @@ class TestFolderBrowser(object):
         with patch.object(file_browser, "_open_url") as mock_open:
             widget._docs_action.trigger()
         mock_open.assert_called_once_with("https://helicon.readthedocs.io")
+
     def test_theme_menu_action_persists_selection(self, tmp_path, qapp):
         from PySide6.QtCore import QSettings
         from helicon.lib.file_browser import FolderBrowserWidget, _saved_theme
@@ -2237,9 +2244,7 @@ class TestFolderBrowser(object):
             widget._open_terminal_action.trigger()
         mock_spawn.assert_called_once()
         cmd = mock_spawn.call_args[0][0]
-        assert any(
-            arg == str(tmp_path) or arg.endswith(f"={tmp_path}") for arg in cmd
-        )
+        assert any(arg == str(tmp_path) or arg.endswith(f"={tmp_path}") for arg in cmd)
 
     def test_open_terminal_darwin_uses_native_terminal(self):
         from unittest.mock import patch
@@ -2403,7 +2408,9 @@ class TestFolderBrowser(object):
             patch.dict(os.environ, {"TERMINAL": "kitty"}, clear=False),
         ):
             mock_platform.system.return_value = "Linux"
-            mock_shutil.which.side_effect = lambda c: c if c in {"kitty", "xterm"} else None
+            mock_shutil.which.side_effect = lambda c: (
+                c if c in {"kitty", "xterm"} else None
+            )
             file_browser._open_terminal("/some/folder")
         mock_spawn.assert_called_once_with(
             ["kitty", "--working-directory=/some/folder"],
@@ -2416,14 +2423,22 @@ class TestFolderBrowser(object):
         from helicon.lib import file_browser
 
         with (
-            patch.object(file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"),
+            patch.object(
+                file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"
+            ),
             patch.object(file_browser, "_dbus_name_has_owner", return_value=False),
-            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": ""}, clear=False),
+            patch.dict(
+                os.environ,
+                {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": ""},
+                clear=False,
+            ),
         ):
             assert file_browser._gnome_terminal_usable() is False
 
         with (
-            patch.object(file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"),
+            patch.object(
+                file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"
+            ),
             patch.object(file_browser, "_dbus_name_has_owner", return_value=False),
             patch.dict(
                 os.environ,
@@ -2434,9 +2449,15 @@ class TestFolderBrowser(object):
             assert file_browser._gnome_terminal_usable() is True
 
         with (
-            patch.object(file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"),
+            patch.object(
+                file_browser.shutil, "which", return_value="/usr/bin/gnome-terminal"
+            ),
             patch.object(file_browser, "_dbus_name_has_owner", return_value=True),
-            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": ""}, clear=False),
+            patch.dict(
+                os.environ,
+                {"XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": ""},
+                clear=False,
+            ),
         ):
             assert file_browser._gnome_terminal_usable() is True
 
@@ -2966,6 +2987,7 @@ class TestFolderBrowser(object):
             "slice",
             "gallery",
             "text",
+            "images2star",
         ]
 
         # Helical Class2D job: the helical web apps are offered.
@@ -2980,6 +3002,7 @@ class TestFolderBrowser(object):
             "slice",
             "gallery",
             "text",
+            "images2star",
             "whereIsMyClass",
             "helicalPitch",
         ]
@@ -4017,3 +4040,1536 @@ class TestReexecMacosDisplay:
         monkeypatch.setattr(cli.os, "execve", fake_execve)
         cli._maybe_reexec_macos_display()
         assert captured["env"]["HELICON_MACOS_IDENTITY"] == "1"
+
+
+class TestImages2StarDialog(object):
+    """Phase-0 Images2Star panel: threaded load, preview, and save."""
+
+    @staticmethod
+    def _df_with_optics():
+        data = pd.DataFrame(
+            {"rlnImageName": ["a.mrc", "b.mrc"], "rlnAngleRot": [1.0, 2.0]}
+        )
+        optics = pd.DataFrame({"rlnOpticsGroup": [1], "rlnPixelSize": [1.2]})
+        data.attrs["optics"] = optics
+        data.attrs["convention"] = "relion"
+        return data
+
+    @staticmethod
+    def _open(path, **kwargs):
+        if Images2StarDialog is None:
+            pytest.skip("PySide6 required for the Images2Star panel")
+        return Images2StarDialog(path, **kwargs)
+
+    @staticmethod
+    def _pump(qapp):
+        qapp.processEvents()
+
+    def test_loads_via_injected_loader_and_shows_preview(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            assert dialog._data is not None
+            assert len(dialog._data) == 2
+            assert "rows" in dialog._status.text()
+            assert "optics" in dialog._status.text()
+            assert dialog._btn_save.isEnabled()
+            model = dialog._table.model()
+            assert model.rowCount() == 2
+            assert model.columnCount() == 2
+            assert dialog._particles_label.text() == "Particles"
+            assert not dialog._particles_label.isHidden()
+            optics_model = dialog._optics_table.model()
+            assert optics_model is not None
+            assert optics_model.rowCount() == 1
+            assert optics_model.columnCount() == 2
+            assert dialog._optics_label.text() == "Optics groups"
+            assert not dialog._optics_label.isHidden()
+            assert not dialog._optics_table.isHidden()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_no_optics_hides_optics_table(self, qapp):
+        data = pd.DataFrame({"rlnImageName": ["a.mrc"]})
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            assert dialog._data is not None
+            assert dialog._table.model() is not None
+            assert dialog._optics_table.model() is None
+            assert dialog._optics_label.isHidden()
+            assert dialog._optics_table.isHidden()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_dialog_styles_follow_saved_theme(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        try:
+            for theme, window, button in (
+                ("Dark", "#2d2d2d", "#3c3c3c"),
+                ("Light", "#f4f4f4", "#ffffff"),
+            ):
+                settings.setValue("theme", theme)
+                dialog = self._open(
+                    "dummy.star", loader=lambda p: self._df_with_optics()
+                )
+                try:
+                    assert dialog.palette().window().color().name() == window
+                    assert dialog._btn_save.palette().button().color().name() == button
+                    assert f"background-color: {window}" in dialog.styleSheet()
+                    assert dialog._status.palette().windowText().color().name() == (
+                        "#cccccc" if theme == "Dark" else "#202020"
+                    )
+                finally:
+                    dialog.close()
+                    dialog.deleteLater()
+                    self._pump(qapp)
+        finally:
+            settings.remove("theme")
+
+    def test_open_dialog_refreshes_when_theme_changes(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Light")
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            assert dialog.palette().window().color().name() == "#f4f4f4"
+
+            settings.setValue("theme", "Dark")
+            display._refresh_display_theme_windows()
+
+            assert dialog.palette().window().color().name() == "#2d2d2d"
+            assert "background-color: #2d2d2d" in dialog.styleSheet()
+            assert "background-color: #3c3c3c" in dialog._btn_save.styleSheet()
+            assert "color: #cccccc" in dialog._btn_save.styleSheet()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+            settings.remove("theme")
+
+    def test_large_dataset_preview_is_virtual_over_all_rows(self, qapp):
+        n = 2000
+        data = pd.DataFrame(
+            {
+                "rlnImageName": [f"frame_{i:04d}.mrc" for i in range(n)],
+                "rlnAngleRot": np.linspace(0.0, 180.0, n),
+            }
+        )
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            model = dialog._table.model()
+            assert model.rowCount() == n
+            assert model.columnCount() == 2
+            # Rows beyond the old 500-row cap are reachable on demand.
+            late_index = model.index(1234, 0)
+            assert model.data(late_index) == "frame_1234.mrc"
+            assert dialog._particles_label.text() == "Particles"
+            assert "capped" not in dialog._status.text()
+            assert f"{n:,} rows" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_preview_table_uses_virtual_scroll_settings(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            table = dialog._table
+            optics_table = dialog._optics_table
+            assert table.verticalScrollMode() == (
+                QAbstractItemView.ScrollMode.ScrollPerPixel
+            )
+            assert table.horizontalScrollMode() == (
+                QAbstractItemView.ScrollMode.ScrollPerPixel
+            )
+            assert not table.wordWrap()
+            assert optics_table.verticalScrollMode() == (
+                QAbstractItemView.ScrollMode.ScrollPerPixel
+            )
+            assert optics_table.horizontalScrollMode() == (
+                QAbstractItemView.ScrollMode.ScrollPerPixel
+            )
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_preview_tables_use_compact_font_and_rows(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            # Matches the file browser's compactness: 12px font and table
+            # rows sized from those metrics instead of the style default.
+            for table in (dialog._table, dialog._optics_table):
+                assert table.fontInfo().pixelSize() == 12
+                vh = table.verticalHeader()
+                assert vh.defaultSectionSize() == vh.fontMetrics().height()
+                assert vh.minimumSectionSize() <= vh.fontMetrics().height()
+            assert (
+                dialog._table.rowHeight(0)
+                == dialog._table.verticalHeader().defaultSectionSize()
+            )
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_preview_splitter_drag_and_optics_collapse(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            splitter = dialog._splitter
+            assert splitter.count() == 2
+            optics_pane = splitter.widget(1)
+            assert not optics_pane.isHidden()
+
+            # Dragging the handle down to a sliver must not be blocked by the
+            # table's style-default minimum height (~90px).
+            splitter.setSizes([splitter.height() - 30, 30])
+            self._pump(qapp)
+            assert splitter.sizes()[1] <= 60
+            dragged_sizes = list(splitter.sizes())
+
+            # A dataset without optics collapses the optics pane entirely.
+            plain = pd.DataFrame({"rlnImageName": ["a.mrc"], "rlnAngleRot": [1.0]})
+            dialog._refresh_preview(plain)
+            self._pump(qapp)
+            assert optics_pane.isHidden()
+
+            # Restoring optics brings the pane back at the dragged size.
+            dialog._refresh_preview(self._df_with_optics())
+            self._pump(qapp)
+            assert not optics_pane.isHidden()
+            assert splitter.sizes() == dragged_sizes
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_table_sorts_by_column_ascending(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            dialog._table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+            model = dialog._table.model()
+            # rlnDefocusU = [2.0, 1.0, 2.0, 1.0] -> 1.0, 1.0, 2.0, 2.0 with
+            # ties keeping the original (stable) row order.
+            assert [model.data(model.index(r, 1)) for r in range(4)] == [
+                "1.0",
+                "1.0",
+                "2.0",
+                "2.0",
+            ]
+            # The working dataset keeps its original order.
+            assert dialog._data["rlnDefocusU"].tolist() == [2.0, 1.0, 2.0, 1.0]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_table_sorts_by_column_descending(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            dialog._table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+            model = dialog._table.model()
+            assert [model.data(model.index(r, 1)) for r in range(4)] == [
+                "2.0",
+                "2.0",
+                "1.0",
+                "1.0",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_table_sorts_numerically_not_lexicographically(self, qapp):
+        data = pd.DataFrame(
+            {
+                "rlnDefocusU": [10.0, 2.0, 100.0, 1.0],
+            }
+        )
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+            model = dialog._table.model()
+            assert [model.data(model.index(r, 0)) for r in range(4)] == [
+                "1.0",
+                "2.0",
+                "10.0",
+                "100.0",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_table_sort_keeps_missing_values_last(self, qapp):
+        data = pd.DataFrame({"rlnDefocusU": [3.0, None, 1.0, 2.0]})
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+            model = dialog._table.model()
+            assert [model.data(model.index(r, 0)) for r in range(4)] == [
+                "1.0",
+                "2.0",
+                "3.0",
+                "",
+            ]
+
+            dialog._table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+            assert [model.data(model.index(r, 0)) for r in range(4)] == [
+                "3.0",
+                "2.0",
+                "1.0",
+                "",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_edit_after_sort_writes_correct_source_row(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            dialog._table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+            model = dialog._table.model()
+            # View row 0 is source row 1 (rlnDefocusU == 1.0).
+            index = model.index(0, 1)
+            assert model.setData(index, "7.5")
+
+            assert dialog._data["rlnDefocusU"].tolist()[1] == 7.5
+            assert model.data(index) == "7.5"
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_optics_table_sorts_too(self, qapp):
+        optics = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [2, 1, 3],
+                "rlnPixelSize": [1.2, 0.9, 1.5],
+            }
+        )
+        data = pd.DataFrame({"rlnImageName": ["a.mrc", "b.mrc"]})
+        data.attrs["optics"] = optics
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._optics_table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+            model = dialog._optics_table.model()
+            assert [model.data(model.index(r, 1)) for r in range(3)] == [
+                "1.5",
+                "1.2",
+                "0.9",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_refresh_preview_clears_sort_indicator(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            dialog._table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+            assert dialog._table.horizontalHeader().sortIndicatorSection() == 1
+
+            dialog._refresh_preview(dialog._data)
+            assert dialog._table.horizontalHeader().sortIndicatorSection() == -1
+            assert dialog._optics_table.horizontalHeader().sortIndicatorSection() == -1
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_many_optics_groups_preview_is_virtual(self, qapp):
+        n = 2000
+        optics = pd.DataFrame(
+            {
+                "rlnOpticsGroup": range(1, n + 1),
+                "rlnVoltage": np.linspace(300.0, 300.0, n),
+                "rlnPixelSize": np.linspace(1.0, 0.5, n),
+            }
+        )
+        data = pd.DataFrame({"rlnImageName": ["a.mrc", "b.mrc"]})
+        data.attrs["optics"] = optics
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            model = dialog._optics_table.model()
+            assert model.rowCount() == n
+            assert model.columnCount() == 3
+            # Late rows render on demand, exactly like the particles table.
+            late_index = model.index(1234, 0)
+            assert model.data(late_index) == "1235"
+            assert dialog._optics_label.text() == "Optics groups"
+            assert not dialog._optics_table.isHidden()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_labels_are_selectable(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            for label in (
+                dialog._title,
+                dialog._status,
+                dialog._particles_label,
+                dialog._optics_label,
+            ):
+                flags = label.textInteractionFlags()
+                assert flags & Qt.TextInteractionFlag.TextSelectableByMouse
+                assert flags & Qt.TextInteractionFlag.TextSelectableByKeyboard
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_status_line_sits_at_bottom(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            layout = dialog.layout()
+            # The status label is the last item in the main layout, below the
+            # button row, so transient messages read as a bottom status bar.
+            assert layout.indexOf(dialog._status) == layout.count() - 1
+            assert layout.indexOf(dialog._status) > layout.indexOf(dialog._btn_save)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_section_headers_are_bold(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            for label in (dialog._particles_label, dialog._optics_label):
+                assert label.font().bold()
+                assert label.text() in ("Particles", "Optics groups")
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_table_copy_puts_tsv_on_clipboard(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._table.selectRow(0)
+            dialog._table._copy_selection()
+            copied = qapp.clipboard().text()
+            assert "rlnImageName" in copied
+            assert "rlnAngleRot" in copied
+            assert "a.mrc" in copied
+            assert "1.0" in copied
+
+            dialog._optics_table.selectRow(0)
+            dialog._optics_table._copy_selection()
+            copied = qapp.clipboard().text()
+            assert "rlnOpticsGroup" in copied
+            assert "1" in copied
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_copy_shortcut_triggered_by_keypress(self, qapp):
+        from PySide6.QtTest import QTest
+
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._table.selectRow(0)
+            QTest.keyClick(
+                dialog._table,
+                Qt.Key_C,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            copied = qapp.clipboard().text()
+            assert "rlnImageName" in copied
+            assert "a.mrc" in copied
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_save_via_injected_saver(self, tmp_path, qapp):
+        captured = {}
+
+        def saver(data, path):
+            captured["data"] = data
+            captured["path"] = path
+
+        dialog = self._open(
+            "dummy.star",
+            loader=lambda p: self._df_with_optics(),
+            saver=saver,
+        )
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            out = str(tmp_path / "out.star")
+            dialog._save_to(out)
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            assert captured["data"] is dialog._data
+            assert captured["path"] == out
+            assert "Saved" in dialog._status.text()
+            assert "out.star" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_load_failure_reported(self, qapp):
+        def loader(path):
+            raise RuntimeError("boom")
+
+        dialog = self._open("missing.star", loader=loader)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            assert dialog._data is None
+            assert "Failed to load dataset" in dialog._status.text()
+            assert "RuntimeError" in dialog._status.text()
+            assert not dialog._btn_save.isEnabled()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_default_loader_and_saver_end_to_end(self, tmp_path, qapp):
+        import mrcfile
+
+        for name in ("a.mrc", "b.mrc"):
+            mrcfile.new(
+                str(tmp_path / name),
+                data=np.zeros((2, 2), dtype=np.float32),
+                overwrite=True,
+            )
+        star = tmp_path / "images.star"
+        star.write_text(
+            "data_images\n\nloop_\n"
+            "_rlnImageName #1\n_rlnAngleRot #2\n"
+            "a.mrc 1.5\nb.mrc 2.5\n"
+        )
+        dialog = self._open(str(star))
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            assert dialog._data is not None
+            assert len(dialog._data) == 2
+
+            out = tmp_path / "out.star"
+            dialog._save_to(str(out))
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            assert out.is_file()
+            assert "Saved" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    # ------------------------------------------------------------------
+    # Phase 1: ordered operation stack
+
+    @staticmethod
+    def _df_for_ops():
+        """Dataset with values that select/sort can discriminate."""
+        data = pd.DataFrame(
+            {
+                "rlnMicrographName": [
+                    "/d/A.mrc",
+                    "/d/A.mrc",
+                    "/d/B.mrc",
+                    "/d/B.mrc",
+                ],
+                "rlnDefocusU": [2.0, 1.0, 2.0, 1.0],
+                "rlnDefocusV": [10.0, 20.0, 5.0, 15.0],
+            }
+        )
+        optics = pd.DataFrame({"rlnOpticsGroup": [1], "rlnPixelSize": [1.2]})
+        data.attrs["optics"] = optics
+        data.attrs["convention"] = "relion"
+        return data
+
+    def _open_ops(self, qapp, **kwargs):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_for_ops(), **kwargs)
+        dialog._load_worker.wait()
+        self._pump(qapp)
+        return dialog
+
+    @staticmethod
+    def _select_op(dialog, name):
+        index = dialog._ops_combo.findData(name)
+        assert index >= 0, f"operation {name} missing from combo"
+        dialog._ops_combo.setCurrentIndex(index)
+
+    def test_operations_combo_excludes_file_writing_options(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            names = {
+                dialog._ops_combo.itemData(i) for i in range(dialog._ops_combo.count())
+            }
+            assert {"select", "sortby", "setParm"} <= names
+            for excluded in (
+                "process",
+                "createStack",
+                "splitByMicrograph",
+                "extractHelices",
+                "path",
+                "sets",
+            ):
+                assert excluded not in names
+            assert not dialog._btn_apply.isEnabled()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_add_operation_validates_and_appends(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnDefocusV 5,20")
+            dialog._btn_add.click()
+
+            assert dialog._stack_model.rowCount() == 1
+            assert dialog._stack_model.operations() == [("select", "rlnDefocusV 5,20")]
+            assert dialog._btn_apply.isEnabled()
+
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+            assert dialog._stack_model.operations() == [
+                ("select", "rlnDefocusV 5,20"),
+                ("sortby", "rlnDefocusU"),
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_invalid_parameter_rejected_on_add(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnDefocusV")  # select needs two tokens
+            dialog._btn_add.click()
+
+            assert dialog._stack_model.rowCount() == 0
+            assert "Cannot add --select" in dialog._status.text()
+            assert not dialog._btn_apply.isEnabled()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_apply_runs_engine_and_refreshes_preview(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnDefocusV 5,20")
+            dialog._btn_add.click()
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+
+            dialog._btn_apply.click()
+
+            assert len(dialog._data) == 2
+            assert dialog._data["rlnDefocusU"].tolist() == [1.0, 2.0]
+            assert dialog._data["rlnDefocusV"].tolist() == [20.0, 5.0]
+            model = dialog._table.model()
+            assert model.rowCount() == 2
+            assert model.columnCount() == 3
+            assert "2 operation(s)" in dialog._status.text()
+            assert "modified" in dialog.windowTitle()
+            assert dialog._optics_table.model().rowCount() == 1
+            assert dialog._btn_reset.isEnabled()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_append_option_applied_in_order(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusV")
+            dialog._btn_add.click()
+
+            dialog._btn_apply.click()
+
+            # The last sort is primary (stable sort keeps the first's order).
+            assert dialog._data["rlnDefocusV"].tolist() == [5.0, 10.0, 15.0, 20.0]
+            assert dialog._data["rlnDefocusU"].tolist() == [2.0, 2.0, 1.0, 1.0]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_move_and_remove_reorder_stack(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusV")
+            dialog._btn_add.click()
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+
+            dialog._stack_view.setCurrentIndex(dialog._stack_model.index(1, 0))
+            dialog._btn_up.click()
+            assert dialog._stack_model.operations() == [
+                ("sortby", "rlnDefocusU"),
+                ("sortby", "rlnDefocusV"),
+            ]
+
+            dialog._stack_view.setCurrentIndex(dialog._stack_model.index(0, 0))
+            dialog._btn_remove.click()
+            assert dialog._stack_model.operations() == [("sortby", "rlnDefocusV")]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_stack_view_configured_for_drag_reorder(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            view = dialog._stack_view
+            assert view.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+            assert view.defaultDropAction() == Qt.DropAction.MoveAction
+            assert not view.dragDropOverwriteMode()
+
+            model = dialog._stack_model
+            assert model.supportedDropActions() == Qt.DropAction.MoveAction
+            for name, text in (
+                ("keepParm", "rlnAngleRot"),
+                ("select", "rlnDefocusV"),
+                ("sortby", "rlnDefocusU"),
+                ("renameParm", "rlnPixelSize"),
+            ):
+                model.add(name, text)
+            for row in range(model.rowCount()):
+                flags = model.flags(model.index(row, 0))
+                assert flags & Qt.ItemFlag.ItemIsDragEnabled
+                assert flags & Qt.ItemFlag.ItemIsDropEnabled
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_stack_model_move_rows_reorders_like_drag(self, qapp):
+        """moveRows uses Qt's destination-before-row convention."""
+        dialog = self._open_ops(qapp)
+        try:
+            model = dialog._stack_model
+            for name, text in (
+                ("keepParm", "rlnAngleRot"),
+                ("select", "rlnDefocusV"),
+                ("sortby", "rlnDefocusU"),
+                ("renameParm", "rlnPixelSize"),
+            ):
+                model.add(name, text)
+
+            def names():
+                return [n for n, _ in model.operations()]
+
+            def move(source_row, destination_child):
+                assert model.moveRows(
+                    QModelIndex(), source_row, 1, QModelIndex(), destination_child
+                )
+                return names()
+
+            # First row dragged below the third (drop before original row 3).
+            assert move(0, 3) == [
+                "select",
+                "sortby",
+                "keepParm",
+                "renameParm",
+            ]
+            # Last row dragged to the top (drop before row 0).
+            assert move(3, 0) == [
+                "renameParm",
+                "select",
+                "sortby",
+                "keepParm",
+            ]
+            # Second row dragged below the last (drop at the end).
+            assert move(1, 4) == [
+                "renameParm",
+                "sortby",
+                "keepParm",
+                "select",
+            ]
+            # Third row dragged above the second (drop before row 1).
+            assert move(2, 1) == [
+                "renameParm",
+                "keepParm",
+                "sortby",
+                "select",
+            ]
+            # Dropping on itself or directly below it is a no-op.
+            assert not model.moveRows(QModelIndex(), 0, 1, QModelIndex(), 0)
+            assert not model.moveRows(QModelIndex(), 0, 1, QModelIndex(), 1)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_ctrl_up_down_shortcuts_move_selection(self, qapp):
+        from PySide6.QtTest import QTest
+
+        dialog = self._open_ops(qapp)
+        try:
+            model = dialog._stack_model
+            model.add("sortby", "rlnDefocusV")
+            model.add("sortby", "rlnDefocusU")
+            model.add("select", "rlnMicrographName")
+
+            dialog.show()
+            dialog._stack_view.setFocus()
+            dialog._stack_view.setCurrentIndex(model.index(2, 0))
+            self._pump(qapp)
+
+            QTest.keyClick(
+                dialog._stack_view,
+                Qt.Key_Up,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            assert model.operations() == [
+                ("sortby", "rlnDefocusV"),
+                ("select", "rlnMicrographName"),
+                ("sortby", "rlnDefocusU"),
+            ]
+            assert dialog._stack_view.currentIndex().row() == 1
+
+            QTest.keyClick(
+                dialog._stack_view,
+                Qt.Key_Down,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            assert model.operations() == [
+                ("sortby", "rlnDefocusV"),
+                ("sortby", "rlnDefocusU"),
+                ("select", "rlnMicrographName"),
+            ]
+            assert dialog._stack_view.currentIndex().row() == 2
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_command_text_maps_stack_to_cli(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            for name, text in (
+                ("select", "rlnDefocusV 5,20"),
+                ("sortby", "rlnDefocusU"),
+                ("renameParm", "rlnPixelSize rlnPixelSizeNew"),
+            ):
+                self._select_op(dialog, name)
+                dialog._param_edit.setText(text)
+                dialog._btn_add.click()
+
+            command = dialog._command_text()
+            source = str(Path("dummy.star").resolve())
+            fallback = str(Path("dummy.processed.star").resolve())
+            expected = (
+                "helicon images2star "
+                f"{source} {fallback} "
+                "--select rlnDefocusV 5,20 --sortby rlnDefocusU "
+                "--renameParm rlnPixelSize rlnPixelSizeNew"
+            )
+            assert command == expected
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_command_text_quotes_paths_and_values(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnMicrographName 'd ir/file 1.mrc'")
+            dialog._btn_add.click()
+
+            command = dialog._command_text()
+            source = str(Path("dummy.star").resolve())
+            fallback = str(Path("dummy.processed.star").resolve())
+            assert source in command
+            assert fallback in command
+            assert command.endswith("--select rlnMicrographName 'd ir/file 1.mrc'")
+            # Round-trips through the shell.
+            import shlex
+
+            tokens = shlex.split(command)
+            assert tokens[0] == "helicon"
+            assert tokens[1] == "images2star"
+            assert tokens[2] == source
+            assert tokens[3] == fallback
+            assert tokens[4:] == [
+                "--select",
+                "rlnMicrographName",
+                "d ir/file 1.mrc",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_command_uses_last_saved_output_path(self, qapp):
+        captured = {}
+
+        def saver(data, path):
+            captured["data"] = data
+            captured["path"] = path
+
+        dialog = self._open_ops(qapp, saver=saver)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+
+            dialog._save_to("/out/target.star")
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            command = dialog._command_text()
+            assert "/out/target.star" in command
+            assert ".processed.star" not in command
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_save_default_path_differs_from_input(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            source = str(Path("dummy.star").resolve())
+            assert dialog._default_output_path() == str(
+                Path("dummy.processed.star").resolve()
+            )
+            assert dialog._default_output_path() != source
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_save_default_path_remembers_last_output(self, qapp):
+        dialog = self._open_ops(qapp, saver=lambda data, path: None)
+        try:
+            dialog._save_to("/out/target.star")
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            assert dialog._default_output_path() == "/out/target.star"
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_choose_output_suggests_distinct_default(self, qapp):
+        from unittest.mock import patch
+
+        dialog = self._open_ops(qapp)
+        try:
+            with patch(
+                "PySide6.QtWidgets.QFileDialog.getSaveFileName",
+                return_value=("", ""),
+            ) as m:
+                dialog._choose_output()
+
+            suggested = m.call_args.args[2]
+            assert suggested == str(Path("dummy.processed.star").resolve())
+            assert suggested != str(Path("dummy.star").resolve())
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_command_dialog_has_editable_selectable_command(self, qapp):
+        from PySide6.QtGui import QFontDatabase
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+
+            cmd_dlg = dialog._build_command_dialog()
+            try:
+                edits = cmd_dlg.findChildren(QPlainTextEdit)
+                assert len(edits) == 1
+                edit = edits[0]
+                text = edit.toPlainText()
+                assert text.startswith("helicon images2star ")
+                assert "--sortby rlnDefocusU" in text
+                assert edit.isReadOnly() is False
+                assert edit.lineWrapMode() == QPlainTextEdit.LineWrapMode.WidgetWidth
+                from PySide6.QtGui import QTextOption
+
+                assert (
+                    edit.document().defaultTextOption().wrapMode()
+                    == QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+                )
+                font = edit.font()
+                assert (
+                    font.family()
+                    == QFontDatabase.systemFont(
+                        QFontDatabase.SystemFont.FixedFont
+                    ).family()
+                )
+                assert cmd_dlg.windowTitle() == "Equivalent images2star command"
+            finally:
+                cmd_dlg.close()
+                cmd_dlg.deleteLater()
+                self._pump(qapp)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_command_copy_puts_text_on_clipboard(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+
+            command = dialog._command_text()
+            dialog._copy_command(command)
+            assert qapp.clipboard().text() == command
+            assert "Command copied to clipboard" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_reset_restores_source_dataset(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnDefocusV 5,20")
+            dialog._btn_add.click()
+            dialog._btn_apply.click()
+            assert len(dialog._data) == 2
+
+            dialog._table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+            assert dialog._table.horizontalHeader().sortIndicatorSection() == 1
+
+            dialog._btn_reset.click()
+
+            assert len(dialog._data) == 4
+            assert dialog._stack_model.rowCount() == 0
+            assert "modified" not in dialog.windowTitle()
+            assert dialog._table.model().rowCount() == 4
+            assert not dialog._btn_reset.isEnabled()
+            # Reset also discards the preview sort: the indicator is cleared
+            # and the table returns to the natural (unsorted) row order.
+            assert dialog._table.horizontalHeader().sortIndicatorSection() == -1
+            model = dialog._table.model()
+            assert [model.data(model.index(r, 0)) for r in range(4)] == [
+                "/d/A.mrc",
+                "/d/A.mrc",
+                "/d/B.mrc",
+                "/d/B.mrc",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_pure_sort_is_resettable_without_modified_title(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            assert not dialog._btn_reset.isEnabled()
+            assert "modified" not in dialog.windowTitle()
+
+            dialog._table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+
+            # A pure sort enables Reset Data but never marks the data dirty.
+            assert dialog._btn_reset.isEnabled()
+            assert "modified" not in dialog.windowTitle()
+            model = dialog._table.model()
+            assert [model.data(model.index(r, 0)) for r in range(4)] == [
+                "/d/B.mrc",
+                "/d/A.mrc",
+                "/d/B.mrc",
+                "/d/A.mrc",
+            ]
+
+            dialog._btn_reset.click()
+
+            assert not dialog._btn_reset.isEnabled()
+            assert "modified" not in dialog.windowTitle()
+            assert dialog._table.horizontalHeader().sortIndicatorSection() == -1
+            model = dialog._table.model()
+            assert [model.data(model.index(r, 0)) for r in range(4)] == [
+                "/d/A.mrc",
+                "/d/A.mrc",
+                "/d/B.mrc",
+                "/d/B.mrc",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_optics_sort_is_resettable_with_same_button(self, qapp):
+        optics = pd.DataFrame(
+            {
+                "rlnOpticsGroup": [2, 1, 3],
+                "rlnPixelSize": [1.2, 0.9, 1.5],
+            }
+        )
+        data = pd.DataFrame({"rlnImageName": ["a.mrc", "b.mrc"]})
+        data.attrs["optics"] = optics
+        dialog = self._open("dummy.star", loader=lambda p: data)
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._optics_table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+            assert dialog._btn_reset.isEnabled()
+            assert "modified" not in dialog.windowTitle()
+
+            dialog._btn_reset.click()
+
+            assert not dialog._btn_reset.isEnabled()
+            assert dialog._optics_table.horizontalHeader().sortIndicatorSection() == -1
+            model = dialog._optics_table.model()
+            assert [model.data(model.index(r, 0)) for r in range(3)] == [
+                "2",
+                "1",
+                "3",
+            ]
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_save_writes_transformed_data(self, tmp_path, qapp):
+        captured = {}
+
+        def saver(data, path):
+            captured["data"] = data
+            captured["path"] = path
+
+        dialog = self._open_ops(qapp, saver=saver)
+        try:
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnDefocusV 5,20")
+            dialog._btn_add.click()
+            dialog._btn_apply.click()
+
+            out = str(tmp_path / "filtered.star")
+            dialog._save_to(out)
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            assert len(captured["data"]) == 2
+            assert captured["path"] == out
+            assert "Saved" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_transform_failure_reported_in_status(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnNoSuchColumn")
+            dialog._btn_add.click()
+
+            dialog._btn_apply.click()
+
+            assert len(dialog._data) == 4  # unchanged
+            assert "Transform failed" in dialog._status.text()
+            assert "rlnNoSuchColumn" in dialog._status.text()
+            assert not dialog._btn_reset.isEnabled()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_status_error_message_renders_red(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Light")
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnNoSuchColumn")
+            dialog._btn_add.click()
+
+            dialog._btn_apply.click()
+
+            assert "Transform failed" in dialog._status.text()
+            assert "color: #b3261e" in dialog._status.styleSheet()
+
+            # A subsequent info message clears the error styling.
+            dialog._set_status("back to normal")
+            assert dialog._status.styleSheet() == ""
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+            settings.remove("theme")
+
+    def test_status_error_uses_dark_theme_red(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Dark")
+        dialog = self._open_ops(qapp)
+        try:
+            dialog._set_status("boom", error=True)
+            assert "color: #ff6b6b" in dialog._status.styleSheet()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+            settings.remove("theme")
+
+    def test_error_style_reapplied_after_theme_switch(self, qapp):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("helicon", "display")
+        settings.setValue("theme", "Light")
+        dialog = self._open_ops(qapp)
+        try:
+            dialog._set_status("boom", error=True)
+            assert "color: #b3261e" in dialog._status.styleSheet()
+
+            settings.setValue("theme", "Dark")
+            dialog._apply_display_theme()
+            assert "color: #ff6b6b" in dialog._status.styleSheet()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+            settings.remove("theme")
+
+    def test_add_parm_missing_column_shown_in_status(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            self._select_op(dialog, "addParm")
+            dialog._param_edit.setText("rlnNoSuchColumn 1.5")
+            dialog._btn_add.click()
+
+            dialog._btn_apply.click()
+
+            assert len(dialog._data) == 4  # unchanged
+            assert "Transform failed" in dialog._status.text()
+            assert "rlnNoSuchColumn" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_edit_particle_cell_updates_data_and_marks_dirty(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            model = dialog._table.model()
+            index = model.index(0, 1)  # rlnDefocusU, row 0
+            assert model.setData(index, "2.5")
+
+            assert dialog._data["rlnDefocusU"].tolist()[0] == 2.5
+            assert model.data(index) == "2.5"
+            assert "modified" in dialog.windowTitle()
+            assert dialog._btn_reset.isEnabled()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_edit_optics_cell_updates_attrs(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            model = dialog._optics_table.model()
+            index = model.index(0, 1)  # rlnPixelSize
+            assert model.setData(index, "1.35")
+
+            assert dialog._data.attrs["optics"]["rlnPixelSize"].tolist() == [1.35]
+            assert "modified" in dialog.windowTitle()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_edit_rejects_invalid_value(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            model = dialog._table.model()
+            index = model.index(0, 1)  # rlnDefocusU is float
+            assert not model.setData(index, "not-a-number")
+
+            assert dialog._data["rlnDefocusU"].tolist()[0] == 2.0
+            assert "modified" not in dialog.windowTitle()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_manual_edit_survives_apply(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            model = dialog._table.model()
+            assert model.setData(model.index(0, 1), "9.0")
+
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+            dialog._btn_apply.click()
+
+            # The edited 9.0 survives the transform (apply runs on current data).
+            assert dialog._data["rlnDefocusU"].tolist()[3] == 9.0
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_preview_tables_allow_editing(self, qapp):
+        dialog = self._open_ops(qapp)
+        try:
+            triggers = (
+                QAbstractItemView.EditTrigger.DoubleClicked
+                | QAbstractItemView.EditTrigger.EditKeyPressed
+            )
+            assert dialog._table.editTriggers() == triggers
+            assert dialog._optics_table.editTriggers() == triggers
+            assert dialog._table.model().flags(dialog._table.model().index(0, 0)) & (
+                Qt.ItemFlag.ItemIsEditable
+            )
+            assert dialog._optics_table.model().flags(
+                dialog._optics_table.model().index(0, 0)
+            ) & (Qt.ItemFlag.ItemIsEditable)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_ops_end_to_end_with_real_files(self, tmp_path, qapp):
+        """Default loader + stack apply + real save produce a valid star."""
+        import starfile
+
+        data = self._df_for_ops()
+        src = tmp_path / "images.star"
+        helicon.dataframe2file(data, str(src))
+
+        dialog = self._open(str(src))
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+            assert len(dialog._data) == 4
+            assert dialog._optics_table.model().rowCount() == 1
+
+            self._select_op(dialog, "select")
+            dialog._param_edit.setText("rlnDefocusV 5,20")
+            dialog._btn_add.click()
+            self._select_op(dialog, "sortby")
+            dialog._param_edit.setText("rlnDefocusU")
+            dialog._btn_add.click()
+            dialog._btn_apply.click()
+
+            out = tmp_path / "filtered.star"
+            dialog._save_to(str(out))
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            written = starfile.read(str(out))
+            if isinstance(written, dict):
+                block = next((v for k, v in written.items() if k != "optics"), None)
+                assert block is not None, list(written)
+                particles = block
+            else:
+                particles = written
+            assert len(particles) == 2
+            assert particles["rlnDefocusU"].tolist() == [1.0, 2.0]
+            assert particles["rlnDefocusV"].tolist() == [20.0, 5.0]
+            assert "Saved" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_ctrl_w_shortcut_closes_dialog(self, qapp):
+        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtTest import QTest
+
+        dialog = self._open_ops(qapp)
+        try:
+            shortcuts = dialog.findChildren(QShortcut)
+            close_sc = next(
+                sc for sc in shortcuts if sc.key() == QKeySequence("Ctrl+W")
+            )
+            assert close_sc.isEnabled()
+
+            dialog.show()
+            self._pump(qapp)
+            assert dialog.isVisible()
+
+            dialog._param_edit.setFocus()
+            QTest.keyClick(
+                dialog._param_edit,
+                Qt.Key_W,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            self._pump(qapp)
+            assert not dialog.isVisible()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_ctrl_q_shortcut_quits_app(self, qapp):
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        dialog = self._open_ops(qapp)
+        try:
+            shortcuts = dialog.findChildren(QShortcut)
+            quit_sc = next(
+                sc
+                for sc in shortcuts
+                if sc.key() == QKeySequence(QKeySequence.StandardKey.Quit)
+            )
+            assert quit_sc.isEnabled()
+
+            with patch("PySide6.QtWidgets.QApplication.quit") as mock_quit:
+                dialog.show()
+                self._pump(qapp)
+                # StandardKey.Quit is Cmd+Q on macOS and Ctrl+Q elsewhere, so
+                # drive the shortcut signal directly rather than a key press.
+                quit_sc.activated.emit()
+                self._pump(qapp)
+
+            mock_quit.assert_called_once()
+            assert not dialog.isVisible()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_header_double_click_does_not_copy_column_label(self, qapp):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            qapp.clipboard().setText("sentinel")
+            header = dialog._table.horizontalHeader()
+            x = header.sectionViewportPosition(0) + header.sectionSize(0) // 2
+            QTest.mouseDClick(
+                header.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                QPoint(x, header.height() // 2),
+            )
+
+            # Double-clicking a header only sorts; the label is copied via
+            # the right-click context menu instead.
+            assert qapp.clipboard().text() == "sentinel"
+            assert "rlnImageName" not in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_header_menu_actions_copy_label_or_all_labels(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            menu = dialog._table._header_menu(1)
+            actions = menu.actions()
+            assert len(actions) == 2
+
+            actions[0].trigger()  # Copy column label
+            assert qapp.clipboard().text() == "rlnAngleRot"
+            assert "rlnAngleRot" in dialog._status.text()
+
+            actions[1].trigger()  # Copy all column labels
+            assert qapp.clipboard().text().splitlines() == [
+                "rlnImageName",
+                "rlnAngleRot",
+            ]
+            assert "2 column labels" in dialog._status.text()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_header_label_copy_works_on_optics_table(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            self._pump(qapp)
+
+            dialog._optics_table._copy_header_label(1)
+            assert qapp.clipboard().text() == "rlnPixelSize"
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)

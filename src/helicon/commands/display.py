@@ -1916,6 +1916,24 @@ def _launch_truefsc(path: str, parent=None) -> None:
     dialog.exec()
 
 
+def _open_images2star_tools(path: str, parent=None) -> None:
+    """Open the Images2Star tools panel (preview + save) for a dataset."""
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.images2star_widget import Images2StarDialog
+
+    try:
+        Images2StarDialog(str(Path(path).resolve()), parent=parent).exec()
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "Images2Star Error",
+            f"Failed to open Images2Star tools:\n{exc}",
+        )
+
+
 def _open_helical_angle_stats_plot(
     result: dict,
 ) -> None:
@@ -5356,6 +5374,9 @@ def main(args: argparse.Namespace) -> None:
                 path,
                 parent=widget,
             )
+            return
+        if mode == "images2star":
+            _open_images2star_tools(path, parent=widget)
             return
         tracker = _TRACKER_FOR.get(mode)
         if tracker is None:

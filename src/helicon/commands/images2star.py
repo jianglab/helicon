@@ -12,6 +12,7 @@ from helicon.lib.exceptions import (
     HeliconValidationError,
     HeliconFileExistsError,
 )
+from helicon.lib.images2star_engine import apply_options
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,6 @@ pd.options.mode.copy_on_write = True
 import helicon
 from helicon.lib.io import getPixelSize, setPixelSize, pixelSizeAttrForImageAttr
 from helicon.lib.analysis import estimate_inter_segment_distance
-from helicon.plugins.images2star import dispatch
 
 
 def main(args: argparse.Namespace) -> None:
@@ -215,20 +215,7 @@ def main(args: argparse.Namespace) -> None:
         data = data.iloc[first:last]
         data = data.reset_index(drop=True)  # important to do this
 
-    index_d = {}
-    for o in args.all_options:
-        index_d[o] = 0
-
-    for option_name in args.all_options:
-        if option_name in args.append_options:
-            param = args.__dict__[option_name][index_d[option_name]]
-        else:
-            param = args.__dict__[option_name]
-
-        if args.verbose:
-            logger.info("%s: %s", option_name, param)
-
-        data, index_d = dispatch(option_name, data, args, index_d, param)
+    data = apply_options(data, args.all_options, args, args.append_options)
     if args.path != "absolute":
         from helicon import get_relion_project_folder, convert_dataframe_file_path
 
