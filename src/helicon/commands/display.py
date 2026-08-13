@@ -1981,12 +1981,13 @@ def _launch_truefsc(path: str, parent=None) -> None:
     dialog.exec()
 
 
-class _Images2StarActivationFilter(QObject):
-    """Forward panel focus changes to the images2star window tracker.
+class _WindowActivationFilter(QObject):
+    """Forward panel focus changes to a display-window tracker.
 
     Mirrors how the gallery/text/FSC windows report activation so that
     ``tracker.active()`` always points at the most recently focused panel
-    (reuse target when the ``New`` checkbox is off).
+    (reuse target when the ``New`` checkbox is off). Used by the
+    images2star and proc3d tools panels.
     """
 
     def __init__(self, window, tracker):
@@ -2039,7 +2040,7 @@ def _open_images2star_tools(
         if tracker is not None:
             tracker.register(dialog)
             dialog.destroyed.connect(lambda *_: tracker.on_close(dialog))
-            _Images2StarActivationFilter(dialog, tracker)
+            _WindowActivationFilter(dialog, tracker)
         # Offset the panel at least half of its own width from the parent
         # so the two windows sit side by side instead of fully overlapping
         # the file browser (the dialog already resized itself in __init__).
@@ -2055,6 +2056,61 @@ def _open_images2star_tools(
             None,
             "Images2Star Error",
             f"Failed to open Images2Star tools:\n{exc}",
+        )
+
+
+def _open_proc3d_tools(
+    path: str, parent=None, reuse_window=None, tracker=None
+) -> None:
+    """Open the Proc3D tools panel (ortho previews + save) for a 3D map.
+
+    Follows the images2star panel lifecycle: with ``reuse_window`` the panel
+    reloads the new file in place; otherwise a fresh non-modal panel is shown
+    (the file browser stays usable) and registered with ``tracker`` so later
+    clicks reuse it unless the ``New`` checkbox is checked.
+    """
+    from pathlib import Path
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    from helicon.lib.proc3d_widget import Proc3dDialog
+
+    try:
+        path = str(Path(path).resolve())
+        if (
+            reuse_window is not None
+            and _is_alive_widget(reuse_window)
+            and isinstance(reuse_window, Proc3dDialog)
+        ):
+            reuse_window.load_path(path)
+            reuse_window.show()
+            reuse_window.raise_()
+            reuse_window.activateWindow()
+            return
+
+        dialog = Proc3dDialog(path, parent=parent)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setModal(False)
+        if tracker is not None:
+            tracker.register(dialog)
+            dialog.destroyed.connect(lambda *_: tracker.on_close(dialog))
+            _WindowActivationFilter(dialog, tracker)
+        # Offset the panel at least half of its own width from the parent
+        # so the two windows sit side by side instead of fully overlapping
+        # the file browser (the dialog already resized itself in __init__).
+        if parent:
+            parent_geo = parent.geometry()
+            offset_x = max(dialog.width(), parent_geo.width()) // 2
+            dialog.move(parent_geo.x() + offset_x, parent_geo.y() + 40)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "Proc3D Error",
+            f"Failed to open Proc3D tools:\n{exc}",
         )
 
 
@@ -3704,19 +3760,21 @@ _gallery = _DisplayTracker(_is_alive_widget)
 _plot = _DisplayTracker(_is_alive_widget)
 _text = _DisplayTracker(_is_alive_widget)
 _images2star = _DisplayTracker(_is_alive_widget)
+_proc3d = _DisplayTracker(_is_alive_widget)
 
 _NAPARI_MODES = {"slice", "volume", "3dplot", "stats", "html"}
 _GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
 _TEXT_MODES = {"text"}
 _PLOT_MODES = {"fsc"}
 _IMAGES2STAR_MODES = {"images2star"}
+_PROC3D_MODES = {"proc3d"}
 
 
 def _quit_all_windows():
     """Close every tracked window and the file browser, then quit."""
     from PySide6.QtWidgets import QApplication
 
-    for tracker in (_napari, _gallery, _text, _plot, _images2star):
+    for tracker in (_napari, _gallery, _text, _plot, _images2star, _proc3d):
         for w in list(tracker.alive()):
             try:
                 w.close()
@@ -3760,6 +3818,8 @@ for _m in _IMAGES2STAR_MODES:
     _TRACKER_FOR[_m] = _images2star
 for _m in _IMAGES2STAR_MODES:
     _TRACKER_FOR[_m] = _images2star
+for _m in _PROC3D_MODES:
+    _TRACKER_FOR[_m] = _proc3d
 
 
 def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
@@ -5482,6 +5542,13 @@ def main(args: argparse.Namespace) -> None:
                 reuse_window=tracker.active(),
                 tracker=tracker,
             )
+        elif tracker is _proc3d:
+            _open_proc3d_tools(
+                path,
+                parent=widget,
+                reuse_window=tracker.active(),
+                tracker=tracker,
+            )
 
     def _on_file_selected_new_window(path):
         tracker, mode = _categorize_file(path)
@@ -5551,6 +5618,13 @@ def main(args: argparse.Namespace) -> None:
                 _open_fsc_plot(path, reuse_window=reuse)
             elif tracker is _images2star:
                 _open_images2star_tools(
+                    path,
+                    parent=widget,
+                    reuse_window=reuse,
+                    tracker=tracker,
+                )
+            elif tracker is _proc3d:
+                _open_proc3d_tools(
                     path,
                     parent=widget,
                     reuse_window=reuse,

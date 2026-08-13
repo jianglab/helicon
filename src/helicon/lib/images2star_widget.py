@@ -660,6 +660,7 @@ class Images2StarDialog(QDialog):
         self._workers: list[QThread] = []
         self._load_seq = 0
         self._sized_once = False
+        self._preview_sized_once = False
 
         self.setWindowTitle(f"Images2Star - {Path(self._path).name}")
         self.resize(940, 800)
@@ -847,18 +848,46 @@ class Images2StarDialog(QDialog):
         return button
 
     def _apply_default_split_sizes(self) -> None:
-        """Give the transformations block a compact default height.
+        """Apply the default split sizes for both splitters.
 
         Runs once on first show, when the splitter's real height is known.
-        The block defaults to the height its (compact) contents request --
-        about half of the taller block the vertical button column used to
-        demand -- and the drag bar lets the user expand it.
+        The transformations block defaults to the height its (compact)
+        contents request with the option list showing two full rows, and the
+        drag bar lets the user expand it. If the dataset finished loading
+        before the window was laid out, the preview split was never sized, so
+        the optics default is applied here as well.
         """
         total = self._main_splitter.height()
         if total <= 0:
             return
         ops = self._ops_group.sizeHint().height()
         self._main_splitter.setSizes([max(total - ops, 0), ops])
+        if not self._preview_sized_once:
+            self._preview_sized_once = True
+            self._apply_default_preview_split()
+
+    def _apply_default_preview_split(self) -> None:
+        """Size the optics pane to ~1.5 table rows; particles get the rest."""
+        h = self._splitter.height()
+        if h <= 0:
+            return
+        optics_h = self._optics_default_pane_height()
+        self._splitter.setSizes([max(h - optics_h, 0), optics_h])
+
+    def _optics_default_pane_height(self) -> int:
+        """Return the optics pane height that shows ~1.5 data rows.
+
+        The pane holds the section label above the table; the table shows its
+        column headers plus one and a half data rows, so a single optics
+        group reads at a glance while the splitter still lets the user expand
+        raw cases with many groups.
+        """
+        row_h = self._optics_table.verticalHeader().defaultSectionSize()
+        header = self._optics_table.horizontalHeader()
+        header_h = header.height() or header.sizeHint().height()
+        label_h = self._optics_label.height() or self._optics_label.sizeHint().height()
+        spacing = self._optics_pane.layout().spacing()
+        return label_h + spacing + header_h + int(1.5 * row_h)
 
     def showEvent(self, event) -> None:
         """Apply the default split once so user drags are never reset."""
@@ -916,13 +945,16 @@ class Images2StarDialog(QDialog):
         self._install_move_shortcuts()
         # Ignore the list's height hint so the block can sit at its compact
         # default height and only grow when the splitter is dragged open.
-        # A two-row minimum keeps the stack readable at that default.
+        # A two-row minimum keeps the stack readable at that default; the
+        # frame allowance lets both rows render fully (the viewport is the
+        # widget height minus the frame).
         self._stack_view.setSizePolicy(
             self._stack_view.sizePolicy().horizontalPolicy(),
             QSizePolicy.Policy.Ignored,
         )
         self._stack_view.setMinimumHeight(
             2 * self._stack_view.fontMetrics().lineSpacing()
+            + 2 * self._stack_view.frameWidth()
         )
         stack_row.addWidget(self._stack_view, 1)
         outer.addLayout(stack_row)
@@ -1320,12 +1352,9 @@ class Images2StarDialog(QDialog):
         self._source_data = self._deep_copy(data)
         self._data = self._deep_copy(data)
         self._refresh_preview(self._data)
-        # Initial split gives particles the bulk and optics a compact strip;
-        # later refreshes keep whatever sizes the user dragged to.
-        # Use proportional sizes based on available height instead of fixed pixels.
-        h = self._splitter.height()
-        if h > 0:
-            self._splitter.setSizes([int(h * 2 / 3), int(h / 3)])
+        # Initial split gives optics a compact ~1.5-row strip and particles
+        # the rest; later refreshes keep whatever sizes the user dragged to.
+        self._apply_default_preview_split()
         self._btn_save.setEnabled(True)
         warnings = list(data.attrs.get("load_warnings", []))
         message = self._summary(self._data)

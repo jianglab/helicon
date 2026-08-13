@@ -8,6 +8,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -57,6 +58,23 @@ __all__ = ["FolderBrowserWidget"]
 
 _THEMES = ("Dark", "Light", "System")
 _DEFAULT_THEME = "System"
+
+# Standalone tools exposed through the Apps menu, in display order.
+# Tuple: (menu label, shiny tab name or None, streamlit subcommand module or
+# None). A shiny tab is opened in the consolidated Helicon Lab web app without
+# an input file; a streamlit module is launched via its subcommand ``main``.
+_APP_LAUNCH_TABLE = [
+    ("WhereIsMyClass", "WhereIsMyClass", None),
+    ("HelicalProjection", "HelicalProjection", None),
+    ("HILL", "HILL", None),
+    ("HelicalPitch", "HelicalPitch", None),
+    ("Denovo3D", "Denovo3D", None),
+    ("HelicalLattice", "HelicalLattice", None),
+    ("HI3D", "HI3D", None),
+    ("CTF Simulation", None, "helicon.commands.ctfSimulation"),
+    ("Map2Seq", None, "helicon.commands.map2seq"),
+    ("ProCart", None, "helicon.commands.procart"),
+]
 
 _THEME_COLORS = {
     "Dark": {
@@ -268,6 +286,78 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _name_matches_filter(name: str, pattern: str, use_regex: bool) -> bool:
+    """Return whether ``name`` matches the browser's active filter.
+
+    An empty pattern matches everything. Regex mode uses ``re.search`` (any
+    match), glob mode uses ``fnmatch.fnmatch``. Invalid regexes match
+    everything so a bad pattern never hides the whole listing.
+
+    Parameters
+    ----------
+    name : str
+        Entry name to test.
+    pattern : str
+        Active filename filter (``"*"`` when no filter is set).
+    use_regex : bool
+        Whether ``pattern`` is a regular expression.
+
+    Returns
+    -------
+    bool
+        Whether the name should be shown in the listing.
+    """
+    if not pattern:
+        return True
+    if use_regex:
+        import re
+
+        try:
+            return bool(re.search(pattern, name))
+        except re.error:
+            return True
+    else:
+        import fnmatch
+
+        return fnmatch.fnmatch(name, pattern)
+
+
+def _count_dir_items(path: Path, filter_pattern: str, use_regex: bool) -> int | None:
+    """Count the entries of a directory the way the browser lists them.
+
+    Mirrors ``FileBrowserModel._load_directory`` visibility rules: hidden
+    entries (leading dot) are skipped and non-directory entries must match
+    the active filter. Directories are always visible.
+
+    Parameters
+    ----------
+    path : Path
+        Directory to count.
+    filter_pattern : str
+        Active filename filter (``"*"`` when no filter is set).
+    use_regex : bool
+        Whether ``filter_pattern`` is a regular expression.
+
+    Returns
+    -------
+    int or None
+        Number of visible entries, or ``None`` when the directory cannot be
+        read (e.g. ``PermissionError``).
+    """
+    try:
+        count = 0
+        for entry in path.iterdir():
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                count += 1
+            elif _name_matches_filter(entry.name, filter_pattern, use_regex):
+                count += 1
+        return count
+    except (OSError, PermissionError):
+        return None
 
 
 def _is_text_file(path: str) -> bool:
@@ -687,19 +777,7 @@ class FileBrowserModel(QStandardItemModel):
         self._load_directory(root_path)
 
     def _matches_filter(self, name: str) -> bool:
-        if not self._filter_pattern:
-            return True
-        if self._use_regex:
-            import re
-
-            try:
-                return bool(re.search(self._filter_pattern, name))
-            except re.error:
-                return True
-        else:
-            import fnmatch
-
-            return fnmatch.fnmatch(name, self._filter_pattern)
+        return _name_matches_filter(name, self._filter_pattern, self._use_regex)
 
     def _load_directory(self, path: str) -> None:
         self._epoch += 1
@@ -810,6 +888,48 @@ class FileBrowserModel(QStandardItemModel):
             if filepath and not self.is_dir(self.index(row, COL_NAME)):
                 rows.append((row, filepath))
         return rows
+
+    def dir_rows(self) -> list[tuple[int, str]]:
+        """Return ``(row, filepath)`` pairs for every directory row.
+
+        Used by the asynchronous count populator to know which rows still need
+        their Size column filled with the number of visible entries.
+        """
+        rows: list[tuple[int, str]] = []
+        for row in range(self.rowCount()):
+            name_index = self.index(row, COL_NAME)
+            filepath = self.data(name_index, Qt.ItemDataRole.UserRole)
+            if filepath and self.is_dir(self.index(row, COL_NAME)):
+                rows.append((row, filepath))
+        return rows
+
+    def apply_dir_count(self, filepath: str, n_items: int) -> None:
+        """Fill the Size column for ``filepath`` with its entry count.
+
+        Resolves the row by searching for *filepath* in the Name column, so
+        results remain correct even when the model has been re-sorted after
+        the ``DirCountWorker`` was dispatched. Updates the sort role so sorting
+        by the Size column orders folders by their entry count.
+
+        Parameters
+        ----------
+        filepath : str
+            Directory whose count is being applied.
+        n_items : int
+            Number of visible entries, or a negative value to leave the cell
+            blank (used when the directory could not be read).
+        """
+        if not filepath or n_items < 0:
+            return
+        row = self._row_for_filepath(filepath)
+        if row < 0 or row >= self.rowCount():
+            return
+        size_item = self.item(row, COL_SIZE)
+        if size_item is None:
+            return
+        label = "1 item" if n_items == 1 else f"{n_items} items"
+        size_item.setText(label)
+        size_item.setData(n_items, ROLE_SORT)
 
     def apply_file_info(
         self, filepath: str, info: str, n_images: str, pixel_size: str
@@ -940,6 +1060,41 @@ class InfoWorker(QThread):
             self.info_ready.emit(filepath, info, n_images, pixel_size, self._epoch)
 
 
+class DirCountWorker(QThread):
+    """Count directory entries off the GUI thread.
+
+    Each worker runs its own thread and is handed a slice of
+    ``(row, filepath)`` pairs; it emits ``count_ready`` per directory as it
+    resolves the count. Counting is a plain ``readdir`` per directory, so it
+    never stalls the UI even for folders holding many subdirectories.
+    ``finished`` is emitted once the slice is exhausted so the owner can clean
+    up and re-sort if needed.
+    """
+
+    count_ready = Signal(str, int, int)  # filepath, n_items, epoch
+
+    def __init__(
+        self,
+        tasks: list[tuple[int, str]],
+        epoch: int,
+        filter_pattern: str,
+        use_regex: bool,
+    ) -> None:
+        super().__init__()
+        self._tasks = tasks
+        self._epoch = epoch
+        self._filter_pattern = filter_pattern
+        self._use_regex = use_regex
+
+    def run(self) -> None:
+        for _row, filepath in self._tasks:
+            n_items = _count_dir_items(
+                Path(filepath), self._filter_pattern, self._use_regex
+            )
+            if n_items is not None:
+                self.count_ready.emit(filepath, n_items, self._epoch)
+
+
 class FolderBrowserWidget(QMainWindow):
     """A folder browser widget for selecting image and volume files.
 
@@ -979,6 +1134,7 @@ class FolderBrowserWidget(QMainWindow):
         ("_btn_optimiser", "optimiser"),
         ("_btn_2dclasses", "2dclasses"),
         ("_btn_orthogonal", "orthogonal"),
+        ("_btn_proc3d", "proc3d"),
         ("_btn_fsc", "fsc"),
         ("_btn_html", "html"),
         ("_btn_denovo3d", "denovo3D"),
@@ -1006,17 +1162,27 @@ class FolderBrowserWidget(QMainWindow):
 
         self._menu_bar = self.menuBar()
         self._file_menu = self._menu_bar.addMenu("File")
-        self._view_menu = self._menu_bar.addMenu("View")
+        self._apps_menu = self._menu_bar.addMenu("Apps")
 
         self._open_folder_action = QAction("Open Folder…", self)
         self._open_folder_action.setShortcut(QKeySequence.StandardKey.Open)
         self._open_folder_action.triggered.connect(self._open_folder)
         self._file_menu.addAction(self._open_folder_action)
 
-        self._open_terminal_action = QAction("Open Terminal", self)
+        # Terminal is the first app, kept on the Apps menu where every other
+        # standalone tool lives rather than buried in the File menu.
+        self._open_terminal_action = QAction("Terminal", self)
         self._open_terminal_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
         self._open_terminal_action.triggered.connect(self._open_terminal)
-        self._file_menu.addAction(self._open_terminal_action)
+        self._apps_menu.addAction(self._open_terminal_action)
+
+        self._app_actions = {}
+        for label, key, streamlit_mod in _APP_LAUNCH_TABLE:
+            action = QAction(label, self)
+            action.setData((key, streamlit_mod))
+            action.triggered.connect(self._on_launch_app)
+            self._apps_menu.addAction(action)
+            self._app_actions[label] = action
 
         self._recent_menu = self._file_menu.addMenu("Recent Folders")
         self._recent_menu.aboutToShow.connect(self._refresh_recent_menu)
@@ -1027,6 +1193,8 @@ class FolderBrowserWidget(QMainWindow):
         self._quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         self._quit_action.triggered.connect(self._quit)
         self._file_menu.addAction(self._quit_action)
+
+        self._view_menu = self._menu_bar.addMenu("View")
 
         self._theme_menu = self._view_menu.addMenu("Theme")
         self._theme_actions = {}
@@ -1042,6 +1210,9 @@ class FolderBrowserWidget(QMainWindow):
             self._theme_actions[theme] = action
 
         self._help_menu = self._menu_bar.addMenu("Help")
+        self._home_page_action = QAction("Home Page", self)
+        self._home_page_action.triggered.connect(self._open_home_page)
+        self._help_menu.addAction(self._home_page_action)
         self._docs_action = QAction("Documentation", self)
         self._docs_action.triggered.connect(self._open_documentation)
         self._help_menu.addAction(self._docs_action)
@@ -1282,6 +1453,12 @@ class FolderBrowserWidget(QMainWindow):
         self._btn_2dclasses.setToolTip("Show 2D class averages sorted by abundance")
         self._btn_orthogonal = QPushButton("Ortho Slice")
         self._btn_orthogonal.setToolTip("Interactive XYZ slice viewer for 3D volumes")
+        self._btn_proc3d = QPushButton("Proc3D")
+        self._btn_proc3d.setToolTip(
+            "Open the Proc3D tools panel to preview and transform "
+            "this 3D map (flip hand, clip, resample, ...), comparing the "
+            "result side by side with the original, then save a new MRC file"
+        )
         self._btn_fsc = QPushButton("FSC")
         self._btn_fsc.setToolTip(
             "Display the FSC curve, or the SSNR-derived W_MAP curve for Class3D, "
@@ -1470,7 +1647,14 @@ class FolderBrowserWidget(QMainWindow):
         if ext in _MRC_VOLUME_EXTENSIONS:
             _has_volume = self._volume_has_nz_gt1(path)
             if _has_volume:
-                modes = ["slice", "volume", "gallery", "chimerax", "orthogonal"]
+                modes = [
+                    "slice",
+                    "volume",
+                    "gallery",
+                    "chimerax",
+                    "orthogonal",
+                    "proc3d",
+                ]
             else:
                 # Single-slice (nz == 1) or unreadable .mrc/.map files are
                 # treated as 2D image stacks, not 3D volumes.
@@ -1711,6 +1895,74 @@ class FolderBrowserWidget(QMainWindow):
         """Open the host OS terminal in the currently displayed folder."""
         _open_terminal(self._model._root_path)
 
+    def _on_launch_app(self, checked: bool = False) -> None:
+        """Launch the standalone tool listed in the Apps menu.
+
+        Shiny web-app tabs reuse the same launch pipeline as the display
+        buttons (``_launch_or_reuse_web_app``) but with no input file, so the
+        app opens with its own file-picker ready. Streamlit subcommands are
+        launched through their command module's ``main``.
+        """
+        action = self.sender()
+        if not isinstance(action, QAction):
+            return
+        key, streamlit_mod = action.data()
+        if streamlit_mod is not None:
+            self._launch_streamlit_app(streamlit_mod)
+            return
+        self._launch_web_app_tab(key)
+
+    def _launch_web_app_tab(self, tab: str) -> None:
+        """Open *tab* in Helicon Lab with no pre-set input file."""
+        try:
+            from helicon.commands import display as _display
+
+            _display._launch_or_reuse_web_app(
+                tab,
+                _display._make_bookmark_query(tab, {}),
+                new_window=False,
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger("helicon").exception(
+                "failed to launch web app tab %r", tab
+            )
+
+    @staticmethod
+    def _launch_streamlit_app(module_name: str) -> None:
+        """Run a streamlit subcommand (e.g. ctfSimulation) in a new process.
+
+        The subcommand ``main`` blocks until the server exits (``streamlit
+        run``), so it must run detached from the GUI event loop.
+        """
+        # Import the command module and invoke ``main`` with a freshly parsed
+        # (empty) argument namespace, rather than running its ``__main__``
+        # block.  ``runpy.run_module(..., alter_sys=True)`` leaves the module
+        # name in ``sys.argv`` and the ``__main__`` block's ``parse_args()``
+        # then rejects that unrecognized argument, so the app never starts.
+        cmd = [
+            sys.executable,
+            "-c",
+            (
+                "import importlib,sys;"
+                "m=importlib.import_module(sys.argv[1]);"
+                "import argparse;"
+                "p=argparse.ArgumentParser();"
+                "(m.add_args(p) if hasattr(m,'add_args') else None);"
+                "m.main(p.parse_args([]))"
+            ),
+            module_name,
+        ]
+        try:
+            _spawn_detached(cmd)
+        except Exception:
+            import logging
+
+            logging.getLogger("helicon").exception(
+                "failed to launch streamlit app %r", module_name
+            )
+
     def _quit(self) -> None:
         """Exit the application (File → Quit / Ctrl+Q)."""
         app = QApplication.instance()
@@ -1718,6 +1970,10 @@ class FolderBrowserWidget(QMainWindow):
             app.quit()
         else:
             self.close()
+
+    def _open_home_page(self) -> None:
+        """Open the Helicon project home page in the system browser."""
+        _open_url("https://jianglab.science.psu.edu/helicon")
 
     def _open_documentation(self) -> None:
         """Open the Helicon user docs in the system browser."""
@@ -1750,35 +2006,38 @@ class FolderBrowserWidget(QMainWindow):
         self._populate_file_info_async()
 
     def _populate_file_info_async(self) -> None:
-        """Fill Dimension / Images / Pixel Size columns in background threads.
+        """Fill Dimension / Images / Pixel Size and folder counts in the background.
 
         The model rows are created synchronously with those columns empty so
         the folder opens instantly; this method then resolves the per-file
-        metadata off the GUI thread using a small pool of worker threads. Old
-        workers from a previous directory load are dropped (their results are
-        discarded via the epoch guard and they self-delete on finish), and
-        every result carries the model epoch so stale results are ignored.
+        metadata and per-folder entry counts off the GUI thread using small
+        pools of worker threads. Old workers from a previous directory load
+        are dropped (their results are discarded via the epoch guard and they
+        self-delete on finish), and every result carries the model epoch so
+        stale results are ignored.
         """
         # Stop tracking any in-flight workers from a previous load.
         self._info_threads.clear()
 
-        tasks = self._model.file_rows()
-        if not tasks:
+        file_tasks = self._model.file_rows()
+        dir_tasks = self._model.dir_rows()
+        if not file_tasks and not dir_tasks:
             return
 
         epoch = self._model.current_epoch()
-        num_workers = min(4, len(tasks))
-        chunks = [tasks[i::num_workers] for i in range(num_workers)]
-        chunks = [c for c in chunks if c]
-
-        pending = len(chunks)
         sort_col = self._tree.header().sortIndicatorSection()
-        re_sort_needed = sort_col in (COL_IMAGES, COL_INFO, COL_PIXELSIZE)
+        re_sort_needed = sort_col in (COL_SIZE, COL_IMAGES, COL_INFO, COL_PIXELSIZE)
+        pending = 0
 
         def on_info_ready(filepath, info, n_images, pixel_size, result_epoch):
             if result_epoch != self._model.current_epoch():
                 return  # directory was reloaded; ignore stale result
             self._model.apply_file_info(filepath, info, n_images, pixel_size)
+
+        def on_count_ready(filepath, n_items, result_epoch):
+            if result_epoch != self._model.current_epoch():
+                return  # directory was reloaded; ignore stale result
+            self._model.apply_dir_count(filepath, n_items)
 
         def on_worker_finished():
             nonlocal pending
@@ -1786,17 +2045,37 @@ class FolderBrowserWidget(QMainWindow):
             if pending == 0 and re_sort_needed:
                 self._model.sort(sort_col, self._tree.header().sortIndicatorOrder())
 
-        for chunk in chunks:
-            worker = InfoWorker(chunk, epoch)
-            worker.info_ready.connect(on_info_ready)
-            # Defer deletion until after any still-queued info_ready events
-            # from this worker have been delivered to the GUI thread.
-            worker.finished.connect(
-                lambda w=worker: QTimer.singleShot(0, w.deleteLater)
-            )
-            worker.finished.connect(on_worker_finished)
-            self._info_threads.append(worker)
-            worker.start()
+        if file_tasks:
+            num_workers = min(4, len(file_tasks))
+            chunks = [file_tasks[i::num_workers] for i in range(num_workers)]
+            pending += len(chunks)
+            for chunk in chunks:
+                worker = InfoWorker(chunk, epoch)
+                worker.info_ready.connect(on_info_ready)
+                # Defer deletion until after any still-queued info_ready events
+                # from this worker have been delivered to the GUI thread.
+                worker.finished.connect(
+                    lambda w=worker: QTimer.singleShot(0, w.deleteLater)
+                )
+                worker.finished.connect(on_worker_finished)
+                self._info_threads.append(worker)
+                worker.start()
+
+        if dir_tasks:
+            num_workers = min(4, len(dir_tasks))
+            chunks = [dir_tasks[i::num_workers] for i in range(num_workers)]
+            pending += len(chunks)
+            filter_pattern = self._model._filter_pattern
+            use_regex = self._model._use_regex
+            for chunk in chunks:
+                worker = DirCountWorker(chunk, epoch, filter_pattern, use_regex)
+                worker.count_ready.connect(on_count_ready)
+                worker.finished.connect(
+                    lambda w=worker: QTimer.singleShot(0, w.deleteLater)
+                )
+                worker.finished.connect(on_worker_finished)
+                self._info_threads.append(worker)
+                worker.start()
 
     def _apply_filter(self) -> None:
         pattern = self._filter_edit.text().strip()
@@ -2061,7 +2340,7 @@ def _gnome_terminal_usable() -> bool:
 
     ``gnome-terminal`` talks to a D-Bus service.  On bare SSH/X11-forwarded
     Linux sessions that service is often listed as activatable but fails
-    after a long timeout (~120s), which made File → Open Terminal appear to
+    after a long timeout (~120s), which made Apps → Terminal appear to
     do nothing.  Only try it when the service is already up or the desktop
     looks like a real GNOME session that can activate it.
     """
@@ -2099,7 +2378,12 @@ def _linux_terminal_candidates(target: str) -> list[tuple[str, list[str]]]:
     same D-Bus hang over SSH/X11.
     """
     shell = os.environ.get("SHELL") or "/bin/sh"
-    shell_cd = f"cd {shlex.quote(target)} && exec {shell}"
+    # xterm/uxterm run an embedded shell command (rather than accepting a
+    # working-directory flag), so reproduce the inherited environment here
+    # too -- sourcing the shared env snapshot keeps the same Python that
+    # launched Helicon (desktop emulators that take ``--working-directory``
+    # already inherit it through the subprocess env).
+    shell_cd = f"cd {shlex.quote(target)} && {_source_env_command()} ; exec {shell}"
     # Prefer ``--flag=value``: lxterminal (and some others) treat a separate
     # ``--working-directory DIR`` as unknown and print usage then exit 0.
     workdir = [f"--working-directory={target}"]
@@ -2155,43 +2439,137 @@ def _open_terminal(folder: str | None = None) -> None:
     Platform-specific launch strategies are tried in order; the first one
     that actually starts wins.  On Linux, candidates that exit immediately
     (missing flags, bad args) are skipped so a working emulator is used.
+
+    The spawned terminal receives the corrected running environment from
+    :func:`_terminal_env` so the shell uses the same Python that launched
+    Helicon (see that function for why the environment is adjusted rather than
+    assuming conda/venv).
     """
     target = folder if folder else os.getcwd()
     system = platform.system()
+    env = _terminal_env()
 
     if system == "Darwin":
-        # `open -a Terminal <dir>` opens the native Terminal.app in <dir>.
-        _spawn_detached(["open", "-a", "Terminal", target])
+        _open_terminal_macos(target, env)
         return
 
     if system == "Windows":
         # Prefer the modern Windows Terminal, then fall back to cmd.exe.
         if shutil.which("wt"):
-            _spawn_detached(["wt", "-d", target])
+            _spawn_detached(["wt", "-d", target], env=env)
             return
         # ``/d`` skips cmd's AutoRun; ``/k`` keeps the window open.
-        _spawn_detached(["cmd.exe", "/d", "/k", "cd", "/d", target])
+        _spawn_detached(["cmd.exe", "/d", "/k", "cd", "/d", target], env=env)
         return
 
     if _is_wsl():
         # WSL distros usually lack a working X terminal (xterm breaks under
         # WSLg), so launch the Windows side through interop instead.
         if shutil.which("wt.exe"):
-            if _spawn_detached(["wt.exe", "wsl", "--cd", target]):
+            if _spawn_detached(["wt.exe", "wsl", "--cd", target], env=env):
                 return
         if shutil.which("wsl.exe"):
-            if _spawn_detached(["wsl.exe", "--cd", target]):
+            if _spawn_detached(["wsl.exe", "--cd", target], env=env):
                 return
 
     for exe, args in _linux_terminal_candidates(target):
-        if _spawn_detached([exe, *args], check_early_exit=True):
+        if _spawn_detached([exe, *args], check_early_exit=True, env=env):
             return
 
     shell = os.environ.get("SHELL") or "/bin/sh"
-    _spawn_detached([shell, "-c", f"cd {shlex.quote(target)} && exec {shell}"])
+    _spawn_detached(
+        [
+            shell,
+            "-c",
+            f"cd {shlex.quote(target)} && {_source_env_command()} ; exec {shell}",
+        ],
+        env=env,
+    )
 
 
-def _spawn_detached(cmd: list[str], check_early_exit: bool = False) -> bool:
+def _open_terminal_macos(target: str, env: dict) -> None:
+    """Launch Terminal.app on macOS with the corrected environment applied.
+
+    GUI apps started through LaunchServices run from the launchd environment,
+    so ``open -a Terminal <dir>`` drops the ``env`` passed to the subprocess
+    and the shell loses the Helicon Python.  AppleScript ``do script`` can
+    inject it, but typing many ``export`` lines would echo visibly.  Instead we
+    snapshot the environment to a temp file and source it with a single line:
+    the file is read into the already-initialised interactive shell, so rc-files
+    (which re-activate conda/virtualenv and would clobber ``PATH``) do not run
+    again.  The window is left at a prompt rooted in *target*.
+    """
+    _write_env_file(env)
+    command = f"cd {shlex.quote(target)} && {_source_env_command()}"
+    script_dir = Path(tempfile.gettempdir()) / "helicon_terminal"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    osascript = (
+        'tell application "Terminal" to do script ' f'"{_applescript_escape(command)}"'
+    )
+    _spawn_detached(["osascript", "-e", osascript])
+
+
+def _applescript_escape(s: str) -> str:
+    """Escape *s* for embedding inside a double-quoted AppleScript string."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _env_file() -> Path:
+    """Return the persistent path of the generated environment snapshot."""
+    name = "helicon-terminal-env.bat" if os.name == "nt" else "helicon-terminal-env.sh"
+    return Path(tempfile.gettempdir()) / "helicon_terminal" / name
+
+
+def _env_pairs(env: dict) -> list[tuple[str, str]]:
+    """Return ``(name, value)`` pairs captured for the opened terminal."""
+    pairs: list[tuple[str, str]] = [("PATH", env["PATH"])]
+    if env.get("PYTHONPATH"):
+        pairs.append(("PYTHONPATH", env["PYTHONPATH"]))
+    for key in ("VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV"):
+        if env.get(key):
+            pairs.append((key, env[key]))
+    return pairs
+
+
+def _env_export_lines(env: dict) -> list[str]:
+    """Return POSIX ``export`` lines reproducing the corrected environment."""
+    return [f"export {k}={shlex.quote(v)}" for k, v in _env_pairs(env)]
+
+
+def _write_env_file(env: dict) -> Path:
+    """Snapshot *env* to a file the opened terminal can source on any platform.
+
+    POSIX shells get ``export`` lines; Windows ``cmd.exe`` gets ``set`` lines.
+    Reusing the same temp file each launch keeps a single source/call line.
+    """
+    path = _env_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        body = "\r\n".join(f'set "{k}={v}"' for k, v in _env_pairs(env)) + "\r\n"
+    else:
+        body = "\n".join(_env_export_lines(env)) + "\n"
+    path.write_text(body)
+    return path
+
+
+def _source_env_command() -> str:
+    """Return the platform-appropriate way to apply the persisted env.
+
+    Returns ``source <file>`` for POSIX shells and ``call <file>`` for
+    ``cmd.exe``.  The file is written by :func:`_write_env_file`; launching the
+    terminal twice is unsupported, so callers always write before sourcing.
+    """
+    envfile = _env_file()
+    if os.name == "nt":
+        return f'call "{envfile}"'
+    return f"source {shlex.quote(str(envfile))}"
+
+
+def _spawn_detached(
+    cmd: list[str],
+    check_early_exit: bool = False,
+    env: dict | None = None,
+) -> bool:
     """Start ``cmd`` detached so it outlives the Helicon process.
 
     Parameters
@@ -2201,6 +2579,9 @@ def _spawn_detached(cmd: list[str], check_early_exit: bool = False) -> bool:
     check_early_exit : bool, optional
         If True, wait briefly and treat a non-zero exit as failure so the
         caller can try the next candidate.  Defaults to False.
+    env : dict, optional
+        Environment for the child process.  Defaults to the current process
+        environment.
 
     Returns
     -------
@@ -2218,6 +2599,7 @@ def _spawn_detached(cmd: list[str], check_early_exit: bool = False) -> bool:
         proc = subprocess.Popen(
             cmd,
             cwd=os.getcwd(),
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2237,3 +2619,30 @@ def _spawn_detached(cmd: list[str], check_early_exit: bool = False) -> bool:
         return True
     # Exit 0 can mean a healthy hand-off (gnome-terminal → server).
     return code == 0
+
+
+def _terminal_env() -> dict:
+    """Return the running Helicon environment, corrected for the terminal.
+
+    Rather than assuming the user installed Helicon through conda (they may
+    have used ``module load``, a venv, or system Python), we derive the
+    active interpreter's bin directory from ``sys.prefix`` and prepend it to
+    ``PATH``.  That way the spawned shell resolves the same Python that launched
+    Helicon regardless of packaging.
+
+    When Helicon is running inside a non-base Python (``sys.prefix !=
+    sys.base_prefix``), we also sync helper variables (``VIRTUAL_ENV``,
+    ``CONDA_PREFIX``, ``CONDA_DEFAULT_ENV``) so rc-files / shells that respect
+    an already-active environment don't try to re-activate base.
+    """
+    env = os.environ.copy()
+    bin_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+    path = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    path = [str(bin_dir)] + [p for p in path if p != str(bin_dir)]
+    env["PATH"] = os.pathsep.join(path)
+
+    if sys.prefix != sys.base_prefix:
+        env["VIRTUAL_ENV"] = sys.prefix
+        env["CONDA_PREFIX"] = sys.prefix
+        env["CONDA_DEFAULT_ENV"] = Path(sys.prefix).name
+    return env

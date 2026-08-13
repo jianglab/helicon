@@ -20,6 +20,7 @@ from PySide6.QtGui import (
     QPolygonF,
 )
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSlider,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -96,7 +98,7 @@ def _gallery_qss(colors: dict[str, str]) -> str:
             margin: -4px 0;
             border-radius: 6px;
         }}
-        QPushButton, QComboBox, QDoubleSpinBox {{
+        QPushButton, QComboBox, QSpinBox, QDoubleSpinBox {{
             color: {colors["text"]};
             background: {colors["input"]};
             border: 1px solid {colors["border"]};
@@ -1186,6 +1188,7 @@ _DARK_BG = QColor("#2d2d2d")
 _COLOR_X = QColor(255, 0, 0)
 _COLOR_Y = QColor(0, 255, 0)
 _COLOR_Z = QColor(0, 100, 255)
+_AXIS_COLORS = {"x": _COLOR_X, "y": _COLOR_Y, "z": _COLOR_Z}
 
 
 class _SliceView(QWidget):
@@ -1233,6 +1236,9 @@ class _SliceView(QWidget):
         self._drag_last: QPoint | None = None
         self._border_color = QColor(255, 255, 255)
         self._axis_label = axis_label
+        # h = horizontal arrow, v = vertical arrow (e.g. Z panel: h="x", v="y").
+        self._axes_h = ""
+        self._axes_v = ""
 
     def _apply_display_theme(self) -> None:
         """Apply the current theme to this custom-painted slice view."""
@@ -1249,6 +1255,20 @@ class _SliceView(QWidget):
 
     def set_border_color(self, color: QColor) -> None:
         self._border_color = color
+
+    def set_axes(self, h_label: str, v_label: str) -> None:
+        """Set the in-plane axis names drawn as a mini axes icon.
+
+        Parameters
+        ----------
+        h_label : str
+            Axis name for the horizontal arrow (e.g. ``"x"`` for the Z panel).
+        v_label : str
+            Axis name for the vertical arrow (e.g. ``"y"`` for the Z panel).
+        """
+        self._axes_h = h_label
+        self._axes_v = v_label
+        self.update()
 
     def set_crosshair(
         self,
@@ -1378,7 +1398,50 @@ class _SliceView(QWidget):
             painter.setFont(QFont("Arial", 14, QFont.Bold))
             painter.drawText(6, 18, self._axis_label)
 
+        self._draw_axes_icon(painter)
+
         painter.end()
+
+    def _draw_axes_icon(self, painter: QPainter) -> None:
+        """Draw a mini axes icon (horizontal + vertical labeled arrows).
+
+        Placed at the top-left, just below the plane label. Each arrow is
+        colored by the standard per-axis color (X red, Y green, Z blue) so it
+        matches the crosshair colors drawn elsewhere in the panel. Both arrows
+        share a common tail at the top-left corner so the icon reads as a
+        corner origin instead of a centered cross.
+        """
+        if not self._axes_h or not self._axes_v:
+            return
+        colors = _gallery_theme_colors()
+        h_color = _AXIS_COLORS.get(self._axes_h, QColor(colors["text"]))
+        v_color = _AXIS_COLORS.get(self._axes_v, QColor(colors["text"]))
+        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        pen = QPen()
+        pen.setWidthF(1.5)
+
+        # Common tail at the top-left corner (an "L" shape).
+        ox, oy = 10, 30  # origin
+        h_len, v_len = 22, 22
+        pen.setColor(h_color)
+        painter.setPen(pen)
+        # Horizontal arrow pointing right from the origin.
+        hx2 = ox + h_len
+        painter.drawLine(QPointF(ox, oy), QPointF(hx2, oy))
+        painter.drawLine(QPointF(hx2, oy), QPointF(hx2 - 5, oy - 4))
+        painter.drawLine(QPointF(hx2, oy), QPointF(hx2 - 5, oy + 4))
+        painter.setPen(h_color)
+        painter.drawText(QPointF(hx2 + 4, oy + 4), self._axes_h)
+
+        # Vertical arrow pointing down from the same origin.
+        vy2 = oy + v_len
+        pen.setColor(v_color)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(ox, oy), QPointF(ox, vy2))
+        painter.drawLine(QPointF(ox, vy2), QPointF(ox - 4, vy2 - 5))
+        painter.drawLine(QPointF(ox, vy2), QPointF(ox + 4, vy2 - 5))
+        painter.setPen(v_color)
+        painter.drawText(QPointF(ox + 5, vy2 + 2), self._axes_v)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MiddleButton:
@@ -1417,7 +1480,7 @@ class _ControlBar(QWidget):
     def __init__(self, nx: int, ny: int, nz: int, parent=None):
         super().__init__(parent)
         colors = _gallery_theme_colors()
-        self.setMinimumWidth(120)
+        self.setMinimumWidth(170)
         self.setAutoFillBackground(True)
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QColor(colors["panel"]))
@@ -1453,24 +1516,33 @@ class _ControlBar(QWidget):
             s.setStyleSheet(sld)
             return s
 
-        def _make_slider_row(label_text, rng, val_text):
+        def _spinbox(rng, val):
+            sp = QSpinBox()
+            sp.setRange(0, max(0, rng - 1))
+            sp.setValue(val)
+            # Compact numeric entry; the slider handles stepped scrolling.
+            sp.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            sp.setAlignment(Qt.AlignCenter)
+            sp.setFixedWidth(54)
+            return sp
+
+        def _make_axis_row(label_text, rng, val):
             sl = _slider(rng)
-            vl = _label(val_text)
-            vl.setStyleSheet(val_lbl)
+            sp = _spinbox(rng, val)
             row = QHBoxLayout()
             row.setSpacing(4)
             row.addWidget(_label(label_text))
             row.addWidget(sl, 1)
-            row.addWidget(vl)
-            return sl, vl, row
+            row.addWidget(sp)
+            return sl, sp, row
 
-        self._x_slider, self._x_val, x_row = _make_slider_row("X", nx, "0")
+        self._x_slider, self._x_spin, x_row = _make_axis_row("X", nx, 0)
         root.addLayout(x_row)
 
-        self._y_slider, self._y_val, y_row = _make_slider_row("Y", ny, "0")
+        self._y_slider, self._y_spin, y_row = _make_axis_row("Y", ny, 0)
         root.addLayout(y_row)
 
-        self._z_slider, self._z_val, z_row = _make_slider_row("Z", nz, "0")
+        self._z_slider, self._z_spin, z_row = _make_axis_row("Z", nz, 0)
         root.addLayout(z_row)
 
         self._zoom_slider = QSlider(Qt.Horizontal)
@@ -1490,32 +1562,29 @@ class _ControlBar(QWidget):
         self._movie_btn = QPushButton("Movie")
         self._movie_btn.setCheckable(True)
         self._movie_btn.setStyleSheet(btn)
+        # Auto-default-off: otherwise Enter in a sibling spinbox toggles the
+        # movie button (QPushButton auto-defaults inside a QDialog parent).
+        self._movie_btn.setAutoDefault(False)
         self._movie_btn.clicked.connect(self.movie_toggled)
         row_btns.addWidget(self._movie_btn)
 
         self._reset_btn = QPushButton("Reset")
         self._reset_btn.setStyleSheet(btn)
+        self._reset_btn.setAutoDefault(False)
         self._reset_btn.clicked.connect(self.reset_view_requested)
         row_btns.addWidget(self._reset_btn)
         root.addLayout(row_btns)
 
         root.addStretch(1)
 
-        self._z_slider.valueChanged.connect(
-            lambda v: self.position_changed.emit(
-                self._x_slider.value(), self._y_slider.value(), v
-            )
-        )
-        self._y_slider.valueChanged.connect(
-            lambda v: self.position_changed.emit(
-                self._x_slider.value(), v, self._z_slider.value()
-            )
-        )
-        self._x_slider.valueChanged.connect(
-            lambda v: self.position_changed.emit(
-                v, self._y_slider.value(), self._z_slider.value()
-            )
-        )
+        # Slider<->spinbox mirror: each side blocks the other's signals
+        # while updating so one user action emits position_changed once.
+        self._sliders = (self._x_slider, self._y_slider, self._z_slider)
+        self._spins = (self._x_spin, self._y_spin, self._z_spin)
+        for axis, slider in enumerate(self._sliders):
+            slider.valueChanged.connect(lambda v, a=axis: self._on_slider_changed(a, v))
+        for axis, spin in enumerate(self._spins):
+            spin.valueChanged.connect(lambda v, a=axis: self._on_spin_changed(a, v))
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
 
     def _apply_display_theme(self) -> None:
@@ -1544,15 +1613,61 @@ class _ControlBar(QWidget):
         self._zoom_val.setText(f"{zoom:.2f}x")
         self.zoom_changed.emit(zoom)
 
+    def _on_slider_changed(self, axis: int, v: int) -> None:
+        """Mirror a slider move into the matching spinbox, then emit position."""
+        self._spins[axis].blockSignals(True)
+        self._spins[axis].setValue(v)
+        self._spins[axis].blockSignals(False)
+        self.position_changed.emit(*[s.value() for s in self._sliders])
+
+    def _on_spin_changed(self, axis: int, v: int) -> None:
+        """Mirror a spinbox entry into the matching slider, then emit position."""
+        self._sliders[axis].blockSignals(True)
+        self._sliders[axis].setValue(v)
+        self._sliders[axis].blockSignals(False)
+        self.position_changed.emit(*[s.value() for s in self._sliders])
+
     def set_position(self, x: int, y: int, z: int) -> None:
-        for slider, val_lbl, val in [
-            (self._x_slider, self._x_val, x),
-            (self._y_slider, self._y_val, y),
-            (self._z_slider, self._z_val, z),
+        for slider, spin, val in [
+            (self._x_slider, self._x_spin, x),
+            (self._y_slider, self._y_spin, y),
+            (self._z_slider, self._z_spin, z),
         ]:
             slider.blockSignals(True)
             slider.setValue(val)
-            val_lbl.setText(str(val))
+            spin.blockSignals(True)
+            spin.setValue(val)
+            spin.blockSignals(False)
+            slider.blockSignals(False)
+
+    def set_dimensions(self, nx: int, ny: int, nz: int) -> None:
+        """Retarget the position sliders and spinboxes to a new volume size.
+
+        Used when the displayed volume is replaced (e.g. after a transform
+        that changes its dimensions). ``QSlider.setRange`` and
+        ``QSpinBox.setRange`` clamp the current value into the new range, so
+        the crosshair position stays where it was when the new volume still
+        contains that location.
+
+        Parameters
+        ----------
+        nx : int
+            New X dimension.
+        ny : int
+            New Y dimension.
+        nz : int
+            New Z dimension.
+        """
+        for slider, spin, rng in [
+            (self._x_slider, self._x_spin, nx),
+            (self._y_slider, self._y_spin, ny),
+            (self._z_slider, self._z_spin, nz),
+        ]:
+            slider.blockSignals(True)
+            slider.setRange(0, max(0, rng - 1))
+            spin.blockSignals(True)
+            spin.setRange(0, max(0, rng - 1))
+            spin.blockSignals(False)
             slider.blockSignals(False)
 
     def set_zoom(self, zoom: float) -> None:
@@ -1709,6 +1824,46 @@ class OrthogonalViewerWidget(QWidget):
         self._setup_ui()
         self._sync_views(source_idx=-1)
 
+    def set_volume(
+        self,
+        volume: np.ndarray,
+        apix: float | None = None,
+        reset_position: bool = False,
+    ) -> None:
+        """Replace the displayed volume, keeping the current view state.
+
+        Used by host panels that transform a volume in place (e.g. the
+        Proc3D tools panel's result preview). The three slice panels keep
+        their zoom and pan, the crosshair position is clamped into the new
+        dimensions, and the control-bar sliders are retargeted to the new
+        size. ``apix`` is only updated when explicitly passed.
+
+        Parameters
+        ----------
+        volume : np.ndarray
+            Replacement 3D array with shape ``(nz, ny, nx)``.
+        apix : float, optional
+            New pixel size in Angstroms; keeps the current value when None.
+        reset_position : bool, optional
+            When True, the crosshair position is reset to the volume center
+            ``(nx//2, ny//2, nz//2)`` instead of being clamped into the new
+            dimensions. Use this when the previous position is meaningless
+            (e.g. replacing a placeholder volume on first load). Defaults to
+            False.
+        """
+        self._volume = volume
+        if apix is not None:
+            self._apix = apix
+        nz, ny, nx = volume.shape
+        self._nx, self._ny, self._nz = nx, ny, nz
+        if reset_position:
+            self._pos = [nx // 2, ny // 2, nz // 2]
+        else:
+            for i, dim in enumerate((self._nx, self._ny, self._nz)):
+                self._pos[i] = int(np.clip(self._pos[i], 0, dim - 1))
+        self._ctrl.set_dimensions(nx, ny, nz)
+        self._sync_views(source_idx=-1)
+
     def _apply_display_theme(self) -> None:
         """Apply the current theme to all orthogonal-view components."""
         colors = _gallery_theme_colors()
@@ -1731,6 +1886,12 @@ class OrthogonalViewerWidget(QWidget):
         self._xy_view.set_border_color(QColor(0, 200, 0))
         self._xz_view.set_border_color(QColor(200, 0, 0))
         self._yz_view.set_border_color(QColor(0, 100, 255))
+
+        # Per-panel in-plane axes: Z panel → x horizontal / y vertical,
+        # X panel → z horizontal / y vertical, Y panel → x horizontal / z vertical.
+        self._xy_view.set_axes("x", "y")
+        self._xz_view.set_axes("z", "y")
+        self._yz_view.set_axes("x", "z")
 
         self._ctrl = _ControlBar(self._nx, self._ny, self._nz)
 

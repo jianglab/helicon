@@ -2283,11 +2283,13 @@ class TestFolderBrowser(object):
 
         assert [action.text() for action in widget._menu_bar.actions()] == [
             "File",
+            "Apps",
             "View",
             "Help",
         ]
         assert widget._file_menu.title() == "File"
         assert widget._view_menu.title() == "View"
+        assert widget._apps_menu.title() == "Apps"
         assert widget._help_menu.title() == "Help"
         assert widget._open_folder_action.text() == "Open Folder…"
         assert widget._quit_action.text() == "Quit"
@@ -2297,8 +2299,18 @@ class TestFolderBrowser(object):
         assert set(widget._theme_actions) == {"Dark", "Light", "System"}
         file_labels = [a.text() for a in widget._file_menu.actions()]
         assert "Quit" in file_labels
-        assert "Documentation" in [a.text() for a in widget._help_menu.actions()]
-        assert "Home Page" in [a.text() for a in widget._help_menu.actions()]
+        help_labels = [a.text() for a in widget._help_menu.actions()]
+        assert help_labels[0] == "Home Page"
+        assert help_labels[1] == "Documentation"
+        # Terminal leads the Apps menu, followed by each standalone tool.
+        assert widget._open_terminal_action in widget._apps_menu.actions()
+        assert widget._apps_menu.actions()[0] is widget._open_terminal_action
+        app_labels = [a.text() for a in widget._apps_menu.actions()]
+        assert app_labels[0] == "Terminal"
+        assert "WhereIsMyClass" in app_labels
+        assert "CTF Simulation" in app_labels
+        assert "ProCart" in app_labels
+        assert "Terminal" not in file_labels
 
     def test_quit_action_quits_application(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
@@ -2317,7 +2329,7 @@ class TestFolderBrowser(object):
             widget._docs_action.trigger()
         mock_open.assert_called_once_with("https://helicon.readthedocs.io")
 
-    def test_home_page_action_opens_website(self, tmp_path, qapp):
+    def test_home_page_action_opens_homepage(self, tmp_path, qapp):
         from helicon.lib import file_browser
         from helicon.lib.file_browser import FolderBrowserWidget
 
@@ -2379,17 +2391,66 @@ class TestFolderBrowser(object):
 
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
 
-        # The action must exist in the File menu and launch the host terminal
-        # rooted at the folder currently shown in the browser.
-        assert widget._open_terminal_action.text() == "Open Terminal"
-        assert "Open Terminal" in [a.text() for a in widget._file_menu.actions()]
+        # The action must exist in the Apps menu (as its first item) and
+        # launch the host terminal rooted at the currently shown folder.
+        assert widget._open_terminal_action.text() == "Terminal"
+        assert widget._open_terminal_action in widget._apps_menu.actions()
         with patch.object(
             file_browser, "_spawn_detached", return_value=True
         ) as mock_spawn:
             widget._open_terminal_action.trigger()
         mock_spawn.assert_called_once()
         cmd = mock_spawn.call_args[0][0]
-        assert any(arg == str(tmp_path) or arg.endswith(f"={tmp_path}") for arg in cmd)
+        # The target folder appears as a CLI arg (``--working-directory=...``)
+        # or embedded in the macOS `do script` line / fallback shell command,
+        # so check the args and the injected command text.
+        payload = list(cmd)
+        assert any(str(tmp_path) in arg for arg in payload)
+
+    def test_apps_menu_web_app_launch_reuses_action_button_pipeline(
+        self, tmp_path, qapp
+    ):
+        from unittest.mock import patch
+
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        action = widget._app_actions["WhereIsMyClass"]
+        with patch.object(widget, "_launch_web_app_tab") as mock_launch:
+            action.trigger()
+        mock_launch.assert_called_once_with("WhereIsMyClass")
+
+        # The web-app tab launch goes through display's shared pipeline with
+        # an empty bookmark (no input file pre-set).
+        with (
+            patch("helicon.commands.display._launch_or_reuse_web_app") as mock_reuse,
+            patch(
+                "helicon.commands.display._make_bookmark_query",
+                return_value={"p": "{}"},
+            ) as mock_query,
+        ):
+            widget._launch_web_app_tab("HILL")
+        mock_query.assert_called_once_with("HILL", {})
+        mock_reuse.assert_called_once_with("HILL", {"p": "{}"}, new_window=False)
+
+    def test_apps_menu_streamlit_launch_spawns_detached(self, tmp_path, qapp):
+        from unittest.mock import patch
+
+        from helicon.lib import file_browser
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        action = widget._app_actions["CTF Simulation"]
+        with patch.object(
+            file_browser, "_spawn_detached", return_value=True
+        ) as mock_spawn:
+            with patch.object(file_browser, "sys") as mock_sys:
+                mock_sys.executable = "/path/to/python"
+                action.trigger()
+        mock_spawn.assert_called_once()
+        cmd = mock_spawn.call_args[0][0]
+        assert cmd[0] == "/path/to/python"
+        assert "helicon.commands.ctfSimulation" in cmd
 
     def test_open_terminal_darwin_uses_native_terminal(self):
         from unittest.mock import patch
@@ -2402,7 +2463,21 @@ class TestFolderBrowser(object):
                 file_browser, "_spawn_detached", return_value=True
             ) as mock_spawn:
                 file_browser._open_terminal("/some/folder")
-        mock_spawn.assert_called_once_with(["open", "-a", "Terminal", "/some/folder"])
+        # macOS drives Terminal.app via AppleScript `do script`, but only a
+        # single `source` line (the env snapshot) is sent -- LaunchServices
+        # drops a subprocess env, and multi-line exports would echo noisily.
+        mock_spawn.assert_called_once()
+        cmd = mock_spawn.call_args[0][0]
+        assert cmd[0] == "osascript"
+        assert cmd[1] == "-e"
+        applescript = cmd[2]
+        assert applescript.startswith('tell application "Terminal" to do script ')
+        inner = applescript.split(" do script ", 1)[1]
+        assert "cd /some/folder" in inner
+        assert "source" in inner
+        assert file_browser._env_file().name in inner
+        # Only env snapshot handling; no subprocess env is passed for the GUI.
+        assert mock_spawn.call_args[1] == {}
 
     def test_open_terminal_wsl_prefers_windows_terminal(self):
         from unittest.mock import patch
@@ -2420,7 +2495,10 @@ class TestFolderBrowser(object):
             mock_platform.system.return_value = "Linux"
             mock_shutil.which.side_effect = lambda c: c if c == "wt.exe" else None
             file_browser._open_terminal("/some/folder")
-        mock_spawn.assert_called_once_with(["wt.exe", "wsl", "--cd", "/some/folder"])
+        mock_spawn.assert_called_once_with(
+            ["wt.exe", "wsl", "--cd", "/some/folder"],
+            env=file_browser._terminal_env(),
+        )
 
     def test_open_terminal_wsl_falls_back_to_wsl_exe(self):
         from unittest.mock import patch
@@ -2438,7 +2516,10 @@ class TestFolderBrowser(object):
             mock_platform.system.return_value = "Linux"
             mock_shutil.which.side_effect = lambda c: c if c == "wsl.exe" else None
             file_browser._open_terminal("/some/folder")
-        mock_spawn.assert_called_once_with(["wsl.exe", "--cd", "/some/folder"])
+        mock_spawn.assert_called_once_with(
+            ["wsl.exe", "--cd", "/some/folder"],
+            env=file_browser._terminal_env(),
+        )
 
     def test_open_terminal_wsl_without_interop_uses_x_terminals(self):
         from unittest.mock import patch
@@ -2462,6 +2543,7 @@ class TestFolderBrowser(object):
         mock_spawn.assert_called_once_with(
             ["gnome-terminal", "--working-directory=/some/folder"],
             check_early_exit=True,
+            env=file_browser._terminal_env(),
         )
 
     def test_open_terminal_linux_uses_xterm_e_flag(self):
@@ -2485,8 +2567,11 @@ class TestFolderBrowser(object):
         assert cmd[0] == "xterm"
         assert cmd[1] == "-e"
         shell = os.environ.get("SHELL") or "/bin/sh"
-        assert cmd[-1] == f"cd /some/folder && exec {shell}"
+        assert cmd[-1] == (
+            f"cd /some/folder && {file_browser._source_env_command()} ; exec {shell}"
+        )
         assert mock_spawn.call_args[1].get("check_early_exit") is True
+        assert mock_spawn.call_args[1]["env"] == file_browser._terminal_env()
 
     def test_open_terminal_linux_skips_gnome_without_session(self):
         """SSH/X11 hosts often have gnome-terminal installed but no D-Bus service."""
@@ -2510,6 +2595,7 @@ class TestFolderBrowser(object):
         mock_spawn.assert_called_once_with(
             ["lxterminal", "--working-directory=/some/folder"],
             check_early_exit=True,
+            env=file_browser._terminal_env(),
         )
 
     def test_open_terminal_linux_falls_through_on_early_exit(self):
@@ -2517,7 +2603,7 @@ class TestFolderBrowser(object):
 
         from helicon.lib import file_browser
 
-        def spawn_side_effect(cmd, check_early_exit=False):
+        def spawn_side_effect(cmd, check_early_exit=False, env=None):
             return cmd[0] != "lxterminal"
 
         with (
@@ -2542,6 +2628,7 @@ class TestFolderBrowser(object):
 
         from helicon.lib import file_browser
 
+        expected_env = None
         with (
             patch.object(file_browser, "platform") as mock_platform,
             patch.object(file_browser, "_is_wsl", return_value=False),
@@ -2557,10 +2644,53 @@ class TestFolderBrowser(object):
                 c if c in {"kitty", "xterm"} else None
             )
             file_browser._open_terminal("/some/folder")
+            expected_env = file_browser._terminal_env()
         mock_spawn.assert_called_once_with(
             ["kitty", "--working-directory=/some/folder"],
             check_early_exit=True,
+            env=expected_env,
         )
+
+    def test_terminal_env_prepends_interpreter_bin_to_path(self):
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "sys") as mock_sys,
+            patch.dict(
+                os.environ,
+                {"PATH": "/usr/bin:/bin", "PYTHONPATH": "/some/py"},
+                clear=True,
+            ),
+        ):
+            mock_sys.prefix = "/envs/helicon"
+            mock_sys.base_prefix = "/base"
+            env = file_browser._terminal_env()
+
+        bin_dir = "/envs/helicon/bin"
+        assert env["PATH"] == f"{bin_dir}:/usr/bin:/bin"
+        assert env["VIRTUAL_ENV"] == "/envs/helicon"
+        assert env["CONDA_PREFIX"] == "/envs/helicon"
+        assert env["CONDA_DEFAULT_ENV"] == "helicon"
+
+    def test_terminal_env_within_base_prefix_does_not_sync_helpers(self):
+        from helicon.lib import file_browser
+
+        with (
+            patch.object(file_browser, "sys") as mock_sys,
+            patch.dict(
+                os.environ,
+                {"PATH": "/usr/bin"},
+                clear=True,
+            ),
+        ):
+            mock_sys.prefix = "/usr"
+            mock_sys.base_prefix = "/usr"
+            env = file_browser._terminal_env()
+
+        assert env["PATH"] == "/usr/bin"
+        assert "VIRTUAL_ENV" not in env
+        assert "CONDA_PREFIX" not in env
+        assert "CONDA_DEFAULT_ENV" not in env
 
     def test_gnome_terminal_usable_requires_session_or_owner(self):
         from unittest.mock import patch
@@ -2749,6 +2879,95 @@ class TestFolderBrowser(object):
                 assert model.is_dir(idx) is True
             elif name == "file.txt":
                 assert model.is_dir(idx) is False
+
+    def test_count_dir_items_matches_listing_rules(self, tmp_path):
+        from helicon.lib.file_browser import _count_dir_items
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "a.txt").write_text("a")
+        (sub / "b.txt").write_text("b")
+        (sub / "data.mrc").write_bytes(b"x" * 64)
+        (sub / "nested").mkdir()
+        (sub / ".hidden.txt").write_text("h")
+
+        # No filter: hidden entries are skipped, everything else counts.
+        assert _count_dir_items(sub, "*", False) == 4
+        # With a filter: non-directory entries must match it.
+        assert _count_dir_items(sub, "*.txt", False) == 3
+        assert _count_dir_items(sub, "*.mrc", False) == 2
+        assert _count_dir_items(sub, r".*\.mrc", True) == 2
+
+    def test_count_dir_items_unreadable_returns_none(self, tmp_path):
+        from helicon.lib.file_browser import _count_dir_items
+
+        # A regular file is not a directory; iterdir() raises NotADirectoryError.
+        f = tmp_path / "plain.txt"
+        f.write_text("x")
+        assert _count_dir_items(f, "*", False) is None
+
+    def test_file_browser_model_dir_rows(self, tmp_path):
+        from helicon.lib.file_browser import FileBrowserModel
+
+        (tmp_path / "adir").mkdir()
+        (tmp_path / "bfile.txt").write_text("x")
+        model = FileBrowserModel(str(tmp_path))
+        dirs = model.dir_rows()
+        assert len(dirs) == 1
+        row, path = dirs[0]
+        assert Path(path).name == "adir"
+        assert model.is_dir(model.index(row, 0))
+
+    def test_apply_dir_count_sets_size_cell(self, tmp_path):
+        from helicon.lib.file_browser import (
+            FileBrowserModel,
+            COL_NAME,
+            COL_SIZE,
+            ROLE_SORT,
+        )
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        model = FileBrowserModel(str(tmp_path))
+        row = model._row_for_filepath(str(sub))
+        assert row >= 0
+
+        model.apply_dir_count(str(sub), 3)
+        assert model.item(row, COL_SIZE).text() == "3 items"
+        assert model.item(row, COL_SIZE).data(ROLE_SORT) == 3
+
+        model.apply_dir_count(str(sub), 1)
+        assert model.item(row, COL_SIZE).text() == "1 item"
+
+    def test_apply_dir_count_ignores_unknown_path(self, tmp_path):
+        from helicon.lib.file_browser import FileBrowserModel, COL_SIZE
+
+        (tmp_path / "sub").mkdir()
+        model = FileBrowserModel(str(tmp_path))
+        model.apply_dir_count(str(tmp_path / "does-not-exist"), 5)
+        model.apply_dir_count(str(tmp_path / "sub"), -1)
+        sizes = [model.item(r, COL_SIZE).text() for r in range(model.rowCount())]
+        assert sizes == [""]
+
+    def test_file_browser_model_sorts_dirs_by_item_count(self, tmp_path):
+        from helicon.lib.file_browser import (
+            FileBrowserModel,
+            COL_NAME,
+            COL_SIZE,
+        )
+
+        few = tmp_path / "few"
+        many = tmp_path / "many"
+        few.mkdir()
+        many.mkdir()
+        (many / "1.txt").write_text("1")
+        (many / "2.txt").write_text("2")
+        model = FileBrowserModel(str(tmp_path))
+        model.apply_dir_count(str(few), 1)
+        model.apply_dir_count(str(many), 2)
+        model.sort(COL_SIZE, Qt.SortOrder.AscendingOrder)
+        assert model.item(0, COL_NAME).text() == "few/"
+        assert model.item(1, COL_NAME).text() == "many/"
 
     def test_folder_browser_emits_signal(self, tmp_path, qapp):
         from helicon.lib.file_browser import FolderBrowserWidget
@@ -4090,6 +4309,41 @@ class TestOrthogonalViewer:
         w = OrthogonalViewerWidget(vol, apix=1.0, name="test")
         w._on_slider_position(3, 4, 5)
         assert w._pos == [3, 4, 5]
+        w.deleteLater()
+
+    def test_controlbar_spinbox_sync(self, qapp):
+        from helicon.lib.gallery_widget import _ControlBar
+
+        bar = _ControlBar(10, 12, 14)
+        bar._x_slider.setValue(4)
+        assert bar._x_spin.value() == 4
+        bar._y_spin.setValue(7)
+        assert bar._y_slider.value() == 7
+        bar.deleteLater()
+
+    def test_orthogonal_viewer_reset_position_center(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        vol1 = np.zeros((4, 4, 4), dtype=np.float32)
+        vol2 = np.zeros((10, 12, 14), dtype=np.float32)
+        w = OrthogonalViewerWidget(vol1, apix=1.0, name="test")
+        assert w._pos == [2, 2, 2]
+        w.set_volume(vol2, reset_position=True)
+        assert w._pos == [7, 6, 5]
+        w.deleteLater()
+
+    def test_orthogonal_viewer_axes_labels(self, qapp):
+        import numpy as np
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        w = OrthogonalViewerWidget(np.zeros((8, 8, 8), dtype=np.float32))
+        assert w._xy_view._axes_h == "x"
+        assert w._xy_view._axes_v == "y"
+        assert w._xz_view._axes_h == "z"
+        assert w._xz_view._axes_v == "y"
+        assert w._yz_view._axes_h == "x"
+        assert w._yz_view._axes_v == "z"
         w.deleteLater()
 
 
@@ -6055,6 +6309,69 @@ class TestImages2StarDialog(object):
             preview, ops = dialog._main_splitter.sizes()
             assert abs(preview - int(h * 0.4)) <= 3
             assert abs(ops - int(h * 0.6)) <= 3
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_default_ops_block_fits_two_stack_rows(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            dialog.show()
+            self._pump(qapp)
+
+            # The transformations block defaults tall enough for the option
+            # list to show two full argument rows (frame included) instead of
+            # one row with the second clipped by the list frame.
+            stack = dialog._stack_view
+            row_h = stack.fontMetrics().lineSpacing()
+            assert stack.minimumHeight() == 2 * row_h + 2 * stack.frameWidth()
+            assert stack.viewport().height() >= 2 * row_h
+            assert dialog._ops_group.height() == dialog._ops_group.sizeHint().height()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_optics_pane_defaults_to_one_and_half_rows(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            dialog._load_worker.wait()
+            dialog.show()
+            self._pump(qapp)
+
+            # Optics gets a compact strip showing ~1.5 data rows (label +
+            # column headers + 1.5 rows); the particles table gets the rest.
+            expected = dialog._optics_default_pane_height()
+            preview, optics = dialog._splitter.sizes()
+            assert abs(optics - expected) <= 2
+            # The two panes plus the splitter handle fill the splitter, so the
+            # particles pane keeps everything except the optics strip and the
+            # few pixels taken by the handle.
+            assert preview >= dialog._splitter.height() - expected - 5
+            row_h = dialog._optics_table.verticalHeader().defaultSectionSize()
+            visible = (
+                dialog._optics_table.height()
+                - dialog._optics_table.horizontalHeader().height()
+            )
+            assert visible >= 1.5 * row_h - 1
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_preview_default_applies_when_load_finishes_before_show(self, qapp):
+        dialog = self._open("dummy.star", loader=lambda p: self._df_with_optics())
+        try:
+            # Let the load complete before the window is ever shown so the
+            # optics default must survive into the first show.
+            dialog._load_worker.wait()
+            self._pump(qapp)
+            dialog.show()
+            self._pump(qapp)
+            expected = dialog._optics_default_pane_height()
+            assert abs(dialog._splitter.sizes()[1] - expected) <= 2
         finally:
             dialog.close()
             dialog.deleteLater()
