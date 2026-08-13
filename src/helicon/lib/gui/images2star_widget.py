@@ -280,7 +280,7 @@ class _DataFramePreviewModel(QAbstractTableModel):
     @staticmethod
     def _error_color() -> str:
         """Return the theme's error color used to flag missing-file cells."""
-        from helicon.lib.file_browser import (
+        from helicon.lib.gui.file_browser import (
             _THEME_COLORS,
             _resolved_theme,
             _saved_theme,
@@ -1388,7 +1388,8 @@ class Images2StarDialog(QDialog):
         sample.setContentsMargins(0, 0, 0, 0)
         sample.setTextMargins(0, 0, 0, 0)
         header = table.verticalHeader()
-        header.setMinimumSectionSize(table.fontMetrics().height())
+        header.setFont(table.font())
+        header.setMinimumSectionSize(header.fontMetrics().height())
         header.setDefaultSectionSize(sample.sizeHint().height() + 1)
         table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
@@ -1513,7 +1514,7 @@ class Images2StarDialog(QDialog):
         the whole widget, so the compact framing would otherwise be lost as
         soon as the error color is applied.
         """
-        from helicon.lib.file_browser import (
+        from helicon.lib.gui.file_browser import (
             _THEME_COLORS,
             _resolved_theme,
             _saved_theme,

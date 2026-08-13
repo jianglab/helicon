@@ -38,9 +38,9 @@ from PySide6.QtWidgets import (
 
 import mrcfile
 
-from helicon.lib.gallery_widget import OrthogonalViewerWidget
+from helicon.lib.gui.gallery_widget import OrthogonalViewerWidget
 from helicon.lib.images2star_engine import parse_operation_value
-from helicon.lib.images2star_widget import _OperationStackModel
+from helicon.lib.gui.images2star_widget import _OperationStackModel
 from helicon.lib.proc3d_engine import (
     apply_options,
     gui_operation_specs,
@@ -823,8 +823,7 @@ class Proc3dDialog(QDialog):
         if self._sized_once:
             self._apply_default_split_sizes()
         self._set_status(
-            f"Applied {len(stack)} operation(s): "
-            f"{_volume_summary(data, apix)}"
+            f"Applied {len(stack)} operation(s): " f"{_volume_summary(data, apix)}"
         )
         self._update_ops_buttons()
 
@@ -915,7 +914,7 @@ class Proc3dDialog(QDialog):
 
     def _status_stylesheet(self, error: bool) -> str:
         """Return the stylesheet for the read-only status row."""
-        from helicon.lib.file_browser import (
+        from helicon.lib.gui.file_browser import (
             _THEME_COLORS,
             _resolved_theme,
             _saved_theme,

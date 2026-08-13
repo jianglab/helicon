@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
     from PyQt5.QtGui import QMouseEvent
     from PyQt5.QtWidgets import QApplication
 
-from helicon.lib.gallery_widget import GalleryPanel, ImageGalleryWidget
+from helicon.lib.gui.gallery_widget import GalleryPanel, ImageGalleryWidget
 
 
 @pytest.fixture(scope="session")
@@ -197,7 +197,7 @@ class TestImageGalleryWidget:
 
 def test_gallery_label_background_colors_are_valid(qapp):
     from PySide6.QtGui import QColor
-    from helicon.lib.gallery_widget import _gallery_theme_colors
+    from helicon.lib.gui.gallery_widget import _gallery_theme_colors
     from PySide6.QtCore import QSettings
 
     settings = QSettings("helicon", "display")
@@ -245,7 +245,7 @@ def _mouse_event(etype, pos, button):
 # ---------------------------------------------------------------------------
 
 from helicon.commands import display  # noqa: E402
-from helicon.lib import file_browser  # noqa: E402
+from helicon.lib.gui import file_browser  # noqa: E402
 
 
 class TestGalleryModeButtons:
@@ -293,12 +293,12 @@ class TestOpenGalleryDispatch:
         # The gallery is a standalone window with no napari viewer dependency.
         assert window is not None
         assert window.centralWidget() is not None
-        from helicon.lib.gallery_widget import ImageGalleryWidget
+        from helicon.lib.gui.gallery_widget import ImageGalleryWidget
 
         assert window.centralWidget().findChild(ImageGalleryWidget) is not None
 
     def test_click_does_not_open_in_viewer(self, qapp):
-        from helicon.lib.gallery_widget import ImageGalleryWidget
+        from helicon.lib.gui.gallery_widget import ImageGalleryWidget
 
         viewer = _mock_viewer()
         images = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
@@ -315,7 +315,7 @@ class TestOpenGalleryDispatch:
         assert viewer._added_image is None
 
     def test_panel_toggle_grows_window_leftward(self, qapp):
-        from helicon.lib.gallery_widget import ImageGalleryWidget, _ControlPanel
+        from helicon.lib.gui.gallery_widget import ImageGalleryWidget, _ControlPanel
 
         images = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
         window = display._open_gallery(
@@ -357,7 +357,7 @@ class TestOpenGalleryDispatch:
         # Regression test for the reported bug: each toggle used to move the
         # window up by the title-bar height.  Toggling many times must keep
         # the window's y exactly constant (no accumulation).
-        from helicon.lib.gallery_widget import ImageGalleryWidget
+        from helicon.lib.gui.gallery_widget import ImageGalleryWidget
 
         images = [np.full((20, 20), float(i), dtype=np.float32) for i in range(50)]
         window = display._open_gallery(

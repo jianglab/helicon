@@ -45,7 +45,11 @@ import numpy as np
 
 def _gallery_theme_colors() -> dict[str, str]:
     """Return colors for custom-painted gallery widgets."""
-    from helicon.lib.file_browser import _THEME_COLORS, _resolved_theme, _saved_theme
+    from helicon.lib.gui.file_browser import (
+        _THEME_COLORS,
+        _resolved_theme,
+        _saved_theme,
+    )
 
     resolved = _resolved_theme(_saved_theme())
     colors = _THEME_COLORS[resolved]

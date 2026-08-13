@@ -84,6 +84,12 @@ _INIT_CUTOFF_X = 7.03
 _INIT_CUTOFF_Y = 4.69
 _INIT_HELICAL_RADIUS = 77.6
 
+# Default 2D image stack pre-filled in the URL input so the field is not
+# blank on launch.
+_DEFAULT_URL = (
+    "https://tinyurl.com/y5tq9fqa"
+)
+
 
 # ── UI ────────────────────────────────────────────────────────────
 
@@ -92,8 +98,7 @@ _INIT_HELICAL_RADIUS = 77.6
 def hill_tab_ui():
     return ui.page_fillable(
         bokeh_dependency(),
-        ui.tags.style(
-            """
+        ui.tags.style("""
         .hill-scrollable-sidebar {
             height: 100%; max-height: 100%; overflow-y: auto;
             border: 1px solid #ccc; padding: 10px;
@@ -103,8 +108,7 @@ def hill_tab_ui():
         .hill-inline-box input { width: 4em; margin-left: 1em; }
         .hill-inline-box .form-group { display: table-row; }
         #hill-hill_main_plots { overflow-y: auto; }
-        """
-        ),
+        """),
         ui.layout_sidebar(
             ui.sidebar(
                 ui.navset_pill(
@@ -1389,6 +1393,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 ui.input_text(
                     "hill_img_file_url",
                     "Input a url of 2D image(s) or a 3D map:",
+                    value=_DEFAULT_URL,
                     update_on="blur",
                 ),
                 ui.input_checkbox("hill_is_3d", "The input is a 3D map", value=False),

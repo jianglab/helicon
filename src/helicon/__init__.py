@@ -72,7 +72,7 @@ from .lib.filters import (
     set_structural_factors,
     threshold_data,
 )
-from .lib.groups import (
+from .lib.exposure_groups import (
     assign_time_groups,
     combine_groups,
     extract_timestamps,

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from helicon.lib.groups import (
+from helicon.lib.exposure_groups import (
     combine_groups,
     extract_timestamps,
     per_micrograph_ids,

@@ -64,7 +64,7 @@ class BaseGallery:
             return None
 
         from PySide6.QtWidgets import QMainWindow
-        from helicon.lib.gallery_widget import ImageGalleryWidget
+        from helicon.lib.gui.gallery_widget import ImageGalleryWidget
         from helicon.commands.display import (
             _display_theme_palette,
             _display_theme_stylesheet,
@@ -91,7 +91,7 @@ class BaseGallery:
             reuse_window.setProperty("helicon_theme_window", True)
             reuse_window.setStyleSheet(_display_theme_stylesheet())
             reuse_window.setPalette(_display_theme_palette())
-            from helicon.lib.gallery_widget import _apply_gallery_theme
+            from helicon.lib.gui.gallery_widget import _apply_gallery_theme
 
             _apply_gallery_theme(reuse_window)
             reuse_window.setWindowTitle(f"Helicon - {Path(self.star_path).name}")
@@ -121,7 +121,7 @@ class BaseGallery:
         window.setProperty("helicon_theme_window", True)
         window.setStyleSheet(_display_theme_stylesheet())
         window.setPalette(_display_theme_palette())
-        from helicon.lib.gallery_widget import _apply_gallery_theme
+        from helicon.lib.gui.gallery_widget import _apply_gallery_theme
 
         _apply_gallery_theme(window)
         window.setWindowTitle(f"Helicon - {Path(self.star_path).name}")
@@ -182,7 +182,7 @@ class OrthogonalGallery:
             return None
 
         from PySide6.QtWidgets import QMainWindow
-        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+        from helicon.lib.gui.gallery_widget import OrthogonalViewerWidget
         from helicon.commands.display import (
             _display_theme_palette,
             _display_theme_stylesheet,
@@ -196,7 +196,7 @@ class OrthogonalGallery:
             reuse_window.setProperty("helicon_theme_window", True)
             reuse_window.setStyleSheet(_display_theme_stylesheet())
             reuse_window.setPalette(_display_theme_palette())
-            from helicon.lib.gallery_widget import _apply_gallery_theme
+            from helicon.lib.gui.gallery_widget import _apply_gallery_theme
 
             _apply_gallery_theme(reuse_window)
             reuse_window.setWindowTitle(f"Helicon - {self._name}")
@@ -226,7 +226,7 @@ class OrthogonalGallery:
         window.setProperty("helicon_theme_window", True)
         window.setStyleSheet(_display_theme_stylesheet())
         window.setPalette(_display_theme_palette())
-        from helicon.lib.gallery_widget import _apply_gallery_theme
+        from helicon.lib.gui.gallery_widget import _apply_gallery_theme
 
         _apply_gallery_theme(window)
         window.setWindowTitle(f"Helicon - {self._name}")
@@ -444,7 +444,7 @@ class Class3dGallery(BaseGallery):
         return labels
 
     def _setup_panel(self, container: Any, widget: Any) -> None:
-        from helicon.lib.gallery_widget import _ControlPanel
+        from helicon.lib.gui.gallery_widget import _ControlPanel
 
         panel = container.findChild(_ControlPanel)
         if panel is not None and self._nz_first > 1:
@@ -541,7 +541,7 @@ class Refine3dGallery(BaseGallery):
         return labels
 
     def _setup_panel(self, container: Any, widget: Any) -> None:
-        from helicon.lib.gallery_widget import _ControlPanel
+        from helicon.lib.gui.gallery_widget import _ControlPanel
 
         panel = container.findChild(_ControlPanel)
         if panel is not None and self._nz_first > 1:
@@ -647,7 +647,7 @@ class Class2dGallery(BaseGallery):
         return labels
 
     def _setup_panel(self, container: Any, widget: Any) -> None:
-        from helicon.lib.gallery_widget import _ControlPanel
+        from helicon.lib.gui.gallery_widget import _ControlPanel
 
         panel = container.findChild(_ControlPanel)
         if panel is not None:
