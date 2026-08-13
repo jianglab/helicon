@@ -1394,7 +1394,10 @@ class _SliceView(QWidget):
         painter.drawRect(0, 0, w - 1, h - 1)
 
         if self._axis_label:
-            painter.setPen(QColor(colors["text"]))
+            label_color = _AXIS_COLORS.get(
+                self._axis_label.lower(), QColor(colors["text"])
+            )
+            painter.setPen(label_color)
             painter.setFont(QFont("Arial", 14, QFont.Bold))
             painter.drawText(6, 18, self._axis_label)
 

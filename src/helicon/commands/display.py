@@ -1835,15 +1835,32 @@ def _launch_hi3d(path: str, *, new_window: bool = False) -> None:
 
 
 def _launch_truefsc(path: str, parent=None) -> None:
-    """Compute True FSC from the two half-maps referenced by a model.star file."""
+    """Compute True FSC from the two half-maps referenced by a model.star file.
+
+    Opens a dialog that immediately shows ortho-slice views of the two input
+    half-maps, then fills in the mask, the masked-map ortho views, and the
+    text info once the computation finishes.
+    """
     import logging
     import os
     import re
     import tempfile
     from pathlib import Path
 
-    from PySide6.QtCore import QThread, Signal
-    from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QTextEdit, QVBoxLayout
+    import numpy as np
+
+    from PySide6.QtCore import Qt, QThread, Signal
+    from PySide6.QtWidgets import (
+        QDialog,
+        QGridLayout,
+        QLabel,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    from helicon.lib.gallery_widget import OrthogonalViewerWidget
+    from helicon.lib.proc3d_widget import _load_volume
 
     model_path = Path(path)
     model_dir = model_path.parent
@@ -1884,6 +1901,33 @@ def _launch_truefsc(path: str, parent=None) -> None:
 
     plot_file = output_dir / "trueFSC.pdf"
 
+    # Load the input maps immediately so their ortho views can be shown right
+    # away while the True FSC computation runs in the background.
+    map1_vol, map1_apix = _load_volume(str(map1))
+    map2_vol, map2_apix = _load_volume(str(map2))
+
+    def _section_label(text: str) -> QLabel:
+        label = QLabel(text)
+        font = label.font()
+        font.setBold(True)
+        label.setFont(font)
+        return label
+
+    def _ortho_pane(label_text: str, viewer: OrthogonalViewerWidget) -> QWidget:
+        """Return a bold header plus a toggleable ortho-viewer column."""
+        container = _wrap_gallery_with_panel(viewer)
+        pane = QWidget()
+        box = QVBoxLayout(pane)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
+        box.addWidget(_section_label(label_text))
+        box.addWidget(container, 1)
+        return pane
+
+    def _placeholder() -> np.ndarray:
+        """Return a blank volume matching the input maps for empty panels."""
+        return np.zeros_like(map1_vol, dtype=np.float32)
+
     from helicon.commands.trueFSC import compute_truefsc
 
     class LogHandler(logging.Handler):
@@ -1900,8 +1944,8 @@ def _launch_truefsc(path: str, parent=None) -> None:
         finished = Signal(object)
         error = Signal(str)
 
-        def __init__(self):
-            super().__init__()
+        def __init__(self, parent=None):
+            super().__init__(parent)
 
         def run(self):
             try:
@@ -1932,20 +1976,53 @@ def _launch_truefsc(path: str, parent=None) -> None:
             super().__init__(parent)
             self.setStyleSheet(_display_theme_stylesheet())
             self.setWindowTitle("trueFSC")
-            self.setMinimumSize(500, 300)
-            layout = QVBoxLayout(self)
+            self.resize(1200, 900)
+            self.setMinimumSize(800, 500)
+            root = QVBoxLayout(self)
+            # Track the background worker via plain Python state so we never
+            # touch the C++ QThread wrapper after it has been deleteLater'd.
+            self._worker = None
+            self._worker_done = True
 
-            self.label = QLabel("Running trueFSC...")
-            layout.addWidget(self.label)
+            grid = QGridLayout()
+            grid.setSpacing(6)
+            root.addLayout(grid, 1)
 
+            # Column 1: the two input maps, shown as soon as the dialog appears.
+            self._map1_viewer = OrthogonalViewerWidget(
+                map1_vol, apix=map1_apix, name="Map 1"
+            )
+            self._map2_viewer = OrthogonalViewerWidget(
+                map2_vol, apix=map2_apix, name="Map 2"
+            )
+            # Columns 2 and 3: filled in once the computation finishes.
+            self._mask_viewer = OrthogonalViewerWidget(
+                _placeholder(), apix=map1_apix, name="Mask"
+            )
+            self._masked1_viewer = OrthogonalViewerWidget(
+                _placeholder(), apix=map1_apix, name="Masked map 1"
+            )
+            self._masked2_viewer = OrthogonalViewerWidget(
+                _placeholder(), apix=map1_apix, name="Masked map 2"
+            )
+
+            grid.addWidget(_ortho_pane("Map 1", self._map1_viewer), 0, 0)
+            grid.addWidget(_ortho_pane("Map 2", self._map2_viewer), 1, 0)
+            grid.addWidget(_ortho_pane("Mask", self._mask_viewer), 0, 1)
+            grid.addWidget(_ortho_pane("Masked map 1", self._masked1_viewer), 0, 2)
+            grid.addWidget(_ortho_pane("Masked map 2", self._masked2_viewer), 1, 2)
+
+            # Text info cell (row 1, col 2).
             self.text_edit = QTextEdit()
             self.text_edit.setReadOnly(True)
-            layout.addWidget(self.text_edit)
-
-            self.close_btn = QPushButton("Close")
-            self.close_btn.setEnabled(False)
-            self.close_btn.clicked.connect(self.accept)
-            layout.addWidget(self.close_btn)
+            info_box = QVBoxLayout()
+            info_box.setContentsMargins(0, 0, 0, 0)
+            info_box.setSpacing(2)
+            info_box.addWidget(_section_label("Information"))
+            info_box.addWidget(self.text_edit, 1)
+            info_widget = QWidget()
+            info_widget.setLayout(info_box)
+            grid.addWidget(info_widget, 1, 1)
 
         def append_line(self, line):
             self.text_edit.append(line)
@@ -1953,32 +2030,97 @@ def _launch_truefsc(path: str, parent=None) -> None:
             scrollbar.setValue(scrollbar.maximum())
 
         def set_result(self, result):
-            if result and result.get("plot_file"):
-                self.label.setText(
-                    f"True FSC completed - Resolution: {result['resolution']:.2f} A"
+            if not result:
+                return
+
+            volumes = result.get("volumes") or {}
+            for viewer, key in (
+                (self._mask_viewer, "mask1_file"),
+                (self._masked1_viewer, "masked_map1_file"),
+                (self._masked2_viewer, "masked_map2_file"),
+            ):
+                path = volumes.get(key)
+                if path:
+                    data, apix = _load_volume(path)
+                    viewer.set_volume(data, apix=apix, reset_position=True)
+
+            res = result.get("resolution")
+
+            self.text_edit.clear()
+            self.text_edit.append(f"Map 1: {map1}")
+            self.text_edit.append(f"Map 2: {map2}")
+            self.text_edit.append("")
+            if result.get("resolution_unmasked"):
+                self.text_edit.append(
+                    f"Unmasked resolution (0.143): {result['resolution_unmasked']:.2f} A"
                 )
+            if result.get("resolution_masked"):
+                self.text_edit.append(
+                    f"Masked resolution (0.143): {result['resolution_masked']:.2f} A"
+                )
+            if res:
+                self.text_edit.append(f"True FSC resolution (0.143): {res:.2f} A")
+            else:
+                self.text_edit.append("True FSC completed")
+
+            if result.get("plot_file"):
                 viewer = _napari.active()
                 if viewer is None:
                     viewer = _create_napari_viewer()
                 _open_file(viewer, str(result["plot_file"]), mode="slice")
-            else:
-                self.label.setText("trueFSC completed")
+
             if output_dir != model_dir:
                 self.text_edit.append(f"\nResults saved to: {output_dir}")
-            self.close_btn.setEnabled(True)
 
         def set_error(self, error_msg):
-            self.label.setText("trueFSC failed")
             self.text_edit.append(f"\nError: {error_msg}")
-            self.close_btn.setEnabled(True)
+
+        def _on_worker_done(self, *_):
+            """Mark the background worker as finished.
+
+            Connected to the worker's ``finished``/``error`` signals. We track
+            done-ness with a plain Python flag instead of querying the QThread,
+            because the worker is scheduled for deletion once it finishes and
+            touching its C++ wrapper afterwards raises a RuntimeError.
+            """
+            self._worker_done = True
+
+        def closeEvent(self, event) -> None:
+            # If the computation is still running, wait for it to finish so the
+            # thread is never destroyed while still executing (crashes
+            # otherwise). Only reach for the worker while it may still be alive;
+            # once it has finished it is scheduled for deletion.
+            worker = self._worker
+            if worker is not None and not self._worker_done and worker.isRunning():
+                worker.quit()
+                worker.wait()
+            event.accept()
 
     dialog = ProgressDialog(parent)
-    worker = Worker()
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    dialog.setWindowModality(Qt.WindowModality.NonModal)
+    # Offset the panel so it sits beside the file browser instead of covering it.
+    if parent:
+        parent_geo = parent.geometry()
+        offset_x = max(dialog.width(), parent_geo.width()) // 2
+        dialog.move(parent_geo.x() + offset_x, parent_geo.y() + 40)
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
+
+    # Keep the worker alive for the life of the dialog and delete it only
+    # after its thread has actually finished, otherwise QThread complains that
+    # it was destroyed while still running.
+    worker = Worker(parent=dialog)
+    dialog._worker = worker
+    dialog._worker_done = False
     worker.line_received.connect(dialog.append_line)
     worker.finished.connect(dialog.set_result)
     worker.error.connect(dialog.set_error)
+    worker.finished.connect(dialog._on_worker_done)
+    worker.error.connect(dialog._on_worker_done)
+    worker.finished.connect(worker.deleteLater)
     worker.start()
-    dialog.exec()
 
 
 class _WindowActivationFilter(QObject):

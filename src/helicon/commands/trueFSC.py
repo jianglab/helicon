@@ -375,24 +375,34 @@ def compute_truefsc(
     basename1 = Path(map1_file).stem
     basename2 = Path(map2_file).stem
 
-    if not user_mask:
-        if one_mask:
-            mask1_file = str(
-                Path(maskdir) / (basename1 + "_" + basename2 + ".common_mask.mrc")
-            )
-            logger.info("Saving final mask: %s", mask1_file)
-            with mrcfile.new(mask1_file, overwrite=True) as mrc:
-                mrc.set_data(mask1.astype(np.float32))
+    mask1_file = None
+    mask2_file = None
+    if user_mask:
+        # Reuse the user-provided mask file(s) for display, as if they were the
+        # auto-generated masks. The mask panel shows the exact mask applied.
+        mask1_file = str(mask_file[0])
+        if len(mask_file) == 2:
+            mask2_file = str(mask_file[1])
         else:
-            mask1_file = str(Path(maskdir) / (basename1 + ".mask.mrc"))
-            logger.info("Saving final mask: %s", mask1_file)
-            with mrcfile.new(mask1_file, overwrite=True) as mrc:
-                mrc.set_data(mask1.astype(np.float32))
+            # A single mask applies to both half-maps.
+            mask2_file = mask1_file
+    elif one_mask:
+        mask1_file = str(
+            Path(maskdir) / (basename1 + "_" + basename2 + ".common_mask.mrc")
+        )
+        logger.info("Saving final mask: %s", mask1_file)
+        with mrcfile.new(mask1_file, overwrite=True) as mrc:
+            mrc.set_data(mask1.astype(np.float32))
+    else:
+        mask1_file = str(Path(maskdir) / (basename1 + ".mask.mrc"))
+        logger.info("Saving final mask: %s", mask1_file)
+        with mrcfile.new(mask1_file, overwrite=True) as mrc:
+            mrc.set_data(mask1.astype(np.float32))
 
-            mask2_file = str(Path(maskdir) / (basename2 + ".mask.mrc"))
-            logger.info("Saving final mask: %s", mask2_file)
-            with mrcfile.new(mask2_file, overwrite=True) as mrc:
-                mrc.set_data(mask2.astype(np.float32))
+        mask2_file = str(Path(maskdir) / (basename2 + ".mask.mrc"))
+        logger.info("Saving final mask: %s", mask2_file)
+        with mrcfile.new(mask2_file, overwrite=True) as mrc:
+            mrc.set_data(mask2.astype(np.float32))
 
     # Apply masks and compute FSCs
     m1 = map1 * mask1
@@ -499,6 +509,12 @@ def compute_truefsc(
         "resolution_masked": res_masked,
         "plot_file": plot_file,
         "fsc_curves": fsc_curves,
+        "volumes": {
+            "mask1_file": mask1_file,
+            "mask2_file": mask2_file,
+            "masked_map1_file": masked1_file,
+            "masked_map2_file": masked2_file,
+        },
     }
 
 
