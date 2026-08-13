@@ -1855,6 +1855,10 @@ class OrthogonalViewerWidget(QWidget):
             False.
         """
         self._volume = volume
+        if min(volume.shape) == 0:
+            raise ValueError(
+                f"invalid volume shape {volume.shape}: all dimensions must be > 0"
+            )
         if apix is not None:
             self._apix = apix
         nz, ny, nx = volume.shape

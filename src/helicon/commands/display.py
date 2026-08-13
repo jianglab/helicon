@@ -1837,30 +1837,11 @@ def _launch_hi3d(path: str, *, new_window: bool = False) -> None:
 def _launch_truefsc(path: str, parent=None) -> None:
     """Compute True FSC from the two half-maps referenced by a model.star file.
 
-    Opens a dialog that immediately shows ortho-slice views of the two input
-    half-maps, then fills in the mask, the masked-map ortho views, and the
-    text info once the computation finishes.
+    Opens the trueFSC panel with the Map 1 and Map 2 selectors pre-filled and
+    starts loading the maps immediately.
     """
-    import logging
-    import os
     import re
-    import tempfile
     from pathlib import Path
-
-    import numpy as np
-
-    from PySide6.QtCore import Qt, QThread, Signal
-    from PySide6.QtWidgets import (
-        QDialog,
-        QGridLayout,
-        QLabel,
-        QTextEdit,
-        QVBoxLayout,
-        QWidget,
-    )
-
-    from helicon.lib.gallery_widget import OrthogonalViewerWidget
-    from helicon.lib.proc3d_widget import _load_volume
 
     model_path = Path(path)
     model_dir = model_path.parent
@@ -1894,17 +1875,52 @@ def _launch_truefsc(path: str, parent=None) -> None:
         )
         return
 
-    if os.access(model_dir, os.W_OK):
-        output_dir = model_dir
-    else:
-        output_dir = Path(tempfile.mkdtemp(prefix="helicon_truefsc_"))
+    _launch_truefsc_maps(map1=map1, map2=map2, parent=parent)
 
-    plot_file = output_dir / "trueFSC.pdf"
 
-    # Load the input maps immediately so their ortho views can be shown right
-    # away while the True FSC computation runs in the background.
-    map1_vol, map1_apix = _load_volume(str(map1))
-    map2_vol, map2_apix = _load_volume(str(map2))
+def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
+    """Open the trueFSC panel with Map 1 / Map 2 / optional Mask selectors.
+
+    The information pane holds three file selectors: Map 1, Map 2, and an
+    optional Mask. As soon as both half-maps are chosen the two input ortho
+    viewers load and the True FSC computation runs in the background; a mask
+    given in the selector is used verbatim, otherwise an adaptive mask is
+    generated. ``map1`` and ``map2`` pre-fill the selectors when the panel is
+    launched from a ``model.star`` action button; launching from the Apps
+    menu leaves every selector empty.
+
+    ``map1``, ``map2``, and ``mask`` may be ``str``, ``pathlib.Path``, or
+    ``None``.
+
+    Returns
+    -------
+    QDialog
+        The open, non-modal progress dialog.
+    """
+    import logging
+    import os
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+
+    from PySide6.QtCore import Qt, QThread, Signal
+    from PySide6.QtWidgets import (
+        QDialog,
+        QFileDialog,
+        QGridLayout,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QPushButton,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    from helicon.commands.trueFSC import compute_truefsc
+    from helicon.lib.gallery_widget import OrthogonalViewerWidget
+    from helicon.lib.proc3d_widget import _load_volume
 
     def _section_label(text: str) -> QLabel:
         label = QLabel(text)
@@ -1924,11 +1940,12 @@ def _launch_truefsc(path: str, parent=None) -> None:
         box.addWidget(container, 1)
         return pane
 
-    def _placeholder() -> np.ndarray:
-        """Return a blank volume matching the input maps for empty panels."""
-        return np.zeros_like(map1_vol, dtype=np.float32)
-
-    from helicon.commands.trueFSC import compute_truefsc
+    def _output_dir_for(map1_path: str) -> Path:
+        """Return a writable output directory next to ``map1_path``."""
+        base_dir = Path(map1_path).parent
+        if os.access(base_dir, os.W_OK):
+            return base_dir
+        return Path(tempfile.mkdtemp(prefix="helicon_truefsc_"))
 
     class LogHandler(logging.Handler):
         def __init__(self, signal):
@@ -1939,19 +1956,56 @@ def _launch_truefsc(path: str, parent=None) -> None:
             msg = self.format(record)
             self._signal.emit(msg)
 
-    class Worker(QThread):
+    class _InputLoader(QThread):
+        """Load the chosen maps (and optional mask) off the UI thread."""
+
+        loaded = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, map1, map2, mask, parent=None):
+            super().__init__(parent)
+            self._map1 = map1
+            self._map2 = map2
+            self._mask = mask
+
+        def run(self):
+            try:
+                if self._map1:
+                    d1, a1 = _load_volume(self._map1)
+                else:
+                    d1, a1 = None, None
+                if self._map2:
+                    d2, a2 = _load_volume(self._map2)
+                else:
+                    d2, a2 = None, None
+                mask_vol = None
+                if self._mask:
+                    mask_vol, _ = _load_volume(self._mask)
+                self.loaded.emit({"map1": (d1, a1), "map2": (d2, a2), "mask": mask_vol})
+            except Exception as exc:
+                self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+    class _ComputeWorker(QThread):
+        """Run ``compute_truefsc`` off the UI thread, streaming log lines."""
+
         line_received = Signal(str)
         finished = Signal(object)
         error = Signal(str)
 
-        def __init__(self, parent=None):
+        def __init__(self, map1, map2, mask, plot_file, parent=None):
             super().__init__(parent)
+            self._map1 = map1
+            self._map2 = map2
+            self._mask = mask
+            self._plot_file = plot_file
 
         def run(self):
             try:
-                self.line_received.emit(f"Map 1: {map1}")
-                self.line_received.emit(f"Map 2: {map2}")
-                self.line_received.emit(f"Output: {plot_file}")
+                self.line_received.emit(f"Map 1: {self._map1}")
+                self.line_received.emit(f"Map 2: {self._map2}")
+                if self._mask:
+                    self.line_received.emit(f"Mask: {self._mask}")
+                self.line_received.emit(f"Output: {self._plot_file}")
                 self.line_received.emit("")
 
                 handler = LogHandler(self.line_received)
@@ -1961,9 +2015,10 @@ def _launch_truefsc(path: str, parent=None) -> None:
                 logger.setLevel(logging.DEBUG)
                 try:
                     result = compute_truefsc(
-                        str(map1),
-                        str(map2),
-                        str(plot_file),
+                        self._map1,
+                        self._map2,
+                        self._plot_file,
+                        mask_file=[self._mask] if self._mask else None,
                     )
                 finally:
                     logger.removeHandler(handler)
@@ -1978,32 +2033,37 @@ def _launch_truefsc(path: str, parent=None) -> None:
             self.setWindowTitle("trueFSC")
             self.resize(1200, 900)
             self.setMinimumSize(800, 500)
-            root = QVBoxLayout(self)
-            # Track the background worker via plain Python state so we never
-            # touch the C++ QThread wrapper after it has been deleteLater'd.
-            self._worker = None
-            self._worker_done = True
+            # Track background workers via plain Python state so we never
+            # touch a C++ QThread wrapper after it has been deleteLater'd.
+            self._workers: list[tuple[QThread, list]] = []
+            self._seq = 0
+            self._map1 = str(Path(map1).resolve()) if map1 else ""
+            self._map2 = str(Path(map2).resolve()) if map2 else ""
+            self._mask = str(Path(mask).resolve()) if mask else ""
 
+            root = QVBoxLayout(self)
             grid = QGridLayout()
             grid.setSpacing(6)
             root.addLayout(grid, 1)
 
-            # Column 1: the two input maps, shown as soon as the dialog appears.
+            placeholder = np.zeros((1, 1, 1), dtype=np.float32)
+
+            # Column 1: the two input maps, shown as soon as they load.
             self._map1_viewer = OrthogonalViewerWidget(
-                map1_vol, apix=map1_apix, name="Map 1"
+                placeholder, apix=1.0, name="Map 1"
             )
             self._map2_viewer = OrthogonalViewerWidget(
-                map2_vol, apix=map2_apix, name="Map 2"
+                placeholder, apix=1.0, name="Map 2"
             )
             # Columns 2 and 3: filled in once the computation finishes.
             self._mask_viewer = OrthogonalViewerWidget(
-                _placeholder(), apix=map1_apix, name="Mask"
+                placeholder, apix=1.0, name="Mask"
             )
             self._masked1_viewer = OrthogonalViewerWidget(
-                _placeholder(), apix=map1_apix, name="Masked map 1"
+                placeholder, apix=1.0, name="Masked map 1"
             )
             self._masked2_viewer = OrthogonalViewerWidget(
-                _placeholder(), apix=map1_apix, name="Masked map 2"
+                placeholder, apix=1.0, name="Masked map 2"
             )
 
             grid.addWidget(_ortho_pane("Map 1", self._map1_viewer), 0, 0)
@@ -2012,24 +2072,197 @@ def _launch_truefsc(path: str, parent=None) -> None:
             grid.addWidget(_ortho_pane("Masked map 1", self._masked1_viewer), 0, 2)
             grid.addWidget(_ortho_pane("Masked map 2", self._masked2_viewer), 1, 2)
 
-            # Text info cell (row 1, col 2).
-            self.text_edit = QTextEdit()
-            self.text_edit.setReadOnly(True)
+            # Column 2, row 2: the input map selectors plus the info log.
+            selector_panel = self._build_selector_panel()
             info_box = QVBoxLayout()
             info_box.setContentsMargins(0, 0, 0, 0)
             info_box.setSpacing(2)
             info_box.addWidget(_section_label("Information"))
+            self.text_edit = QTextEdit()
+            self.text_edit.setReadOnly(True)
             info_box.addWidget(self.text_edit, 1)
             info_widget = QWidget()
-            info_widget.setLayout(info_box)
+            info_col = QVBoxLayout(info_widget)
+            info_col.setContentsMargins(0, 0, 0, 0)
+            info_col.setSpacing(2)
+            info_col.addWidget(selector_panel)
+            info_col.addLayout(info_box, 1)
             grid.addWidget(info_widget, 1, 1)
+
+            if self._map1:
+                self._map1_edit.setText(self._map1)
+            if self._map2:
+                self._map2_edit.setText(self._map2)
+            if self._mask:
+                self._mask_edit.setText(self._mask)
+
+        # ------------------------------------------------------------------
+        # Input selectors
+        # ------------------------------------------------------------------
+
+        def _compact_button(self, text: str, tooltip: str) -> QPushButton:
+            """Give a button the browser's fixed 26px action-bar height."""
+            button = QPushButton(text)
+            button.setFixedHeight(26)
+            button.setAutoDefault(False)
+            button.setToolTip(tooltip)
+            return button
+
+        def _build_selector_panel(self) -> QWidget:
+            """Build the Map 1 / Map 2 / optional Mask file selectors."""
+            panel = QWidget()
+            box = QVBoxLayout(panel)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(2)
+            box.addWidget(_section_label("Input maps"))
+
+            self._map1_edit, row1 = self._selector_row(
+                "Map 1", "Choose the half-map 1 3D MRC/MAP map from disk"
+            )
+            self._map2_edit, row2 = self._selector_row(
+                "Map 2", "Choose the half-map 2 3D MRC/MAP map from disk"
+            )
+            self._mask_edit, row3 = self._selector_row(
+                "Mask",
+                "Optional mask used verbatim; empty generates an adaptive mask",
+            )
+            box.addLayout(row1)
+            box.addLayout(row2)
+            box.addLayout(row3)
+            return panel
+
+        def _selector_row(
+            self, label_text: str, tooltip: str
+        ) -> tuple[QLineEdit, QHBoxLayout]:
+            """Return a labeled path field with a Browse button."""
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            label = QLabel(label_text)
+            label.setMinimumWidth(48)
+            row.addWidget(label)
+            edit = QLineEdit()
+            edit.setClearButtonEnabled(True)
+            edit.setPlaceholderText("Path to a 3D MRC/MAP map...")
+            edit.returnPressed.connect(self._on_inputs_changed)
+            row.addWidget(edit, 1)
+            browse = self._compact_button("Browse...", tooltip)
+            browse.clicked.connect(lambda: self._browse_for(edit))
+            row.addWidget(browse)
+            return edit, row
+
+        def _browse_for(self, edit: QLineEdit) -> None:
+            """Open a file picker and immediately load the chosen map."""
+            file_name, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select 3D map",
+                edit.text() or self._map1 or str(Path.home()),
+                "Maps (*.mrc *.mrcs *.em *.map);;All files (*)",
+            )
+            if not file_name:
+                return
+            edit.setText(file_name)
+            self._on_inputs_changed()
+
+        # ------------------------------------------------------------------
+        # Load-and-compute pipeline
+        # ------------------------------------------------------------------
+
+        def _track(self, worker: QThread) -> None:
+            """Register a worker so closeEvent can wait for it safely."""
+            done = [False]
+
+            def _mark():
+                done[0] = True
+
+            worker.finished.connect(_mark)
+            self._workers.append((worker, done))
+
+        def _on_inputs_changed(self) -> None:
+            """Load each chosen map into its ortho viewer, then (re)compute.
+
+            Every map that is currently specified in the selectors is loaded
+            into the matching ortho-slice view right away; the True FSC
+            computation restarts only when both half-maps are present.
+            """
+            self._map1 = self._map1_edit.text().strip()
+            self._map2 = self._map2_edit.text().strip()
+            self._mask = self._mask_edit.text().strip()
+            self._seq += 1
+            seq = self._seq
+            self.text_edit.clear()
+            if self._map1 and self._map2:
+                self.text_edit.append(
+                    f"Loading {Path(self._map1).name} and {Path(self._map2).name}\u2026"
+                )
+            else:
+                self.text_edit.append(
+                    "Choose Map 1 and Map 2 to start the True FSC "
+                    "computation. A mask is optional."
+                )
+            loader = _InputLoader(self._map1, self._map2, self._mask, parent=self)
+            self._track(loader)
+            loader.loaded.connect(lambda vols, s=seq: self._on_inputs_loaded(vols, s))
+            loader.failed.connect(lambda msg, s=seq: self._on_input_failed(msg, s))
+            loader.start()
+
+        def _on_inputs_loaded(self, volumes, seq) -> None:
+            if seq != self._seq:
+                return
+            (d1, a1) = volumes["map1"]
+            (d2, a2) = volumes["map2"]
+            if d1 is not None:
+                self._map1_viewer.set_volume(d1, a1, reset_position=True)
+            else:
+                self._map1_viewer.set_volume(
+                    np.zeros((1, 1, 1), dtype=np.float32), 1.0, reset_position=True
+                )
+            if d2 is not None:
+                self._map2_viewer.set_volume(d2, a2, reset_position=True)
+            else:
+                self._map2_viewer.set_volume(
+                    np.zeros((1, 1, 1), dtype=np.float32), 1.0, reset_position=True
+                )
+            mask_vol = volumes["mask"]
+            if mask_vol is not None:
+                self._mask_viewer.set_volume(mask_vol, a1, reset_position=True)
+            else:
+                self._mask_viewer.set_volume(
+                    np.zeros((1, 1, 1), dtype=np.float32), 1.0, reset_position=True
+                )
+            if self._map1 and self._map2:
+                self._start_compute(seq)
+
+        def _on_input_failed(self, message: str, seq) -> None:
+            if seq != self._seq:
+                return
+            self.text_edit.clear()
+            self.text_edit.append(f"Error loading maps:\n{message}")
+
+        def _start_compute(self, seq) -> None:
+            output_dir = _output_dir_for(self._map1)
+            plot_file = output_dir / "trueFSC.pdf"
+            worker = _ComputeWorker(
+                self._map1, self._map2, self._mask, str(plot_file), parent=self
+            )
+            self._track(worker)
+            worker.line_received.connect(self.append_line)
+            worker.finished.connect(lambda r, s=seq: self.set_result(r, s))
+            worker.error.connect(lambda m, s=seq: self.set_error(m, s))
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+
+        # ------------------------------------------------------------------
+        # Info log / results
+        # ------------------------------------------------------------------
 
         def append_line(self, line):
             self.text_edit.append(line)
             scrollbar = self.text_edit.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
 
-        def set_result(self, result):
+        def set_result(self, result, seq):
+            if seq != self._seq:
+                return
             if not result:
                 return
 
@@ -2047,8 +2280,22 @@ def _launch_truefsc(path: str, parent=None) -> None:
             res = result.get("resolution")
 
             self.text_edit.clear()
-            self.text_edit.append(f"Map 1: {map1}")
-            self.text_edit.append(f"Map 2: {map2}")
+            self.text_edit.append(f"Map 1: {self._map1}")
+            self.text_edit.append(f"Map 2: {self._map2}")
+            if self._mask:
+                self.text_edit.append(f"Mask (input): {self._mask}")
+            self.text_edit.append("")
+            for label, key in (
+                ("Mask", "mask1_file"),
+                ("Masked map 1", "masked_map1_file"),
+                ("Masked map 2", "masked_map2_file"),
+            ):
+                path = volumes.get(key)
+                if path:
+                    self.text_edit.append(f"{label}: {path}")
+            plot_file = result.get("plot_file")
+            if plot_file:
+                self.text_edit.append(f"FSC plot: {plot_file}")
             self.text_edit.append("")
             if result.get("resolution_unmasked"):
                 self.text_edit.append(
@@ -2063,37 +2310,30 @@ def _launch_truefsc(path: str, parent=None) -> None:
             else:
                 self.text_edit.append("True FSC completed")
 
-            if result.get("plot_file"):
+            if plot_file:
                 viewer = _napari.active()
                 if viewer is None:
                     viewer = _create_napari_viewer()
-                _open_file(viewer, str(result["plot_file"]), mode="slice")
+                _open_file(viewer, str(plot_file), mode="slice")
+                if Path(plot_file).parent != Path(self._map1).parent:
+                    self.text_edit.append(
+                        f"\nResults saved to: {Path(plot_file).parent}"
+                    )
 
-            if output_dir != model_dir:
-                self.text_edit.append(f"\nResults saved to: {output_dir}")
-
-        def set_error(self, error_msg):
+        def set_error(self, error_msg, seq):
+            if seq != self._seq:
+                return
             self.text_edit.append(f"\nError: {error_msg}")
 
-        def _on_worker_done(self, *_):
-            """Mark the background worker as finished.
-
-            Connected to the worker's ``finished``/``error`` signals. We track
-            done-ness with a plain Python flag instead of querying the QThread,
-            because the worker is scheduled for deletion once it finishes and
-            touching its C++ wrapper afterwards raises a RuntimeError.
-            """
-            self._worker_done = True
-
         def closeEvent(self, event) -> None:
-            # If the computation is still running, wait for it to finish so the
-            # thread is never destroyed while still executing (crashes
-            # otherwise). Only reach for the worker while it may still be alive;
-            # once it has finished it is scheduled for deletion.
-            worker = self._worker
-            if worker is not None and not self._worker_done and worker.isRunning():
-                worker.quit()
-                worker.wait()
+            # Wait for any still-running background worker so a QThread is
+            # never destroyed while executing (crashes otherwise). Only touch
+            # workers that are still alive; finished ones are scheduled for
+            # deletion.
+            for worker, done in list(self._workers):
+                if not done[0] and worker.isRunning():
+                    worker.quit()
+                    worker.wait()
             event.accept()
 
     dialog = ProgressDialog(parent)
@@ -2108,19 +2348,10 @@ def _launch_truefsc(path: str, parent=None) -> None:
     dialog.raise_()
     dialog.activateWindow()
 
-    # Keep the worker alive for the life of the dialog and delete it only
-    # after its thread has actually finished, otherwise QThread complains that
-    # it was destroyed while still running.
-    worker = Worker(parent=dialog)
-    dialog._worker = worker
-    dialog._worker_done = False
-    worker.line_received.connect(dialog.append_line)
-    worker.finished.connect(dialog.set_result)
-    worker.error.connect(dialog.set_error)
-    worker.finished.connect(dialog._on_worker_done)
-    worker.error.connect(dialog._on_worker_done)
-    worker.finished.connect(worker.deleteLater)
-    worker.start()
+    if dialog._map1 and dialog._map2:
+        dialog._on_inputs_changed()
+
+    return dialog
 
 
 class _WindowActivationFilter(QObject):
@@ -2147,7 +2378,7 @@ class _WindowActivationFilter(QObject):
 
 
 def _open_images2star_tools(
-    path: str, parent=None, reuse_window=None, tracker=None
+    path=None, parent=None, reuse_window=None, tracker=None
 ) -> None:
     """Open the Images2Star tools panel (preview + save) for a dataset.
 
@@ -2155,6 +2386,10 @@ def _open_images2star_tools(
     reloads the new file in place; otherwise a fresh non-modal panel is shown
     (the file browser stays usable) and registered with ``tracker`` so later
     clicks reuse it unless the ``New`` checkbox is checked.
+
+    ``path`` may be ``None`` (or empty) to open the panel with its in-panel
+    file selector empty so the user chooses a dataset inside the dialog; pass
+    a concrete path (as the button action does) to pre-fill and load it.
     """
     from pathlib import Path
 
@@ -2164,19 +2399,20 @@ def _open_images2star_tools(
     from helicon.lib.images2star_widget import Images2StarDialog
 
     try:
-        path = str(Path(path).resolve())
+        resolved = str(Path(path).resolve()) if path else ""
         if (
             reuse_window is not None
             and _is_alive_widget(reuse_window)
             and isinstance(reuse_window, Images2StarDialog)
         ):
-            reuse_window.load_path(path)
+            if resolved:
+                reuse_window.load_path(resolved)
             reuse_window.show()
             reuse_window.raise_()
             reuse_window.activateWindow()
             return
 
-        dialog = Images2StarDialog(path, parent=parent)
+        dialog = Images2StarDialog(resolved or None, parent=parent)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.setModal(False)
         if tracker is not None:
@@ -2201,15 +2437,17 @@ def _open_images2star_tools(
         )
 
 
-def _open_proc3d_tools(
-    path: str, parent=None, reuse_window=None, tracker=None
-) -> None:
+def _open_proc3d_tools(path=None, parent=None, reuse_window=None, tracker=None) -> None:
     """Open the Proc3D tools panel (ortho previews + save) for a 3D map.
 
     Follows the images2star panel lifecycle: with ``reuse_window`` the panel
     reloads the new file in place; otherwise a fresh non-modal panel is shown
     (the file browser stays usable) and registered with ``tracker`` so later
     clicks reuse it unless the ``New`` checkbox is checked.
+
+    ``path`` may be ``None`` (or empty) to open the panel with its in-panel
+    file selector empty so the user chooses a 3D map inside the dialog; pass a
+    concrete path (as the button action does) to pre-fill and load that map.
     """
     from pathlib import Path
 
@@ -2219,19 +2457,20 @@ def _open_proc3d_tools(
     from helicon.lib.proc3d_widget import Proc3dDialog
 
     try:
-        path = str(Path(path).resolve())
+        resolved = str(Path(path).resolve()) if path else ""
         if (
             reuse_window is not None
             and _is_alive_widget(reuse_window)
             and isinstance(reuse_window, Proc3dDialog)
         ):
-            reuse_window.load_path(path)
+            if resolved:
+                reuse_window.load_path(resolved)
             reuse_window.show()
             reuse_window.raise_()
             reuse_window.activateWindow()
             return
 
-        dialog = Proc3dDialog(path, parent=parent)
+        dialog = Proc3dDialog(resolved or None, parent=parent)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.setModal(False)
         if tracker is not None:

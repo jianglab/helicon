@@ -61,19 +61,26 @@ _DEFAULT_THEME = "System"
 
 # Standalone tools exposed through the Apps menu, in display order.
 # Tuple: (menu label, shiny tab name or None, streamlit subcommand module or
-# None). A shiny tab is opened in the consolidated Helicon Lab web app without
-# an input file; a streamlit module is launched via its subcommand ``main``.
+# None, picker kind or None). A shiny tab is opened in the consolidated
+# Helicon Lab web app without an input file; a streamlit module is launched via
+# its subcommand ``main``. The picker kind selects a file picker that lets the
+# user choose an input before launching the tool: "map" requires one .mrc,
+# "two_maps" requires two half-map .mrc files, and "star" opens the tool's
+# own in-panel file selector with no pre-set input.
 _APP_LAUNCH_TABLE = [
-    ("WhereIsMyClass", "WhereIsMyClass", None),
-    ("HelicalProjection", "HelicalProjection", None),
-    ("HILL", "HILL", None),
-    ("HelicalPitch", "HelicalPitch", None),
-    ("Denovo3D", "Denovo3D", None),
-    ("HelicalLattice", "HelicalLattice", None),
-    ("HI3D", "HI3D", None),
-    ("CTF Simulation", None, "helicon.commands.ctfSimulation"),
-    ("Map2Seq", None, "helicon.commands.map2seq"),
-    ("ProCart", None, "helicon.commands.procart"),
+    ("Images2Star", None, None, "star"),
+    ("Proc3D", None, None, "map"),
+    ("WhereIsMyClass", "WhereIsMyClass", None, None),
+    ("HelicalProjection", "HelicalProjection", None, None),
+    ("HILL", "HILL", None, None),
+    ("HelicalPitch", "HelicalPitch", None, None),
+    ("Denovo3D", "Denovo3D", None, None),
+    ("HelicalLattice", "HelicalLattice", None, None),
+    ("HI3D", "HI3D", None, None),
+    ("TrueFSC", None, None, "two_maps"),
+    ("Map2Seq", None, "helicon.commands.map2seq", None),
+    ("ProCart", None, "helicon.commands.procart", None),
+    ("CTF Simulation", None, "helicon.commands.ctfSimulation", None),
 ]
 
 _THEME_COLORS = {
@@ -1177,9 +1184,9 @@ class FolderBrowserWidget(QMainWindow):
         self._apps_menu.addAction(self._open_terminal_action)
 
         self._app_actions = {}
-        for label, key, streamlit_mod in _APP_LAUNCH_TABLE:
+        for label, key, streamlit_mod, picker in _APP_LAUNCH_TABLE:
             action = QAction(label, self)
-            action.setData((key, streamlit_mod))
+            action.setData((key, streamlit_mod, picker))
             action.triggered.connect(self._on_launch_app)
             self._apps_menu.addAction(action)
             self._app_actions[label] = action
@@ -1341,7 +1348,8 @@ class FolderBrowserWidget(QMainWindow):
         self._tree.setIndentation(20)
         self._tree.setExpandsOnDoubleClick(False)
 
-        self._tree.setStyleSheet("""
+        self._tree.setStyleSheet(
+            """
             QTreeView {
                 font-size: 12px;
                 background-color: #2d2d2d;
@@ -1361,9 +1369,11 @@ class FolderBrowserWidget(QMainWindow):
                 color: #cccccc;
                 border: 1px solid #2d2d2d;
             }
-            """)
+            """
+        )
 
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QWidget {
                 background-color: #2d2d2d;
                 color: #cccccc;
@@ -1422,7 +1432,8 @@ class FolderBrowserWidget(QMainWindow):
             QCheckBox::indicator:checked:hover {
                 background-color: #5a82c4;
             }
-            """)
+            """
+        )
 
         layout.addWidget(self._tree)
 
@@ -1491,7 +1502,7 @@ class FolderBrowserWidget(QMainWindow):
         self._btn_hi3d.setToolTip(
             "Open this file in the HI3D web app for helical indexing via cylindrical projection"
         )
-        self._btn_truefsc = QPushButton("trueFSC")
+        self._btn_truefsc = QPushButton("TrueFSC")
         self._btn_truefsc.setToolTip("Compute True FSC curve from the two half-maps")
         self._btn_images2star = QPushButton("Images2Star")
         self._btn_images2star.setToolTip(
@@ -1902,15 +1913,76 @@ class FolderBrowserWidget(QMainWindow):
         buttons (``_launch_or_reuse_web_app``) but with no input file, so the
         app opens with its own file-picker ready. Streamlit subcommands are
         launched through their command module's ``main``.
+        The Proc3D, Images2Star and trueFSC entries pick their inputs first.
         """
         action = self.sender()
         if not isinstance(action, QAction):
             return
-        key, streamlit_mod = action.data()
+        key, streamlit_mod, picker = action.data()
+        if picker == "map":
+            self._on_pick_proc3d_map()
+            return
+        if picker == "star":
+            self._on_pick_images2star_file()
+            return
+        if picker == "two_maps":
+            self._on_pick_truefsc_maps()
+            return
         if streamlit_mod is not None:
             self._launch_streamlit_app(streamlit_mod)
             return
         self._launch_web_app_tab(key)
+
+    def _on_pick_proc3d_map(self) -> None:
+        """Open the Proc3D tools panel with its in-panel file selector."""
+        try:
+            from helicon.commands import display as _display
+
+            _display._open_proc3d_tools(
+                None,
+                parent=self,
+                reuse_window=(
+                    None
+                    if self._new_window_cb.isChecked()
+                    else _display._proc3d.active()
+                ),
+                tracker=_display._proc3d,
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger("helicon").exception("failed to launch Proc3D")
+
+    def _on_pick_images2star_file(self) -> None:
+        """Open the Images2Star tools panel with its in-panel file selector."""
+        try:
+            from helicon.commands import display as _display
+
+            _display._open_images2star_tools(
+                None,
+                parent=self,
+                reuse_window=(
+                    None
+                    if self._new_window_cb.isChecked()
+                    else _display._images2star.active()
+                ),
+                tracker=_display._images2star,
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger("helicon").exception("failed to launch Images2Star")
+
+    def _on_pick_truefsc_maps(self) -> None:
+        """Open the trueFSC panel with empty input map selectors."""
+        try:
+            from helicon.commands import display as _display
+
+            _display._launch_truefsc_maps(parent=self)
+        except Exception:
+            import logging
+
+            logging.getLogger("helicon").exception("failed to launch trueFSC")
 
     def _launch_web_app_tab(self, tab: str) -> None:
         """Open *tab* in Helicon Lab with no pre-set input file."""

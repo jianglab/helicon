@@ -2452,6 +2452,42 @@ class TestFolderBrowser(object):
         assert cmd[0] == "/path/to/python"
         assert "helicon.commands.ctfSimulation" in cmd
 
+    def test_apps_menu_images2star_opens_with_empty_selector(self, tmp_path, qapp):
+        from helicon.lib.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        action = widget._app_actions["Images2Star"]
+        assert action.data() == (None, None, "star")
+
+        # The menu action routes to the in-panel selector picker.
+        with patch.object(widget, "_on_pick_images2star_file") as mock_pick:
+            action.trigger()
+        mock_pick.assert_called_once_with()
+
+        # The picker opens the tools panel with no pre-set input file,
+        # reusing the tracker's active window unless "New" is checked.
+        with (
+            patch("helicon.commands.display._open_images2star_tools") as mock_open,
+            patch(
+                "helicon.commands.display._images2star.active",
+                return_value="active-win",
+            ),
+        ):
+            widget._on_pick_images2star_file()
+        mock_open.assert_called_once_with(
+            None,
+            parent=widget,
+            reuse_window="active-win",
+            tracker=display._images2star,
+        )
+
+        widget._new_window_cb.setChecked(True)
+        with patch("helicon.commands.display._open_images2star_tools") as mock_open:
+            widget._on_pick_images2star_file()
+        mock_open.assert_called_once_with(
+            None, parent=widget, reuse_window=None, tracker=display._images2star
+        )
+
     def test_open_terminal_darwin_uses_native_terminal(self):
         from unittest.mock import patch
 
@@ -4333,6 +4369,16 @@ class TestOrthogonalViewer:
         assert w._pos == [7, 6, 5]
         w.deleteLater()
 
+    def test_orthogonal_viewer_set_volume_rejects_degenerate(self, qapp):
+        import numpy as np
+        import pytest
+        from helicon.lib.gallery_widget import OrthogonalViewerWidget
+
+        w = OrthogonalViewerWidget(np.zeros((8, 8, 8), dtype=np.float32))
+        with pytest.raises(ValueError):
+            w.set_volume(np.zeros((0, 8, 8), dtype=np.float32), reset_position=True)
+        w.deleteLater()
+
     def test_orthogonal_viewer_axes_labels(self, qapp):
         import numpy as np
         from helicon.lib.gallery_widget import OrthogonalViewerWidget
@@ -4345,6 +4391,49 @@ class TestOrthogonalViewer:
         assert w._yz_view._axes_h == "x"
         assert w._yz_view._axes_v == "z"
         w.deleteLater()
+
+
+class TestTrueFscPanel(object):
+
+    def test_empty_launch_leaves_selectors_blank(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        qapp.processEvents()
+        assert dialog._map1_edit.text() == ""
+        assert dialog._map2_edit.text() == ""
+        assert dialog._mask_edit.text() == ""
+        assert dialog._workers == []
+        dialog.close()
+        qapp.processEvents()
+
+    def test_prefilled_launch_populates_map_selectors(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        import mrcfile
+        import numpy as np
+        from PySide6.QtCore import QThread
+
+        from helicon.commands import display
+
+        half1 = tmp_path / "half1.mrc"
+        half2 = tmp_path / "half2.mrc"
+        for path in (half1, half2):
+            with mrcfile.new(str(path), overwrite=True) as m:
+                m.set_data(np.zeros((4, 4, 4), dtype=np.float32))
+                m.voxel_size = 1.35
+
+        monkeypatch.setattr(QThread, "start", lambda self: None)
+        dialog = display._launch_truefsc_maps(
+            map1=str(half1), map2=str(half2), parent=None
+        )
+        qapp.processEvents()
+        assert dialog._map1_edit.text() == str(half1.resolve())
+        assert dialog._map2_edit.text() == str(half2.resolve())
+        assert dialog._mask_edit.text() == ""
+        assert dialog._seq == 1
+        dialog.close()
+        qapp.processEvents()
 
 
 class TestDisplayButtonSorting:
@@ -4668,6 +4757,63 @@ class TestImages2StarDialog(object):
             dialog._workers[-1].wait()
             self._pump(qapp)
             assert dialog._stack_model.rowCount() == 1
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_opens_with_empty_selector_when_no_path(self, qapp):
+        dialog = self._open(None, loader=lambda p: self._df_with_optics())
+        try:
+            assert dialog._path == ""
+            assert not hasattr(dialog, "_load_worker")
+            assert dialog._workers == []
+            assert dialog._path_edit.text() == ""
+            assert dialog._path_edit.placeholderText()
+            assert not dialog._btn_save.isEnabled()
+            assert dialog.windowTitle() == "Images2Star"
+            assert "Select a dataset file" in dialog._status.toPlainText()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_load_from_field_loads_typed_path(self, qapp):
+        dialog = self._open(None, loader=lambda p: self._df_with_optics())
+        try:
+            dialog._path_edit.setText("typed.star")
+            dialog._load_from_field()
+            dialog._workers[-1].wait()
+            self._pump(qapp)
+
+            assert dialog._path.endswith("typed.star")
+            assert dialog._path_edit.text() == dialog._path
+            assert dialog._data is not None
+            assert dialog._btn_save.isEnabled()
+            assert "typed.star" in dialog.windowTitle()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_load_from_field_reports_empty_entry(self, qapp):
+        dialog = self._open(None, loader=lambda p: self._df_with_optics())
+        try:
+            dialog._path_edit.setText("")
+            dialog._load_from_field()
+            assert dialog._path == ""
+            assert "Enter a path to a dataset file" in dialog._status.toPlainText()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self._pump(qapp)
+
+    def test_default_output_falls_back_when_no_path(self, qapp):
+        dialog = self._open(None, loader=lambda p: self._df_with_optics())
+        try:
+            assert dialog._default_output_path() == str(
+                Path.cwd() / "dataset.processed.star"
+            )
         finally:
             dialog.close()
             dialog.deleteLater()
@@ -5020,7 +5166,6 @@ class TestImages2StarDialog(object):
             self._pump(qapp)
 
             for label in (
-                dialog._title,
                 dialog._status,
                 dialog._particles_label,
                 dialog._optics_label,
@@ -5028,6 +5173,9 @@ class TestImages2StarDialog(object):
                 flags = label.textInteractionFlags()
                 assert flags & Qt.TextInteractionFlag.TextSelectableByMouse
                 assert flags & Qt.TextInteractionFlag.TextSelectableByKeyboard
+            # The file selector line edit is fully selectable/editable by its
+            # nature (replaced the old read-only title label).
+            assert dialog._path_edit.isReadOnly() is False
         finally:
             dialog.close()
             dialog.deleteLater()

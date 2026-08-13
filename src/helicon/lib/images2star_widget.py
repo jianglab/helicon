@@ -63,6 +63,11 @@ from helicon.lib.images2star_engine import (
 
 _OUTPUT_FILTER = "RELION STAR (*.star);;CryoSPARC v2 (*.cs);;CSV (*.csv)"
 
+_INPUT_FILTER = (
+    "Dataset files (*.star *.cs *.csv);;RELION STAR (*.star);;"
+    "CryoSPARC v2 (*.cs);;CSV (*.csv);;All files (*)"
+)
+
 # Compact, color-agnostic styling matching the file browser: the browser
 # renders its file table at 12px (via ``QTreeView { font-size: 12px }``) with
 # bold, tightly padded column headers, and its action buttons are a fixed
@@ -644,11 +649,17 @@ class Images2StarDialog(QDialog):
     ``helicon.dataframe2file``.
     """
 
-    def __init__(self, path: str, parent=None, loader=None, saver=None):
+    def __init__(
+        self,
+        path: str | None = None,
+        parent=None,
+        loader=None,
+        saver=None,
+    ):
         super().__init__(parent)
         self.setProperty("helicon_theme_window", True)
         self._status_error = False
-        self._path = str(Path(path).resolve())
+        self._path = str(Path(path).resolve()) if path else ""
         self._loader = loader or _images2dataframe_tolerant
         self._saver = saver or helicon.dataframe2file
         self._specs = gui_operation_specs()
@@ -662,7 +673,7 @@ class Images2StarDialog(QDialog):
         self._sized_once = False
         self._preview_sized_once = False
 
-        self.setWindowTitle(f"Images2Star - {Path(self._path).name}")
+        self._set_window_title()
         self.resize(940, 800)
 
         compact = QFont()
@@ -673,13 +684,26 @@ class Images2StarDialog(QDialog):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        self._title = QLabel(str(Path(self._path)))
-        self._title.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        file_row = QHBoxLayout()
+        file_row.setSpacing(4)
+        self._path_edit = QLineEdit()
+        self._path_edit.setPlaceholderText(
+            "Path to a RELION STAR, CryoSPARC, or CSV dataset..."
         )
-        self._title.setWordWrap(True)
-        layout.addWidget(self._title)
+        self._path_edit.setToolTip(
+            "Path to the dataset to preview and transform (type it, paste it, "
+            "or pick it with Browse)"
+        )
+        self._path_edit.setClearButtonEnabled(True)
+        self._path_edit.returnPressed.connect(self._load_from_field)
+        self._btn_browse = self._compact_button(QPushButton("Browse..."))
+        self._btn_browse.setToolTip("Choose a dataset file from disk")
+        self._btn_browse.clicked.connect(self._browse_for_file)
+        file_row.addWidget(self._path_edit, 1)
+        file_row.addWidget(self._btn_browse)
+        layout.addLayout(file_row)
+        if self._path:
+            self._path_edit.setText(self._path)
 
         self._table = self._make_table()
         self._optics_table = self._make_table()
@@ -723,7 +747,11 @@ class Images2StarDialog(QDialog):
         buttons.setSpacing(4)
         self._status = QPlainTextEdit()
         self._status.setReadOnly(True)
-        self._status.setPlainText("Loading dataset\u2026")
+        self._status.setPlainText(
+            "Loading dataset\u2026"
+            if self._path
+            else "Select a dataset file (STAR/CS/CSV) above to begin"
+        )
         self._status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
@@ -758,11 +786,14 @@ class Images2StarDialog(QDialog):
         )
         layout.addLayout(buttons)
 
-        self._load_worker = _LoadWorker(self._path, self._loader, parent=self)
-        self._workers.append(self._load_worker)
-        self._load_worker.loaded.connect(self._on_loaded)
-        self._load_worker.failed.connect(self._on_load_failed)
-        self._load_worker.start()
+        if self._path:
+            self._load_worker = _LoadWorker(self._path, self._loader, parent=self)
+            self._workers.append(self._load_worker)
+            self._load_worker.loaded.connect(self._on_loaded)
+            self._load_worker.failed.connect(self._on_load_failed)
+            self._load_worker.start()
+        else:
+            self._update_ops_buttons()
         self._install_shortcuts()
         self._apply_display_theme()
 
@@ -779,6 +810,46 @@ class Images2StarDialog(QDialog):
         self.close()
         QApplication.quit()
 
+    def _set_window_title(self) -> None:
+        """Set the window title from the current dataset path, or a bare label.
+
+        With no dataset loaded the title is just "Images2Star"; once a file is
+        chosen it becomes "Images2Star - <file-name>". Unsaved transforms are
+        flagged with a "(modified)" suffix.
+        """
+        name = Path(self._path).name if self._path else ""
+        base = "Images2Star" if not name else f"Images2Star - {name}"
+        self.setWindowTitle(base + (" (modified)" if self._dirty else ""))
+
+    def _browse_for_file(self) -> None:
+        """Open a file picker and load the chosen dataset file."""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select dataset",
+            self._path or "",
+            _INPUT_FILTER,
+        )
+        if not file_name:
+            return
+        if file_name != self._path:
+            self._path_edit.setText(file_name)
+            self.load_path(file_name)
+        else:
+            self._path_edit.setText(file_name)
+
+    def _load_from_field(self) -> None:
+        """Load the dataset whose path is typed into the file selector."""
+        path = self._path_edit.text().strip()
+        if not path:
+            self._set_status("Enter a path to a dataset file first", error=True)
+            return
+        if path != self._path:
+            self.load_path(path)
+        elif self._data is not None:
+            self._set_status(self._summary(self._data))
+        else:
+            self._set_status("Loading dataset\u2026")
+
     def load_path(self, path: str) -> None:
         """Reload this panel from a new file, reusing the same window.
 
@@ -787,12 +858,13 @@ class Images2StarDialog(QDialog):
         reset until the new dataset finishes loading.
         """
         self._path = str(Path(path).resolve())
-        self.setWindowTitle(f"Images2Star - {Path(self._path).name}")
+        self._path_edit.setText(self._path)
         self._source_data = None
         self._data = None
         self._dirty = False
         self._sort_active = False
         self._last_output = None
+        self._set_window_title()
         self._btn_save.setEnabled(False)
         self._set_status("Loading dataset\u2026")
 
@@ -1081,6 +1153,8 @@ class Images2StarDialog(QDialog):
         if self._last_output:
             return self._last_output
         source = Path(self._path)
+        if not self._path:
+            return str(Path.cwd() / "dataset.processed.star")
         return str(source.with_name(source.stem + ".processed.star"))
 
     def _command_text(self, output: str | None = None) -> str:
@@ -1172,7 +1246,12 @@ class Images2StarDialog(QDialog):
 
     def _save_command_script(self, text: str) -> None:
         """Write the command to a ``.sh`` script chosen by the user."""
-        default = Path(self._path).with_name(Path(self._path).stem + ".images2star.sh")
+        if self._path:
+            default = Path(self._path).with_name(
+                Path(self._path).stem + ".images2star.sh"
+            )
+        else:
+            default = Path.cwd() / "dataset.images2star.sh"
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Command Script",
@@ -1259,8 +1338,7 @@ class Images2StarDialog(QDialog):
     def _set_dirty(self, dirty: bool) -> None:
         """Track unsaved transforms and reflect them in the window title."""
         self._dirty = dirty
-        base = f"Images2Star - {Path(self._path).name}"
-        self.setWindowTitle(base + (" (modified)" if dirty else ""))
+        self._set_window_title()
 
     @staticmethod
     def _deep_copy(data: pd.DataFrame) -> pd.DataFrame:

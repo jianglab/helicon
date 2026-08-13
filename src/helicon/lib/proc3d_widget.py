@@ -91,6 +91,8 @@ def _load_volume(path: str) -> tuple[np.ndarray, float]:
         data = mrc.data
         if data is None or data.ndim != 3:
             raise ValueError(f"not a 3D volume: {path}")
+        if min(data.shape) == 0:
+            raise ValueError(f"empty volume (zero-size dimension): {path}")
         apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
     return np.array(data, dtype=np.float32), apix
 
@@ -152,20 +154,39 @@ class _VolumeSaveWorker(QThread):
 class Proc3dDialog(QDialog):
     """Preview, transform, and save a 3D map with the proc3d engine.
 
-    The panel loads the volume with ``_load_volume``, shows it in an
-    interactive ortho-slice viewer (the same ``OrthogonalViewerWidget`` the
-    "Ortho Slice" button opens), and lets the user build an ordered stack of
-    in-memory ``proc3d`` options (``--flip_hand``, ``--clip``, ``--apix``,
-    ...). Applying the stack runs the exact CLI dispatch loop
+    The first row is a file selector: a path field with Browse and Load
+    buttons. Launching the panel from a file (button action) pre-fills and
+    loads that map; launching it from the Apps menu leaves the selector empty
+    so the user picks a map directly inside the panel. Once a 3D map is
+    loaded with ``_load_volume``, it appears in an interactive ortho-slice
+    viewer (the same ``OrthogonalViewerWidget`` the "Ortho Slice" button
+    opens), and the user can build an ordered stack of in-memory ``proc3d``
+    options (``--flip_hand``, ``--clip``, ``--apix``, ...). Applying the stack
+    runs the exact CLI dispatch loop
     (:func:`~helicon.lib.proc3d_engine.apply_options`); the result appears in
     a second, side-by-side ortho-slice viewer so the transform can be
     compared against the original. The current (possibly transformed) volume
     is exported with ``mrcfile.new`` using the engine's pixel size.
+
+    Parameters
+    ----------
+    path : str, optional
+        Path to a 3D MRC/MAP map to pre-load. When omitted or empty the panel
+        opens with an empty file selector so the user can choose a map inside
+        it.
+    parent : QWidget, optional
+        Parent widget for the dialog.
+    loader : callable, optional
+        Callable ``loader(path) -> (data, apix)`` overriding the default
+        :func:`_load_volume`.
+    saver : callable, optional
+        Callable ``saver(data, apix, path)`` overriding the default
+        :func:`_write_volume`.
     """
 
     def __init__(
         self,
-        path: str,
+        path: str | None = None,
         parent=None,
         loader=None,
         saver=None,
@@ -173,7 +194,7 @@ class Proc3dDialog(QDialog):
         super().__init__(parent)
         self.setProperty("helicon_theme_window", True)
         self._status_error = False
-        self._path = str(Path(path).resolve())
+        self._path = str(Path(path).resolve()) if path else ""
         self._loader = loader or _load_volume
         self._saver = saver or _write_volume
         self._specs = gui_operation_specs()
@@ -187,7 +208,7 @@ class Proc3dDialog(QDialog):
         self._load_seq = 0
         self._sized_once = False
 
-        self.setWindowTitle(f"Proc3D - {Path(self._path).name}")
+        self._set_window_title()
         self.resize(1200, 820)
 
         compact = QFont()
@@ -198,13 +219,24 @@ class Proc3dDialog(QDialog):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        self._title = QLabel(str(Path(self._path)))
-        self._title.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        file_row = QHBoxLayout()
+        file_row.setSpacing(4)
+        self._path_edit = QLineEdit()
+        self._path_edit.setPlaceholderText("Path to a 3D MRC/MAP map...")
+        self._path_edit.setToolTip(
+            "Path to the 3D map to preview and transform (type it, paste it, "
+            "or pick it with Browse)"
         )
-        self._title.setWordWrap(True)
-        layout.addWidget(self._title)
+        self._path_edit.setClearButtonEnabled(True)
+        self._path_edit.returnPressed.connect(self._load_from_field)
+        self._btn_browse = self._compact_button(QPushButton("Browse..."))
+        self._btn_browse.setToolTip("Choose a 3D MRC/MAP map from disk")
+        self._btn_browse.clicked.connect(self._browse_for_map)
+        file_row.addWidget(self._path_edit, 1)
+        file_row.addWidget(self._btn_browse)
+        layout.addLayout(file_row)
+        if self._path:
+            self._path_edit.setText(self._path)
 
         # Placeholder viewers: the result pane stays hidden until the first
         # Apply so the source never shares screen space with an untransformed
@@ -241,7 +273,11 @@ class Proc3dDialog(QDialog):
         buttons.setSpacing(4)
         self._status = QPlainTextEdit()
         self._status.setReadOnly(True)
-        self._status.setPlainText("Loading volume\u2026")
+        self._status.setPlainText(
+            "Loading volume\u2026"
+            if self._path
+            else "Select a 3D map (MRC/MAP) above to begin"
+        )
         self._status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
@@ -277,11 +313,14 @@ class Proc3dDialog(QDialog):
         )
         layout.addLayout(buttons)
 
-        self._load_worker = _VolumeLoadWorker(self._path, self._loader, parent=self)
-        self._workers.append(self._load_worker)
-        self._load_worker.loaded.connect(self._on_loaded)
-        self._load_worker.failed.connect(self._on_load_failed)
-        self._load_worker.start()
+        if self._path:
+            self._load_worker = _VolumeLoadWorker(self._path, self._loader, parent=self)
+            self._workers.append(self._load_worker)
+            self._load_worker.loaded.connect(self._on_loaded)
+            self._load_worker.failed.connect(self._on_load_failed)
+            self._load_worker.start()
+        else:
+            self._update_ops_buttons()
         self._install_shortcuts()
         self._apply_display_theme()
 
@@ -298,6 +337,43 @@ class Proc3dDialog(QDialog):
         self.close()
         QApplication.quit()
 
+    def _set_window_title(self) -> None:
+        """Set the window title from the current map path, or a bare label.
+
+        With no map loaded the title is just "Proc3D"; once a map is chosen
+        it becomes "Proc3D - <map-name>".
+        """
+        name = Path(self._path).name if self._path else ""
+        title = "Proc3D" if not name else f"Proc3D - {name}"
+        self.setWindowTitle(title)
+
+    def _browse_for_map(self) -> None:
+        """Open a file picker and load the chosen 3D MRC/MAP map."""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select 3D map",
+            self._path or "",
+            _MRC_FILTER,
+        )
+        if not file_name:
+            return
+        if file_name != self._path:
+            self._path_edit.setText(file_name)
+            self.load_path(file_name)
+        else:
+            self._path_edit.setText(file_name)
+
+    def _load_from_field(self) -> None:
+        """Load the map whose path is typed into the file selector."""
+        path = self._path_edit.text().strip()
+        if not path:
+            self._set_status("Enter a path to a 3D map first", error=True)
+            return
+        if path != self._path:
+            self.load_path(path)
+        else:
+            self._set_status(self._summary() or "3D map already loaded")
+
     def load_path(self, path: str) -> None:
         """Reload this panel from a new file, reusing the same window.
 
@@ -306,7 +382,8 @@ class Proc3dDialog(QDialog):
         the new volume finishes loading.
         """
         self._path = str(Path(path).resolve())
-        self.setWindowTitle(f"Proc3D - {Path(self._path).name}")
+        self._path_edit.setText(self._path)
+        self._set_window_title()
         self._source_volume = None
         self._volume = None
         self._dirty = False
@@ -589,6 +666,8 @@ class Proc3dDialog(QDialog):
         if self._last_output:
             return self._last_output
         source = Path(self._path)
+        if not self._path:
+            return str(Path.cwd() / "volume.proc3d.mrc")
         return str(source.with_name(source.stem + ".proc3d.mrc"))
 
     def _command_text(self, output: str | None = None) -> str:
@@ -764,7 +843,8 @@ class Proc3dDialog(QDialog):
     def _set_dirty(self, dirty: bool) -> None:
         """Track unsaved transforms and reflect them in the window title."""
         self._dirty = dirty
-        base = f"Proc3D - {Path(self._path).name}"
+        self._set_window_title()
+        base = self.windowTitle()
         self.setWindowTitle(base + (" (modified)" if dirty else ""))
 
     # ------------------------------------------------------------------
