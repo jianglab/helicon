@@ -84,6 +84,30 @@ _INIT_CUTOFF_X = 7.03
 _INIT_CUTOFF_Y = 4.69
 _INIT_HELICAL_RADIUS = 77.6
 
+
+def _resolution_limits_from_apix(apix: float) -> tuple[float, float]:
+    """Return HILL's default X/Y resolution limits for a pixel size."""
+    apix = float(apix)
+    return round(3 * apix, 4), round(2 * apix, 4)
+
+
+def _update_with_apix_from_file(apix: float) -> None:
+    """Apply a loaded file's pixel size to HILL's dependent inputs."""
+    apix = float(apix)
+    if not np.isfinite(apix) or apix <= 0:
+        return
+
+    cutoff_res_x, cutoff_res_y = _resolution_limits_from_apix(apix)
+    nyquist_res = cutoff_res_y
+    ui.update_numeric("hill_apix", value=round(apix, 4))
+    ui.update_numeric(
+        "hill_cutoff_res_x", value=cutoff_res_x, min=nyquist_res
+    )
+    ui.update_numeric(
+        "hill_cutoff_res_y", value=cutoff_res_y, min=nyquist_res
+    )
+
+
 # Default 2D image stack pre-filled in the URL input so the field is not
 # blank on launch.
 _DEFAULT_URL = (
@@ -1025,7 +1049,9 @@ def hill_tab_server(input, output, session, project: ProjectState):
         url_apix = qp.get("apix")
         if url_apix:
             try:
-                apix_from_file.set(float(url_apix))
+                apix = float(url_apix)
+                apix_from_file.set(apix)
+                _update_with_apix_from_file(apix)
             except ValueError:
                 pass
         url_rot = qp.get("rotate")
@@ -1056,7 +1082,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 data, apix = denovo3d_pipeline.get_images_from_url(url_img)
                 input_data.set(data)
                 apix_from_file.set(apix)
-                ui.update_numeric("hill_apix", value=apix)
+                _update_with_apix_from_file(apix)
                 _update_image_dims_from_input_data()
             except Exception as e:
                 import logging
@@ -1088,7 +1114,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 data, apix = denovo3d_pipeline.get_images_from_url(url_img)
                 input_data.set(data)
                 apix_from_file.set(apix)
-                ui.update_numeric("hill_apix", value=apix)
+                _update_with_apix_from_file(apix)
                 _update_image_dims_from_input_data()
             except Exception as e:
                 logger.error(
@@ -1616,7 +1642,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
             data, apix = denovo3d_pipeline.get_images_from_url(url)
             input_data.set(data)
             apix_from_file.set(apix)
-            ui.update_numeric("hill_apix", value=apix)
+            _update_with_apix_from_file(apix)
             _update_image_dims_from_input_data()
         except Exception as e:
             logger.error("Failed to load data from URL: %s", e)
@@ -1644,7 +1670,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 apix = float(mrc.voxel_size.x)
             input_data.set(d)
             apix_from_file.set(apix)
-            ui.update_numeric("hill_apix", value=apix)
+            _update_with_apix_from_file(apix)
             _update_image_dims_from_input_data()
         except Exception as e:
             logger.error("Failed to load data from upload: %s", e)
@@ -1669,7 +1695,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
             data, apix = emdb(eid)
             input_data.set(data)
             apix_from_file.set(apix)
-            ui.update_numeric("hill_apix", value=apix)
+            _update_with_apix_from_file(apix)
             ui.update_checkbox("hill_is_3d", value=True)
             _update_image_dims_from_input_data()
         except Exception as e:
