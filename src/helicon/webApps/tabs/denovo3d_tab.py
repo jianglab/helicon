@@ -17,7 +17,6 @@ import pathlib
 import random
 import tempfile
 import traceback
-import mrcfile
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
@@ -45,6 +44,7 @@ BOOKMARK_DEFAULTS = {
     "ignore_blank": ("dn_ignore_blank", True),
     "plot_scores": ("dn_plot_scores", True),
     "show_download": ("dn_show_download_buttons", False),
+    "match_input_box": ("dn_match_input_box", True),
     "display_size": ("dn_selected_image_display_size", 128),
     "rec_length": ("dn_reconstruct_length_rise", 3),
     "target_apix2d": ("dn_target_apix2d", 5),
@@ -151,6 +151,49 @@ def _estimate_helix_rotation_center_diameter(
     return rotation, shift_y, diameter
 
 
+def _prepare_download_map(
+    result,
+    *,
+    match_input_box,
+    input_image_shape,
+    input_apix,
+    compact_apix,
+    cpu,
+):
+    """Return the reconstructed map and voxel size for download.
+
+    RELION expects an initial reference to use the particle images' cubic box
+    and pixel size.  The compact map remains available to avoid the memory and
+    download-size cost of padding a long helical reconstruction to a cube.
+    """
+    _score, return_data, params = result
+    rec3d = return_data[3]
+    compact_map = return_data[8]
+
+    if not match_input_box:
+        if compact_map is None:
+            raise ValueError("The compact reconstructed map is unavailable")
+        return np.asarray(compact_map, dtype=np.float32), float(compact_apix)
+
+    if rec3d is None:
+        raise ValueError("The reconstructed map is unavailable")
+
+    apix3d, twist, rise, csym = params[3], params[5], params[6], params[7]
+    box_size = max(int(v) for v in input_image_shape[-2:])
+    rec3d_map = helicon.apply_helical_symmetry(
+        data=rec3d[0],
+        apix=apix3d,
+        twist_degree=twist,
+        rise_angstrom=rise,
+        csym=csym,
+        fraction=1.0,
+        new_size=(box_size, box_size, box_size),
+        new_apix=input_apix,
+        cpu=cpu,
+    )
+    return np.asarray(rec3d_map, dtype=np.float32), float(input_apix)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # UI
 # ═══════════════════════════════════════════════════════════════════════════
@@ -206,6 +249,14 @@ def denovo3d_tab_ui():
                             "dn_show_download_buttons",
                             "Show download buttons",
                             value=False,
+                        ),
+                        ui.tooltip(
+                            ui.input_checkbox(
+                                "dn_match_input_box",
+                                "Match input box and pixel size for downloaded map",
+                                value=True,
+                            ),
+                            "Generate a cubic map that can be used directly as a RELION initial reference. Disable to download the smaller, compact map.",
                         ),
                         col_widths=6,
                         style="align-items: flex-end;",
@@ -1344,55 +1395,26 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     def dn_download_map():
         req(len(reconstruction_results()) == 1)
         result = reconstruction_results()[0]
-        (
-            score,
-            (
-                rec3d_x_proj,
-                rec3d_y_proj,
-                rec3d_z_sections,
-                rec3d,
-                _d2d,
-                _d3d,
-                _l2d,
-                _l3d,
-                _xform,
-            ),
-            (
-                _data,
-                _imageFile,
-                _imageIndex,
-                apix3d,
-                _apix2d,
-                twist,
-                rise,
-                csym,
-                _tilt,
-                _psi,
-                _dy,
-            ),
-        ) = result
-
         imgs = all_images()
+        req(imgs is not None)
         if isinstance(imgs.data, np.ndarray):
             if len(imgs.data.shape) < 3:
-                ny, nx = imgs.data.shape
+                input_image_shape = imgs.data.shape
             else:
-                _, ny, nx = imgs.data.shape
+                input_image_shape = imgs.data.shape[-2:]
         else:
-            ny, nx = imgs.data[int(_imageIndex) - 1].shape
+            image_index = int(result[2][2]) - 1
+            input_image_shape = imgs.data[image_index].shape
 
-        apix = input_data().apix
-        rec3d_map = helicon.apply_helical_symmetry(
-            data=rec3d[0],
-            apix=apix3d,
-            twist_degree=twist,
-            rise_angstrom=rise,
-            csym=csym,
-            fraction=1.0,
-            new_size=(nx, ny, ny),
-            new_apix=apix,
+        compact_apix = input.dn_apix() * max(1, input.dn_binning())
+        rec3d_map, apix = _prepare_download_map(
+            result,
+            match_input_box=input.dn_match_input_box(),
+            input_image_shape=input_image_shape,
+            input_apix=imgs.apix,
+            compact_apix=compact_apix,
             cpu=input.dn_cpu(),
-        ).astype(np.float32)
+        )
 
         with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
             with mrcfile.new(temp.name, overwrite=True) as mrc:

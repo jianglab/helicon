@@ -338,6 +338,7 @@ def app_ui(request: Request):
                         "ignore_blank": "denovo3d-dn_ignore_blank",
                         "plot_scores": "denovo3d-dn_plot_scores",
                         "show_download": "denovo3d-dn_show_download_buttons",
+                        "match_input_box": "denovo3d-dn_match_input_box",
                         "display_size": "denovo3d-dn_selected_image_display_size",
                         "rec_length": "denovo3d-dn_reconstruct_length_rise",
                         "target_apix2d": "denovo3d-dn_target_apix2d",
