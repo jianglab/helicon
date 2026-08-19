@@ -37,7 +37,7 @@ helicon --help
 - **display**:             A file browser for viewing image, map, star, bild, eps, pdf, html, and text files
 
 ### Shiny web apps
-- **webApps**:             A Helicon Web app with seven analytical tools as tabs:
+- **webApps**:             A [Helicon Web app](https://01a01bc0-00db-fb4f-bfe0-f0ba9f0dd427.share.connect.posit.cloud) with seven analytical tools as tabs:
    - *WhereIsMyClass*:     Map 2D classes to helical tube/filament images
    - *HelicalProjection*:  Compare 2D images with helical structure projections in EMDB
    - *HILL*:               Helical indexing using Fourier-Bessel layer lines (power spectra/phase difference)
