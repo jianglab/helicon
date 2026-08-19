@@ -3,6 +3,131 @@ from __future__ import annotations
 import numpy as np
 import helicon
 
+try:  # pragma: no cover - depends on optional numba install
+    from numba import njit
+
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover - depends on optional numba install
+    _HAS_NUMBA = False
+
+
+if _HAS_NUMBA:
+
+    @njit(cache=True, nogil=True)
+    def _fsc_shell_reduce(F1r, F2r, shell_flat, nshells):
+        """Single-pass, numba-accelerated shell-binned FSC reduction.
+
+        Accumulates cross-power and per-map power into shells in one pass over
+        the flattened rfftn coefficients. Avoids materialising the large n**3
+        intermediate arrays used by the pure-numpy np.bincount path.
+
+        Parameters
+        ----------
+        F1r : np.ndarray
+            Flattened rfftn coefficients of the first map (complex128).
+        F2r : np.ndarray
+            Flattened rfftn coefficients of the second map (complex128).
+        shell_flat : np.ndarray
+            Flattened integer shell labels on the rfftn output grid.
+        nshells : int
+            Number of shells (n // 2 + 1).
+        """
+        n = shell_flat.shape[0]
+        num = np.zeros(nshells)
+        den1 = np.zeros(nshells)
+        den2 = np.zeros(nshells)
+        for i in range(n):
+            s = shell_flat[i]
+            fr = F1r[i].real
+            fi = F1r[i].imag
+            gr = F2r[i].real
+            gi = F2r[i].imag
+            num[s] += fr * gr + fi * gi
+            den1[s] += fr * fr + fi * fi
+            den2[s] += gr * gr + gi * gi
+        return num, den1, den2
+
+
+if _HAS_NUMBA:
+
+    @njit(cache=True, nogil=True)
+    def _fsc_shell_sum(flat_num, flat_den1, flat_den2, shell_flat, nshells):
+        """One-pass shell-binned accumulation over precomputed products.
+
+        Accumulates pre-computed cross-power and per-map power arrays into
+        shells, visiting indices in the same serial order as the pure-numpy
+        ``np.add.at`` path so the result is bit-identical to it (but avoids
+        numpy's slow scatter-add).
+
+        Parameters
+        ----------
+        flat_num : np.ndarray
+            Flattened cross-power (real parts) per coefficient.
+        flat_den1 : np.ndarray
+            Flattened per-map power of the first map.
+        flat_den2 : np.ndarray
+            Flattened per-map power of the second map.
+        shell_flat : np.ndarray
+            Flattened integer shell labels.
+        nshells : int
+            Number of shells (n // 2 + 1).
+        """
+        n = shell_flat.shape[0]
+        num = np.zeros(nshells)
+        den1 = np.zeros(nshells)
+        den2 = np.zeros(nshells)
+        for i in range(n):
+            s = shell_flat[i]
+            num[s] += flat_num[i]
+            den1[s] += flat_den1[i]
+            den2[s] += flat_den2[i]
+        return num, den1, den2
+
+
+def _fsc_from_rfft(F1, F2, shell_flat, n):
+    """Compute 1D shell-binned FSC from rfftn coefficients.
+
+    Uses a numba single-pass reduction when available and falls back to
+    np.bincount otherwise. The returned array is indexed by shell number
+    (0 = DC) and has n // 2 + 1 entries, matching calc_fsc.
+
+    Parameters
+    ----------
+    F1 : np.ndarray
+        rfftn result of the first map.
+    F2 : np.ndarray
+        rfftn result of the second map.
+    shell_flat : np.ndarray
+        Pre-computed flattened shell labels for the rfftn output grid.
+    n : int
+        Spatial dimension of the (cubic) maps.
+
+    Returns
+    -------
+    np.ndarray
+        1D FSC array of length n // 2 + 1.
+    """
+    nshells = n // 2 + 1
+    F1r = np.ascontiguousarray(F1).ravel()
+    F2r = np.ascontiguousarray(F2).ravel()
+    shell_flat = np.ascontiguousarray(shell_flat).ravel()
+
+    if _HAS_NUMBA:
+        num, den1, den2 = _fsc_shell_reduce(F1r, F2r, shell_flat, nshells)
+    else:
+        num = np.bincount(
+            shell_flat, weights=np.real(F1r * np.conj(F2r)), minlength=nshells
+        )
+        den1 = np.bincount(shell_flat, weights=np.abs(F1r) ** 2, minlength=nshells)
+        den2 = np.bincount(shell_flat, weights=np.abs(F2r) ** 2, minlength=nshells)
+
+    denom = np.sqrt(den1 * den2)
+    fsc = np.ones(nshells, dtype=np.float64)
+    valid = denom > 0
+    fsc[valid] = num[valid] / denom[valid]
+    return fsc
+
+
 __all__ = [
     "calc_fsc",
     "calc_fsc_from_fft",
@@ -161,21 +286,7 @@ def calc_fsc(map1, map2, apix, F1=None, F2=None, shell_flat=None, n=None):
 
         F2 = rfftn(map2, workers=-1)
 
-    num = np.bincount(
-        shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=n // 2 + 1
-    )
-    den1 = np.bincount(
-        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n // 2 + 1
-    )
-    den2 = np.bincount(
-        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n // 2 + 1
-    )
-
-    denom = np.sqrt(den1 * den2)
-    fsc = np.ones(n // 2 + 1, dtype=np.float64)
-    valid = denom > 0
-    fsc[valid] = num[valid] / denom[valid]
-
+    fsc = _fsc_from_rfft(F1, F2, shell_flat, n)
     qx_max = np.fft.rfftfreq(n).max()
     saxis = np.arange(n // 2 + 1) * df
     idx = np.where(saxis <= qx_max)
@@ -211,28 +322,20 @@ def calc_fsc_from_fft(F1, F2, n, apix):
     shell_flat = shell.ravel()
     del shell
 
-    num = np.bincount(
-        shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=n // 2 + 1
-    )
-    den1 = np.bincount(
-        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n // 2 + 1
-    )
-    den2 = np.bincount(
-        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n // 2 + 1
-    )
-
-    denom = np.sqrt(den1 * den2)
-    fsc = np.ones(n // 2 + 1, dtype=np.float64)
-    valid = denom > 0
-    fsc[valid] = num[valid] / denom[valid]
-
+    fsc = _fsc_from_rfft(F1, F2, shell_flat, n)
     qx_max = np.fft.rfftfreq(n).max()
     saxis = np.arange(n // 2 + 1) * df
     idx = np.where(saxis <= qx_max)
     return np.vstack((saxis[idx], fsc[idx])).T
 
 
-def calc_fsc_per_shell(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.ndarray:
+def calc_fsc_per_shell(
+    map1: np.ndarray,
+    map2: np.ndarray,
+    apix: float,
+    shell_flat: np.ndarray | None = None,
+    n: int | None = None,
+) -> np.ndarray:
     """Calculate FSC using per-voxel shell assignment (matching EMAN2).
 
     Each voxel is assigned to exactly one shell based on its integer
@@ -248,6 +351,15 @@ def calc_fsc_per_shell(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.nd
         Second 3D map.
     apix : float
         Pixel size in Angstroms per pixel.
+    shell_flat : np.ndarray, optional
+        Pre-computed flattened integer shell labels for the full fftn grid
+        of a cubic map of size ``n``. When provided, the per-voxel shell
+        grid is not recomputed, which avoids the costly 3-cube meshgrid
+        allocation on every call (e.g. inside an optimisation loop where
+        ``n`` is constant). Must be the ``np.round(sqrt(...) * n)``,
+        clipped-to-``n//2`` labels produced for the full symmetric grid.
+    n : int, optional
+        Spatial dimension of the (cubic) maps. Defaults to ``map1.shape[0]``.
 
     Returns
     -------
@@ -255,33 +367,40 @@ def calc_fsc_per_shell(map1: np.ndarray, map2: np.ndarray, apix: float) -> np.nd
         FSC values indexed by shell number (0 = DC, 1 = first shell, etc.).
         Spatial frequency for shell i is ``i / (n * apix)``.
     """
-    n = map1.shape[0]
+    if n is None:
+        n = map1.shape[0]
     from scipy.fft import fftn
 
     F1 = fftn(map1, workers=-1)
     F2 = fftn(map2, workers=-1)
 
-    kx = np.fft.fftfreq(n)
-    ky = np.fft.fftfreq(n)
-    kz = np.fft.fftfreq(n)
-    KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing="ij")
-    kr = np.sqrt(KX**2 + KY**2 + KZ**2)
-    shell = np.round(kr * n).astype(np.int32)
-    np.clip(shell, 0, n // 2, out=shell)
+    if shell_flat is None:
+        kx = np.fft.fftfreq(n)
+        ky = np.fft.fftfreq(n)
+        kz = np.fft.fftfreq(n)
+        KX, KY, KZ = np.meshgrid(kx, ky, kz, indexing="ij")
+        kr = np.sqrt(KX**2 + KY**2 + KZ**2)
+        shell = np.round(kr * n).astype(np.int32)
+        np.clip(shell, 0, n // 2, out=shell)
+        shell_flat = shell.ravel()
 
     nshells = n // 2 + 1
-    num = np.zeros(nshells, dtype=np.float64)
-    den1 = np.zeros(nshells, dtype=np.float64)
-    den2 = np.zeros(nshells, dtype=np.float64)
-
-    flat_shell = shell.ravel()
+    flat_shell = np.ascontiguousarray(shell_flat).ravel()
     flat_num = np.real(F1 * np.conj(F2)).ravel()
     flat_den1 = np.abs(F1).ravel() ** 2
     flat_den2 = np.abs(F2).ravel() ** 2
 
-    np.add.at(num, flat_shell, flat_num)
-    np.add.at(den1, flat_shell, flat_den1)
-    np.add.at(den2, flat_shell, flat_den2)
+    if _HAS_NUMBA:
+        num, den1, den2 = _fsc_shell_sum(
+            flat_num, flat_den1, flat_den2, flat_shell, nshells
+        )
+    else:
+        num = np.zeros(nshells, dtype=np.float64)
+        den1 = np.zeros(nshells, dtype=np.float64)
+        den2 = np.zeros(nshells, dtype=np.float64)
+        np.add.at(num, flat_shell, flat_num)
+        np.add.at(den1, flat_shell, flat_den1)
+        np.add.at(den2, flat_shell, flat_den2)
 
     denom = np.sqrt(den1 * den2)
     fsc = np.ones(nshells, dtype=np.float64)

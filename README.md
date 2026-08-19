@@ -14,7 +14,13 @@ pip install "helicon[all] @ git+https://github.com/jianglab/helicon"
 ```
 
 ## Usage
-Run this command in a terminal and follow the help message:
+
+Run this command in a terminal to start the Helicon GUI:
+```
+helicon
+```
+
+Run this command in a terminal to show the sub-commands:
 ```
 helicon --help
 ```

@@ -37,6 +37,84 @@ class TestAnalysis(object):
         fsc_identical = analysis.calc_fsc(map1, map1, apix=1.0)
         np.testing.assert_allclose(fsc_identical[:, 1], 1.0, atol=1e-6)
 
+    def test_calc_fsc_per_shell_matches_reference(self):
+        """Optimized calc_fsc_per_shell must match the np.add.at reference
+        bit-for-bit, both with and without a precomputed shell grid."""
+        rng = np.random.default_rng(0)
+        for n in (16, 32):
+            m1 = rng.normal(size=(n, n, n))
+            m2 = rng.normal(size=(n, n, n))
+            # Reference: original implementation (meshgrid + np.add.at).
+            from scipy.fft import fftn
+
+            F1 = fftn(m1, workers=-1)
+            F2 = fftn(m2, workers=-1)
+            kx = np.fft.fftfreq(n)
+            KX, KY, KZ = np.meshgrid(kx, kx, kx, indexing="ij")
+            kr = np.sqrt(KX**2 + KY**2 + KZ**2)
+            shell = np.round(kr * n).astype(np.int32)
+            np.clip(shell, 0, n // 2, out=shell)
+            nshells = n // 2 + 1
+            num = np.zeros(nshells)
+            den1 = np.zeros(nshells)
+            den2 = np.zeros(nshells)
+            flat_shell = shell.ravel()
+            flat_num = np.real(F1 * np.conj(F2)).ravel()
+            flat_den1 = np.abs(F1).ravel() ** 2
+            flat_den2 = np.abs(F2).ravel() ** 2
+            np.add.at(num, flat_shell, flat_num)
+            np.add.at(den1, flat_shell, flat_den1)
+            np.add.at(den2, flat_shell, flat_den2)
+            denom = np.sqrt(den1 * den2)
+            ref = np.ones(nshells)
+            valid = denom > 0
+            ref[valid] = num[valid] / denom[valid]
+
+            # Default path (shell recomputed internally).
+            out_default = analysis.calc_fsc_per_shell(m1, m2, 1.0)
+            np.testing.assert_array_equal(out_default, ref)
+
+            # Precomputed-shell path (used by the mask-slope optimiser).
+            out_precomputed = analysis.calc_fsc_per_shell(
+                m1, m2, 1.0, shell_flat=flat_shell, n=n
+            )
+            np.testing.assert_array_equal(out_precomputed, ref)
+
+    def test_fsc_from_rfft_matches_bincount(self):
+        """_fsc_from_rfft must match the pure-numpy np.bincount reference."""
+        rng = np.random.default_rng(1)
+        for n in (16, 32):
+            F1 = rng.normal(size=(n, n, n // 2 + 1)) + 1j * rng.normal(
+                size=(n, n, n // 2 + 1)
+            )
+            F2 = rng.normal(size=(n, n, n // 2 + 1)) + 1j * rng.normal(
+                size=(n, n, n // 2 + 1)
+            )
+            k2 = np.fft.fftfreq(n) ** 2
+            kr2 = np.fft.rfftfreq(n) ** 2
+            shell = np.round(
+                np.sqrt(k2[:, None, None] + k2[None, :, None] + kr2[None, None, :]) * n
+            ).astype(np.int32)
+            np.clip(shell, 0, n // 2, out=shell)
+            shell_flat = shell.ravel()
+            nshells = n // 2 + 1
+            num = np.bincount(
+                shell_flat, weights=np.real(F1 * np.conj(F2)).ravel(), minlength=nshells
+            )
+            den1 = np.bincount(
+                shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=nshells
+            )
+            den2 = np.bincount(
+                shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=nshells
+            )
+            denom = np.sqrt(den1 * den2)
+            ref = np.ones(nshells)
+            valid = denom > 0
+            ref[valid] = num[valid] / denom[valid]
+
+            out = analysis._fsc_from_rfft(F1, F2, shell_flat, n)
+            np.testing.assert_allclose(out, ref, atol=1e-12, rtol=1e-12)
+
     def test_get_cylindrical_mask(self):
         mask = analysis.get_cylindrical_mask(10, 10, 10, rmin=2, rmax=4)
         assert mask.shape == (10, 10, 10)

@@ -1,17 +1,33 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 import platform
 
 import numpy as np
 
-# finufft uses a bundled FFTW for its plan stage. FFTW's planner keeps
-# static/global state (wisdom cache) across plan create/destroy cycles, so
-# repeated calls within the same process can corrupt FFTW internals and
-# segfault.  This is especially visible when running a full test suite where
-# each test creates and destroys finufft plans.  Setting OMP_NUM_THREADS=1
-# prevents finufft from spawning multiple FFTW threads, avoiding the race.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+@contextmanager
+def _single_omp_thread():
+    """Pin OpenMP/FFTW to a single thread for a finufft plan.
+
+    finufft's bundled FFTW keeps static planner (wisdom) state across plan
+    create/destroy cycles, so spawning multiple FFTW threads in a process that
+    creates and destroys many finufft plans (e.g. a test suite) can race and
+    segfault.  Setting OMP_NUM_THREADS=1 for just the finufft call avoids
+    that, while restoring the previous value so it does not throttle unrelated
+    FFTs (e.g. scipy workers) for the rest of the process.
+    """
+    prev = os.environ.get("OMP_NUM_THREADS")
+    os.environ["OMP_NUM_THREADS"] = "1"
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        else:
+            os.environ["OMP_NUM_THREADS"] = prev
+
 
 __all__ = [
     "apply_helical_symmetry",
@@ -720,9 +736,10 @@ def fft_rescale(
         Y = (2 * np.pi * Y).flatten(order="C")
         X = (2 * np.pi * X).flatten(order="C")
 
-        from finufft import nufft2d2
+        with _single_omp_thread():
+            from finufft import nufft2d2
 
-        fft = nufft2d2(x=Y, y=X, f=data.astype(np.complex128), eps=1e-6)
+            fft = nufft2d2(x=Y, y=X, f=data.astype(np.complex128), eps=1e-6)
         fft = fft.reshape((ony, onx))
 
         # phase shifts for real-space shifts by half of the image box in both directions
@@ -749,9 +766,10 @@ def fft_rescale(
         Y = (2 * np.pi * Y).flatten(order="C")
         X = (2 * np.pi * X).flatten(order="C")
 
-        from finufft import nufft3d2
+        with _single_omp_thread():
+            from finufft import nufft3d2
 
-        fft = nufft3d2(x=Z, y=Y, z=X, f=data.astype(np.complex128), eps=1e-6)
+            fft = nufft3d2(x=Z, y=Y, z=X, f=data.astype(np.complex128), eps=1e-6)
         fft = fft.reshape((onz, ony, onx))
 
         # phase shifts for real-space shifts by half of the image box in both directions

@@ -30,3 +30,4 @@ helicon.plugins.*.denoisecurvelet*
 AGENTS.md
 tests/output/
 .agents/
+.freebuff/

@@ -181,7 +181,15 @@ def compute_truefsc(
     ).astype(np.int32)
     np.clip(_shell, 0, n // 2, out=_shell)
     _shell_flat = _shell.ravel()
-    del _shell, _k2, _kr2
+    # Full symmetric-grid shell labels for calc_fsc_per_shell (used during
+    # mask-slope optimisation). n is constant across calls, so precompute once
+    # to avoid rebuilding the 3-cube meshgrid on every FSC evaluation.
+    _shell_full = np.round(
+        np.sqrt(_k2[:, None, None] + _k2[None, :, None] + _k2[None, None, :]) * n
+    ).astype(np.int32)
+    np.clip(_shell_full, 0, n // 2, out=_shell_full)
+    _shell_flat_full = _shell_full.ravel()
+    del _shell_full, _k2, _kr2
 
     # Compute FSC of original, unmasked maps
     logger.info("Calculating FSC of original maps")
@@ -312,11 +320,15 @@ def compute_truefsc(
                 mask_e = _soft_mask(mask_a, x)
                 m1 = map1 * mask_e
                 m2 = map2 * mask_e
-                fsc_t = helicon.calc_fsc_per_shell(m1, m2, pix_size)
+                fsc_t = helicon.calc_fsc_per_shell(
+                    m1, m2, pix_size, shell_flat=_shell_flat_full, n=n
+                )
 
                 m1r = map1r * mask_e
                 m2r = map2r * mask_e
-                fsc_n = helicon.calc_fsc_per_shell(m1r, m2r, pix_size)
+                fsc_n = helicon.calc_fsc_per_shell(
+                    m1r, m2r, pix_size, shell_flat=_shell_flat_full, n=n
+                )
 
                 fsc_t_arr = fsc_t[cutoff_i:]
                 fsc_n_arr = fsc_n[cutoff_i:]
@@ -1093,12 +1105,17 @@ def add_args(parser):
     )
     parser.add_argument(
         "--oneMask",
+        metavar="<0|1>",
         type=int,
         default=1,
         help="use the same mask for both maps (1) or separate masks (0)",
     )
     parser.add_argument(
-        "--showPlot", type=int, default=1, help="show plots on screen (1) or not (0)"
+        "--showPlot", 
+        metavar="<0|1>",
+        type=int, 
+        default=1, 
+        help="show plots on screen (1) or not (0)"
     )
 
     group = parser.add_mutually_exclusive_group()
@@ -1143,11 +1160,16 @@ def add_args(parser):
     )
     group2.add_argument(
         "--refineMask",
+        metavar="<0|1>",
         type=int,
         help="refine mask slope (0 or 1). Default: 1 (ignored if --maskSoft is set)",
         default=1,
     )
 
     parser.add_argument(
-        "--verbose", type=int, default=1, help="verbose level (0-2). Default: 1"
+        "--verbose", 
+        metavar="<0-2>",
+        type=int, 
+        default=1, 
+        help="verbose level (0-2). Default: 1"
     )
