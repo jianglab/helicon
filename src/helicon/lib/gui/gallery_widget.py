@@ -1556,13 +1556,20 @@ class _ControlBar(QWidget):
         self._zoom_slider.setRange(0, 1000)
         self._zoom_slider.setValue(500)
         self._zoom_slider.setStyleSheet(sld)
-        self._zoom_val = _label("1.00x")
-        self._zoom_val.setStyleSheet(val_lbl)
+        self._zoom_spin = QDoubleSpinBox()
+        self._zoom_spin.setDecimals(2)
+        self._zoom_spin.setRange(0.05, 100.0)
+        self._zoom_spin.setValue(1.00)
+        self._zoom_spin.setSingleStep(0.1)
+        self._zoom_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._zoom_spin.setAlignment(Qt.AlignCenter)
+        self._zoom_spin.setFixedWidth(54)
+        self._zoom_spin.setAccelerated(True)
         row_zm = QHBoxLayout()
         row_zm.setSpacing(4)
         row_zm.addWidget(_label("Zoom"))
         row_zm.addWidget(self._zoom_slider, 1)
-        row_zm.addWidget(self._zoom_val)
+        row_zm.addWidget(self._zoom_spin)
         root.addLayout(row_zm)
 
         row_btns = QHBoxLayout()
@@ -1584,6 +1591,11 @@ class _ControlBar(QWidget):
 
         root.addStretch(1)
 
+        self._voxel_label = _label("")
+        self._voxel_label.setStyleSheet(val_lbl)
+        self._voxel_label.setWordWrap(True)
+        root.addWidget(self._voxel_label)
+
         # Slider<->spinbox mirror: each side blocks the other's signals
         # while updating so one user action emits position_changed once.
         self._sliders = (self._x_slider, self._y_slider, self._z_slider)
@@ -1593,6 +1605,7 @@ class _ControlBar(QWidget):
         for axis, spin in enumerate(self._spins):
             spin.valueChanged.connect(lambda v, a=axis: self._on_spin_changed(a, v))
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
+        self._zoom_spin.valueChanged.connect(self._on_zoom_spin)
 
     def _apply_display_theme(self) -> None:
         """Apply the current theme to the orthogonal-view controls."""
@@ -1617,7 +1630,16 @@ class _ControlBar(QWidget):
 
     def _on_zoom_slider(self, v: int) -> None:
         zoom = self._slider_to_zoom(v)
-        self._zoom_val.setText(f"{zoom:.2f}x")
+        self._zoom_spin.blockSignals(True)
+        self._zoom_spin.setValue(zoom)
+        self._zoom_spin.blockSignals(False)
+        self.zoom_changed.emit(zoom)
+
+    def _on_zoom_spin(self, zoom: float) -> None:
+        zoom = max(0.05, zoom)
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(self._zoom_to_slider(zoom))
+        self._zoom_slider.blockSignals(False)
         self.zoom_changed.emit(zoom)
 
     def _on_slider_changed(self, axis: int, v: int) -> None:
@@ -1680,8 +1702,16 @@ class _ControlBar(QWidget):
     def set_zoom(self, zoom: float) -> None:
         self._zoom_slider.blockSignals(True)
         self._zoom_slider.setValue(self._zoom_to_slider(zoom))
-        self._zoom_val.setText(f"{zoom:.2f}x")
+        self._zoom_spin.blockSignals(True)
+        self._zoom_spin.setValue(max(0.05, zoom))
+        self._zoom_spin.blockSignals(False)
         self._zoom_slider.blockSignals(False)
+
+    def set_voxel_value(self, x: int, y: int, z: int, val: float) -> None:
+        "Show the clicked voxel index and value in the control panel."
+        self._voxel_label.setText(
+            f"x,y,z={int(x)},{int(y)},{int(z)} val={float(val):.6g}"
+        )
 
     def set_movie_playing(self, playing: bool) -> None:
         self._movie_btn.blockSignals(True)
@@ -1982,6 +2012,10 @@ class OrthogonalViewerWidget(QWidget):
             self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
             self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
         self._sync_views(source_idx=panel_idx)
+        if self._volume is not None:
+            x, y, z = self._pos
+            val = float(self._volume[z, y, x])
+            self._ctrl.set_voxel_value(x, y, z, val)
 
     def _on_pan(self, panel_idx: int, dpx: int, dpy: int) -> None:
         """Linked panning: dragging in one view shifts the other two to keep
