@@ -89,8 +89,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from shiny import App, reactive, ui
 
-from ..lib.shiny import encode_query_params
-from .lib.shared_state import project
+from helicon.lib.shiny import encode_query_params
+from helicon.webApps.lib.shared_state import project
 
 logger = logging.getLogger(__name__)
 
@@ -108,22 +108,37 @@ def _web_theme(request: Request) -> str:
 #   - <name>_tab_ui(id)   → ui components for the tab
 #   - <name>_tab_server(input, output, session, project)   → reactive logic
 
-from .tabs.helical_lattice_tab import helical_lattice_tab_ui, helical_lattice_tab_server
-from .tabs.helical_pitch_tab import helical_pitch_tab_ui, helical_pitch_tab_server
-from .tabs.hill_tab import hill_tab_ui, hill_tab_server
-from .tabs.hi3d_tab import hi3d_tab_ui, hi3d_tab_server
-from .tabs.denovo3d_tab import denovo3d_tab_ui, denovo3d_tab_server
-from .tabs.helical_projection_tab import (
+from helicon.webApps.tabs.helical_lattice_tab import (
+    helical_lattice_tab_ui,
+    helical_lattice_tab_server,
+)
+from helicon.webApps.tabs.helical_pitch_tab import (
+    helical_pitch_tab_ui,
+    helical_pitch_tab_server,
+)
+from helicon.webApps.tabs.hill_tab import hill_tab_ui, hill_tab_server
+from helicon.webApps.tabs.hi3d_tab import hi3d_tab_ui, hi3d_tab_server
+from helicon.webApps.tabs.denovo3d_tab import denovo3d_tab_ui, denovo3d_tab_server
+from helicon.webApps.tabs.helical_projection_tab import (
     helical_projection_tab_ui,
     helical_projection_tab_server,
 )
-from .tabs.where_is_my_class_tab import (
+from helicon.webApps.tabs.where_is_my_class_tab import (
     where_is_my_class_tab_ui,
     where_is_my_class_tab_server,
 )
 
-from .tabs import hill_tab, hi3d_tab, denovo3d_tab, helical_projection_tab
-from .tabs import helical_pitch_tab, where_is_my_class_tab, helical_lattice_tab
+from helicon.webApps.tabs import (
+    hill_tab,
+    hi3d_tab,
+    denovo3d_tab,
+    helical_projection_tab,
+)
+from helicon.webApps.tabs import (
+    helical_pitch_tab,
+    where_is_my_class_tab,
+    helical_lattice_tab,
+)
 
 # ── Bookmark module map ─────────────────────────────────────────
 # Maps tab names to (module_prefix, tab_module) for constructing full
@@ -264,8 +279,7 @@ def app_ui(request: Request):
         ui.head_content(
             ui.tags.title("Helicon"),
             ui.tags.link(rel="icon", type="image/png", href="icon.png"),
-            ui.tags.script(
-                f"""
+            ui.tags.script(f"""
                 (function() {{
                     var requested = {theme!r};
                     function applyTheme() {{
@@ -290,10 +304,8 @@ def app_ui(request: Request):
                             .addEventListener('change', applyTheme);
                     }}
                 }})();
-                """
-            ),
-            ui.tags.script(
-                """
+                """),
+            ui.tags.script("""
                 var _BOOKMARK_TABS = {
                     "HILL": {
                         "input_mode": "hill-hill_input_mode",
@@ -545,10 +557,8 @@ def app_ui(request: Request):
                 Shiny.addCustomMessageHandler('triggerUrlSync', function(msg) {
                     if (_initialCaptureDone) _buildBookmarkUrl();
                 });
-            """
-            ),
-            ui.tags.script(
-                """
+            """),
+            ui.tags.script("""
                 var _heliconToken = new URLSearchParams(window.location.search).get('helicon_token');
                 if (_heliconToken) {
                     setInterval(function() {
@@ -564,11 +574,9 @@ def app_ui(request: Request):
                             .catch(function() {});
                     }, 2000);
                 }
-                """
-            ),
+                """),
         ),
-        ui.tags.style(
-            f"""
+        ui.tags.style(f"""
             :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {{
                 --helicon-page-bg: #1e1e1e;
                 --helicon-text: #e0e0e0;
@@ -647,8 +655,7 @@ def app_ui(request: Request):
             .sidebar {{ padding-right: 4px !important; }}
             .main {{ padding-left: 4px !important; }}
             body.bslib-page-fill {{ padding: 0 !important; gap: 0 !important; }}
-        """
-        ),
+        """),
         ui.navset_bar(
             ui.nav_panel(
                 "WhereIsMyClass", where_is_my_class_tab_ui("where_is_my_class")
