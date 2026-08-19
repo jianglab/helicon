@@ -34,7 +34,7 @@ homepage = "https://github.com/jianglab/helicon"
 helicon = "helicon.helicon:main"
 
 [project.optional-dependencies]
-shiny = ['ipyfilechooser', 'ipywidgets', 'itk-montage', 'jupyter_bokeh', 'plotly', 'requests', 'shiny','shinywidgets']
+shiny = ['ipyfilechooser', 'ipywidgets', 'itk-montage', 'jupyter_bokeh', 'plotly', 'requests', 'shiny','shinywidgets', 'trackpy']
 
 streamlit = ['atomium', 'bokeh', 'kneebow', 'numpy', 'psutil', 'qrcode', 'shapely', 'st-clickable-images', 'streamlit', 'streamlit-bokeh', 'streamlit-drawable-canvas', 'trackpy', 'uptime', 'xmltodict']
 
