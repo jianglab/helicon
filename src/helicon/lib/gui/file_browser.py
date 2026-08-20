@@ -868,8 +868,12 @@ class FileBrowserModel(QStandardItemModel):
             images_item.setData(0, ROLE_SORT)
             apix_item = QStandardItem("")
             apix_item.setData("", ROLE_SORT)
-            mod_item = QStandardItem("")
-            mod_item.setData("", ROLE_SORT)
+            try:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime)
+            except (OSError, ValueError):
+                mtime = datetime.now()
+            mod_item = QStandardItem(mtime.strftime("%Y-%m-%d %H:%M"))
+            mod_item.setData(mtime.isoformat(), ROLE_SORT)
         else:
             try:
                 size_bytes = path.stat().st_size

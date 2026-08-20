@@ -2895,6 +2895,29 @@ class TestFolderBrowser(object):
         dates = [model.item(r, COL_MODIFIED).text() for r in range(model.rowCount())]
         assert any("202" in d for d in dates)
 
+    def test_file_browser_model_shows_folder_date(self, tmp_path):
+        from datetime import datetime
+
+        from helicon.lib.gui.file_browser import (
+            FileBrowserModel,
+            COL_MODIFIED,
+            COL_TYPE,
+        )
+
+        folder = tmp_path / "subdir"
+        folder.mkdir()
+        (tmp_path / "file.txt").write_text("x")
+        model = FileBrowserModel(str(tmp_path))
+        dates_by_type = {
+            model.item(r, COL_TYPE).text(): model.item(r, COL_MODIFIED).text()
+            for r in range(model.rowCount())
+        }
+        assert dates_by_type["Folder"]
+        expected = datetime.fromtimestamp(folder.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        assert dates_by_type["Folder"] == expected
+
     def test_file_browser_model_sort_by_size(self, tmp_path):
         from helicon.lib.gui.file_browser import FileBrowserModel, COL_SIZE
 
