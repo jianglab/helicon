@@ -4480,6 +4480,213 @@ class TestTrueFscPanel(object):
         dialog.close()
         qapp.processEvents()
 
+    def test_launch_exposes_options_tab_to_the_right_of_input_maps(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        qapp.processEvents()
+        tabs = dialog._tabs
+        assert tabs.tabText(0) == "Input Maps"
+        assert tabs.tabText(1) == "Options"
+        assert tabs.count() == 2
+        # The freshly launched dialog uses auto defaults on the Options tab.
+        opts = dialog._get_options()
+        assert opts["apix"] == 0
+        assert opts["cutoff_res"] == 0
+        assert opts["one_mask"] == 1
+        assert opts["mask_fraction_thresh"] == -1
+        assert opts["mask_thresh"] is None
+        assert opts["mask_mass"] == 0
+        assert opts["mask_soft"] == -1
+        assert opts["refine_mask"] == 1
+        dialog.close()
+        qapp.processEvents()
+
+    def test_mask_selector_moves_to_options_tab(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        qapp.processEvents()
+        # The mask map input is grouped with the mask-threshold options.
+        assert dialog._mask_edit is not None
+        assert dialog._mask_edit.parent() is dialog._tabs.widget(1)
+        # The Input Maps tab holds only Map 1 and Map 2.
+        input_tab = dialog._tabs.widget(0)
+        assert dialog._map1_edit.parent() is input_tab
+        assert dialog._map2_edit.parent() is input_tab
+        assert dialog._mask_edit.parent() is not input_tab
+        dialog.close()
+        qapp.processEvents()
+
+    def test_provided_mask_greys_out_mask_slope(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        qapp.processEvents()
+        # Initially the mask slope is editable for the adaptive mask.
+        assert dialog._mask_soft_edit.isEnabled()
+        assert dialog._refine_check.isEnabled()
+        # Entering a mask map path grays out the slope and refine controls.
+        dialog._mask_edit.setText("/tmp/user_mask.mrc")
+        qapp.processEvents()
+        assert not dialog._mask_soft_edit.isEnabled()
+        assert not dialog._refine_check.isEnabled()
+        assert dialog._get_options()["mask_file"] == ["/tmp/user_mask.mrc"]
+        assert dialog._get_options()["mask_soft"] == -1
+        # Clearing the mask re-enables the slope controls.
+        dialog._mask_edit.setText("")
+        qapp.processEvents()
+        assert dialog._mask_soft_edit.isEnabled()
+        assert dialog._refine_check.isEnabled()
+        dialog.close()
+        qapp.processEvents()
+
+    def test_options_lay_out_in_shared_rows(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        dialog.show()
+        qapp.processEvents()
+        # Pixel size and cutoff resolution sit on the same row.
+        assert dialog._apix_edit.geometry().y() == dialog._cutoff_edit.geometry().y()
+        # Mask slope and the two checkboxes share a single row.
+        assert (
+            dialog._mask_soft_edit.geometry().y() == dialog._refine_check.geometry().y()
+        )
+        assert (
+            dialog._refine_check.geometry().y() == dialog._one_mask_check.geometry().y()
+        )
+        dialog.close()
+        qapp.processEvents()
+
+    def test_options_tab_seeds_prefilled_values(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(
+            parent=None,
+            apix=1.35,
+            cutoff_res=8,
+            one_mask=0,
+            mask_fraction_thresh=0.2,
+            mask_mass=0,
+            mask_soft=5,
+            refine_mask=1,
+        )
+        qapp.processEvents()
+        opts = dialog._get_options()
+        assert opts["apix"] == 1.35
+        assert opts["cutoff_res"] == 8
+        assert opts["one_mask"] == 0
+        assert opts["mask_fraction_thresh"] == 0.2
+        assert opts["mask_soft"] == 5
+        # A manual slope disables slope refinement (mirrors the CLI).
+        assert opts["refine_mask"] == 0
+        dialog.close()
+        qapp.processEvents()
+
+    def test_changed_option_recomputes_when_maps_are_ready(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        import mrcfile
+        import numpy as np
+        from PySide6.QtCore import QThread
+
+        from helicon.commands import display
+
+        half1 = tmp_path / "h1.mrc"
+        half2 = tmp_path / "h2.mrc"
+        for path in (half1, half2):
+            with mrcfile.new(str(path), overwrite=True) as m:
+                m.set_data(np.zeros((4, 4, 4), dtype=np.float32))
+                m.voxel_size = 1.35
+
+        monkeypatch.setattr(QThread, "start", lambda self: None)
+        dialog = display._launch_truefsc_maps(
+            map1=str(half1), map2=str(half2), parent=None
+        )
+        qapp.processEvents()
+        assert dialog._seq == 1
+        dialog._apix_edit.setText("1.0")
+        dialog._on_options_changed()
+        qapp.processEvents()
+        assert dialog._seq == 2
+        assert dialog._get_options()["apix"] == 1.0
+        dialog.close()
+        qapp.processEvents()
+
+    def test_changing_or_clearing_mask_map_recomputes_when_maps_are_ready(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        import mrcfile
+        import numpy as np
+        from PySide6.QtCore import QThread
+
+        from helicon.commands import display
+
+        half1 = tmp_path / "h1.mrc"
+        half2 = tmp_path / "h2.mrc"
+        for path in (half1, half2):
+            with mrcfile.new(str(path), overwrite=True) as m:
+                m.set_data(np.zeros((4, 4, 4), dtype=np.float32))
+                m.voxel_size = 1.35
+
+        mask_path = tmp_path / "user_mask.mrc"
+        with mrcfile.new(str(mask_path), overwrite=True) as m:
+            m.set_data(np.zeros((4, 4, 4), dtype=np.float32))
+            m.voxel_size = 1.35
+
+        monkeypatch.setattr(QThread, "start", lambda self: None)
+        dialog = display._launch_truefsc_maps(
+            map1=str(half1), map2=str(half2), parent=None
+        )
+        qapp.processEvents()
+        assert dialog._seq == 1
+        # Setting the mask recomputes (options are committed).
+        dialog._mask_edit.setText(str(mask_path))
+        dialog._on_options_changed()
+        qapp.processEvents()
+        assert dialog._seq == 2
+        assert dialog._get_options()["mask_file"] == [str(mask_path)]
+        # Clearing the mask also recomputes.
+        dialog._mask_edit.setText("")
+        dialog._on_options_changed()
+        qapp.processEvents()
+        assert dialog._seq == 3
+        assert dialog._get_options()["mask_file"] is None
+        dialog.close()
+        qapp.processEvents()
+
+    def test_mask_map_enter_recomputes_once(self, qapp, tmp_path, monkeypatch):
+        import mrcfile
+        import numpy as np
+        from PySide6.QtCore import QThread
+
+        from helicon.commands import display
+
+        half1 = tmp_path / "h1.mrc"
+        half2 = tmp_path / "h2.mrc"
+        for path in (half1, half2):
+            with mrcfile.new(str(path), overwrite=True) as m:
+                m.set_data(np.zeros((4, 4, 4), dtype=np.float32))
+                m.voxel_size = 1.35
+
+        monkeypatch.setattr(QThread, "start", lambda self: None)
+        dialog = display._launch_truefsc_maps(
+            map1=str(half1), map2=str(half2), parent=None
+        )
+        qapp.processEvents()
+        assert dialog._seq == 1
+        # Pressing Enter must recompute exactly once: it used to fire both
+        # returnPressed (input reload) and editingFinished (options commit).
+        dialog._mask_edit.setText(str(half1))
+        qapp.processEvents()
+        dialog._mask_edit.returnPressed.emit()
+        dialog._mask_edit.editingFinished.emit()
+        qapp.processEvents()
+        assert dialog._seq == 2
+        dialog.close()
+        qapp.processEvents()
+
 
 class TestDisplayButtonSorting:
 

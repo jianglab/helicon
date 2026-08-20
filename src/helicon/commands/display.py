@@ -236,19 +236,34 @@ def _launch_truefsc(path: str, parent=None) -> None:
     _launch_truefsc_maps(map1=map1, map2=map2, parent=parent)
 
 
-def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
-    """Open the trueFSC panel with Map 1 / Map 2 / optional Mask selectors.
+def _launch_truefsc_maps(
+    map1=None,
+    map2=None,
+    mask=None,
+    parent=None,
+    apix=0,
+    cutoff_res=0,
+    one_mask=1,
+    mask_fraction_thresh=-1,
+    mask_thresh=None,
+    mask_mass=0,
+    mask_soft=-1,
+    refine_mask=1,
+) -> None:
+    """Open the trueFSC panel with Map 1 / Map 2 selectors and options.
 
-    The information pane holds three file selectors: Map 1, Map 2, and an
-    optional Mask. As soon as both half-maps are chosen the two input ortho
-    viewers load and the True FSC computation runs in the background; a mask
-    given in the selector is used verbatim, otherwise an adaptive mask is
-    generated. ``map1`` and ``map2`` pre-fill the selectors when the panel is
-    launched from a ``model.star`` action button; launching from the Apps
-    menu leaves every selector empty.
+    The information pane holds two tabs. The first, "Input Maps", provides
+    the Map 1 and Map 2 file selectors. As soon as both half-maps are chosen
+    the two input ortho viewers load and the True FSC computation runs in the
+    background. The second tab, "Options", exposes the remaining trueFSC
+    command options: pixel size, cutoff resolution, the optional mask map and
+    mask threshold behaviour, and the mask slope width.
 
     ``map1``, ``map2``, and ``mask`` may be ``str``, ``pathlib.Path``, or
-    ``None``.
+    ``None``. A mask given in the Options tab is used verbatim, otherwise an
+    adaptive mask is generated. The remaining keyword arguments seed the
+    matching fields on the Options tab; leaving them at their defaults keeps
+    the trueFSC auto behaviour.
 
     Returns
     -------
@@ -264,6 +279,8 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
 
     from PySide6.QtCore import Qt, QThread, Signal
     from PySide6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
         QDialog,
         QFileDialog,
         QGridLayout,
@@ -271,6 +288,7 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
         QLabel,
         QLineEdit,
         QPushButton,
+        QTabWidget,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -350,12 +368,21 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
         finished = Signal(object)
         error = Signal(str)
 
-        def __init__(self, map1, map2, mask, plot_file, parent=None):
+        def __init__(
+            self,
+            map1,
+            map2,
+            mask,
+            plot_file,
+            options,
+            parent=None,
+        ):
             super().__init__(parent)
             self._map1 = map1
             self._map2 = map2
             self._mask = mask
             self._plot_file = plot_file
+            self._options = options
 
         def run(self):
             try:
@@ -363,6 +390,9 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
                 self.line_received.emit(f"Map 2: {self._map2}")
                 if self._mask:
                     self.line_received.emit(f"Mask: {self._mask}")
+                for key, value in self._options.items():
+                    if value is not None and value not in ("", -1, 0):
+                        self.line_received.emit(f"{key}: {value}")
                 self.line_received.emit(f"Output: {self._plot_file}")
                 self.line_received.emit("")
 
@@ -376,7 +406,7 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
                         self._map1,
                         self._map2,
                         self._plot_file,
-                        mask_file=[self._mask] if self._mask else None,
+                        **self._options,
                     )
                 finally:
                     logger.removeHandler(handler)
@@ -398,6 +428,16 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
             self._map1 = str(Path(map1).resolve()) if map1 else ""
             self._map2 = str(Path(map2).resolve()) if map2 else ""
             self._mask = str(Path(mask).resolve()) if mask else ""
+            self._seed = {
+                "apix": apix,
+                "cutoff_res": cutoff_res,
+                "one_mask": one_mask,
+                "mask_fraction_thresh": mask_fraction_thresh,
+                "mask_thresh": mask_thresh,
+                "mask_mass": mask_mass,
+                "mask_soft": mask_soft,
+                "refine_mask": refine_mask,
+            }
 
             root = QVBoxLayout(self)
             grid = QGridLayout()
@@ -430,8 +470,12 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
             grid.addWidget(_ortho_pane("Masked map 1", self._masked1_viewer), 0, 2)
             grid.addWidget(_ortho_pane("Masked map 2", self._masked2_viewer), 1, 2)
 
-            # Column 2, row 2: the input map selectors plus the info log.
-            selector_panel = self._build_selector_panel()
+            # Column 2, row 2: an "Input Maps" / "Options" tab bar plus the
+            # info log. The Options tab exposes the remaining trueFSC command
+            # options that are not part of the three input map selectors.
+            self._tabs = QTabWidget()
+            self._tabs.addTab(self._build_selector_panel(), "Input Maps")
+            self._tabs.addTab(self._build_options_panel(), "Options")
             info_box = QVBoxLayout()
             info_box.setContentsMargins(0, 0, 0, 0)
             info_box.setSpacing(2)
@@ -443,7 +487,7 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
             info_col = QVBoxLayout(info_widget)
             info_col.setContentsMargins(0, 0, 0, 0)
             info_col.setSpacing(2)
-            info_col.addWidget(selector_panel)
+            info_col.addWidget(self._tabs)
             info_col.addLayout(info_box, 1)
             grid.addWidget(info_widget, 1, 1)
 
@@ -467,12 +511,11 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
             return button
 
         def _build_selector_panel(self) -> QWidget:
-            """Build the Map 1 / Map 2 / optional Mask file selectors."""
+            """Build the Map 1 / Map 2 file selectors."""
             panel = QWidget()
             box = QVBoxLayout(panel)
             box.setContentsMargins(0, 0, 0, 0)
             box.setSpacing(2)
-            box.addWidget(_section_label("Input maps"))
 
             self._map1_edit, row1 = self._selector_row(
                 "Map 1", "Choose the half-map 1 3D MRC/MAP map from disk"
@@ -480,14 +523,289 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
             self._map2_edit, row2 = self._selector_row(
                 "Map 2", "Choose the half-map 2 3D MRC/MAP map from disk"
             )
-            self._mask_edit, row3 = self._selector_row(
-                "Mask",
-                "Optional mask used verbatim; empty generates an adaptive mask",
-            )
             box.addLayout(row1)
             box.addLayout(row2)
-            box.addLayout(row3)
             return panel
+
+        def _build_options_panel(self) -> QWidget:
+            """Build the Options tab exposing the remaining trueFSC options."""
+            panel = QWidget()
+            box = QVBoxLayout(panel)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(6)
+
+            # Pixel size + cutoff resolution on a single row.
+            self._apix_edit, self._cutoff_edit = self._build_options_pair_row(
+                box,
+                "Pixel size (A)",
+                "Pixel size in Angstrom. Empty reads it from the map header",
+                str(self._seed["apix"]) if self._seed["apix"] else "",
+                "Cutoff res (A)",
+                "Starting resolution for phase randomization. Default: FSC=0.8 "
+                "of the unmasked maps",
+                str(self._seed["cutoff_res"]) if self._seed["cutoff_res"] else "",
+            )
+
+            # Mask threshold mode + value.
+            self._mask_mode_combo, mask_value_edit = self._build_mask_mode_row(
+                box, self._seed["mask_fraction_thresh"]
+            )
+            self._mask_value_edit = mask_value_edit
+            self._mask_mode_combo.currentIndexChanged.connect(
+                self._on_mask_mode_changed
+            )
+
+            # Mask slope width + refine-slope + common-mask checkboxes on a
+            # single row.
+            slope_label = QLabel("Slope (A)")
+            slope_label.setToolTip(
+                "Mask slope width in Angstrom. Empty uses automatic slope"
+            )
+            self._mask_soft_edit = QLineEdit(
+                str(self._seed["mask_soft"]) if self._seed["mask_soft"] > 0 else "",
+                maxLength=8,
+            )
+            self._mask_soft_edit.setToolTip(
+                "Mask slope width in Angstrom. Empty uses automatic slope"
+            )
+            self._mask_soft_edit.setPlaceholderText("auto")
+            self._mask_soft_edit.setClearButtonEnabled(True)
+            # The slope only needs a few digits; keep it compact so the
+            # two checkboxes have room to render their full labels and
+            # absorb the spare width (no clipped trailing letter).
+            self._mask_soft_edit.setMaximumWidth(110)
+            self._refine_check = QCheckBox("Refine slope")
+            self._refine_check.setToolTip(
+                "Refine the mask slope at the end of the computation"
+            )
+            self._refine_check.setChecked(bool(self._seed["refine_mask"]))
+            self._one_mask_check = QCheckBox("Common mask")
+            self._one_mask_check.setToolTip(
+                "Use the same mask for both maps (checked) or separate masks"
+            )
+            self._one_mask_check.setChecked(bool(self._seed["one_mask"]))
+            slope_row = QHBoxLayout()
+            slope_row.setSpacing(4)
+            slope_row.addWidget(slope_label)
+            slope_row.addWidget(self._mask_soft_edit)
+            slope_row.addWidget(self._refine_check, 1)
+            slope_row.addWidget(self._one_mask_check, 1)
+            box.addLayout(slope_row)
+
+            # Optional mask map, grouped with the mask threshold options. When a
+            # mask file is provided the mask slope below is grayed out.
+            mask_row = QHBoxLayout()
+            mask_row.setSpacing(4)
+            mask_label = QLabel("Mask map")
+            mask_label.setMinimumWidth(48)
+            mask_row.addWidget(mask_label)
+            self._mask_edit = QLineEdit()
+            self._mask_edit.setClearButtonEnabled(True)
+            self._mask_edit.setPlaceholderText("Path to a mask MRC/MAP map...")
+            self._mask_edit.setToolTip(
+                "Optional mask used verbatim; empty generates an adaptive mask"
+            )
+            mask_row.addWidget(self._mask_edit, 1)
+            mask_browse = self._compact_button(
+                "Browse...",
+                "Optional mask used verbatim; empty generates an adaptive mask",
+            )
+            mask_browse.clicked.connect(lambda: self._browse_for(self._mask_edit))
+            mask_row.addWidget(mask_browse)
+            box.addLayout(mask_row)
+            self._mask_edit.textChanged.connect(self._on_mask_changed)
+
+            for widget in (
+                self._apix_edit,
+                self._cutoff_edit,
+                self._mask_value_edit,
+                self._mask_edit,
+                self._mask_soft_edit,
+                self._mask_mode_combo,
+                self._refine_check,
+                self._one_mask_check,
+            ):
+                signal = getattr(widget, "editingFinished", None)
+                if signal is not None:
+                    signal.connect(self._on_options_changed)
+                if isinstance(widget, QCheckBox):
+                    widget.toggled.connect(self._on_options_changed)
+                if isinstance(widget, QComboBox):
+                    widget.currentIndexChanged.connect(self._on_options_changed)
+            return panel
+
+        def _build_options_pair_row(
+            self,
+            box: QVBoxLayout,
+            label1: str,
+            tooltip1: str,
+            value1: str,
+            label2: str,
+            tooltip2: str,
+            value2: str,
+        ) -> tuple[QLineEdit, QLineEdit]:
+            """Add two labeled line edits side by side and return them."""
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for index, (label_text, tooltip, value) in enumerate(
+                ((label1, tooltip1, value1), (label2, tooltip2, value2))
+            ):
+                sub = QHBoxLayout()
+                sub.setSpacing(4)
+                label = QLabel(label_text)
+                label.setMinimumWidth(72)
+                sub.addWidget(label)
+                edit = QLineEdit(value)
+                edit.setToolTip(tooltip)
+                edit.setPlaceholderText("auto")
+                edit.setClearButtonEnabled(True)
+                sub.addWidget(edit, 1)
+                row.addLayout(sub, 1)
+                if index == 0:
+                    edit1 = edit
+                else:
+                    edit2 = edit
+            box.addLayout(row)
+            return edit1, edit2
+
+        def _build_options_row(
+            self, box: QVBoxLayout, label_text: str, tooltip: str, value: str
+        ) -> QLineEdit:
+            """Add a labeled line edit row to the options tab and return it."""
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            label = QLabel(label_text)
+            label.setMinimumWidth(96)
+            row.addWidget(label)
+            edit = QLineEdit(value)
+            edit.setToolTip(tooltip)
+            edit.setPlaceholderText("auto")
+            edit.setClearButtonEnabled(True)
+            row.addWidget(edit, 1)
+            box.addLayout(row)
+            return edit
+
+        def _build_mask_mode_row(
+            self, box: QVBoxLayout, fraction_thresh: float
+        ) -> tuple[QComboBox, QLineEdit]:
+            """Add the mask-threshold mode selector and its value field."""
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            label = QLabel("Mask threshold")
+            label.setMinimumWidth(96)
+            row.addWidget(label)
+            self._mask_mode_combo = QComboBox()
+            self._mask_mode_combo.addItem("Auto", userData="auto")
+            self._mask_mode_combo.addItem("Fraction of max", userData="fraction")
+            self._mask_mode_combo.addItem("Pixel value", userData="pixel")
+            self._mask_mode_combo.addItem("Mass (kDa)", userData="mass")
+            row.addWidget(self._mask_mode_combo, 1)
+            value_edit = QLineEdit()
+            value_edit.setPlaceholderText(
+                "Value (auto mode computes it from the map density)"
+            )
+            value_edit.setClearButtonEnabled(True)
+            row.addWidget(value_edit, 1)
+            box.addLayout(row)
+            self._mask_value_edit = value_edit
+            if fraction_thresh > 0:
+                self._mask_mode_combo.setCurrentIndex(1)
+                value_edit.setText(str(fraction_thresh))
+            elif fraction_thresh == 0:
+                self._mask_mode_combo.setCurrentIndex(3)
+                value_edit.setText(str(self._seed["mask_mass"]))
+            elif self._seed["mask_thresh"]:
+                self._mask_mode_combo.setCurrentIndex(2)
+                thresh = self._seed["mask_thresh"]
+                value_edit.setText(
+                    str(thresh[0] if isinstance(thresh, list) else thresh)
+                )
+            self._on_mask_mode_changed()
+            return self._mask_mode_combo, self._mask_value_edit
+
+        def _on_mask_mode_changed(self) -> None:
+            """Enable/disable the mask-value field in auto mode."""
+            mode = self._mask_mode_combo.currentData()
+            enabled = mode != "auto"
+            self._mask_value_edit.setEnabled(enabled)
+            if not enabled:
+                self._mask_value_edit.setPlaceholderText(
+                    "Auto (computed from the map density)"
+                )
+            else:
+                self._mask_value_edit.setPlaceholderText("Value")
+
+        def _on_mask_changed(self) -> None:
+            """Gray out the mask slope when a mask map is provided."""
+            has_mask = bool(self._mask_edit.text().strip())
+            self._mask_soft_edit.setEnabled(not has_mask)
+            tooltip = (
+                "Mask used verbatim; slope options are inactive."
+                if has_mask
+                else "Mask slope width in Angstrom. Empty uses automatic slope"
+            )
+            self._mask_soft_edit.setToolTip(tooltip)
+            self._refine_check.setEnabled(not has_mask)
+
+        def _get_options(self) -> dict:
+            """Return the trueFSC options dict parsed from the Options tab."""
+
+            def _float(text_value, default):
+                text_value = text_value.strip()
+                if not text_value:
+                    return default
+                try:
+                    return float(text_value)
+                except ValueError:
+                    return default
+
+            apix = _float(self._apix_edit.text(), 0)
+            cutoff_res = _float(self._cutoff_edit.text(), 0)
+            self._mask = self._mask_edit.text().strip()
+            mask_file = [self._mask] if self._mask else None
+            if mask_file:
+                # A provided mask is used verbatim (mask slope is grayed out).
+                mask_soft = -1
+            else:
+                mask_soft = _float(self._mask_soft_edit.text(), -1)
+
+            mode = self._mask_mode_combo.currentData()
+            mask_fraction_thresh = -1
+            mask_thresh = None
+            mask_mass = 0
+            if mode == "fraction":
+                mask_fraction_thresh = _float(self._mask_value_edit.text(), 1.0)
+            elif mode == "pixel":
+                val = _float(self._mask_value_edit.text(), None)
+                mask_thresh = [val] if val is not None else None
+            elif mode == "mass":
+                mask_mass = _float(self._mask_value_edit.text(), 0)
+
+            if mask_soft > 0:
+                # A manual slope disables slope refinement (mirrors the CLI).
+                refine_mask = 0
+            else:
+                refine_mask = 1 if self._refine_check.isChecked() else 0
+
+            options = {
+                "apix": apix,
+                "cutoff_res": cutoff_res,
+                "one_mask": 1 if self._one_mask_check.isChecked() else 0,
+                "mask_file": mask_file,
+                "mask_fraction_thresh": mask_fraction_thresh,
+                "mask_thresh": mask_thresh,
+                "mask_mass": mask_mass,
+                "mask_soft": mask_soft,
+                "refine_mask": refine_mask,
+            }
+            return options
+
+        def _on_options_changed(self) -> None:
+            """Recompute True FSC when an option changes and maps are ready."""
+            self._mask = self._mask_edit.text().strip()
+            if self._map1 and self._map2:
+                self._seq += 1
+                self._start_compute(self._seq)
 
         def _selector_row(
             self, label_text: str, tooltip: str
@@ -566,8 +884,8 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
         def _on_inputs_loaded(self, volumes, seq) -> None:
             if seq != self._seq:
                 return
-            (d1, a1) = volumes["map1"]
-            (d2, a2) = volumes["map2"]
+            d1, a1 = volumes["map1"]
+            d2, a2 = volumes["map2"]
             if d1 is not None:
                 self._map1_viewer.set_volume(d1, a1, reset_position=True)
             else:
@@ -599,8 +917,14 @@ def _launch_truefsc_maps(map1=None, map2=None, mask=None, parent=None) -> None:
         def _start_compute(self, seq) -> None:
             output_dir = _output_dir_for(self._map1)
             plot_file = output_dir / "trueFSC.pdf"
+            options = self._get_options()
             worker = _ComputeWorker(
-                self._map1, self._map2, self._mask, str(plot_file), parent=self
+                self._map1,
+                self._map2,
+                self._mask,
+                str(plot_file),
+                options,
+                parent=self,
             )
             self._track(worker)
             worker.line_received.connect(self.append_line)

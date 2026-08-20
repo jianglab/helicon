@@ -59,6 +59,33 @@ def _display_theme_stylesheet() -> str:
             color: {colors["text"]};
             selection-background-color: {colors["accent"]};
         }}
+        QTabWidget::pane {{
+            border: 1px solid {colors["border"]};
+            background-color: {colors["window"]};
+            border-radius: 3px;
+        }}
+        QTabBar::tab {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-bottom: none;
+            padding: 4px 10px;
+            margin-right: 2px;
+            border-top-left-radius: 3px;
+            border-top-right-radius: 3px;
+        }}
+        QTabBar::tab:selected {{
+            background-color: {colors["window"]};
+            color: {colors["strong_text"]};
+            font-weight: bold;
+        }}
+        QTabBar::tab:hover:!selected {{
+            background-color: {colors["hover"]};
+        }}
+        QCheckBox {{
+            color: {colors["strong_text"]};
+            spacing: 6px;
+        }}
     """
 
 
