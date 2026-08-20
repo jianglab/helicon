@@ -571,7 +571,7 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
                 nz = int(mrc.header.nz)
                 apix = float(mrc.voxel_size.x)
                 if apix > 0:
-                    pixel_size = f"{apix:.2f} Å"
+                    pixel_size = f"{apix:.3f} Å"
                 if ext == ".mrcs":
                     n_images = str(nz) if nz > 1 else "1"
                     info = f"{nx}×{ny}"
@@ -725,7 +725,7 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
                                 nz = int(mrc.header.nz)
                                 apix = float(mrc.voxel_size.x)
                                 if apix > 0:
-                                    pixel_size = f"{apix:.2f} Å"
+                                    pixel_size = f"{apix:.3f} Å"
                                 if img_ext == ".mrcs" or nz == 1:
                                     info = f"{nx}×{ny}"
                                 else:
@@ -744,7 +744,7 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
                     and optics_pixel_size is not None
                     and optics_pixel_size > 0
                 ):
-                    pixel_size = f"{optics_pixel_size:.2f} Å"
+                    pixel_size = f"{optics_pixel_size:.3f} Å"
         except Exception:
             pass
 

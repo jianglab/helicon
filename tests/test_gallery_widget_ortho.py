@@ -36,8 +36,11 @@ class TestVoxelValueDisplay:
         widget._on_click(0, x, y)  # Z panel: horizontal=x, vertical=y
         z = widget._nz // 2
         val = widget._volume[z, y, x]
+        cx, cy, cz = widget._nx // 2, widget._ny // 2, widget._nz // 2
         assert widget._ctrl._voxel_label.text() == (
             f"x,y,z={x},{y},{z} val={float(val):.6g}"
+            f" (world {(x - cx) * widget._apix:.3g},{(y - cy) * widget._apix:.3g},"
+            f"{(z - cz) * widget._apix:.3g} A | apix {widget._apix:.6g})"
         )
 
     def test_click_panel_x_updates_voxel_label(self, qapp):
@@ -46,8 +49,11 @@ class TestVoxelValueDisplay:
         widget._on_click(1, z_click, y_click)  # X panel: horizontal=z, vertical=y
         x = widget._nx // 2
         val = widget._volume[z_click, y_click, x]
+        cx, cy, cz = widget._nx // 2, widget._ny // 2, widget._nz // 2
         assert widget._ctrl._voxel_label.text() == (
             f"x,y,z={x},{y_click},{z_click} val={float(val):.6g}"
+            f" (world {(x - cx) * widget._apix:.3g},{(y_click - cy) * widget._apix:.3g},"
+            f"{(z_click - cz) * widget._apix:.3g} A | apix {widget._apix:.6g})"
         )
 
     def test_click_panel_y_updates_voxel_label(self, qapp):
@@ -56,8 +62,39 @@ class TestVoxelValueDisplay:
         widget._on_click(2, x_click, z_click)  # Y panel: horizontal=x, vertical=z
         y = widget._ny // 2
         val = widget._volume[z_click, y, x_click]
+        cx, cy, cz = widget._nx // 2, widget._ny // 2, widget._nz // 2
         assert widget._ctrl._voxel_label.text() == (
             f"x,y,z={x_click},{y},{z_click} val={float(val):.6g}"
+            f" (world {(x_click - cx) * widget._apix:.3g},{(y - cy) * widget._apix:.3g},"
+            f"{(z_click - cz) * widget._apix:.3g} A | apix {widget._apix:.6g})"
+        )
+
+    def test_slider_position_updates_voxel_label(self, qapp):
+        widget = OrthogonalViewerWidget(_make_volume())
+        x, y, z = 4, 0, 3
+        val = widget._volume[z, y, x]
+        widget._on_slider_position(x, y, z)
+        assert widget._pos == [x, y, z]
+        cx, cy, cz = widget._nx // 2, widget._ny // 2, widget._nz // 2
+        assert widget._ctrl._voxel_label.text() == (
+            f"x,y,z={x},{y},{z} val={float(val):.6g}"
+            f" (world {(x - cx) * widget._apix:.3g},{(y - cy) * widget._apix:.3g},"
+            f"{(z - cz) * widget._apix:.3g} A | apix {widget._apix:.6g})"
+        )
+
+    def test_apix_scales_world_coordinates(self, qapp):
+        apix = 2.5
+        widget = OrthogonalViewerWidget(_make_volume(), apix=apix)
+        assert widget._ctrl._apix == apix
+        x, y = widget._nx - 1, 0  # corner: world offset = (nx-1 - cx) * apix
+        widget._on_click(0, x, y)
+        z = widget._pos[2]
+        val = widget._volume[z, y, x]
+        cx, cy, cz = widget._nx // 2, widget._ny // 2, widget._nz // 2
+        assert widget._ctrl._voxel_label.text() == (
+            f"x,y,z={x},{y},{z} val={float(val):.6g}"
+            f" (world {(x - cx) * apix:.3g},{(y - cy) * apix:.3g},"
+            f"{(z - cz) * apix:.3g} A | apix {apix:.6g})"
         )
 
 

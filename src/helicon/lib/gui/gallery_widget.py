@@ -1484,7 +1484,7 @@ class _ControlBar(QWidget):
     reset_view_requested = Signal()
     middle_clicked = Signal()
 
-    def __init__(self, nx: int, ny: int, nz: int, parent=None):
+    def __init__(self, nx: int, ny: int, nz: int, apix: float = 1.0, parent=None):
         super().__init__(parent)
         colors = _gallery_theme_colors()
         self.setMinimumWidth(170)
@@ -1493,6 +1493,9 @@ class _ControlBar(QWidget):
         pal.setColor(self.backgroundRole(), QColor(colors["panel"]))
         self.setPalette(pal)
         self.setStyleSheet(_gallery_qss(colors))
+        # Pixel size and dimensions back the world-coordinate readout.
+        self._apix = float(apix)
+        self._nx, self._ny, self._nz = nx, ny, nz
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -1594,6 +1597,7 @@ class _ControlBar(QWidget):
         self._voxel_label = _label("")
         self._voxel_label.setStyleSheet(val_lbl)
         self._voxel_label.setWordWrap(True)
+        self._voxel_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(self._voxel_label)
 
         # Slider<->spinbox mirror: each side blocks the other's signals
@@ -1687,6 +1691,7 @@ class _ControlBar(QWidget):
         nz : int
             New Z dimension.
         """
+        self._nx, self._ny, self._nz = nx, ny, nz
         for slider, spin, rng in [
             (self._x_slider, self._x_spin, nx),
             (self._y_slider, self._y_spin, ny),
@@ -1708,10 +1713,22 @@ class _ControlBar(QWidget):
         self._zoom_slider.blockSignals(False)
 
     def set_voxel_value(self, x: int, y: int, z: int, val: float) -> None:
-        "Show the clicked voxel index and value in the control panel."
+        """Show the voxel index, value and world coordinates in the panel.
+
+        The world coordinate is the offset from the map center
+        (nx//2, ny//2, nz//2) in Angstroms, i.e. (idx - center) * apix.
+        """
+        cx, cy, cz = self._nx // 2, self._ny // 2, self._nz // 2
+        wx = (int(x) - cx) * self._apix
+        wy = (int(y) - cy) * self._apix
+        wz = (int(z) - cz) * self._apix
         self._voxel_label.setText(
-            f"x,y,z={int(x)},{int(y)},{int(z)} val={float(val):.6g}"
+            f"val={float(val):.6g} at x,y,z={int(x)},{int(y)},{int(z)} ({wx:.3g},{wy:.3g},{wz:.3g} Å | {self._apix:.4g} Å/pixel)"
         )
+
+    def set_apix(self, apix: float) -> None:
+        """Update the pixel size used for the world-coordinate readout."""
+        self._apix = float(apix)
 
     def set_movie_playing(self, playing: bool) -> None:
         self._movie_btn.blockSignals(True)
@@ -1903,6 +1920,7 @@ class OrthogonalViewerWidget(QWidget):
             for i, dim in enumerate((self._nx, self._ny, self._nz)):
                 self._pos[i] = int(np.clip(self._pos[i], 0, dim - 1))
         self._ctrl.set_dimensions(nx, ny, nz)
+        self._ctrl.set_apix(self._apix)
         self._sync_views(source_idx=-1)
 
     def _apply_display_theme(self) -> None:
@@ -1935,6 +1953,7 @@ class OrthogonalViewerWidget(QWidget):
         self._yz_view.set_axes("x", "z")
 
         self._ctrl = _ControlBar(self._nx, self._ny, self._nz)
+        self._ctrl.set_apix(self._apix)
 
         # Arrange the three orthogonal panels in Z, X, Y order.
         layout.addWidget(self._xy_view, 0, 0)
@@ -2012,10 +2031,7 @@ class OrthogonalViewerWidget(QWidget):
             self._pos[0] = int(np.clip(round(dx), 0, self._nx - 1))
             self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
         self._sync_views(source_idx=panel_idx)
-        if self._volume is not None:
-            x, y, z = self._pos
-            val = float(self._volume[z, y, x])
-            self._ctrl.set_voxel_value(x, y, z, val)
+        self._update_voxel_label()
 
     def _on_pan(self, panel_idx: int, dpx: int, dpy: int) -> None:
         """Linked panning: dragging in one view shifts the other two to keep
@@ -2124,9 +2140,18 @@ class OrthogonalViewerWidget(QWidget):
     def set_selected_idx(self, idx) -> None:
         pass
 
+    def _update_voxel_label(self) -> None:
+        """Refresh the voxel value/world-coordinate readout from self._pos."""
+        if self._volume is None:
+            return
+        x, y, z = self._pos
+        val = float(self._volume[z, y, x])
+        self._ctrl.set_voxel_value(x, y, z, val)
+
     def _on_slider_position(self, x: int, y: int, z: int) -> None:
         self._pos = [x, y, z]
         self._sync_views(source_idx=-1)
+        self._update_voxel_label()
 
     def _on_movie_toggle(self, playing: bool) -> None:
         if playing:
@@ -2142,9 +2167,11 @@ class OrthogonalViewerWidget(QWidget):
             v._pan_y = 0.0
         self._ctrl.set_zoom(1.0)
         self._sync_views(source_idx=-1)
+        self._update_voxel_label()
 
     def _advance_movie(self) -> None:
         axis = self._movie_axis
         sizes = [self._nx, self._ny, self._nz]
         self._pos[axis] = (self._pos[axis] + 1) % sizes[axis]
         self._sync_views(source_idx=-1)
+        self._update_voxel_label()
