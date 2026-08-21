@@ -4503,7 +4503,9 @@ class TestTrueFscPanel(object):
         dialog.close()
         qapp.processEvents()
 
-    def test_launch_exposes_options_tab_to_the_right_of_input_maps(self, qapp):
+    def test_launch_exposes_options_and_fsc_tabs_to_the_right_of_input_maps(
+        self, qapp
+    ):
         from helicon.commands import display
 
         dialog = display._launch_truefsc_maps(parent=None)
@@ -4511,7 +4513,8 @@ class TestTrueFscPanel(object):
         tabs = dialog._tabs
         assert tabs.tabText(0) == "Input Maps"
         assert tabs.tabText(1) == "Options"
-        assert tabs.count() == 2
+        assert tabs.tabText(2) == "FSC curves"
+        assert tabs.count() == 3
         # The freshly launched dialog uses auto defaults on the Options tab.
         opts = dialog._get_options()
         assert opts["apix"] == 0
@@ -4522,6 +4525,57 @@ class TestTrueFscPanel(object):
         assert opts["mask_mass"] == 0
         assert opts["mask_soft"] == -1
         assert opts["refine_mask"] == 1
+        dialog.close()
+        qapp.processEvents()
+
+    def test_fsc_tab_uses_the_information_panel_space(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        dialog.show()
+        qapp.processEvents()
+        assert not dialog._information_panel.isHidden()
+        assert dialog._tabs.maximumHeight() == dialog._config_tabs_height
+
+        dialog._tabs.setCurrentIndex(dialog._fsc_tab_index)
+        qapp.processEvents()
+        assert dialog._information_panel.isHidden()
+        assert dialog._tabs.maximumHeight() == 16777215
+
+        dialog._tabs.setCurrentIndex(0)
+        qapp.processEvents()
+        assert not dialog._information_panel.isHidden()
+        assert dialog._tabs.maximumHeight() == dialog._config_tabs_height
+        dialog.close()
+        qapp.processEvents()
+
+    def test_result_curves_are_plotted_in_app(self, qapp):
+        import numpy as np
+
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        curves = [
+            (
+                np.array([0.0, 0.1, 0.2]),
+                np.array([1.0, 0.5, 0.1]),
+                "corrected (5.00 A)",
+            ),
+            (
+                np.array([0.0, 0.1, 0.2]),
+                np.array([1.0, 0.6, 0.2]),
+                "masked (4.80 A)",
+            ),
+        ]
+        dialog.set_result({"fsc_curves": curves}, seq=0)
+        qapp.processEvents()
+
+        assert len(dialog._fsc_curve_items) == 2
+        assert dialog._fsc_plot_widget.isVisibleTo(dialog)
+        assert dialog._tabs.currentIndex() == dialog._fsc_tab_index
+        assert dialog._information_panel.isHidden()
+        np.testing.assert_allclose(dialog._fsc_curve_items[0].xData, curves[0][0])
+        np.testing.assert_allclose(dialog._fsc_curve_items[0].yData, curves[0][1])
         dialog.close()
         qapp.processEvents()
 

@@ -252,12 +252,14 @@ def _launch_truefsc_maps(
 ) -> None:
     """Open the trueFSC panel with Map 1 / Map 2 selectors and options.
 
-    The information pane holds two tabs. The first, "Input Maps", provides
+    The information pane holds three tabs. The first, "Input Maps", provides
     the Map 1 and Map 2 file selectors. As soon as both half-maps are chosen
     the two input ortho viewers load and the True FSC computation runs in the
     background. The second tab, "Options", exposes the remaining trueFSC
     command options: pixel size, cutoff resolution, the optional mask map and
-    mask threshold behaviour, and the mask slope width.
+    mask threshold behaviour, and the mask slope width. The third, "FSC
+    curves", displays the resulting curves in the app and expands over the
+    information panel while selected.
 
     ``map1``, ``map2``, and ``mask`` may be ``str``, ``pathlib.Path``, or
     ``None``. A mask given in the Options tab is used verbatim, otherwise an
@@ -470,12 +472,25 @@ def _launch_truefsc_maps(
             grid.addWidget(_ortho_pane("Masked map 1", self._masked1_viewer), 0, 2)
             grid.addWidget(_ortho_pane("Masked map 2", self._masked2_viewer), 1, 2)
 
-            # Column 2, row 2: an "Input Maps" / "Options" tab bar plus the
-            # info log. The Options tab exposes the remaining trueFSC command
-            # options that are not part of the three input map selectors.
+            # Column 2, row 2: an "Input Maps" / "Options" / "FSC curves"
+            # tab bar plus the info log. The curve tab expands over the info
+            # log so the plot can use this entire grid cell.
             self._tabs = QTabWidget()
-            self._tabs.addTab(self._build_selector_panel(), "Input Maps")
-            self._tabs.addTab(self._build_options_panel(), "Options")
+            selector_panel = self._build_selector_panel()
+            options_panel = self._build_options_panel()
+            self._tabs.addTab(selector_panel, "Input Maps")
+            self._tabs.addTab(options_panel, "Options")
+            self._fsc_tab_index = self._tabs.addTab(
+                self._build_fsc_panel(), "FSC curves"
+            )
+            self._config_tabs_height = (
+                self._tabs.tabBar().sizeHint().height()
+                + max(
+                    selector_panel.sizeHint().height(),
+                    options_panel.sizeHint().height(),
+                )
+                + 12
+            )
             info_box = QVBoxLayout()
             info_box.setContentsMargins(0, 0, 0, 0)
             info_box.setSpacing(2)
@@ -483,13 +498,17 @@ def _launch_truefsc_maps(
             self.text_edit = QTextEdit()
             self.text_edit.setReadOnly(True)
             info_box.addWidget(self.text_edit, 1)
+            self._information_panel = QWidget()
+            self._information_panel.setLayout(info_box)
             info_widget = QWidget()
             info_col = QVBoxLayout(info_widget)
             info_col.setContentsMargins(0, 0, 0, 0)
             info_col.setSpacing(2)
             info_col.addWidget(self._tabs)
-            info_col.addLayout(info_box, 1)
+            info_col.addWidget(self._information_panel, 1)
             grid.addWidget(info_widget, 1, 1)
+            self._tabs.currentChanged.connect(self._on_tab_changed)
+            self._on_tab_changed(self._tabs.currentIndex())
 
             if self._map1:
                 self._map1_edit.setText(self._map1)
@@ -633,6 +652,131 @@ def _launch_truefsc_maps(
                 if isinstance(widget, QComboBox):
                     widget.currentIndexChanged.connect(self._on_options_changed)
             return panel
+
+        def _build_fsc_panel(self) -> QWidget:
+            """Build the interactive, in-app True FSC curve plot."""
+            import pyqtgraph as pg
+
+            panel = QWidget()
+            box = QVBoxLayout(panel)
+            box.setContentsMargins(0, 0, 0, 0)
+            self._fsc_placeholder = QLabel(
+                "FSC curves will appear here when the computation finishes."
+            )
+            self._fsc_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            box.addWidget(self._fsc_placeholder, 1)
+
+            pg.setConfigOptions(antialias=True)
+            self._fsc_plot_widget = pg.PlotWidget()
+            self._fsc_plot_widget.setVisible(False)
+            box.addWidget(self._fsc_plot_widget, 1)
+
+            plot = self._fsc_plot_widget.getPlotItem()
+            self._fsc_plot = plot
+            plot.getAxis("bottom").enableAutoSIPrefix(False)
+            plot.setLabel("bottom", "Resolution", units="1/Å")
+            plot.setLabel("left", "Fourier Shell Correlation")
+            plot.showGrid(x=True, y=True, alpha=0.3)
+            self._fsc_legend = plot.addLegend()
+
+            top_axis = plot.getAxis("top")
+            top_axis.enableAutoSIPrefix(False)
+            top_axis.setLabel("Resolution", units="Å")
+            top_axis.tickStrings = lambda values, scale, spacing: [
+                f"{1.0 / value:.1f}" if value > 0 else "∞" for value in values
+            ]
+            top_axis.show()
+
+            colors = _display_plot_theme_colors()
+            self._fsc_plot_colors = colors
+            self._fsc_plot_widget.setBackground(colors["background"])
+            for axis_name in ("left", "bottom", "top", "right"):
+                axis = plot.getAxis(axis_name)
+                axis.setPen(colors["foreground"])
+                axis.setTextPen(colors["foreground"])
+                axis.setTickPen(colors["foreground"])
+            plot.setLabel(
+                "bottom",
+                "Resolution",
+                units="1/Å",
+                color=colors["foreground"],
+            )
+            plot.setLabel(
+                "left", "Fourier Shell Correlation", color=colors["foreground"]
+            )
+            top_axis.setLabel("Resolution", units="Å", color=colors["foreground"])
+
+            threshold_pen = pg.mkPen(
+                color=(220, 50, 50), width=1, style=Qt.PenStyle.DashLine
+            )
+            self._fsc_threshold_line = pg.InfiniteLine(
+                pos=0.143, angle=0, pen=threshold_pen
+            )
+            plot.addItem(self._fsc_threshold_line)
+            self._fsc_curve_items = []
+            return panel
+
+        def _on_tab_changed(self, index: int) -> None:
+            """Give the curve tab the full tab-and-information area."""
+            curves_selected = index == self._fsc_tab_index
+            self._information_panel.setHidden(curves_selected)
+            self._tabs.setMaximumHeight(
+                16777215 if curves_selected else self._config_tabs_height
+            )
+
+        def _set_fsc_curves(self, curves) -> None:
+            """Replace the in-app plot with the curves from ``compute_truefsc``."""
+            import pyqtgraph as pg
+
+            for item in self._fsc_curve_items:
+                self._fsc_plot.removeItem(item)
+            self._fsc_curve_items.clear()
+
+            if not curves:
+                self._fsc_plot_widget.setVisible(False)
+                self._fsc_placeholder.setText(
+                    "FSC curves will appear here when the computation finishes."
+                )
+                self._fsc_placeholder.setVisible(True)
+                return
+
+            colors = _distinct_curve_colors(len(curves))
+            xmin = 0.0
+            xmax = 0.0
+            ymin = 0.0
+            ymax = 1.0
+            for color, (x, y, label) in zip(colors, curves):
+                x = np.asarray(x)
+                y = np.asarray(y)
+                if not x.size or not y.size:
+                    continue
+                finite = np.isfinite(x) & np.isfinite(y)
+                if not np.any(finite):
+                    continue
+                x = x[finite]
+                y = y[finite]
+                xmin = min(xmin, float(np.min(x)))
+                xmax = max(xmax, float(np.max(x)))
+                ymin = min(ymin, float(np.min(y)))
+                ymax = max(ymax, float(np.max(y)))
+                pen = pg.mkPen(color=color, width=2)
+                self._fsc_curve_items.append(
+                    self._fsc_plot.plot(x, y, pen=pen, name=str(label))
+                )
+
+            if not self._fsc_curve_items:
+                self._fsc_plot_widget.setVisible(False)
+                self._fsc_placeholder.setText("No plottable FSC curve data was returned.")
+                self._fsc_placeholder.setVisible(True)
+                return
+            for _sample, legend_label in self._fsc_legend.items:
+                legend_label.setText(
+                    legend_label.text, color=self._fsc_plot_colors["foreground"]
+                )
+            self._fsc_plot.setXRange(xmin, xmax, padding=0.02)
+            self._fsc_plot.setYRange(ymin, ymax, padding=0.04)
+            self._fsc_placeholder.setVisible(False)
+            self._fsc_plot_widget.setVisible(True)
 
         def _build_options_pair_row(
             self,
@@ -915,6 +1059,8 @@ def _launch_truefsc_maps(
             self.text_edit.append(f"Error loading maps:\n{message}")
 
         def _start_compute(self, seq) -> None:
+            self._set_fsc_curves(None)
+            self._fsc_placeholder.setText("Computing FSC curves…")
             output_dir = _output_dir_for(self._map1)
             plot_file = output_dir / "trueFSC.pdf"
             options = self._get_options()
@@ -947,6 +1093,8 @@ def _launch_truefsc_maps(
                 return
             if not result:
                 return
+
+            self._set_fsc_curves(result.get("fsc_curves"))
 
             volumes = result.get("volumes") or {}
             for viewer, key in (
@@ -992,6 +1140,9 @@ def _launch_truefsc_maps(
             else:
                 self.text_edit.append("True FSC completed")
 
+            if self._fsc_curve_items:
+                self._tabs.setCurrentIndex(self._fsc_tab_index)
+
             if plot_file:
                 viewer = _napari.active()
                 if viewer is None:
@@ -1005,6 +1156,8 @@ def _launch_truefsc_maps(
         def set_error(self, error_msg, seq):
             if seq != self._seq:
                 return
+            self._set_fsc_curves(None)
+            self._fsc_placeholder.setText("FSC computation failed; see Information.")
             self.text_edit.append(f"\nError: {error_msg}")
 
         def closeEvent(self, event) -> None:
