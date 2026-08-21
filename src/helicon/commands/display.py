@@ -1518,6 +1518,31 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
         panel._gamma_val.setText(f"{gallery._gamma:.2f}")
         _refresh_histogram()
 
+    def _on_histogram_bcg(brightness, contrast, gamma):
+        """Apply curve drags through the same quantized values as the sliders."""
+        values = (
+            (panel._brightness_slider, round(brightness * 100)),
+            (panel._contrast_slider, round(contrast * 100)),
+            (panel._gamma_slider, round(gamma * 100)),
+        )
+        for slider, value in values:
+            was_blocked = slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(was_blocked)
+
+        brightness = panel._brightness_slider.value() / 100.0
+        contrast = panel._contrast_slider.value() / 100.0
+        gamma = panel._gamma_slider.value() / 100.0
+        gallery.set_brightness(brightness)
+        gallery.set_contrast(contrast)
+        gallery.set_gamma(gamma)
+        panel._brightness_val.setText(f"{brightness:.2f}")
+        panel._contrast_val.setText(f"{contrast:.2f}")
+        panel._gamma_val.setText(f"{gamma:.2f}")
+        # Pixel samples have not changed, so repaint the transfer curve without
+        # rebuilding the histogram for every mouse-move event.
+        panel._histogram_widget.set_bcg(brightness, contrast, gamma)
+
     def _on_log_transform(checked):
         gallery.set_log_transform(checked)
         _refresh_histogram()
@@ -1553,6 +1578,7 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     panel._brightness_slider.valueChanged.connect(_on_brightness)
     panel._contrast_slider.valueChanged.connect(_on_contrast)
     panel._gamma_slider.valueChanged.connect(_on_gamma)
+    panel._histogram_widget.bcg_changed.connect(_on_histogram_bcg)
     panel._auto_btn.clicked.connect(_on_autocontrast)
     panel._radio_selected.toggled.connect(_on_scope_selected)
     panel._radio_all.toggled.connect(_on_scope_all)

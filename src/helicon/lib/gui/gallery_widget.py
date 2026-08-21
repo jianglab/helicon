@@ -521,9 +521,20 @@ class _HistogramWidget(QWidget):
     Samples a few images from the stack, bins pixel values into 256 buckets,
     and draws them as gray bars.  A white curve shows the current
     brightness/contrast/gamma mapping from normalized [0, 1] → display [0, 1].
+    The black- and white-point handles can be dragged horizontally to change
+    brightness and contrast; dragging the unclipped part of the curve
+    vertically changes gamma.
     """
 
     HIST_HEIGHT = 100
+    HANDLE_RADIUS = 5.0
+    HIT_RADIUS = 7.0
+    MIN_CONTRAST = 0.01
+    MAX_CONTRAST = 3.0
+    MIN_GAMMA = 0.01
+    MAX_GAMMA = 3.0
+
+    bcg_changed = Signal(float, float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -539,6 +550,13 @@ class _HistogramWidget(QWidget):
         self._contrast = 1.0
         self._gamma = 1.0
         self._log_transform = False
+        self._drag_target: str | None = None
+        self._gamma_drag_base: float | None = None
+        self.setMouseTracking(True)
+        self.setToolTip(
+            "Drag the end handles left/right for brightness and contrast; "
+            "drag the curve up/down for gamma."
+        )
 
     def _apply_display_theme(self) -> None:
         """Apply the current theme to the histogram canvas."""
@@ -589,10 +607,161 @@ class _HistogramWidget(QWidget):
         self._bins, _ = np.histogram(normed, bins=256, range=(0, 255))
         self.update()
 
+    def set_bcg(self, brightness: float, contrast: float, gamma: float) -> None:
+        """Update only the transfer curve, retaining the cached histogram."""
+        self._brightness = float(brightness)
+        self._contrast = float(contrast)
+        self._gamma = float(gamma)
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        margin = self.HANDLE_RADIUS + 1.0
+        return QRectF(
+            margin,
+            margin,
+            max(1.0, self.width() - 2.0 * margin),
+            max(1.0, self.height() - 2.0 * margin),
+        )
+
+    def _linear_transfer(self, x: float | np.ndarray) -> float | np.ndarray:
+        """Return the transfer value before gamma and output clipping."""
+        return (x + self._brightness - 0.5) * self._contrast + 0.5
+
+    def _endpoint_values(self) -> tuple[float, float]:
+        """Return normalized input positions of the black and white points."""
+        contrast = max(self.MIN_CONTRAST, self._contrast)
+        half_width = 0.5 / contrast
+        center = 0.5 - self._brightness
+        return center - half_width, center + half_width
+
+    def _endpoint_screen_position(self, target: str) -> QPointF | None:
+        black, white = self._endpoint_values()
+        x = black if target == "black" else white
+        if not 0.0 <= x <= 1.0:
+            return None
+        rect = self._plot_rect()
+        y = rect.bottom() if target == "black" else rect.top()
+        return QPointF(rect.left() + x * rect.width(), y)
+
+    def _hit_target(self, pos: QPointF) -> str | None:
+        """Identify a draggable handle or the active part of the curve."""
+        for target in ("black", "white"):
+            point = self._endpoint_screen_position(target)
+            if point is not None and math.hypot(
+                pos.x() - point.x(), pos.y() - point.y()
+            ) <= self.HIT_RADIUS:
+                return target
+
+        rect = self._plot_rect()
+        if not rect.adjusted(
+            -self.HIT_RADIUS,
+            -self.HIT_RADIUS,
+            self.HIT_RADIUS,
+            self.HIT_RADIUS,
+        ).contains(pos):
+            return None
+        x = float(np.clip((pos.x() - rect.left()) / rect.width(), 0.0, 1.0))
+        base = float(self._linear_transfer(x))
+        # Gamma cannot move the clipped horizontal sections of the curve.
+        if not 1e-6 < base < 1.0 - 1e-6:
+            return None
+        curve_y = float(self._transfer(np.asarray([x]))[0])
+        screen_y = rect.bottom() - curve_y * rect.height()
+        if abs(pos.y() - screen_y) <= self.HIT_RADIUS:
+            return "gamma"
+        return None
+
+    def _emit_endpoint_drag(self, target: str, screen_x: float) -> None:
+        """Convert a dragged black/white point back to brightness/contrast."""
+        rect = self._plot_rect()
+        dragged = float(
+            np.clip((screen_x - rect.left()) / rect.width(), 0.0, 1.0)
+        )
+        black, white = self._endpoint_values()
+        min_gap = 1.0 / self.MAX_CONTRAST
+        if target == "black":
+            black = min(dragged, white - min_gap)
+        else:
+            white = max(dragged, black + min_gap)
+        contrast = float(
+            np.clip(
+                1.0 / max(white - black, min_gap),
+                self.MIN_CONTRAST,
+                self.MAX_CONTRAST,
+            )
+        )
+        brightness = float(np.clip(0.5 - (black + white) / 2.0, -1.0, 1.0))
+        self.bcg_changed.emit(brightness, contrast, self._gamma)
+
+    def _emit_gamma_drag(self, screen_y: float) -> None:
+        """Choose gamma so the grabbed curve point follows the mouse vertically."""
+        if self._gamma_drag_base is None:
+            return
+        rect = self._plot_rect()
+        output = float(
+            np.clip((rect.bottom() - screen_y) / rect.height(), 1e-6, 1.0 - 1e-6)
+        )
+        gamma = math.log(self._gamma_drag_base) / math.log(output)
+        gamma = float(np.clip(gamma, self.MIN_GAMMA, self.MAX_GAMMA))
+        self.bcg_changed.emit(self._brightness, self._contrast, gamma)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self._drag_target = self._hit_target(event.position())
+        if self._drag_target == "gamma":
+            rect = self._plot_rect()
+            x = float(
+                np.clip(
+                    (event.position().x() - rect.left()) / rect.width(), 0.0, 1.0
+                )
+            )
+            self._gamma_drag_base = float(
+                np.clip(self._linear_transfer(x), 1e-6, 1.0 - 1e-6)
+            )
+        else:
+            self._gamma_drag_base = None
+        if self._drag_target is not None:
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_target in ("black", "white"):
+            self._emit_endpoint_drag(self._drag_target, event.position().x())
+            event.accept()
+            return
+        if self._drag_target == "gamma":
+            self._emit_gamma_drag(event.position().y())
+            event.accept()
+            return
+
+        target = self._hit_target(event.position())
+        if target in ("black", "white"):
+            self.setCursor(Qt.SizeHorCursor)
+        elif target == "gamma":
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._drag_target is not None:
+            self._drag_target = None
+            self._gamma_drag_base = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._drag_target is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
     def _transfer(self, x: np.ndarray) -> np.ndarray:
         """Apply the BCG transfer function to normalized [0, 1] values."""
-        y = x + self._brightness
-        y = (y - 0.5) * self._contrast + 0.5
+        y = self._linear_transfer(x)
         if self._gamma != 1.0:
             y = np.clip(y, 0.0, 1.0) ** (1.0 / self._gamma)
         return np.clip(y, 0.0, 1.0)
@@ -603,14 +772,13 @@ class _HistogramWidget(QWidget):
         painter = QPainter(self)
         colors = _gallery_theme_colors()
         painter.fillRect(self.rect(), QColor(colors["background"]))
-        if self._bins is None or self._bins.sum() == 0:
+        if self._bins is None:
             painter.end()
             return
-        w = self.width()
-        h = self.height()
-        margin = 4
-        draw_w = w - 2 * margin
-        draw_h = h - 2 * margin
+        rect = self._plot_rect()
+        margin = int(rect.left())
+        draw_w = rect.width()
+        draw_h = rect.height()
         max_bin = max(1, int(self._bins.max()))
 
         painter.setPen(Qt.NoPen)
@@ -620,18 +788,25 @@ class _HistogramWidget(QWidget):
             bw = max(1, int(draw_w / 256))
             bh = int(self._bins[i] * draw_h / max_bin)
             if bh > 0:
-                painter.drawRect(bx, margin + draw_h - bh, bw, bh)
+                painter.drawRect(bx, int(rect.bottom() - bh), bw, bh)
 
         x_vals = np.linspace(0.0, 1.0, 256)
         y_vals = self._transfer(x_vals)
         pts = QPolygonF()
         for i in range(256):
-            px = margin + i * draw_w / 255.0
-            py = margin + draw_h - y_vals[i] * draw_h
+            px = rect.left() + i * draw_w / 255.0
+            py = rect.bottom() - y_vals[i] * draw_h
             pts.append(QPointF(px, py))
         painter.setPen(QColor(colors["text"]))
         painter.setBrush(Qt.NoBrush)
         painter.drawPolyline(pts)
+
+        painter.setPen(QPen(QColor(colors["text"]), 1.5))
+        painter.setBrush(QColor(colors["accent"]))
+        for target in ("black", "white"):
+            point = self._endpoint_screen_position(target)
+            if point is not None:
+                painter.drawEllipse(point, self.HANDLE_RADIUS, self.HANDLE_RADIUS)
 
         painter.end()
 
