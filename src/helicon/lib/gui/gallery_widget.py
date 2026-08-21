@@ -1202,6 +1202,8 @@ class _SliceView(QWidget):
     -------
     clicked(float, float)
         Emitted with data-space coordinates when the user clicks.
+    hovered(float, float)
+        Emitted with data-space coordinates while the cursor is over the image.
     panned(int, int)
         Emitted with pixel deltas when the user drags.
     zoomed(float)
@@ -1209,6 +1211,7 @@ class _SliceView(QWidget):
     """
 
     clicked = Signal(float, float)
+    hovered = Signal(float, float)
     panned = Signal(int, int)
     zoomed = Signal(float)
     middle_clicked = Signal()
@@ -1217,6 +1220,7 @@ class _SliceView(QWidget):
         super().__init__(parent)
         self.setMinimumSize(100, 100)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
         self.setAutoFillBackground(True)
         pal = self.palette()
         pal.setColor(
@@ -1243,6 +1247,8 @@ class _SliceView(QWidget):
         # h = horizontal arrow, v = vertical arrow (e.g. Z panel: h="x", v="y").
         self._axes_h = ""
         self._axes_v = ""
+        self._hover_text = ""
+        self._hover_pos: QPointF | None = None
 
     def _apply_display_theme(self) -> None:
         """Apply the current theme to this custom-painted slice view."""
@@ -1255,6 +1261,7 @@ class _SliceView(QWidget):
 
     def set_image(self, data: np.ndarray | None) -> None:
         self._image = data
+        self.clear_hover_tip()
         self.update()
 
     def set_border_color(self, color: QColor) -> None:
@@ -1304,12 +1311,26 @@ class _SliceView(QWidget):
 
     def set_zoom(self, zoom: float) -> None:
         self._zoom = max(0.05, zoom)
+        self.clear_hover_tip()
         self.update()
 
     def set_pan(self, x: float, y: float) -> None:
         self._pan_x = x
         self._pan_y = y
+        self.clear_hover_tip()
         self.update()
+
+    def set_hover_tip(self, text: str) -> None:
+        """Set the text painted next to the current hover position."""
+        self._hover_text = text
+        self.update()
+
+    def clear_hover_tip(self) -> None:
+        """Hide any voxel tooltip currently painted over the slice."""
+        if self._hover_text or self._hover_pos is not None:
+            self._hover_text = ""
+            self._hover_pos = None
+            self.update()
 
     def _apply_bcg(self, data: np.ndarray) -> np.ndarray:
         """Apply brightness/contrast/gamma to raw slice data."""
@@ -1346,6 +1367,16 @@ class _SliceView(QWidget):
         ix = (w - iw * scale) / 2 + self._pan_x
         iy = (h - ih * scale) / 2 + self._pan_y
         return (sx - ix) / max(scale, 1e-9), (sy - iy) / max(scale, 1e-9)
+
+    def _data_position_at(self, sx: float, sy: float) -> tuple[float, float] | None:
+        """Return the data position under a screen point, excluding padding."""
+        if self._image is None or self._image.size == 0:
+            return None
+        dx, dy = self._screen_to_data(sx, sy)
+        ih, iw = self._image.shape[:2]
+        if 0.0 <= dx < iw and 0.0 <= dy < ih:
+            return dx, dy
+        return None
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -1406,8 +1437,46 @@ class _SliceView(QWidget):
             painter.drawText(6, 18, self._axis_label)
 
         self._draw_axes_icon(painter)
+        self._draw_hover_tip(painter)
 
         painter.end()
+
+    def _draw_hover_tip(self, painter: QPainter) -> None:
+        """Paint a themed voxel readout near, but not under, the cursor."""
+        if not self._hover_text or self._hover_pos is None:
+            return
+
+        colors = _gallery_theme_colors()
+        painter.save()
+        painter.setFont(QFont("Arial", 9))
+        metrics = painter.fontMetrics()
+        lines = self._hover_text.splitlines()
+        padding = 5.0
+        offset = 12.0
+        margin = 3.0
+        text_width = max(metrics.horizontalAdvance(line) for line in lines)
+        box_width = text_width + padding * 2
+        box_height = metrics.height() * len(lines) + padding * 2
+
+        x = self._hover_pos.x() + offset
+        y = self._hover_pos.y() + offset
+        if x + box_width > self.width() - margin:
+            x = self._hover_pos.x() - offset - box_width
+        if y + box_height > self.height() - margin:
+            y = self._hover_pos.y() - offset - box_height
+        x = max(margin, min(x, max(margin, self.width() - box_width - margin)))
+        y = max(margin, min(y, max(margin, self.height() - box_height - margin)))
+
+        box = QRectF(x, y, box_width, box_height)
+        painter.setPen(QPen(QColor(colors["border"]), 1))
+        painter.setBrush(QColor(colors["label_background"]))
+        painter.drawRoundedRect(box, 4, 4)
+        painter.setPen(QColor(colors["text"]))
+        baseline = y + padding + metrics.ascent()
+        for line in lines:
+            painter.drawText(QPointF(x + padding, baseline), line)
+            baseline += metrics.height()
+        painter.restore()
 
     def _draw_axes_icon(self, painter: QPainter) -> None:
         """Draw a mini axes icon (horizontal + vertical labeled arrows).
@@ -1451,6 +1520,7 @@ class _SliceView(QWidget):
         painter.drawText(QPointF(ox + 5, vy2 + 2), self._axes_v)
 
     def mousePressEvent(self, event) -> None:
+        self.clear_hover_tip()
         if event.button() == Qt.MiddleButton:
             self.middle_clicked.emit()
         elif event.button() == Qt.LeftButton:
@@ -1460,19 +1530,35 @@ class _SliceView(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self._drag_last is not None:
+            self.clear_hover_tip()
             dpx = event.pos().x() - self._drag_last.x()
             dpy = event.pos().y() - self._drag_last.y()
             self._drag_last = event.pos()
             self.panned.emit(dpx, dpy)
+            return
+
+        pos = event.position()
+        data_pos = self._data_position_at(pos.x(), pos.y())
+        if data_pos is None:
+            self.clear_hover_tip()
+            return
+        self._hover_pos = QPointF(pos)
+        self.hovered.emit(*data_pos)
+        self.update()
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._drag_last = None
 
     def wheelEvent(self, event) -> None:
+        self.clear_hover_tip()
         delta = event.angleDelta().y()
         factor = 1.1 if delta > 0 else 1 / 1.1
         self.zoomed.emit(factor)
+
+    def leaveEvent(self, event) -> None:
+        self.clear_hover_tip()
+        super().leaveEvent(event)
 
 
 class _ControlBar(QWidget):
@@ -1970,6 +2056,10 @@ class OrthogonalViewerWidget(QWidget):
         self._xz_view.clicked.connect(lambda x, y: self._on_click(1, x, y))
         self._yz_view.clicked.connect(lambda x, y: self._on_click(2, x, y))
 
+        self._xy_view.hovered.connect(lambda x, y: self._on_hover(0, x, y))
+        self._xz_view.hovered.connect(lambda x, y: self._on_hover(1, x, y))
+        self._yz_view.hovered.connect(lambda x, y: self._on_hover(2, x, y))
+
         self._xy_view.panned.connect(lambda dx, dy: self._on_pan(0, dx, dy))
         self._xz_view.panned.connect(lambda dx, dy: self._on_pan(1, dx, dy))
         self._yz_view.panned.connect(lambda dx, dy: self._on_pan(2, dx, dy))
@@ -2032,6 +2122,47 @@ class OrthogonalViewerWidget(QWidget):
             self._pos[2] = int(np.clip(round(dy), 0, self._nz - 1))
         self._sync_views(source_idx=panel_idx)
         self._update_voxel_label()
+
+    def _voxel_at_panel_position(
+        self, panel_idx: int, dx: float, dy: float
+    ) -> tuple[int, int, int, float] | None:
+        """Map an in-plane cursor position to a raw volume voxel."""
+        u, v = math.floor(dx), math.floor(dy)
+        current_x, current_y, current_z = self._pos
+        if panel_idx == 0:
+            x, y, z = u, v, current_z
+        elif panel_idx == 1:
+            x, y, z = current_x, v, u
+        elif panel_idx == 2:
+            x, y, z = u, current_y, v
+        else:
+            return None
+        if not (0 <= x < self._nx and 0 <= y < self._ny and 0 <= z < self._nz):
+            return None
+        return x, y, z, float(self._volume[z, y, x])
+
+    def _format_hover_tip(self, x: int, y: int, z: int, val: float) -> str:
+        """Format raw voxel, index, and center-relative world coordinates."""
+        cx, cy, cz = self._nx // 2, self._ny // 2, self._nz // 2
+        wx = (x - cx) * self._apix
+        wy = (y - cy) * self._apix
+        wz = (z - cz) * self._apix
+        return (
+            f"val={val:.6g}\n"
+            f"x,y,z={x},{y},{z}\n"
+            f"world={wx:.3g},{wy:.3g},{wz:.3g} Å"
+        )
+
+    def _on_hover(self, panel_idx: int, dx: float, dy: float) -> None:
+        """Update one slice's tooltip without changing the selected voxel."""
+        voxel = self._voxel_at_panel_position(panel_idx, dx, dy)
+        views = (self._xy_view, self._xz_view, self._yz_view)
+        if voxel is None:
+            if 0 <= panel_idx < len(views):
+                views[panel_idx].clear_hover_tip()
+            return
+        x, y, z, val = voxel
+        views[panel_idx].set_hover_tip(self._format_hover_tip(x, y, z, val))
 
     def _on_pan(self, panel_idx: int, dpx: int, dpy: int) -> None:
         """Linked panning: dragging in one view shifts the other two to keep
