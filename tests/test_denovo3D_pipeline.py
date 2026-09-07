@@ -165,35 +165,35 @@ class TestProcessOneTask(object):
         result = pipeline.process_one_task(**params)
         assert result is not None
 
-    def test_with_gauss_fixed_model(self):
-        """gauss_fixed must run through the real pipeline dispatch without
-        raising -- regression test for the refine_tilt_psi_dy_range kwarg
-        previously being sent unconditionally to solvers that don't accept
-        it (fixed in denovo3d_pipeline.process_one_task)."""
+    def test_with_strict_signature_model(self):
+        """A solver whose signature has no **kwargs must run through the real
+        pipeline dispatch without raising -- regression test for the
+        refine_tilt_psi_dy_range kwarg previously being sent unconditionally to
+        solvers that don't accept it (fixed in
+        denovo3d_pipeline.process_one_task).
+
+        fb is the canary because fb_reconstruct takes a fixed parameter list and
+        sits outside the lsq/elasticnet/lasso/ridge family the kwarg is meant
+        for. The gauss solver cannot play this role: it absorbs unknown keywords
+        into **_ignored, so the bug would pass silently there."""
         params = dict(
             self.base_params,
             data=self.data,
-            algorithm=dict(model="gauss_fixed", grid_n_radial=3, grid_n_angular=8),
+            algorithm=dict(model="fb"),
         )
         result = pipeline.process_one_task(**params)
         assert result is not None
         score, return_data, param_tuple = result
         assert isinstance(score, (float, np.floating))
 
-    def test_with_gauss_fixed_model_and_tilt_psi_dy(self):
+    def test_with_strict_signature_model_and_tilt_psi_dy(self):
         params = dict(
             self.base_params,
             data=self.data,
             tilt=5,
             psi=10,
             dy=2,
-            algorithm=dict(
-                model="gauss_fixed",
-                grid_n_radial=3,
-                grid_n_angular=8,
-                refine_tilt_psi_dy=True,
-                fine_tune_iter=20,
-            ),
+            algorithm=dict(model="fb"),
         )
         result = pipeline.process_one_task(**params)
         assert result is not None

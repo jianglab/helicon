@@ -638,7 +638,7 @@ def fb_reconstruct(
         Helical twist in degrees.
     rise_pixel : float
         Helical rise in voxels (3D grid units).
-    … (same signature as ``gauss_fixed_reconstruct``)
+    … (same signature as ``lsq_reconstruct``)
 
     Algorithm dict keys
     -------------------
@@ -660,7 +660,7 @@ def fb_reconstruct(
     Returns
     -------
     (rec3d, None, None), score
-        Same format as ``gauss_fixed_reconstruct``.
+        Same format as ``lsq_reconstruct``.
     """
     _require_torch()
     ny, nx = projection_image.shape

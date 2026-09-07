@@ -104,6 +104,64 @@ def _fig_to_html(fig):
     return ui.HTML(html)
 
 
+def _display_key(param_tuple):
+    """Identify one solved (image, twist, rise) combination.
+
+    ``param_tuple`` is the third element of a solver result, laid out as
+    ``(data, imageFile, imageIndex, apix3d, apix2d, twist, rise, ...)``. The
+    twist and rise are rounded because they travel through the task tuple and
+    back, and only exact equality would otherwise match.
+    """
+    return (
+        round(float(param_tuple[5]), 6),
+        round(float(param_tuple[6]), 6),
+        param_tuple[2],
+    )
+
+
+def _display_redraw_plan(tasks, results, ranked, top_n, display_model):
+    """Work out which tasks to re-solve so the displayed pictures come from
+    ``display_model``, and where each answer belongs.
+
+    Only the pairs that will actually be shown are re-solved -- the top ``top_n``
+    ranked twist/rise pairs, across every image -- because a search may have
+    scored hundreds of pairs and the rest are never drawn.
+
+    Parameters
+    ----------
+    tasks : list of tuple
+        The positional argument tuples that were handed to
+        ``denovo3d_pipeline.process_one_task``. Index 4 is imageIndex, 5 twist,
+        6 rise, and -3 the algorithm dict.
+    results, ranked : list
+        The raw results and their ranking, as ``(score, return_data, params)``.
+    top_n : int
+        How many ranked pairs are displayed; ``<= 0`` means all of them.
+    display_model : str
+        Solver to draw with.
+
+    Returns
+    -------
+    redo : list of tuple
+        Task tuples with the algorithm's model replaced, for the shown pairs.
+    slot : dict
+        ``_display_key`` -> index into ``results``, so a finished re-solve can
+        be put back in the right place.
+    """
+    if top_n <= 0:
+        top_n = len(ranked)
+    wanted = {_display_key(r[2])[:2] for r in ranked[:top_n]}
+    slot = {_display_key(r[2]): i for i, r in enumerate(results)}
+    redo = []
+    for task in tasks:
+        key = (round(float(task[5]), 6), round(float(task[6]), 6), task[4])
+        if key[:2] in wanted and key in slot:
+            t = list(task)
+            t[-3] = dict(t[-3], model=display_model)
+            redo.append(tuple(t))
+    return redo, slot
+
+
 def _rank(results, n_images, log=None):
     """Order solver results best-first, jointly when several images were solved.
 
@@ -537,7 +595,9 @@ def denovo3d_tab_ui():
                         ),
                         (
                             "Used when a single twist/rise pair is requested, i.e. when"
-                            " the 3D map is what you want. Prefer elasticnet here."
+                            " the 3D map is what you want, and to draw the projections"
+                            " shown after a search, since those are reconstructions too."
+                            " Prefer elasticnet here."
                             " gauss is built from non-negative Gaussians, which place"
                             " the strands correctly but cannot carve the hollow core of"
                             " a filament, so its map fills the dark lane between the"
@@ -3370,11 +3430,38 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 f"joint search over {len(images)} images x {n_pairs} twist/rise pairs"
             )
 
+        # A search scores with the search solver, but the pictures it puts on
+        # screen are reconstructions, and the user compares them against the
+        # input image. Drawing them with the search solver shows a map the
+        # reconstruction selector was never going to produce -- so when the two
+        # differ, redraw the displayed pairs with the reconstruction solver.
+        # The scores, and therefore the ranking, stay the search solver's.
+        if return_3d or input.dn_rec_algorithm() == input.dn_lr_algorithm():
+            display_model = None
+        else:
+            display_model = input.dn_rec_algorithm()
+        log.info(
+            f"{n_pairs} twist/rise pair(s) x {len(images)} image(s);"
+            f" search={input.dn_lr_algorithm()}"
+            f" reconstruction={input.dn_rec_algorithm()}"
+            f" -> solving with {algorithm['model']}"
+            + (f", redrawing the display with {display_model}" if display_model else "")
+        )
+
         abort_flag[0] = False
-        _reconstruction_task(tasks, n_cpu, abort_flag, len(images))
+        _reconstruction_task(
+            tasks,
+            n_cpu,
+            abort_flag,
+            len(images),
+            display_model,
+            input.dn_top_n_results(),
+        )
 
     @reactive.extended_task
-    async def _reconstruction_task(tasks, cpu, abort_ref, n_images=1):
+    async def _reconstruction_task(
+        tasks, cpu, abort_ref, n_images=1, display_model=None, top_n=1
+    ):
         _log_dir = pathlib.Path.home() / ".cache" / "helicon"
         _log_dir.mkdir(parents=True, exist_ok=True)
         log = helicon.getLogger(
@@ -3444,10 +3531,76 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 log.info(
                     f"{n_discarded}/{len(tasks)} results are None and thus discarded"
                 )
+            ranked = _rank(results, n_images, log)
             reconstruction_results_raw.set(list(results))
-            reconstruction_results.set(_rank(results, n_images, log))
+            reconstruction_results.set(ranked)
+
+            if display_model and results and not abort_ref[0]:
+                results = await _redraw_with(
+                    tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
+                )
+                reconstruction_results_raw.set(list(results))
+                reconstruction_results.set(_rank(results, n_images, log))
         except Exception:
             log.error("Reconstruction task failed:\n%s", traceback.format_exc())
+
+    async def _redraw_with(
+        tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
+    ):
+        """Re-solve the displayed twist/rise pairs with another solver.
+
+        Only the projections are taken from the second solve. Every score keeps
+        the value the search produced, so the ranking the user is looking at is
+        the one the search actually computed -- this changes the picture, not
+        the answer.
+
+        Returns
+        -------
+        list
+            ``results`` with the displayed entries' return_data replaced. Pairs
+            that were not displayed, and any re-solve that failed, are left as
+            they were.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        redo, slot = _display_redraw_plan(tasks, results, ranked, top_n, display_model)
+        if not redo:
+            return results
+
+        log.info(
+            f"redrawing {len(redo)} displayed reconstructions with {display_model}"
+        )
+        results = list(results)
+        with ui.Progress(min=0, max=len(redo)) as p:
+            p.set(message=f"Reconstructing with {display_model}", detail="for display")
+            with ThreadPoolExecutor(max_workers=cpu) as executor:
+                futures = [
+                    executor.submit(denovo3d_pipeline.process_one_task, *t)
+                    for t in redo
+                ]
+                done = 0
+                for completed_task in as_completed(futures):
+                    await asyncio.sleep(0)
+                    if abort_ref[0] is True:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    done += 1
+                    p.set(done, message=f"Reconstructed {done}/{len(redo)}")
+                    try:
+                        result = completed_task.result()
+                    except Exception:
+                        log.error(
+                            "Display reconstruction raised an exception:\n%s",
+                            traceback.format_exc(),
+                        )
+                        continue
+                    if result is None:
+                        continue
+                    i = slot.get(_display_key(result[2]))
+                    if i is not None:
+                        # Score and parameters from the search, images from here.
+                        results[i] = (results[i][0], result[1], results[i][2])
+        return results
 
     @reactive.effect
     @reactive.event(input.dn_stop_denovo3D)

@@ -246,13 +246,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gauss-only", action="store_true", help="Run only gauss solver"
     )
     parser.add_argument(
-        "--gauss-fixed",
-        action="store_true",
-        help="Use fixed-grid gauss solver (amp-only)",
-    )
-    parser.add_argument(
         "--model",
-        choices=["fb", "gauss_legacy", "gauss_fixed", "lsq"],
+        choices=["fb", "gauss_legacy", "lsq"],
         default=None,
         help="Solver model to run (default: run gauss + lsq)",
     )
@@ -272,32 +267,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gauss-iter", type=int, default=300, help="Number of iterations"
     )
     parser.add_argument("--gauss-lr", type=float, default=0.01, help="Learning rate")
-    parser.add_argument(
-        "--grid-n-z",
-        type=int,
-        default=1,
-        help="Number of z-planes for gauss_fixed grid (1=2D, 3+ = 3D)",
-    )
-    parser.add_argument(
-        "--grid-n-radial", type=int, default=5, help="Number of radial layers"
-    )
-    parser.add_argument(
-        "--grid-n-angular",
-        type=int,
-        default=12,
-        help="Number of angular points per layer",
-    )
-    parser.add_argument(
-        "--grid-sigma",
-        type=float,
-        default=10.0,
-        help="Gaussian sigma in angstroms for gauss_fixed",
-    )
-    parser.add_argument(
-        "--fine-tune",
-        action="store_true",
-        help="Enable position fine-tuning after amplitude-only stage",
-    )
     parser.add_argument(
         "--fine-tune-iter", type=int, default=100, help="Fine-tuning iterations"
     )
@@ -376,8 +345,6 @@ def main() -> int:
         run_lsq = not args.gauss_only
         run_fb = False
         run_gauss = True
-        if args.model == "gauss_fixed":
-            args.gauss_fixed = True
     else:
         run_lsq = not args.gauss_only
         run_fb = False
@@ -408,28 +375,14 @@ def main() -> int:
             task = build_task(image, apix, twist, args.rise, algo)
             all_tasks.append((i, "fb", task))
         if run_gauss:
-            if args.gauss_fixed:
-                algo = dict(
-                    model="gauss_fixed",
-                    gauss_iter=args.gauss_iter,
-                    gauss_lr=args.gauss_lr,
-                    grid_n_z=args.grid_n_z,
-                    grid_n_radial=args.grid_n_radial,
-                    grid_n_angular=args.grid_n_angular,
-                    grid_sigma=args.grid_sigma,
-                    fine_tune=args.fine_tune,
-                    fine_tune_iter=args.fine_tune_iter,
-                    device="cpu",
-                )
-            else:
-                algo = dict(
-                    model="gauss_legacy",
-                    gauss_n=args.gauss_n,
-                    gauss_iter=args.gauss_iter,
-                    gauss_lr=args.gauss_lr,
-                    n_restarts=args.n_restarts,
-                    device="cpu",
-                )
+            algo = dict(
+                model="gauss_legacy",
+                gauss_n=args.gauss_n,
+                gauss_iter=args.gauss_iter,
+                gauss_lr=args.gauss_lr,
+                n_restarts=args.n_restarts,
+                device="cpu",
+            )
             task = build_task(image, apix, twist, args.rise, algo)
             all_tasks.append((i, "gauss_legacy", task))
 

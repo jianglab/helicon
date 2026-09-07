@@ -5,7 +5,7 @@ import numpy as np
 import helicon
 
 from .solver_fourier_bessel import fb_reconstruct
-from .solver_gaussian import gauss_reconstruct, gauss_fixed_reconstruct
+from .solver_gaussian import gauss_reconstruct
 from .solver_gauss_analytic import gauss_analytic_reconstruct
 
 logger = logging.getLogger(__name__)
@@ -336,9 +336,6 @@ def process_one_task(
     if algorithm["model"] == "gauss":
         solve_fn = gauss_analytic_reconstruct
         label = "gauss_reconstruct"
-    elif algorithm["model"] == "gauss_fixed":
-        solve_fn = gauss_fixed_reconstruct
-        label = "gauss_fixed_reconstruct"
     elif algorithm["model"] == "gauss_legacy":
         solve_fn = gauss_reconstruct
         label = "gauss_reconstruct"
