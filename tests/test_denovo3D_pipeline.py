@@ -165,6 +165,95 @@ class TestProcessOneTask(object):
         result = pipeline.process_one_task(**params)
         assert result is not None
 
+    def test_with_gauss_fixed_model(self):
+        """gauss_fixed must run through the real pipeline dispatch without
+        raising -- regression test for the refine_tilt_psi_dy_range kwarg
+        previously being sent unconditionally to solvers that don't accept
+        it (fixed in denovo3d_pipeline.process_one_task)."""
+        params = dict(
+            self.base_params,
+            data=self.data,
+            algorithm=dict(model="gauss_fixed", grid_n_radial=3, grid_n_angular=8),
+        )
+        result = pipeline.process_one_task(**params)
+        assert result is not None
+        score, return_data, param_tuple = result
+        assert isinstance(score, (float, np.floating))
+
+    def test_with_gauss_fixed_model_and_tilt_psi_dy(self):
+        params = dict(
+            self.base_params,
+            data=self.data,
+            tilt=5,
+            psi=10,
+            dy=2,
+            algorithm=dict(
+                model="gauss_fixed",
+                grid_n_radial=3,
+                grid_n_angular=8,
+                refine_tilt_psi_dy=True,
+                fine_tune_iter=20,
+            ),
+        )
+        result = pipeline.process_one_task(**params)
+        assert result is not None
+
+    def test_with_gauss_splat_model(self):
+        """gauss_splat must run end-to-end through the pipeline dispatch."""
+        params = dict(
+            self.base_params,
+            data=self.data,
+            algorithm=dict(
+                model="gauss_splat", n_init=20, iters=20, max_gauss=30, densify_until=15
+            ),
+        )
+        result = pipeline.process_one_task(**params)
+        assert result is not None
+        score, return_data, param_tuple = result
+        assert isinstance(score, (float, np.floating))
+        assert -1.0 <= float(score) <= 1.0
+
+    def test_gauss_splat_uses_tilt_psi_dy(self):
+        """tilt/psi/dy must actually change the gauss_splat forward model --
+        regression guard against the original bug where these were accepted
+        and silently ignored by every Gaussian solver."""
+        from helicon.webApps.lib.solver_gaussian_splat import (
+            build_cov3d,
+            helical_expand,
+            splat_project,
+            _rigid_transform,
+        )
+        import torch
+
+        torch.manual_seed(0)
+        M = 30
+        centers = (torch.rand(M, 3, dtype=torch.float64) - 0.5) * 40
+        cov = build_cov3d(
+            torch.full((M, 3), 1.0, dtype=torch.float64),
+            torch.nn.functional.normalize(
+                torch.rand(M, 4, dtype=torch.float64), dim=-1
+            ),
+        )
+        amps = torch.rand(M, dtype=torch.float64) + 0.1
+        ea, ec, ecov = helical_expand(
+            amps,
+            centers,
+            cov,
+            torch.tensor(10.0, dtype=torch.float64),
+            torch.tensor(5.0, dtype=torch.float64),
+            1,
+            3,
+        )
+        base = splat_project(ea, ec, ecov, 24, 48, 2.0)
+        for tilt, psi, dy in [(7.0, 0.0, 0.0), (0.0, 7.0, 0.0), (0.0, 0.0, 2.0)]:
+            c2, cov2 = _rigid_transform(ec, ecov, tilt, psi, dy, 2.0)
+            moved = splat_project(ea, c2, cov2, 24, 48, 2.0)
+            assert (
+                moved - base
+            ).abs().max() > 1e-6 * base.abs().max(), (
+                f"tilt={tilt} psi={psi} dy={dy} did not change the projection"
+            )
+
     @patch("helicon.read_image_2d")
     def test_loads_data_when_none(self, mock_read):
         mock_read.return_value = np.random.rand(16, 16).astype(np.float32)
