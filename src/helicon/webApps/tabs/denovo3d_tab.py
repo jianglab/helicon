@@ -21,20 +21,33 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
-from PIL import Image
 
 import helicon
 from shiny import reactive, render, req, ui, module
+from shiny.types import SilentException
 
 from ..lib.shared_state import ProjectState
 
-from ..lib import denovo3d_pipeline
+from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register
 from ..lib.helical_projection_utils import (
     _combine_images_for_display,
     _image_stitching_x_positions,
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Multi-image workflows ───────────────────────────────────────────────
+# Selecting several images offers two mutually exclusive routes, and they use
+# separate transform chains, which is why only one set of controls is shown at
+# a time. Stitching is a pre-step that turns N images into 1 (per-image
+# rotation/shift, then compositing, and the result then feeds the normal
+# single-image path). The joint search keeps the N images and applies one
+# common threshold/rotation/crop to all of them, solving each and combining the
+# score curves.
+MODE_JOINT = "Joint parameter search"
+MODE_STITCH = "Stitch manually"
+MODE_AUTOSTITCH = "Stitch automatically"
+
 
 BOOKMARK_DEFAULTS = {
     "input_mode_images": ("dn_input_mode_images", "url"),
@@ -88,6 +101,100 @@ def _fig_to_html(fig):
         default_height=400,
     )
     return ui.HTML(html)
+
+
+def _rank(results, n_images, log=None):
+    """Order solver results best-first, jointly when several images were solved.
+
+    With one image this is just a sort by score. With several, the scores are
+    combined across images per twist/rise pair, because a single class average
+    picks the twist unreliably -- only 5/10 good EMPIAR-10940 classes peaked at
+    the right value on their own, whereas the combined curve was right with a
+    ~50x larger margin. See ``denovo3d_joint`` for why the combination z-scores
+    with a shrinkage floor rather than averaging raw scores.
+    """
+    if not results:
+        return []
+    if n_images < 2:
+        return sorted(results, key=lambda x: x[0], reverse=True)
+    joint, weights = denovo3d_joint.combine_results(results)
+    if log is not None and weights:
+        log.info(
+            "joint weights: "
+            + ", ".join(f"{k}={v:.2f}" for k, v in sorted(weights.items()))
+        )
+    return joint
+
+
+def _refine_helix_rotation_center(
+    data,
+    threshold=0.0,
+    max_iter=6,
+    tol=0.02,
+    estimate_rotation=True,
+    estimate_center=True,
+):
+    """Refine the rotation/centre estimate by guarded iteration.
+
+    ``_estimate_helix_rotation_center_diameter`` estimates the rotation once and
+    never re-checks it after rotating, so an image that is still off-horizontal
+    afterwards stays that way (measured residuals up to 2.4 deg on EMPIAR-10940
+    class averages, which is enough to push the twist search to the wrong
+    answer).
+
+    Iterating it naively is not safe -- the estimator is noisy and each
+    resampling degrades the next estimate, so plain iteration improved 24/42
+    images but made 16/42 worse.  This version therefore *measures* the residual
+    of each proposed correction and keeps it only if strictly better, which is
+    monotone by construction: measured over 42 class averages it improved 25 and
+    degraded none, halving the mean residual rotation (0.272 -> 0.137 deg) and
+    cutting the worst case from 2.39 to 0.52 deg.
+
+    Returns the same ``(rotation_deg, shift_y_px, diameter_px)`` triple.
+    """
+
+    def _apply(d, r, sh):
+        t = d
+        if r:
+            t = helicon.transform_image(image=t, rotation=r)
+        if sh:
+            t = helicon.transform_image(image=t, rotation=0, post_translation=(sh, 0))
+        return t
+
+    def _resid(r, sh):
+        t = _apply(data, r, sh)
+        r2, s2, _ = _estimate_helix_rotation_center_diameter(
+            t,
+            threshold=np.max(t) * 0.2,
+            estimate_rotation=estimate_rotation,
+            estimate_center=estimate_center,
+        )
+        # rotation dominates: a degree of tilt hurts far more than a pixel of shift
+        return abs(r2) + 0.1 * abs(s2), r2, s2
+
+    rot, shift, diameter = _estimate_helix_rotation_center_diameter(
+        data,
+        threshold=threshold,
+        estimate_rotation=estimate_rotation,
+        estimate_center=estimate_center,
+    )
+    best_cost, r2, s2 = _resid(rot, shift)
+    for _ in range(max_iter):
+        if abs(r2) < tol and abs(s2) < tol:
+            break
+        cand_r, cand_s = rot + r2, shift + s2
+        cost, nr2, ns2 = _resid(cand_r, cand_s)
+        if cost >= best_cost - 1e-9:
+            break  # no improvement -- keep what we have rather than risk drifting
+        t = _apply(data, cand_r, cand_s)
+        _, _, diameter = _estimate_helix_rotation_center_diameter(
+            t,
+            threshold=np.max(t) * 0.2,
+            estimate_rotation=estimate_rotation,
+            estimate_center=estimate_center,
+        )
+        rot, shift, best_cost, r2, s2 = cand_r, cand_s, cost, nr2, ns2
+    return rot, shift, diameter
 
 
 def _estimate_helix_rotation_center_diameter(
@@ -232,6 +339,44 @@ def denovo3d_tab_ui():
                 # ── Parameters panel ──
                 ui.nav_panel(
                     "Parameters",
+                    # Filtering lives here rather than beside the images: it is
+                    # rarely touched, and in the main panel it had to be kept in
+                    # step with the gallery's width, which took a resize
+                    # observer to do at all reliably.
+                    ui.accordion(
+                        ui.accordion_panel(
+                            "Filtering options:",
+                            ui.tooltip(
+                                ui.input_numeric(
+                                    "dn_binning",
+                                    "Binning:",
+                                    value=1,
+                                    min=1,
+                                    max=100,
+                                    step=1,
+                                    update_on="blur",
+                                ),
+                                "Default binning makes the image smallest dimension ≤ 128 pixels.",
+                            ),
+                            ui.input_numeric(
+                                "dn_lp_angst",
+                                "Low pass filtering (Å):",
+                                value=-1,
+                                step=0.1,
+                                update_on="blur",
+                            ),
+                            ui.input_numeric(
+                                "dn_hp_angst",
+                                "High pass filtering (Å):",
+                                value=-1,
+                                step=0.1,
+                                update_on="blur",
+                            ),
+                        ),
+                        id="dn_filtering_options",
+                        open=False,
+                        width="100%",
+                    ),
                     ui.layout_columns(
                         col_widths=6,
                         style="align-items: flex-end;",
@@ -370,7 +515,12 @@ def denovo3d_tab_ui():
                             selected="elasticnet",
                             inline=True,
                         ),
-                        "Choose the regularization algorithm for the least-squares reconstruction",
+                        (
+                            "Regularized least-squares variants reconstruct into a voxel"
+                            " grid and are fast, so they suit the twist/rise search."
+                            " elasticnet/lasso/ridge differ in how the voxel densities"
+                            " are penalized, while lsq applies no penalty."
+                        ),
                     ),
                     ui.layout_columns(
                         ui.tooltip(
@@ -437,58 +587,88 @@ def denovo3d_tab_ui():
             "Denovo3D: de novo helical indexing and 3D reconstruction",
             style="font-weight: bold;",
         ),
+        ui.tags.script(
+            """
+            // Show only the card for the image clicked in a gallery. Purely
+            // visual: every card stays in the DOM so its inputs keep whatever
+            // the user typed. Two galleries drive two sets of cards -- the
+            // per-image transform cards and the manual stitching cards.
+            var _CARD_GALLERIES = [
+                {input: 'dn_active_image', cards: '.dn-pi-card', key: 'pi'},
+                {input: 'dn_stitch_active_image', cards: '.dn-ms-card', key: 'ms'}
+            ];
+            $(document).on('shiny:inputchanged', function(e) {
+                if (!e.name) return;
+                _CARD_GALLERIES.forEach(function(g) {
+                    if (e.name.indexOf(g.input) < 0) return;
+                    var v = e.value;
+                    var idx = Array.isArray(v) ? v[0] : v;
+                    if (idx === undefined || idx === null) return;
+                    document.querySelectorAll(g.cards).forEach(function(el) {
+                        el.style.display =
+                            (String(el.dataset[g.key]) === String(idx))
+                                ? '' : 'none';
+                    });
+                });
+            });
+            """
+        ),
+        ui.output_ui("dn_multi_mode_ui"),
         ui.div(
-            ui.output_ui("dn_generate_image_gallery_multiple"),
+            ui.div(
+                ui.output_ui("dn_generate_image_gallery_multiple"),
+                ui.output_ui("dn_stitch_button_ui"),
+                style="display: flex; flex-direction: column;"
+                " align-items: flex-start; gap: 6px; margin-bottom: 0",
+            ),
             ui.output_ui("dn_generate_image_transformation_multiple"),
-            ui.output_ui("dn_image_stitching_transformed"),
-            ui.output_ui("dn_display_stitched_image"),
-            style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
+            # These two are the combined preview and the stitched result. Both
+            # are as wide as all the images laid end to end, so they overflow
+            # the window however the row is arranged; let them scroll on their
+            # own rather than pushing the page sideways.
+            ui.div(
+                ui.output_ui("dn_image_stitching_transformed"),
+                style="max-width: 100%; overflow-x: auto;",
+            ),
+            ui.div(
+                ui.output_ui("dn_display_stitched_image"),
+                style="max-width: 100%; overflow-x: auto;",
+            ),
+            # Four things abreast -- gallery, controls, combined preview and the
+            # stitched result -- run off the right of the screen, and the
+            # stitched image is both the widest and the last. Wrapping puts it
+            # on the next row instead of out of view.
+            style="display: flex; flex-direction: row; flex-wrap: wrap;"
+            " align-items: flex-start; gap: 10px; margin-bottom: 0",
         ),
         ui.div(
             ui.div(
                 ui.output_ui("dn_generate_image_gallery_single"),
-                ui.accordion(
-                    ui.accordion_panel(
-                        "Filtering options:",
-                        ui.tooltip(
-                            ui.input_numeric(
-                                "dn_binning",
-                                "Binning:",
-                                value=1,
-                                min=1,
-                                max=100,
-                                step=1,
-                                update_on="blur",
-                            ),
-                            "Default binning makes the image smallest dimension ≤ 128 pixels.",
-                        ),
-                        ui.layout_columns(
-                            ui.input_numeric(
-                                "dn_lp_angst",
-                                "Low pass filtering (Å):",
-                                value=-1,
-                                step=0.1,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                "dn_hp_angst",
-                                "High pass filtering (Å):",
-                                value=-1,
-                                step=0.1,
-                                update_on="blur",
-                            ),
-                            col_widths=(6, 6),
-                            style="align-items: flex-end;",
-                        ),
-                    ),
-                    id="dn_filtering_options",
-                    open=False,
-                    width="100%",
-                ),
-                style="display: flex; flex-flow: column wrap; align-items: flex-start; gap: 10px; margin-bottom: 0",
+                style="display: flex; flex-direction: column; align-items: flex-start;"
+                " width: fit-content; gap: 10px; margin-bottom: 0",
             ),
-            ui.output_ui("dn_generate_image_transformation_single"),
-            style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
+            # Transform controls and their buttons share a column so the
+            # buttons sit directly beneath the card rather than at the far
+            # left of the page.
+            ui.div(
+                ui.output_ui("dn_joint_per_image_transform_ui"),
+                ui.output_ui("dn_generate_image_transformation_single"),
+                ui.output_ui("dn_transform_buttons_ui"),
+                style="display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 0",
+            ),
+            # Its own column to the right of the transform card, so the two
+            # sets of controls read as separate things rather than one stack.
+            ui.div(
+                ui.output_ui("dn_autostitch_ui"),
+                style="display: flex; flex-direction: column; align-items: flex-start;"
+                " max-width: 380px; gap: 6px; margin-bottom: 0",
+            ),
+            # Wrap rather than overflow: a stitched image can be many times
+            # wider than a class average, and without this the transform card
+            # is pushed off to the right of it. Narrow images still sit side by
+            # side; a wide one takes the row and the controls move below.
+            style="display: flex; flex-direction: row; flex-wrap: wrap;"
+            " align-items: flex-start; gap: 10px; margin-bottom: 0",
         ),
         ui.div(
             ui.tooltip(
@@ -588,17 +768,203 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     initial_image = reactive.value([])
     display_initial_image_value = reactive.value([""])
 
+    # Per-image (rotation_deg, shift_y_pixels) from auto-transform, one entry
+    # per selected image. Empty means "nothing image-specific", which is the
+    # single-image case where the shared Rotation/Vertical shift boxes hold the
+    # absolute values instead.
+    per_image_transforms = reactive.value([])
+
+    # Mirror of the dynamically created mode radio; see _sync_multi_mode.
+    multi_mode_rv = reactive.value(MODE_JOINT)
+
+    # Diagnostics from the last automatic stitch, shown to the user.
+    autostitch_report = reactive.value({})
+
+    # The automatic stitch's per-image transforms, expressed in the manual
+    # route's own terms so that switching to manual picks up where automatic
+    # left off instead of starting from nothing. Possible only because the
+    # manual card carries flips: without them a transferred state would still
+    # not reproduce the composite.
+    autostitch_transforms = reactive.value([])
+
+    @reactive.calc
+    def transformed_gallery_title():
+        """Heading for the main gallery, which shows whatever the pipeline holds.
+
+        Separate from ``selected_images_title`` because that one is also
+        recorded as the imageFile in each reconstruction task, so it has to keep
+        naming the source rather than what is currently on screen.
+        """
+        if len(stitched_image_displayed()):
+            return "Stitched, transformed image:"
+        return selected_images_title()
+
+    @reactive.calc
+    def transformed_image_labels():
+        """One label per transformed image, so a multi-image set is legible."""
+        n = len(selected_images_thresholded_rotated_shifted_cropped())
+        labels = list(selected_images_labels())
+        if n <= 1 or len(labels) != n:
+            return [""] * n
+        return [str(l) for l in labels]
+
     reconstruction_results = reactive.value([])
+    # The unranked per-(image, twist, rise) results. reconstruction_results
+    # keeps one entry per twist/rise pair -- which is what the scores plot and
+    # the download path expect -- so the per-image reconstructions behind each
+    # pair are kept here for the results gallery to expand.
+    reconstruction_results_raw = reactive.value([])
     reconstructed_projection_images = reactive.value([])
     reconstructed_projection_labels = reactive.value([])
 
     run_button_text = reactive.value("Search Parameters")
     abort_flag = [False]  # mutable container shared with the task (not reactive)
 
+    # ── Per-image transform parameters ───────────────────────────────
+    # In joint mode every image carries its own full set of transform
+    # settings. All the per-image inputs are created up front, one card per
+    # image, and only the card for the clicked image is shown -- switching is
+    # pure CSS. Rendering them all means every input always exists, which
+    # matters because reading an input that was never created raises
+    # SilentException and can silently kill an effect.
+
+    def _pi_id(kind, i):
+        return f"dn_pi_{kind}_{i}"
+
+    # The single-image control that each per-image setting corresponds to.
+    _PI_SHARED_ID = {
+        "transpose": "dn_img_transpose",
+        "flip": "dn_img_flip",
+        "negate": "dn_img_negate",
+        "rot": "dn_pre_rotation",
+        "threshold": "dn_threshold",
+        "apix": "dn_apix",
+        "dy": "dn_shift_y",
+        "vcrop": "dn_vertical_crop_size",
+        "hcrop": "dn_horizontal_crop_size",
+    }
+
+    def _param(kind, i, default=0.0):
+        """Effective value of one transform setting for image ``i``.
+
+        Joint mode reads that image's own control; otherwise the shared one.
+        """
+        if _per_image_transform_ui_active():
+            return _input_or(_pi_id(kind, i), default)
+        return _input_or(_PI_SHARED_ID[kind], default)
+
+    def _pi_defaults(i):
+        """Starting values for image ``i``'s card."""
+        per = per_image_transforms()
+        rot, shift_px = per[i] if i < len(per) else (0.0, 0.0)
+        return dict(
+            transpose=img_transpose_rv(),
+            flip=img_flip_rv(),
+            negate=img_negate_rv(),
+            rot=round(float(rot), 2),
+            threshold=threshold_rv(),
+            apix=apix_rv(),
+            dy=round(float(shift_px) * (apix_rv() or 1.0), 2),
+            vcrop=vertical_crop_size_rv(),
+            hcrop=horizontal_crop_size_rv(),
+        )
+
+    def _transformation_card_per_image(i, label, ny, nx):
+        """The full transform card for one image, with per-image input ids."""
+        d = _pi_defaults(i)
+        slider = input.dn_input_ui_type() == "Slider"
+        num = ui.input_slider if slider else ui.input_numeric
+        extra = {} if slider else {"update_on": "blur"}
+        return ui.div(
+            ui.card(
+                ui.div(
+                    f"Image {label}",
+                    style="font-weight: bold; margin-bottom: 4px;",
+                ),
+                ui.layout_columns(
+                    ui.input_checkbox(
+                        _pi_id("transpose", i), "Transpose", d["transpose"]
+                    ),
+                    ui.input_checkbox(_pi_id("flip", i), "Flip", d["flip"]),
+                    ui.input_checkbox(
+                        _pi_id("negate", i), "Invert contrast", d["negate"]
+                    ),
+                    num(
+                        _pi_id("rot", i),
+                        "Rotation (deg)",
+                        min=-90,
+                        max=90,
+                        value=d["rot"],
+                        step=0.1,
+                        **extra,
+                    ),
+                    num(
+                        _pi_id("threshold", i),
+                        "Threshold",
+                        min=round(d["threshold"] - 1, 3),
+                        max=round(d["threshold"] + 1, 3),
+                        value=d["threshold"],
+                        step=0.001,
+                        **extra,
+                    ),
+                    num(
+                        _pi_id("apix", i),
+                        "Pixel size (A)",
+                        min=0.0,
+                        max=10.0,
+                        value=d["apix"],
+                        step=0.001,
+                        **extra,
+                    ),
+                    num(
+                        _pi_id("dy", i),
+                        "Vertical shift (A)",
+                        min=-200,
+                        max=200,
+                        value=d["dy"],
+                        step=0.1,
+                        **extra,
+                    ),
+                    num(
+                        _pi_id("vcrop", i),
+                        "Vertical crop (pixel)",
+                        min=32,
+                        max=max(32, ny),
+                        value=min(d["vcrop"], max(32, ny)),
+                        step=2,
+                        **extra,
+                    ),
+                    num(
+                        _pi_id("hcrop", i),
+                        "Horizontal crop (pixel)",
+                        min=32,
+                        max=max(32, nx),
+                        value=min(d["hcrop"], max(32, nx)),
+                        step=2,
+                        **extra,
+                    ),
+                    col_widths=4,
+                ),
+            ),
+            class_="dn-pi-card",
+            **{"data-pi": str(i)},
+            # A minimum width so the three slider columns and their labels are
+            # not squeezed onto several lines, and the buttons below fit on one.
+            # Only the first card starts visible; the gallery click swaps them.
+            style="min-width: 430px;" + ("" if i == 0 else " display: none;"),
+        )
+
     # ── Helper: UI for single-image transformation controls ──────────
 
-    def _transformation_ui_single():
-        """Build the transformation control card for a single selected image."""
+    def _transformation_ui_single(shared_only=False):
+        """Build the transformation control card.
+
+        ``shared_only`` drops the Rotation and Vertical shift controls, for the
+        multi-image joint route where those are per-image and rendered
+        alongside each image instead. Everything left -- transpose, flip,
+        contrast, threshold, pixel size, crops -- genuinely applies to the
+        whole set.
+        """
         if input.dn_input_ui_type() == "Slider":
             card_content = ui.card(
                 ui.layout_columns(
@@ -609,13 +975,19 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     ui.input_checkbox(
                         "dn_img_negate", "Invert contrast", img_negate_rv()
                     ),
-                    ui.input_slider(
-                        "dn_pre_rotation",
-                        "Rotation (deg)",
-                        min=-20,
-                        max=20,
-                        value=pre_rotation_rv(),
-                        step=0.1,
+                    *(
+                        []
+                        if shared_only
+                        else [
+                            ui.input_slider(
+                                "dn_pre_rotation",
+                                "Rotation (deg)",
+                                min=-20,
+                                max=20,
+                                value=pre_rotation_rv(),
+                                step=0.1,
+                            )
+                        ]
                     ),
                     ui.input_slider(
                         "dn_threshold",
@@ -633,13 +1005,19 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         value=apix_rv(),
                         step=0.001,
                     ),
-                    ui.input_slider(
-                        "dn_shift_y",
-                        "Vertical shift (A)",
-                        min=-100,
-                        max=100,
-                        value=shift_y_rv(),
-                        step=0.1,
+                    *(
+                        []
+                        if shared_only
+                        else [
+                            ui.input_slider(
+                                "dn_shift_y",
+                                "Vertical shift (A)",
+                                min=-100,
+                                max=100,
+                                value=shift_y_rv(),
+                                step=0.1,
+                            )
+                        ]
                     ),
                     ui.input_slider(
                         "dn_vertical_crop_size",
@@ -658,19 +1036,6 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         step=2,
                     ),
                     col_widths=4,
-                ),
-                ui.layout_columns(
-                    ui.input_action_button(
-                        "dn_auto_transform",
-                        label="Auto Transform",
-                        class_="btn-primary",
-                    ),
-                    ui.input_action_button(
-                        "dn_reset_transform",
-                        label="Reset Transform",
-                        class_="btn-primary",
-                    ),
-                    col_widths=6,
                 ),
                 id="dn_single_card_ui",
             )
@@ -684,14 +1049,20 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     ui.input_checkbox(
                         "dn_img_negate", "Invert contrast", img_negate_rv()
                     ),
-                    ui.input_numeric(
-                        "dn_pre_rotation",
-                        "Rotation (deg)",
-                        min=-20,
-                        max=20,
-                        value=pre_rotation_rv(),
-                        step=0.1,
-                        update_on="blur",
+                    *(
+                        []
+                        if shared_only
+                        else [
+                            ui.input_numeric(
+                                "dn_pre_rotation",
+                                "Rotation (deg)",
+                                min=-20,
+                                max=20,
+                                value=pre_rotation_rv(),
+                                step=0.1,
+                                update_on="blur",
+                            )
+                        ]
                     ),
                     ui.input_numeric(
                         "dn_threshold",
@@ -711,14 +1082,20 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         step=0.001,
                         update_on="blur",
                     ),
-                    ui.input_numeric(
-                        "dn_shift_y",
-                        "Vertical shift (A)",
-                        min=-100,
-                        max=100,
-                        value=shift_y_rv(),
-                        step=0.1,
-                        update_on="blur",
+                    *(
+                        []
+                        if shared_only
+                        else [
+                            ui.input_numeric(
+                                "dn_shift_y",
+                                "Vertical shift (A)",
+                                min=-100,
+                                max=100,
+                                value=shift_y_rv(),
+                                step=0.1,
+                                update_on="blur",
+                            )
+                        ]
                     ),
                     ui.input_numeric(
                         "dn_vertical_crop_size",
@@ -739,19 +1116,6 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         update_on="blur",
                     ),
                     col_widths=4,
-                ),
-                ui.layout_columns(
-                    ui.input_action_button(
-                        "dn_auto_transform",
-                        label="Auto Transform",
-                        class_="btn-primary",
-                    ),
-                    ui.input_action_button(
-                        "dn_reset_transform",
-                        label="Reset Transform",
-                        class_="btn-primary",
-                    ),
-                    col_widths=6,
                 ),
                 id="dn_single_card_ui",
             )
@@ -801,36 +1165,75 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
     # ── Helper: UI for per-image transformation controls ─────────────
 
-    def _transformation_ui_group(prefix, shift_scale=100):
-        return ui.card(
-            ui.layout_columns(
-                ui.input_slider(
-                    prefix + "_pre_rotation",
-                    "Rotation (deg)",
-                    min=-45,
-                    max=45,
-                    value=0,
-                    step=0.1,
+    def _transformation_ui_group(
+        prefix, shift_scale=100, index=0, label="", visible=True, initial=None
+    ):
+        """Stitching controls for one image: rotation, the two shifts, and flip.
+
+        Only what stitching needs -- threshold, pixel size and cropping belong
+        to the reconstruction and would be noise here. One card is shown at a
+        time, chosen by clicking the image above, rather than stacking a set per
+        image down the page.
+
+        Every card is rendered and hidden with CSS rather than created on
+        demand, so each image keeps whatever was typed into it and no effect
+        can read an input that does not exist.
+
+        ``initial`` seeds the controls from a previous automatic stitch, so
+        switching to manual continues from that result rather than from zero.
+        """
+        d = initial or {}
+        return ui.div(
+            ui.card(
+                ui.div(
+                    f"Image {label}" if label else "",
+                    style="font-weight: bold; margin-bottom: 4px;",
                 ),
-                ui.input_slider(
-                    prefix + "_shift_x",
-                    "Horizontal shift (pixel)",
-                    min=-shift_scale,
-                    max=shift_scale,
-                    value=0,
-                    step=1,
+                ui.layout_columns(
+                    ui.input_slider(
+                        prefix + "_pre_rotation",
+                        "Rotation (deg)",
+                        min=-45,
+                        max=45,
+                        value=round(float(d.get("rotation", 0.0)), 2),
+                        step=0.1,
+                    ),
+                    ui.input_slider(
+                        prefix + "_shift_x",
+                        "Horizontal shift (pixel)",
+                        min=-shift_scale,
+                        max=shift_scale,
+                        value=int(round(float(d.get("shift_x", 0.0)))),
+                        step=1,
+                    ),
+                    ui.input_slider(
+                        prefix + "_shift_y",
+                        "Vertical shift (pixel)",
+                        min=-100,
+                        max=100,
+                        value=int(round(float(d.get("shift_y", 0.0)))),
+                        step=1,
+                    ),
+                    col_widths=4,
                 ),
-                ui.input_slider(
-                    prefix + "_shift_y",
-                    "Vertical shift (pixel)",
-                    min=-100,
-                    max=100,
-                    value=0,
-                    step=1,
+                ui.layout_columns(
+                    ui.input_checkbox(
+                        prefix + "_flip_x",
+                        "Flip polarity (x)",
+                        bool(d.get("flip_x", False)),
+                    ),
+                    ui.input_checkbox(
+                        prefix + "_flip_y",
+                        "Flip side (y)",
+                        bool(d.get("flip_y", False)),
+                    ),
+                    col_widths=6,
                 ),
-                col_widths=4,
+                id=f"{prefix}_card",
             ),
-            id=f"{prefix}_card",
+            class_="dn-ms-card",
+            **{"data-ms": str(index)},
+            style="min-width: 430px;" + ("" if visible else " display: none;"),
         )
 
     # ── Render: sidebar dynamic UI ───────────────────────────────────
@@ -1081,6 +1484,87 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
         return dl
 
+    # ── Multi-image workflow mode ────────────────────────────────────
+
+    @reactive.effect
+    def _sync_multi_mode():
+        """Mirror the mode radio into a reactive value that is always set.
+
+        The radio is created by a render.ui, so `input.dn_multi_mode` does not
+        exist until a multi-selection renders it. Naming a missing input in a
+        reactive.event list is fatal -- reactive.event calls every dependency
+        up front, so the SilentException from an unset input aborts the whole
+        effect -- so everything triggers off this mirror instead. Reading the
+        input registers the dependency before raising, so this re-runs as soon
+        as the radio appears.
+        """
+        try:
+            mode = input.dn_multi_mode()
+        except SilentException:
+            # Not created yet, or briefly gone during a re-render. Keep what we
+            # have: defaulting here would fight whatever the user just picked.
+            return
+        if mode and multi_mode_rv() != mode:
+            multi_mode_rv.set(mode)
+
+    def _multi_mode():
+        """Which multi-image route is active; joint search unless told otherwise."""
+        return multi_mode_rv()
+
+    def _stitching_active():
+        """True when the manual stitch route owns the display."""
+        return len(selected_images_original()) > 1 and _multi_mode() == MODE_STITCH
+
+    def _autostitch_active():
+        """True when the automatic stitch route owns the display."""
+        return len(selected_images_original()) > 1 and _multi_mode() == MODE_AUTOSTITCH
+
+    @render.ui
+    @reactive.event(selected_images_original)
+    def dn_multi_mode_ui():
+        """The route selector, rebuilt only when the selection changes.
+
+        Deliberately not sensitive to the mode itself: reading multi_mode_rv
+        here made every mode change re-render the radio, destroying and
+        recreating the very input that had just been clicked. While it was
+        being recreated the input read as unset, the sync below fell back to
+        the default, and the selector snapped straight back to the joint
+        search -- so no other mode could be chosen at all.
+        """
+        if len(selected_images_original()) < 2:
+            return ui.div()
+        return ui.div(
+            ui.input_radio_buttons(
+                "dn_multi_mode",
+                "Multiple images selected — what to do with them:",
+                choices=[MODE_JOINT, MODE_AUTOSTITCH, MODE_STITCH],
+                selected=_multi_mode(),
+                inline=True,
+            ),
+            style="margin-bottom: 0",
+        )
+
+    @render.ui
+    def dn_transform_buttons_ui():
+        """Auto / Reset Transform, rendered from one place only.
+
+        Both branches of the shared card and the per-image block used to carry
+        their own copies, which collided as duplicate input ids whenever two of
+        them were in the DOM at the same time.
+        """
+        if not len(selected_images_thresholded()):
+            return ui.div()
+        return ui.layout_columns(
+            ui.input_action_button(
+                "dn_auto_transform", label="Auto Transform", class_="btn-primary"
+            ),
+            ui.input_action_button(
+                "dn_reset_transform", label="Reset Transform", class_="btn-primary"
+            ),
+            col_widths=6,
+            style="max-width: 420px; margin-top: 4px;",
+        )
+
     # ── Render: main area galleries ──────────────────────────────────
 
     @render.ui
@@ -1093,22 +1577,41 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             return ui.div()
         req(0 <= min(sel))
         req(max(sel) < len(imgs))
-        n_images_selected = len(selected_images_original())
-        if n_images_selected == 1:
+        if not _stitching_active():
             return ui.div()
         return helicon.shiny.image_gallery(
-            id=session.ns("dn_display_selected_image_multi"),
+            id=session.ns("dn_stitch_active_image"),
             label=selected_images_title,
             images=selected_images_rotated_shifted,
             image_labels=selected_images_labels,
             image_size=reactive.value(128),
             justification="left",
+            # Clicking picks which image's stitching card is shown, the same way
+            # the joint route works, instead of stacking a card per image.
+            enable_selection=True,
+            allow_multiple_selection=False,
+            initial_selected_indices=reactive.value([0]),
             display_dashed_line=True,
-            enable_selection=False,
         )
 
     @render.ui
-    @reactive.event(selected_images_original)
+    def dn_stitch_button_ui():
+        """The manual Stitch button, rendered apart from the transform cards.
+
+        It acts on the whole selection rather than on the one image the card is
+        editing, so it belongs under the gallery it applies to.
+        """
+        if not _stitching_active():
+            return ui.div()
+        return ui.input_action_button(
+            "dn_perform_stitching",
+            label="Stitch Images",
+            class_="btn-primary",
+            style="max-width: 200px; margin-top: 6px;",
+        )
+
+    @render.ui
+    @reactive.event(selected_images_original, multi_mode_rv, autostitch_transforms)
     def dn_generate_image_transformation_multiple():
         imgs = displayed_images()
         if not imgs or len(imgs) == 0:
@@ -1118,12 +1621,18 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             return ui.div()
         if not (0 <= min(sel) and max(sel) < len(imgs)):
             return ui.div()
-        n_images_selected = len(selected_images_original())
-        if n_images_selected == 1:
+        if not _stitching_active():
             return ui.div()
 
+        n_images_selected = len(selected_images_original())
         dim = len(selected_images_original()[0])
-        shift_scale = int(0.9 * dim) * n_images_selected
+        width = int(np.shape(selected_images_original()[0])[1])
+        # Wide enough for a transferred layout: undoing the end-to-end tiling
+        # puts the last image at roughly -(n-1) * width.
+        shift_scale = max(int(0.9 * dim) * n_images_selected, width * n_images_selected)
+        transferred = autostitch_transforms()
+        if len(transferred) != n_images_selected:
+            transferred = [None] * n_images_selected
         container = ui.div(
             style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-bottom: 0"
         )
@@ -1131,16 +1640,21 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         for i, label in enumerate(selected_images_labels()):
             curr_counter = i
             container.append(
-                ui.row(
-                    _transformation_ui_group(
-                        f"dn_t_ui_group_{curr_counter}", shift_scale=shift_scale
-                    )
+                _transformation_ui_group(
+                    f"dn_t_ui_group_{curr_counter}",
+                    shift_scale=shift_scale,
+                    index=i,
+                    label=str(label),
+                    visible=(i == 0),
+                    initial=transferred[i],
                 )
             )
 
             id_rotation = f"dn_t_ui_group_{curr_counter}_pre_rotation"
             id_x_shift = f"dn_t_ui_group_{curr_counter}_shift_x"
             id_y_shift = f"dn_t_ui_group_{curr_counter}_shift_y"
+            id_flip_x = f"dn_t_ui_group_{curr_counter}_flip_x"
+            id_flip_y = f"dn_t_ui_group_{curr_counter}_flip_y"
 
             @reactive.effect
             @reactive.event(input.dn_select_image)
@@ -1150,23 +1664,34 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 )
                 transformed_images_x_offsets.set(np.zeros(len(input.dn_select_image())))
 
-            def _make_transform_multi_img(_ii, _id_rot, _id_ys):
+            def _make_transform_multi_img(_ii, _id_rot, _id_ys, _id_fx, _id_fy):
                 @reactive.effect
-                @reactive.event(input[_id_rot], input[_id_ys])
+                @reactive.event(
+                    input[_id_rot], input[_id_ys], input[_id_fx], input[_id_fy]
+                )
                 def _fn():
                     req(len(selected_images_original()))
                     rotated = selected_images_rotated_shifted().copy()
+                    work = selected_images_original()[_ii].copy()
+                    # Flips first, as lossless array operations, so only the
+                    # rotation and shift cost an interpolation.
+                    if input[_id_fx]():
+                        work = work[:, ::-1]
+                    if input[_id_fy]():
+                        work = work[::-1, :]
+                    work = np.ascontiguousarray(work)
                     if input[_id_rot]() != 0 or input[_id_ys]() != 0:
-                        rotated[_ii] = helicon.transform_image(
-                            image=selected_images_original()[_ii].copy(),
+                        work = helicon.transform_image(
+                            image=work,
                             rotation=input[_id_rot](),
                             post_translation=(input[_id_ys](), 0),
                         )
+                    rotated[_ii] = work
                     selected_images_rotated_shifted.set(rotated)
 
                 return _fn
 
-            _make_transform_multi_img(i, id_rotation, id_y_shift)
+            _make_transform_multi_img(i, id_rotation, id_y_shift, id_flip_x, id_flip_y)
 
             def _make_update_multi_displayed(_xi, _id_xs):
                 @reactive.effect
@@ -1187,7 +1712,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         selected_images_rotated_shifted(), curr_offsets
                     )
                     transformed_images_displayed.set([image_work])
-                    transformed_images_labels.set(["Combined images"])
+                    transformed_images_labels.set([""])
                     transformed_images_links.set([""])
                     transformed_images_x_offsets.set(curr_offsets)
 
@@ -1195,14 +1720,6 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
             _make_update_multi_displayed(i, id_x_shift)
 
-        container.append(
-            ui.input_action_button(
-                "dn_perform_stitching",
-                label="Stitch Images",
-                class_="btn-primary",
-                style="width: 100%; margin-top: 10px;",
-            )
-        )
         t_ui_counter.set(t_ui_counter() + n_images_selected)
         return container
 
@@ -1216,8 +1733,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             return ui.div()
         req(0 <= min(sel))
         req(max(sel) < len(imgs))
-        n_images_selected = len(selected_images_original())
-        if n_images_selected == 1:
+        if not _stitching_active():
             return ui.div()
         req(len(transformed_images_displayed()))
         return helicon.shiny.image_gallery(
@@ -1242,8 +1758,8 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             return ui.div()
         req(0 <= min(sel))
         req(max(sel) < len(imgs))
-        n_images_selected = len(selected_images_original())
-        if n_images_selected == 1:
+        # Either stitch route produces a stitched image to show.
+        if not (_stitching_active() or _autostitch_active()):
             return ui.div()
         req(len(stitched_image_displayed()))
         return helicon.shiny.image_gallery(
@@ -1268,19 +1784,21 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             return ui.div()
         req(0 <= min(sel))
         req(max(sel) < len(displayed_images()))
-        n_images_selected = len(init)
-        if n_images_selected == 1:
-            return helicon.shiny.image_gallery(
-                id=session.ns("dn_display_selected_image_single"),
-                label=selected_images_title,
-                images=selected_images_thresholded_rotated_shifted_cropped,
-                image_labels=display_initial_image_value,
-                image_size=input.dn_selected_image_display_size,
-                justification="left",
-                enable_selection=False,
-                display_dashed_line=True,
-            )
-        return ui.div()
+        multi = _per_image_transform_ui_active()
+        return helicon.shiny.image_gallery(
+            id=session.ns("dn_active_image"),
+            label=transformed_gallery_title,
+            images=selected_images_thresholded_rotated_shifted_cropped,
+            image_labels=transformed_image_labels,
+            image_size=input.dn_selected_image_display_size,
+            justification="left",
+            # Clicking picks which image's transform card is shown, so the
+            # controls take one card's worth of space instead of N.
+            enable_selection=multi,
+            allow_multiple_selection=False,
+            initial_selected_indices=reactive.value([0] if multi else []),
+            display_dashed_line=True,
+        )
 
     @render.ui
     @reactive.event(initial_image)
@@ -1293,13 +1811,162 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             return ui.div()
         if not (0 <= min(sel) and max(sel) < len(displayed_images())):
             return ui.div()
-        n_images_selected = len(init)
-        if n_images_selected == 1:
-            return ui.div(
-                _transformation_ui_single(),
-                style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
+        # Shown for multi-selection too: the same threshold/rotation/crop applies
+        # to the whole set, and the joint parameter search needs them transformed.
+        if _per_image_transform_ui_active():
+            # Every setting is per-image there, so this card would duplicate
+            # controls that no longer drive anything.
+            return ui.div()
+        return ui.div(
+            _transformation_ui_single(),
+            style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
+        )
+
+    def _per_image_transform_ui_active():
+        """True when rotation/shift are per-image rather than shared.
+
+        Both multi-image routes that auto-transform need this -- the automatic
+        stitch registers the auto-transformed images, so those must have been
+        transformed individually too. Manual stitching is excluded because it
+        already has its own per-image sliders, and a single image has nothing
+        to distinguish.
+        """
+        # Counted on initial_image -- what the pipeline is actually carrying --
+        # rather than the selection, so that once a stitch has produced a single
+        # image it belongs to the shared card however many were selected to make
+        # it. Deliberately not selected_images_thresholded: _threshold_selected_
+        # images calls this through _param, so reading its own output here is a
+        # reactive cycle, and the whole tab silently stops rendering.
+        return len(initial_image()) > 1 and _multi_mode() != MODE_STITCH
+
+    @render.ui
+    @reactive.event(
+        selected_images_original,
+        multi_mode_rv,
+        autostitch_report,
+        stitched_image_displayed,
+    )
+    def dn_autostitch_ui():
+        """The automatic stitch route: one button and an honest verdict.
+
+        The diagnostics are shown rather than hidden because whether a dataset
+        can be stitched at all is a property of the data -- how much of the
+        pitch its classes happen to cover -- not something the algorithm can
+        decide for the user.
+        """
+        if not _autostitch_active():
+            return ui.div()
+        rep = autostitch_report()
+        rows = []
+        if rep:
+            trust = rep.get("trustworthy")
+            colour = "#1a7f37" if trust else "#b35900"
+            verdict = (
+                "Registration looks consistent."
+                if trust
+                else "Registration is NOT reliable - see below."
             )
-        return ui.div()
+            span_note = (
+                f"Combined length {rep['span_gain']:.2f}x a single image"
+                f" ({rep['span_px']:.0f} px)."
+            )
+            detail = (
+                f"{rep['n_pairs']} of {rep['n_possible']} image pairs registered"
+                f" ({rep['n_rejected']} rejected as inconsistent),"
+                f" {rep['n_connected']}/{rep['n_images']} images placed."
+            )
+            checks = []
+            if rep["redundancy"] <= 0:
+                checks.append(
+                    "no redundant pairs, so the consistency check cannot verify anything"
+                )
+            elif not rep["closure_meaningful"]:
+                checks.append("consistency check unavailable")
+            else:
+                checks.append(
+                    f"consistency {rep['closure']['dx']:.2f} px,"
+                    f" {rep['closure']['psi']:.2f} deg"
+                )
+            if rep.get("flip_conflicts"):
+                checks.append(f"{rep['flip_conflicts']} pairs disagree on polarity")
+            if rep.get("unconnected"):
+                checks.append(
+                    f"images {rep['unconnected']} could not be placed and were left out"
+                )
+            rows = [
+                ui.div(verdict, style=f"color: {colour}; font-weight: bold;"),
+                ui.div(span_note),
+                ui.div(detail, style="font-size: 90%;"),
+                ui.div("; ".join(checks), style="font-size: 90%; color: #555;"),
+            ]
+        if len(stitched_image_displayed()):
+            # Stitched already: the pipeline now holds one image, so running it
+            # again would do nothing. Offer the way back instead -- undoing
+            # restores the individual images and their per-image controls, which
+            # is what anyone unhappy with the result actually needs.
+            return ui.div(
+                *rows,
+                ui.input_action_button(
+                    "dn_undo_stitch",
+                    label="Undo stitch",
+                    class_="btn-primary",
+                    style="max-width: 200px; margin-top: 6px;",
+                ),
+                ui.div(
+                    "Undoing brings back the individual images so you can adjust"
+                    " them and stitch again.",
+                    style="font-size: 85%; color: #777;",
+                ),
+                style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 0;",
+            )
+        return ui.div(
+            ui.div(
+                "Register the selected images to each other and combine them into"
+                " one longer image. A longer image covers more of the helical"
+                " pitch, which is what the twist search needs.",
+                style="font-size: 90%; color: #555;",
+            ),
+            ui.input_action_button(
+                "dn_auto_stitch",
+                label="Auto Stitch",
+                class_="btn-primary",
+                style="max-width: 200px; margin-top: 6px;",
+            ),
+            *rows,
+            style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 0;",
+        )
+
+    @render.ui
+    @reactive.event(selected_images_original, per_image_transforms, multi_mode_rv)
+    def dn_joint_per_image_transform_ui():
+        """One full transform card per image, only the clicked one visible.
+
+        Every setting is per-image because every class average differs: the
+        per-image rotations of ten good EMPIAR-10940 classes span -20.1 to
+        +10.2 deg, and contrast and centring vary just as much. All the cards
+        are rendered together and hidden with CSS rather than rendered on
+        demand, so each image's inputs keep their values while you click
+        between images and no effect can read an input that does not exist.
+        """
+        if not _per_image_transform_ui_active():
+            return ui.div()
+        labels = list(selected_images_labels())
+        imgs = selected_images_thresholded() or initial_image() or []
+        if imgs:
+            ny, nx = np.shape(imgs[0])
+        else:
+            ny, nx = 128, 128
+        return ui.div(
+            ui.div(
+                "Per-image transform (click an image to edit it):",
+                style="font-weight: bold; margin-bottom: 4px;",
+            ),
+            *[
+                _transformation_card_per_image(i, label, int(ny), int(nx))
+                for i, label in enumerate(labels)
+            ],
+            style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 0;",
+        )
 
     @render.ui
     def dn_twist_card():
@@ -1406,7 +2073,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             image_index = int(result[2][2]) - 1
             input_image_shape = imgs.data[image_index].shape
 
-        compact_apix = input.dn_apix() * max(1, input.dn_binning())
+        compact_apix = _input_or("dn_apix", apix_rv()) * max(1, input.dn_binning())
         rec3d_map, apix = _prepare_download_map(
             result,
             match_input_box=input.dn_match_input_box(),
@@ -1764,6 +2431,36 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     # Reactive effects: image display & selection
     # ══════════════════════════════════════════════════════════════════
 
+    @reactive.effect(priority=100)
+    def _seed_crop_sizes_from_images():
+        """Start the crop controls at the full image, not the 32/256 defaults.
+
+        On the joint route the per-image cards read these reactive values for
+        their initial Vertical/Horizontal crop, and there is no shared card to
+        have corrected them first.
+        """
+        imgs = initial_image()
+        req(len(imgs))
+        ny, nx = np.shape(imgs[0])
+        if vertical_crop_size_rv() > ny or vertical_crop_size_rv() < 32:
+            vertical_crop_size_rv.set(int(ny) // 2 * 2)
+        if horizontal_crop_size_rv() > nx:
+            horizontal_crop_size_rv.set(int(nx) // 2 * 2)
+
+    @reactive.effect(priority=100)
+    def _seed_apix_from_images():
+        """Keep apix_rv current from the loaded stack.
+
+        Same reason as the threshold above: on the joint route there is no
+        shared Pixel size control to sync this back, and the per-image cards
+        read it for their starting value.
+        """
+        imgs = all_images()
+        req(imgs is not None)
+        apix = round(float(imgs.apix), 4)
+        if apix > 0 and apix_rv() != apix:
+            apix_rv.set(apix)
+
     @reactive.effect
     @reactive.event(all_images, input.dn_ignore_blank)
     def _get_displayed_images():
@@ -1901,29 +2598,90 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         reconstruction_results.set([])
 
     @reactive.effect
-    @reactive.event(selected_images_original, ignore_init=False)
+    @reactive.event(selected_images_original)
+    def _clear_per_image_transforms():
+        """Per-image transforms belong to one selection; drop them on a change.
+
+        A new selection of the same size would otherwise silently inherit the
+        previous images' rotations, which the length check cannot catch.
+
+        Keyed on the selection only, never the mode: the joint and automatic
+        stitch routes both use these values, so clearing them on a mode change
+        threw away the auto-transform just as the automatic stitch was about to
+        compose with it -- which left every image's rotation coming out as the
+        small registration residual alone.
+        """
+        per_image_transforms.set([])
+
+    @reactive.effect
+    @reactive.event(selected_images_original)
+    def _clear_autostitch_transfer():
+        """Drop a transferred layout when the selection changes.
+
+        Deliberately keyed on the selection alone, not on the mode: the whole
+        point of the transfer is to survive the switch from automatic to manual
+        stitching, so clearing it on a mode change would erase it moments before
+        the manual card reads it.
+        """
+        autostitch_transforms.set([])
+
+    @reactive.effect
+    @reactive.event(multi_mode_rv)
+    def _discard_stitch_on_mode_change():
+        """Any change of route discards the stitched image.
+
+        A stitch made by one route is not a valid starting state for another.
+        Left in place it keeps standing in for the selection: the joint search
+        would quietly run on one stitched image instead of the several that were
+        picked, and switching between the stitch routes showed a composite that
+        the other route's controls did not describe.
+
+        Each route therefore starts again from the individual images.
+        """
+        if len(stitched_image_displayed()):
+            stitched_image_displayed.set([])
+            stitched_image_labels.set([])
+            stitched_image_links.set([])
+        if autostitch_report():
+            autostitch_report.set({})
+
+    @reactive.effect
+    @reactive.event(
+        selected_images_original,
+        stitched_image_displayed,
+        multi_mode_rv,
+        ignore_init=False,
+    )
     def _set_initial_image():
         req(len(selected_images_original()))
-        n_images_selected = len(selected_images_original())
-        if n_images_selected == 1:
-            initial_image.set(selected_images_original())
-            new_initial_image.set(True)
+        # What the threshold/transform/crop chain operates on:
+        #   - a stitched image, once made, replaces the selection entirely;
+        #   - the joint and automatic-stitch routes both need every selected
+        #     image auto-transformed, so the whole selection goes through;
+        #   - manual stitching before stitching has nothing to show yet, since
+        #     running the selection through this chain individually is not what
+        #     that route does.
+        if len(stitched_image_displayed()):
+            initial_image.set(stitched_image_displayed())
+        elif _stitching_active():
+            initial_image.set([])
         else:
-            if len(stitched_image_displayed()):
-                initial_image.set(stitched_image_displayed())
-            else:
-                initial_image.set([])
+            initial_image.set(selected_images_original())
+        new_initial_image.set(True)
 
     # ══════════════════════════════════════════════════════════════════
     # Reactive effects: thresholding & transformation
     # ══════════════════════════════════════════════════════════════════
 
-    @reactive.effect
-    @reactive.event(initial_image, input.dn_img_negate)
+    # Plain effect: dn_img_negate belongs to the shared card, which the joint
+    # route replaces with per-image cards, so naming it here would abort this
+    # effect and leave threshold_rv at its 0.0 default -- which the per-image
+    # cards then read as their starting Threshold.
+    @reactive.effect(priority=100)
     def _update_threshold_scale():
         req(len(initial_image()))
         images = initial_image()
-        if input.dn_img_negate():
+        if _input_or("dn_img_negate", img_negate_rv()):
             images = [-img for img in images]
         min_val = float(np.min([np.min(img) for img in images]))
         max_val = float(np.max([np.max(img) for img in images]))
@@ -1931,6 +2689,10 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         from skimage.filters import threshold_otsu
 
         thresh_value = float(np.median([threshold_otsu(img) for img in images]))
+        # Set the reactive value directly, not only the input: the shared card
+        # that used to sync it back does not exist on the joint route, and the
+        # per-image cards seed their Threshold from this value.
+        threshold_rv.set(round(thresh_value, 3))
         ui.update_numeric(
             "dn_threshold",
             value=round(thresh_value, 3),
@@ -1939,27 +2701,23 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             step=round(step_val, 3),
         )
 
-    @reactive.effect
-    @reactive.event(
-        initial_image, input.dn_threshold, input.dn_img_transpose, input.dn_img_flip
-    )
+    # Plain effect, not reactive.event: in joint mode these settings live on
+    # per-image controls, and naming a not-yet-created input in an event list
+    # aborts the effect outright.
+    @reactive.effect(priority=90)
     def _threshold_selected_images():
-        req(len(initial_image()))
         images = initial_image()
-        if input.dn_img_negate():
-            tmp = [
-                helicon.threshold_data(-img, thresh_value=input.dn_threshold())
-                for img in images
-            ]
-        else:
-            tmp = [
-                helicon.threshold_data(img, thresh_value=input.dn_threshold())
-                for img in images
-            ]
-        if input.dn_img_transpose():
-            tmp = [np.transpose(img) for img in tmp]
-        if input.dn_img_flip():
-            tmp = [np.fliplr(img) for img in tmp]
+        req(len(images))
+        tmp = []
+        for i, img in enumerate(images):
+            thresh = _param("threshold", i, threshold_rv())
+            work = -img if _param("negate", i, False) else img
+            work = helicon.threshold_data(work, thresh_value=thresh)
+            if _param("transpose", i, False):
+                work = np.transpose(work)
+            if _param("flip", i, False):
+                work = np.fliplr(work)
+            tmp.append(work)
         selected_images_thresholded.set(tmp)
 
     # Sync checkbox/reactive values
@@ -2035,7 +2793,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
         tmp = np.array(
             [
-                _estimate_helix_rotation_center_diameter(
+                _refine_helix_rotation_center(
                     img,
                     threshold=np.max(img) * 0.2,
                     estimate_rotation=estimate_rotation,
@@ -2044,14 +2802,35 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 for img in images
             ]
         )
-        rotation = np.mean(tmp[:, 0])
-        shift_y = np.mean(tmp[:, 1]) * input.dn_apix()
         diameter = np.max(tmp[:, 2])
-
         if input_data().is_3d:
             crop_size = int(diameter * 1.2) // 4 * 4
         else:
             crop_size = int(diameter * 2) // 4 * 4
+
+        if len(images) > 1:
+            # Every class average sits at its own angle and height, and no
+            # single value describes them: on ten good EMPIAR-10940 classes the
+            # per-image rotations span -20.1 to +10.2 deg with a mean of -0.47,
+            # so applying that mean leaves them 5.73 deg off horizontal on
+            # average (worst 19.6) where per-image transforms give 0.06 (worst
+            # 0.16). Keep the individual values and leave the shared Rotation
+            # and Vertical shift boxes at zero, where they act as a common
+            # nudge applied on top of each image's own transform.
+            per_image_transforms.set([(float(r), float(s)) for r, s, _ in tmp])
+            # The cards already exist, so update them in place rather than
+            # re-rendering, which would discard the user's other edits.
+            for i, (r, sh, _d) in enumerate(tmp):
+                img_apix = _param("apix", i, apix_rv()) or 1.0
+                ui.update_numeric(_pi_id("rot", i), value=round(float(r), 2))
+                ui.update_numeric(_pi_id("dy", i), value=round(float(sh) * img_apix, 2))
+                ui.update_numeric(_pi_id("vcrop", i), value=max(32, crop_size))
+            rotation = 0.0
+            shift_y = 0.0
+        else:
+            per_image_transforms.set([])
+            rotation = float(tmp[0, 0])
+            shift_y = float(tmp[0, 1]) * _input_or("dn_apix", apix_rv())
 
         apix = round(all_images().apix, 4)
         ui.update_numeric("dn_apix", value=apix, max=apix * 2)
@@ -2077,44 +2856,72 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         images = selected_images_thresholded()
         ny = int(np.max([img.shape[0] for img in images]))
         nx = int(np.max([img.shape[1] for img in images]))
+        per_image_transforms.set([])
+        for i in range(len(images)):
+            ui.update_numeric(_pi_id("rot", i), value=0.0)
+            ui.update_numeric(_pi_id("dy", i), value=0.0)
+            ui.update_numeric(_pi_id("vcrop", i), value=ny // 2 * 2)
+            ui.update_numeric(_pi_id("hcrop", i), value=nx // 2 * 2)
         ui.update_numeric("dn_pre_rotation", value=0.0)
         ui.update_numeric("dn_shift_y", value=0.0)
         ui.update_numeric("dn_vertical_crop_size", value=ny // 2 * 2)
         ui.update_numeric("dn_horizontal_crop_size", value=nx // 2 * 2)
 
+    def _input_or(name, default=0.0):
+        """Read a dynamically created input, or a default before it exists.
+
+        Reading an unset input registers the dependency and then raises
+        SilentException, so catching it here still means this effect re-runs
+        once the input appears or the user changes it.
+        """
+        try:
+            val = input[name]()
+        except SilentException:
+            return default
+        return default if val is None else val
+
+    # A plain effect, deliberately not reactive.event: the per-image inputs are
+    # created dynamically, and reactive.event calls every dependency up front,
+    # so naming an input that does not exist yet raises SilentException and
+    # silently aborts the whole effect -- which left the transformed images
+    # never being set, and so no gallery at all. An effect tracks whatever it
+    # actually reads, which also means there is no cap on the image count.
     @reactive.effect
-    @reactive.event(
-        selected_images_thresholded, input.dn_pre_rotation, input.dn_shift_y
-    )
     def _transform_selected_images():
-        req(len(selected_images_thresholded()))
-        if input.dn_pre_rotation() != 0 or input.dn_shift_y() != 0:
-            rotated = []
-            for img in selected_images_thresholded():
+        images = selected_images_thresholded()
+        req(len(images))
+        per = per_image_transforms()
+        if len(per) != len(images):
+            per = [(0.0, 0.0)] * len(images)
+        apix = _input_or("dn_apix", apix_rv()) or 1.0
+
+        rotated = []
+        for i, img in enumerate(images):
+            img_apix = _param("apix", i, apix) or apix
+            rotation = _param("rot", i, per[i][0])
+            shift = _param("dy", i, per[i][1] * img_apix) / img_apix
+            if rotation or shift:
                 rotated.append(
                     helicon.transform_image(
-                        image=img,
-                        rotation=input.dn_pre_rotation(),
-                        post_translation=(input.dn_shift_y() / input.dn_apix(), 0),
+                        image=img, rotation=rotation, post_translation=(shift, 0)
                     )
                 )
-        else:
-            rotated = selected_images_original()
+            else:
+                # Must stay on the thresholded image: the originals would
+                # silently drop the thresholding, and for a stitched image they
+                # are the wrong images entirely.
+                rotated.append(img)
         selected_images_thresholded_rotated_shifted.set(rotated)
 
     @reactive.effect
-    @reactive.event(
-        selected_images_thresholded_rotated_shifted,
-        input.dn_vertical_crop_size,
-        input.dn_horizontal_crop_size,
-    )
     def _crop_selected_images():
-        req(len(selected_images_thresholded_rotated_shifted()))
-        crop_ny = int(input.dn_vertical_crop_size())
-        crop_nx = int(input.dn_horizontal_crop_size())
+        images = selected_images_thresholded_rotated_shifted()
+        req(len(images))
         cropped = []
-        for img in selected_images_thresholded_rotated_shifted():
+        for i, img in enumerate(images):
             ny, nx = img.shape
+            crop_ny = int(_param("vcrop", i, vertical_crop_size_rv()) or ny)
+            crop_nx = int(_param("hcrop", i, horizontal_crop_size_rv()) or nx)
             if crop_ny < ny or crop_nx < nx:
                 cropped.append(
                     helicon.crop_center(img, shape=(min(ny, crop_ny), min(nx, crop_nx)))
@@ -2137,31 +2944,196 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         transformed_images_links.set([""])
 
     @reactive.effect
-    @reactive.event(input.dn_perform_stitching)
-    def _update_stitched_image_displayed():
-        req(len(selected_images_rotated_shifted()))
-        x_offsets = transformed_images_x_offsets()
-        x_positions = _image_stitching_x_positions(
-            selected_images_rotated_shifted(), x_offsets
+    @reactive.event(input.dn_undo_stitch)
+    def _undo_auto_stitch():
+        """Discard the stitched image and go back to the individual images."""
+        stitched_image_displayed.set([])
+        stitched_image_labels.set([])
+        stitched_image_links.set([])
+        autostitch_report.set({})
+
+    @reactive.effect
+    @reactive.event(input.dn_auto_stitch)
+    def _auto_stitch_images():
+        """Register the selected images to each other and composite them.
+
+        Registration runs on the *auto-transformed* images, which are already
+        near horizontal and centred, so only a small residual remains to be
+        found and the search stays tight and reliable. The transforms are then
+        composed with the auto-transform and applied once to the originals, so
+        the composite is interpolated a single time rather than twice.
+        """
+        # The auto-transformed, cropped images -- not selected_images_thresholded,
+        # which is thresholded but NOT yet rotated or centred. Registering those
+        # would hand a tight rotation search images still tilted by up to ten
+        # degrees, and then compose the auto-transform on top of a registration
+        # that had already tried to absorb it.
+        images = selected_images_thresholded_rotated_shifted_cropped()
+        req(len(images) > 1)
+        originals = selected_images_thresholded()
+        if len(originals) != len(images):
+            originals = images
+
+        per = per_image_transforms()
+        if len(per) != len(images):
+            per = [(0.0, 0.0)] * len(images)
+        apix = _input_or("dn_apix", apix_rv()) or 1.0
+        # What auto-transform applied, per image, so it can be folded back in.
+        auto = [
+            (
+                _param("rot", i, per[i][0]),
+                _param("dy", i, per[i][1] * apix) / apix,
+            )
+            for i in range(len(images))
+        ]
+
+        # Every pair is registered twice (polarity, then rotation and shifts)
+        # and every image once per refinement round, so the count is knowable up
+        # front and the bar can be honest about how far along it is.
+        n_jobs = denovo3d_register.n_registration_jobs(len(images))
+        with ui.Progress(min=0, max=n_jobs) as p:
+            done = [0]
+
+            def _tick(label):
+                done[0] += 1
+                p.set(
+                    done[0],
+                    message=f"Registering: {done[0]}/{n_jobs}",
+                    detail=label,
+                )
+
+            p.set(0, message=f"Registering: 0/{n_jobs}", detail="starting ...")
+            try:
+                _stitched, transforms, diagnostics = denovo3d_register.auto_stitch(
+                    images,
+                    rot_range=2.0,
+                    dy_range=3.0,
+                    coarse_step=0.5,
+                    progress=_tick,
+                )
+            except Exception:
+                logger.error("automatic stitching failed", exc_info=True)
+                ui.modal_show(
+                    ui.modal(
+                        "Automatic registration failed; see the log for details.",
+                        title="Auto Stitch",
+                        easy_close=True,
+                        footer=None,
+                    )
+                )
+                return
+
+        # Compose with the auto-transform and resample the originals once.
+        composed = []
+        for (r, sy), t in zip(auto, transforms):
+            c = denovo3d_register.compose_transforms(r, sy, t)
+            c["connected"] = t.get("connected", True)
+            c["dx"] = t["dx"] + c.pop("extra_dx", 0.0)
+            composed.append(c)
+        placed = [
+            dict(
+                psi=0.0,
+                dy=0.0,
+                dx=c["dx"],
+                connected=c["connected"],
+                flip_x=False,
+                flip_y=False,
+            )
+            for c in composed
+        ]
+        oriented = [
+            denovo3d_register.apply_composed(im, c)
+            for im, c in zip(originals, composed)
+        ]
+        stitched, _coverage = denovo3d_register.composite(oriented, placed)
+        if stitched is None:
+            logger.warning("automatic stitching produced no image")
+            return
+
+        # Convert into what the manual sliders mean. Their x value is a
+        # correction from an end-to-end tiled layout, not an absolute position,
+        # so the tiled offset has to come back out.
+        width = int(np.shape(originals[0])[1]) if len(originals) else 0
+        placed_dx = [c["dx"] for c in composed if c["connected"]]
+        base = min(placed_dx) if placed_dx else 0.0
+        transferred = []
+        for i, (c, t) in enumerate(zip(composed, transforms)):
+            transferred.append(
+                dict(
+                    flip_x=bool(t.get("flip_x", False)),
+                    flip_y=bool(t.get("flip_y", False)),
+                    rotation=float(c["rotation"]),
+                    shift_y=float(c["shift_y"]),
+                    shift_x=float(c["dx"] - base - i * width),
+                    connected=bool(c["connected"]),
+                )
+            )
+        autostitch_transforms.set(transferred)
+
+        report = dict(diagnostics)
+        report.update(
+            n_images=len(images),
+            n_possible=len(images) * (len(images) - 1) // 2,
+        )
+        autostitch_report.set(report)
+        logger.info(
+            "auto stitch: %d/%d pairs, %d placed, span %.2fx, trustworthy=%s",
+            diagnostics.get("n_pairs", 0),
+            report["n_possible"],
+            diagnostics.get("n_connected", 0),
+            diagnostics.get("span_gain", 1.0),
+            diagnostics.get("trustworthy"),
         )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with open(temp_dir + "/TileConfiguration.txt", "w") as tc:
-                tc.write("dim = 2\n\n")
-                for i, img in enumerate(selected_images_rotated_shifted()):
-                    tmp = np.uint8(
-                        (img - np.min(img)) / (np.max(img) - np.min(img)) * 255
-                    )
-                    tmp_imf = Image.fromarray(tmp, "L")
-                    tmp_imf.save(temp_dir + "/" + str(i) + ".png")
-                    tc.write(str(i) + ".png; ; (" + str(x_positions[i]) + ", 0.0)\n")
-            result = denovo3d_pipeline.itk_stitch(temp_dir)
-
-        result = result.astype(np.float32)
-        result = (result - result.mean()) / result.std()
-        result = result / result.max()
+        result = np.asarray(stitched, dtype=np.float32)
+        if result.std() > 0:
+            result = (result - result.mean()) / result.std()
+            result = result / max(abs(result.max()), 1e-6)
         stitched_image_displayed.set([result])
-        stitched_image_labels.set(["Stitched image:"])
+        stitched_image_labels.set([""])
+        stitched_image_links.set([""])
+
+    @reactive.effect
+    @reactive.event(input.dn_perform_stitching)
+    def _update_stitched_image_displayed():
+        """Composite the manually placed images.
+
+        Placed directly rather than through ITK's montage: that expects a
+        regular grid of tiles and infers the grid from the positions, so it
+        fails outright once the images overlap substantially -- which is
+        exactly what a layout transferred from the automatic stitch looks like
+        (four 128 px images spanning 172 px). It raised
+
+            ITK ERROR: Axis sizes: [2, 1] current index: [0, 1]
+
+        for four images in a row. Compositing here also means the two stitch
+        routes combine their images the same way, so a transferred layout
+        reproduces the automatic result instead of merely approximating it.
+        """
+        images = selected_images_rotated_shifted()
+        req(len(images))
+        x_positions = _image_stitching_x_positions(
+            images, transformed_images_x_offsets()
+        )
+        # The per-image effects have already applied flip, rotation and dy, so
+        # only the placement is left.
+        placed = [
+            dict(
+                psi=0.0, dy=0.0, dx=float(x), flip_x=False, flip_y=False, connected=True
+            )
+            for x in x_positions
+        ]
+        result, _coverage = denovo3d_register.composite(images, placed)
+        if result is None:
+            logger.warning("manual stitching produced no image")
+            return
+
+        result = np.asarray(result, dtype=np.float32)
+        if result.std() > 0:
+            result = (result - result.mean()) / result.std()
+            result = result / max(abs(result.max()), 1e-6)
+        stitched_image_displayed.set([result])
+        stitched_image_labels.set([""])
         stitched_image_links.set([""])
 
     # ══════════════════════════════════════════════════════════════════
@@ -2188,16 +3160,21 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(input.dn_run_denovo3D)
     def _run_denovo3D_reconstruction():
-        data = selected_images_thresholded_rotated_shifted_cropped()
-        req(len(data) > 0)
+        images = selected_images_thresholded_rotated_shifted_cropped()
+        req(len(images) > 0)
 
-        data = data[0]
-        ny, nx = data.shape
         binning_factor = max(1, getattr(input, "dn_binning", lambda: 1)())
-        apix_binned = input.dn_apix() * binning_factor
+        # Pixel size is per-image in joint mode, so each task carries its own.
+        apix_per_image = [
+            _param("apix", i, apix_rv()) * binning_factor for i in range(len(images))
+        ]
+        apix_binned = apix_per_image[0]
 
         imageFile = selected_images_title().strip(":")
-        imageIndex = selected_images_labels()[0]
+        labels = list(selected_images_labels())
+        if len(labels) != len(images):
+            # A stitched image collapses the selection into one image
+            labels = [f"Stitched: {'+'.join(str(l) for l in labels)}"][: len(images)]
 
         _log_dir = pathlib.Path.home() / ".cache" / "helicon"
         _log_dir.mkdir(parents=True, exist_ok=True)
@@ -2241,7 +3218,8 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         n_pairs = len(tr_pairs)
         return_3d = n_pairs == 1
         n_cpu = input.dn_cpu()
-        n_threads_per_job = max(1, n_cpu // max(1, n_pairs))
+        n_jobs = n_pairs * len(images)
+        n_threads_per_job = max(1, n_cpu // max(1, n_jobs))
 
         if input.dn_target_apix2d() > apix_binned:
             target_apix2d_overwrite = input.dn_target_apix2d()
@@ -2266,8 +3244,6 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             psi_range_val = 0
             dy = 0
             dy_range_val = 0
-            tube_length = nx * apix
-            tube_diameter = ny * apix
             reconstruct_length = input.dn_reconstruct_length_rise() * rise
 
             algorithm = dict(
@@ -2282,60 +3258,71 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             if abs(rise) < 0.01:
                 log.warning(f"WARNING: rise={round(rise, 3)} ignored (too small)")
                 continue
-            if abs(rise) >= tube_length / 2:
-                log.warning(f"WARNING: rise={round(rise, 3)} ignored (too large)")
-                continue
 
-            tasks.append(
-                (
-                    ti,
-                    len(tr_pairs),
-                    data,
-                    imageFile,
-                    imageIndex,
-                    twist,
-                    rise,
-                    (np.min(rises), np.max(rises)),
-                    csym,
-                    tilt,
-                    (tilt_min, tilt_max),
-                    psi,
-                    psi_range_val,
-                    dy,
-                    dy_range_val,
-                    apix,
-                    "",
-                    -1,
-                    0,
-                    0,
-                    target_apix3d_overwrite,
-                    target_apix2d_overwrite,
-                    -1,
-                    int(input.dn_positive_constraint()),
-                    tube_length,
-                    tube_diameter,
-                    0.0,
-                    reconstruct_length,
-                    input.dn_sym_oversample(),
-                    input.dn_interpolation(),
-                    0,
-                    return_3d,
-                    input.dn_score_metric(),
-                    algorithm,
-                    2,
-                    n_threads_per_job,
+            for img_i, (data, imageIndex) in enumerate(zip(images, labels)):
+                apix = apix_per_image[img_i]
+                ny, nx = data.shape
+                tube_length = nx * apix
+                tube_diameter = ny * apix
+                if abs(rise) >= tube_length / 2:
+                    log.warning(f"WARNING: rise={round(rise, 3)} ignored (too large)")
+                    continue
+
+                tasks.append(
+                    (
+                        ti,
+                        len(tr_pairs),
+                        data,
+                        imageFile,
+                        imageIndex,
+                        twist,
+                        rise,
+                        (np.min(rises), np.max(rises)),
+                        csym,
+                        tilt,
+                        (tilt_min, tilt_max),
+                        psi,
+                        psi_range_val,
+                        dy,
+                        dy_range_val,
+                        apix,
+                        "",
+                        -1,
+                        0,
+                        0,
+                        target_apix3d_overwrite,
+                        target_apix2d_overwrite,
+                        -1,
+                        int(input.dn_positive_constraint()),
+                        tube_length,
+                        tube_diameter,
+                        0.0,
+                        reconstruct_length,
+                        input.dn_sym_oversample(),
+                        input.dn_interpolation(),
+                        0,
+                        return_3d,
+                        input.dn_score_metric(),
+                        algorithm,
+                        2,
+                        n_threads_per_job,
+                    )
                 )
-            )
 
         if len(tasks) < 1:
             log.warning("Nothing to do. I will quit")
             return
 
+        if len(images) > 1:
+            log.info(
+                f"joint search over {len(images)} images x {n_pairs} twist/rise pairs"
+            )
+
         abort_flag[0] = False
-        _reconstruction_task(tasks, n_cpu, abort_flag)
+        _reconstruction_task(tasks, n_cpu, abort_flag, len(images))
 
     @reactive.extended_task
-    async def _reconstruction_task(tasks, cpu, abort_ref):
+    async def _reconstruction_task(tasks, cpu, abort_ref, n_images=1):
         _log_dir = pathlib.Path.home() / ".cache" / "helicon"
         _log_dir.mkdir(parents=True, exist_ok=True)
         log = helicon.getLogger(
@@ -2395,8 +3382,8 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         )
 
                         if len(results) % update_interval == 0:
-                            results.sort(key=lambda x: x[0], reverse=True)
-                            reconstruction_results.set(list(results))
+                            reconstruction_results_raw.set(list(results))
+                            reconstruction_results.set(_rank(results, n_images))
 
                     t_final = time()
                     log.info("reconstruction time: %s", t_final - t0)
@@ -2405,9 +3392,8 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 log.info(
                     f"{n_discarded}/{len(tasks)} results are None and thus discarded"
                 )
-            if results:
-                results.sort(key=lambda x: x[0], reverse=True)
-            reconstruction_results.set(results)
+            reconstruction_results_raw.set(list(results))
+            reconstruction_results.set(_rank(results, n_images, log))
         except Exception:
             log.error("Reconstruction task failed:\n%s", traceback.format_exc())
 
@@ -2425,50 +3411,94 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     def _display_denovo3D_projections():
         reconstructed_projection_labels.set([])
         reconstructed_projection_images.set([])
-        req(len(reconstruction_results()))
+        ranked = reconstruction_results()
+        req(len(ranked))
 
         top_n = input.dn_top_n_results()
         if top_n <= 0:
-            top_n = len(reconstruction_results())
+            top_n = len(ranked)
+
+        # Group the raw results by twist/rise so each ranked pair can show every
+        # image's reconstruction. Ordered rank-major and image-minor: the best
+        # twist for image 1, 2, ... n, then the second-best for image 1, 2, ...
+        # so the same twist can be compared across images side by side. That is
+        # n * top_n entries for n selected images.
+        by_pair = {}
+        for r in reconstruction_results_raw():
+            key = (round(float(r[2][5]), 6), round(float(r[2][6]), 6))
+            by_pair.setdefault(key, {})[r[2][2]] = r
+        image_order = [str(l) for l in selected_images_labels()]
+        n_solved = len(selected_images_thresholded_rotated_shifted_cropped())
+        joint = n_solved > 1
 
         labels = []
         images = []
-        for ri, result in enumerate(reconstruction_results()[:top_n]):
-            (
-                score,
-                (rec3d_x_proj, _rec3d_y_proj, rec3d_z_sections, rec3d, *_rest1),
+        for ri, ranked_result in enumerate(ranked[:top_n]):
+            joint_score = ranked_result[0]
+            pair = (
+                round(float(ranked_result[2][5]), 6),
+                round(float(ranked_result[2][6]), 6),
+            )
+            group = by_pair.get(pair, {})
+            # Selection order where known, so the images stay in a stable,
+            # recognisable sequence; anything unmatched is appended.
+            ordered = [group[k] for k in image_order if k in group]
+            ordered += [v for k, v in group.items() if k not in image_order]
+            if not ordered:
+                ordered = [ranked_result]
+
+            for result in ordered:
                 (
-                    _data,
-                    _imageFile,
-                    _imageIndex,
-                    _apix3d,
-                    _apix2d,
-                    twist,
-                    rise,
-                    _csym,
-                    _tilt,
-                    _psi,
-                    _dy,
-                ),
-            ) = result
+                    score,
+                    (rec3d_x_proj, _rec3d_y_proj, rec3d_z_sections, rec3d, *_rest1),
+                    (
+                        query_image,
+                        _imageFile,
+                        imageIndex,
+                        _apix3d,
+                        _apix2d,
+                        twist,
+                        rise,
+                        _csym,
+                        _tilt,
+                        _psi,
+                        _dy,
+                    ),
+                ) = result
 
-            query_image = selected_images_thresholded_rotated_shifted_cropped()[0]
-            query_image_padded = helicon.pad_to_size(
-                query_image, shape=rec3d_x_proj.shape
-            )
+                # The query image comes from the result itself, so it is always
+                # the image this reconstruction was solved from.
+                query_image_padded = helicon.pad_to_size(
+                    query_image, shape=rec3d_x_proj.shape
+                )
+                rec3d_z_sections_padded = helicon.pad_to_size(
+                    rec3d_z_sections, shape=rec3d_x_proj.shape
+                )
 
-            pitch_val = int(round(rise * 360 / abs(twist))) if abs(twist) > 0.01 else 0
-            label_x = f"{ri+1}: X|score={score:.4f}|pitch={pitch_val:,}A|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
-            labels += [
-                f"Input image: {selected_images_labels()[0]}",
-                label_x,
-                f"{ri+1}: Z",
-            ]
-
-            rec3d_z_sections_padded = helicon.pad_to_size(
-                rec3d_z_sections, shape=rec3d_x_proj.shape
-            )
-            images += [query_image_padded, rec3d_x_proj, rec3d_z_sections_padded]
+                pitch_val = (
+                    int(round(rise * 360 / abs(twist))) if abs(twist) > 0.01 else 0
+                )
+                if joint:
+                    label_x = (
+                        f"{ri+1}: X|{imageIndex}|score={score:.4f}"
+                        f"|joint={joint_score:.4f}|pitch={pitch_val:,}A"
+                        f"|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
+                    )
+                else:
+                    label_x = (
+                        f"{ri+1}: X|score={score:.4f}|pitch={pitch_val:,}A"
+                        f"|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
+                    )
+                labels += [
+                    f"Input image: {imageIndex}",
+                    label_x,
+                    f"{ri+1}: Z",
+                ]
+                images += [
+                    query_image_padded,
+                    rec3d_x_proj,
+                    rec3d_z_sections_padded,
+                ]
 
         reconstructed_projection_labels.set(labels)
         reconstructed_projection_images.set(images)

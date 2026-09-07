@@ -155,6 +155,50 @@ _TAB_MODULE_MAP: dict[str, tuple[str, object]] = {
 }
 
 
+# ── Lazy tab loading ────────────────────────────────────────────
+# Tab order as it appears in the navbar; the first entry is the fallback
+# when neither the URL nor the last-open cookie names a tab.
+_TAB_ORDER: tuple[str, ...] = (
+    "WhereIsMyClass",
+    "HelicalProjection",
+    "HILL",
+    "HelicalPitch",
+    "Denovo3D",
+    "HelicalLattice",
+    "HI3D",
+)
+
+assert set(_TAB_ORDER) == set(_TAB_MODULE_MAP), (
+    "_TAB_ORDER must name exactly the tabs in _TAB_MODULE_MAP; a renamed or "
+    "added tab would otherwise break the fallback and lazy-start lookup"
+)
+
+# Cookie written by the client on every tab change, so the tab a user was
+# last on is known at page-request time and needs no extra round trip.
+_LAST_TAB_COOKIE = "helicon_last_tab"
+
+
+def _resolve_active_tab(request: Request) -> str:
+    """Which tab to open, in the order: URL, last-open cookie, first tab.
+
+    Only the resolved tab's server function runs at session start. Every tab's
+    UI is still built (that measured 0.01 s for all seven), so navigation works
+    normally and Shiny keeps hidden outputs suspended; what lazy loading avoids
+    is each tab module's eager reactive effects, which is where session-start
+    time actually went.
+    """
+    tab = request.query_params.get("helicon_tab")
+    if tab:
+        # Arrives JSON-quoted from the bookmark URL, e.g. helicon_tab="Denovo3D"
+        tab = tab.strip().strip('"')
+        if tab in _TAB_MODULE_MAP:
+            return tab
+    tab = request.cookies.get(_LAST_TAB_COOKIE)
+    if tab and tab.strip('"') in _TAB_MODULE_MAP:
+        return tab.strip('"')
+    return _TAB_ORDER[0]
+
+
 # ── Display → tab navigation control ─────────────────────────────
 # The file browser (helicon display) launches this app with a per-launch
 # helicon_token in the URL.  A control endpoint pair lets the browser
@@ -275,11 +319,13 @@ async def _helicon_navigate(request: Request):
 def app_ui(request: Request):
     theme = _web_theme(request)
     initial_theme = "dark" if theme in {"Dark", "System"} else "light"
+    active_tab = _resolve_active_tab(request)
     return ui.page_fillable(
         ui.head_content(
             ui.tags.title("Helicon"),
             ui.tags.link(rel="icon", type="image/png", href="icon.png"),
-            ui.tags.script(f"""
+            ui.tags.script(
+                f"""
                 (function() {{
                     var requested = {theme!r};
                     function applyTheme() {{
@@ -304,8 +350,10 @@ def app_ui(request: Request):
                             .addEventListener('change', applyTheme);
                     }}
                 }})();
-                """),
-            ui.tags.script("""
+                """
+            ),
+            ui.tags.script(
+                """
                 var _BOOKMARK_TABS = {
                     "HILL": {
                         "input_mode": "hill-hill_input_mode",
@@ -437,7 +485,15 @@ def app_ui(request: Request):
                 var _initialValues = {};
                 var _bookmarkTimer = null;
                 var _initialCaptureDone = false;
-                var _DEBUG_BOOKMARK = true;
+                // Keep this off: the handlers below run on every shiny:inputchanged,
+                // and startup fires one per input plus one per output visibility
+                // change -- hundreds of them. Each log line JSON.stringify()s the
+                // whole multi-tab state blob, and the argument is evaluated even
+                // though the flag gates the call, so a session start produced
+                // ~9,300 console messages and stalled the browser's message loop
+                // long enough to delay the first images. Set to true only while
+                // debugging bookmark URLs.
+                var _DEBUG_BOOKMARK = false;
 
                 // Shiny appends a type suffix like :shiny.number to certain input
                 // keys in $inputValues.  Look up both bare and typed versions.
@@ -486,7 +542,28 @@ def app_ui(request: Request):
                     if (_DEBUG_BOOKMARK) console.log('[bookmark] _initialCaptureDone = true. initialValues:', JSON.stringify(_initialValues));
                 }, 2000);
 
+                // Remember the last-open tab in a cookie rather than
+                // localStorage: a cookie is sent with the page request, so the
+                // server knows which tab to open (and which tab's server code
+                // to run) before the websocket exists, with no extra round trip.
+                function _rememberTab(name) {
+                    if (!name) return;
+                    document.cookie = 'helicon_last_tab=' +
+                        encodeURIComponent(name) +
+                        '; path=/; max-age=31536000; SameSite=Lax';
+                }
+                // Also record on connect, not just on change: an explicit
+                // ?helicon_tab= deep link opens that tab via `selected=`, which
+                // fires no change event, so without this a tab the user never
+                // switched away from would not be remembered.
+                $(document).on('shiny:connected', function() {
+                    var active = document.querySelector(
+                        '.navbar .nav-link.active, .navbar-nav .nav-link.active');
+                    if (active) _rememberTab(active.textContent.trim());
+                });
+
                 $(document).on('shiny:inputchanged', function(event) {
+                    if (event.name === 'helicon_tab') _rememberTab(event.value);
                     if (_DEBUG_BOOKMARK) console.log('[bookmark] shiny:inputchanged:', event.name, '=', JSON.stringify(event.value));
                     _captureInitialValues();
 
@@ -557,8 +634,10 @@ def app_ui(request: Request):
                 Shiny.addCustomMessageHandler('triggerUrlSync', function(msg) {
                     if (_initialCaptureDone) _buildBookmarkUrl();
                 });
-            """),
-            ui.tags.script("""
+            """
+            ),
+            ui.tags.script(
+                """
                 var _heliconToken = new URLSearchParams(window.location.search).get('helicon_token');
                 if (_heliconToken) {
                     setInterval(function() {
@@ -574,9 +653,11 @@ def app_ui(request: Request):
                             .catch(function() {});
                     }, 2000);
                 }
-                """),
+                """
+            ),
         ),
-        ui.tags.style(f"""
+        ui.tags.style(
+            f"""
             :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {{
                 --helicon-page-bg: #1e1e1e;
                 --helicon-text: #e0e0e0;
@@ -655,7 +736,8 @@ def app_ui(request: Request):
             .sidebar {{ padding-right: 4px !important; }}
             .main {{ padding-left: 4px !important; }}
             body.bslib-page-fill {{ padding: 0 !important; gap: 0 !important; }}
-        """),
+        """
+        ),
         ui.navset_bar(
             ui.nav_panel(
                 "WhereIsMyClass", where_is_my_class_tab_ui("where_is_my_class")
@@ -681,6 +763,11 @@ def app_ui(request: Request):
             gap=0,
             padding=0,
             id="helicon_tab",
+            # Open directly on the target tab. Without this the navbar starts on
+            # the first tab and the bookmark script switches afterwards, so a
+            # deep link paid for two tabs' worth of rendering before showing the
+            # one asked for.
+            selected=active_tab,
         ),
     )
 
@@ -727,32 +814,61 @@ def server(input, output, session):
 
     type(session)._unhandled_error = lambda self, e: _show_error_modal(e)
 
-    helical_lattice_tab_server("helical_lattice", project)
-    helical_pitch_tab_server("helical_pitch", project)
-    hill_tab_server("hill", project)
-    hi3d_tab_server("hi3d", project)
-    denovo3d_tab_server("denovo3d", project)
-    helical_projection_tab_server("helical_projection", project)
+    # ── Lazy tab initialisation ───────────────────────────────
+    # Each tab's server function is started the first time that tab is
+    # actually shown, not at session start. Seven tabs' worth of eager
+    # reactive effects (EMDB lookups, default-map downloads, plot setup)
+    # used to run on every page load even though only one tab is visible.
 
-    # Create FileChooser at top-level session context (ipywidgets comms
-    # fail when created inside a @module.server nested session).
-    from ipyfilechooser import FileChooser
+    def _start_where_is_my_class():
+        # FileChooser must be built in the top-level session context;
+        # ipywidgets comms fail when it is created inside a @module.server.
+        from ipyfilechooser import FileChooser
 
-    wimc_filechooser = FileChooser(
-        path=".",
-        select_desc="Select",
-        show_hidden=False,
-        filter_pattern=["*_data.star", "*.cs"],
-        title="Select a RELION star or cryoSPARC cs file on the server",
-    )
-    where_is_my_class_tab_server(
-        "where_is_my_class", project, wimc_filechooser=wimc_filechooser
-    )
+        where_is_my_class_tab_server(
+            "where_is_my_class",
+            project,
+            wimc_filechooser=FileChooser(
+                path=".",
+                select_desc="Select",
+                show_hidden=False,
+                filter_pattern=["*_data.star", "*.cs"],
+                title="Select a RELION star or cryoSPARC cs file on the server",
+            ),
+        )
+
+    _TAB_STARTERS: dict[str, object] = {
+        "WhereIsMyClass": _start_where_is_my_class,
+        "HelicalProjection": lambda: helical_projection_tab_server(
+            "helical_projection", project
+        ),
+        "HILL": lambda: hill_tab_server("hill", project),
+        "HelicalPitch": lambda: helical_pitch_tab_server("helical_pitch", project),
+        "Denovo3D": lambda: denovo3d_tab_server("denovo3d", project),
+        "HelicalLattice": lambda: helical_lattice_tab_server(
+            "helical_lattice", project
+        ),
+        "HI3D": lambda: hi3d_tab_server("hi3d", project),
+    }
+    _started: set[str] = set()
+
+    def _start_tab(tab: str) -> None:
+        """Run a tab's server function once, ever, for this session."""
+        if tab in _started or tab not in _TAB_STARTERS:
+            return
+        # Marked before the call, so a failure is not retried on every tab
+        # switch; the tab's UI still renders, it just has no reactivity.
+        _started.add(tab)
+        try:
+            _TAB_STARTERS[tab]()
+        except Exception:
+            logger.error("failed to initialise tab %s", tab, exc_info=True)
 
     @reactive.effect
     def _track_active_tab():
         tab = input.helicon_tab()
         if tab:
+            _start_tab(tab)
             project.active_tab.set(tab)
 
     @session.bookmark.on_bookmark

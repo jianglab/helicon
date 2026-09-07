@@ -54,6 +54,21 @@ class EMDB:
         cache_dir : str or Path, optional
             Custom cache directory path. Defaults to ``helicon.cache_dir / "emdb"``.
         """
+        # __new__ returns the same object every time, but Python still calls
+        # __init__ on it, so without this guard every EMDB() re-ran the whole
+        # setup: re-fetching, re-merging and re-sorting the 61k-entry EMDB table.
+        # Measured 11.9 s on the first call and 0.7 s on each later one, paid
+        # synchronously on the reactive thread by a dozen call sites across the
+        # web app's tabs -- which is what made the app slow to show any images.
+        # Re-initialise only when the arguments differ from last time, so the
+        # callers that pass a custom cache_dir still get what they asked for.
+        signature = (
+            bool(use_curated_helical_parameters),
+            str(cache_dir) if cache_dir is not None else None,
+        )
+        if getattr(self, "_init_signature", None) == signature and self.emd_ids:
+            return
+
         self.emd_ids = []
         self.meta = None
 
@@ -75,6 +90,11 @@ class EMDB:
         self.update_emd_entries(
             use_curated_helical_parameters=use_curated_helical_parameters
         )
+        # Recorded only after a successful load. update_emd_entries swallows its
+        # exceptions and leaves emd_ids empty, and the guard above also requires
+        # a non-empty list, so a failed first attempt (offline, EMDB down) is
+        # retried by the next EMDB() call rather than cached for the process.
+        self._init_signature = signature
 
     def update_emd_entries(
         self,

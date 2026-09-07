@@ -13,6 +13,10 @@ from pathlib import Path
 def get_images_from_url(url: str) -> tuple:
     """Load a 2D/3D image from a URL or local file path.
 
+    A local path is read directly: there is no download to save, and caching on
+    the path string would hide later edits to that file for the cache lifetime.
+    A remote URL goes through the cached helper below.
+
     Parameters
     ----------
     url : str
@@ -23,6 +27,24 @@ def get_images_from_url(url: str) -> tuple:
     -------
     tuple
         ``(data_array, apix_in_angstroms)``
+    """
+    if Path(url).is_file():
+        return get_images_from_file(url)
+    return _get_images_from_url_cached(url)
+
+
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "denovo3D"), expires_after=7, verbose=0
+)
+def _get_images_from_url_cached(url: str) -> tuple:
+    """Download and read a remote image, memoised on the URL.
+
+    Cached because ``download_file_from_url`` writes to a fresh
+    ``NamedTemporaryFile`` on every call and so never reuses a download. The
+    default denovo3D input is 5 MB served from EBI at roughly 100 KB/s, which
+    measured 37-67 s per load and was paid again every time the reactive effect
+    re-fired. Every sibling URL loader (helical_projection, helicalPitch,
+    whereIsMyClass) is cached the same way; this one was the exception.
     """
     url_final = helicon.get_direct_url(url)
     fileobj = helicon.download_file_from_url(url_final)
