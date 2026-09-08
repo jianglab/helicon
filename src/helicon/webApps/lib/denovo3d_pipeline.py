@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 import numpy as np
 import helicon
@@ -18,6 +19,18 @@ from .helical_projection_utils import (
     is_vertical,
     auto_horizontalize,
     tilt_psi_dy_str,
+)
+
+# The denovo3D cache is the one that actually fills disks: a twist/rise search
+# writes a reconstruction per combination, so the directory reached 7.6 GB in a
+# single afternoon -- all of it recent, which means the 7-day expiry never
+# touches it.  Cap the directory instead; joblib evicts least-recently-used
+# entries first, so the searches still in play survive.  Override with
+# HELICON_DENOVO3D_CACHE_LIMIT (e.g. "20G", or "0" to disable the cap).
+DENOVO3D_CACHE_LIMIT = os.environ.get("HELICON_DENOVO3D_CACHE_LIMIT", "5G")
+helicon.set_cache_dir_limit(
+    helicon.cache_dir / "denovo3D",
+    DENOVO3D_CACHE_LIMIT if DENOVO3D_CACHE_LIMIT not in ("0", "") else None,
 )
 
 

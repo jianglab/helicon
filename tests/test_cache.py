@@ -9,6 +9,10 @@ import pytest
 import helicon
 from helicon.lib import cache as cache_mod
 
+# Captured before the autouse fixture shortens them for the tests.
+DEFAULT_PRUNE_INTERVAL = cache_mod._PRUNE_INTERVAL
+DEFAULT_PRUNE_INTERVAL_CAPPED = cache_mod._PRUNE_INTERVAL_CAPPED
+
 
 def _dir_size_mb(path) -> float:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file()) / 1e6
@@ -31,12 +35,15 @@ def _wait_for(predicate, timeout=10.0, interval=0.1) -> bool:
 @pytest.fixture(autouse=True)
 def _reset_prune_throttle():
     """Each test gets a clean throttle table, and a short sweep interval."""
-    original_interval = cache_mod._PRUNE_INTERVAL
+    originals = (cache_mod._PRUNE_INTERVAL, cache_mod._PRUNE_INTERVAL_CAPPED)
     cache_mod._PRUNE_INTERVAL = datetime.timedelta(seconds=0)
+    cache_mod._PRUNE_INTERVAL_CAPPED = datetime.timedelta(seconds=0)
     cache_mod._prune_next.clear()
+    cache_mod._dir_bytes_limit.clear()
     yield
-    cache_mod._PRUNE_INTERVAL = original_interval
+    cache_mod._PRUNE_INTERVAL, cache_mod._PRUNE_INTERVAL_CAPPED = originals
     cache_mod._prune_next.clear()
+    cache_mod._dir_bytes_limit.clear()
 
 
 class TestExpiry:
@@ -173,6 +180,112 @@ class TestPruning:
         f(0)
         time.sleep(0.5)
         assert _n_entries(tmp_path) == 5, "swept despite a fresh stamp file"
+
+
+class TestSizeCap:
+    """A cap bounds total disk use, which age-based expiry cannot do."""
+
+    def _make(self, tmp_path, expires_after=None):
+        @helicon.cache(expires_after=expires_after, cache_dir=tmp_path)
+        def f(x):
+            return b"x" * 200_000  # 200 KB
+
+        return f
+
+    def test_cap_evicts_even_when_nothing_has_expired(self, tmp_path):
+        f = self._make(tmp_path)  # expires_after=None: no entry is ever stale
+        for i in range(30):
+            f(i)
+        assert _dir_size_mb(tmp_path) > 5
+
+        helicon.set_cache_dir_limit(tmp_path, "2M")
+        f(0)
+        assert _wait_for(
+            lambda: _dir_size_mb(tmp_path) <= 2.5
+        ), f"cap not enforced: {_dir_size_mb(tmp_path):.2f} MB"
+
+    def test_no_cap_means_unbounded(self, tmp_path):
+        f = self._make(tmp_path)
+        for i in range(30):
+            f(i)
+        f(0)
+        time.sleep(0.5)
+        assert _dir_size_mb(tmp_path) > 5
+
+    def test_cap_can_be_removed(self, tmp_path):
+        f = self._make(tmp_path)
+        helicon.set_cache_dir_limit(tmp_path, "2M")
+        for i in range(30):
+            f(i)
+        assert _wait_for(lambda: _dir_size_mb(tmp_path) <= 2.5)
+
+        helicon.set_cache_dir_limit(tmp_path, None)
+        for i in range(30, 60):
+            f(i)
+        time.sleep(0.5)
+        assert _dir_size_mb(tmp_path) > 5
+
+    def test_cap_applies_to_the_directory_not_one_function(self, tmp_path):
+        """Two functions share a directory; the cap covers their combined size."""
+        a = self._make(tmp_path)
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def b(x):
+            return b"y" * 200_000
+
+        for i in range(15):
+            a(i)
+            b(i)
+        assert _dir_size_mb(tmp_path) > 5
+
+        helicon.set_cache_dir_limit(tmp_path, "2M")
+        a(0)
+        assert _wait_for(lambda: _dir_size_mb(tmp_path) <= 2.5)
+
+    def test_capped_dirs_sweep_more_often(self):
+        """A cap can be blown through in hours; a week-long TTL cannot."""
+        assert DEFAULT_PRUNE_INTERVAL_CAPPED < DEFAULT_PRUNE_INTERVAL
+
+
+class TestDenovo3DCap:
+    """denovo3d_pipeline caps its cache directory at import time.
+
+    The autouse fixture clears the registry, so rather than inspecting the
+    import side effect these re-run the module's own registration statement.
+    """
+
+    def _register(self, limit):
+        from helicon.webApps.lib import denovo3d_pipeline as pipeline
+
+        helicon.set_cache_dir_limit(
+            helicon.cache_dir / "denovo3D",
+            limit if limit not in ("0", "") else None,
+        )
+        return str(helicon.cache_dir / "denovo3D"), pipeline
+
+    def test_default_limit_is_registered(self):
+        key, pipeline = self._register(pipeline_limit := "5G")
+        assert cache_mod._dir_bytes_limit[key] == pipeline_limit
+        assert pipeline.DENOVO3D_CACHE_LIMIT  # module defines one
+
+    def test_zero_disables_the_cap(self):
+        key, _ = self._register("0")
+        assert key not in cache_mod._dir_bytes_limit
+
+    def test_module_reads_the_env_override(self, monkeypatch):
+        import importlib
+
+        from helicon.webApps.lib import denovo3d_pipeline as pipeline
+
+        monkeypatch.setenv("HELICON_DENOVO3D_CACHE_LIMIT", "12G")
+        importlib.reload(pipeline)
+        try:
+            assert pipeline.DENOVO3D_CACHE_LIMIT == "12G"
+            key = str(helicon.cache_dir / "denovo3D")
+            assert cache_mod._dir_bytes_limit[key] == "12G"
+        finally:
+            monkeypatch.delenv("HELICON_DENOVO3D_CACHE_LIMIT", raising=False)
+            importlib.reload(pipeline)
 
 
 class TestClearScope:

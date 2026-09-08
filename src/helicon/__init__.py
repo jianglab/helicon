@@ -139,6 +139,7 @@ from .lib.util import (
     import_with_auto_install,
     DummyMemory,
     cache,
+    set_cache_dir_limit,
     color_print,
     getLogger,
     log_command_line,

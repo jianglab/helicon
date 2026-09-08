@@ -6,6 +6,7 @@ from .cache import (
     import_with_auto_install,
     DummyMemory,
     cache,
+    set_cache_dir_limit,
 )  # noqa: F401
 from .logging import (  # noqa: F401
     color_print,
