@@ -1977,13 +1977,23 @@ class FolderBrowserWidget(QMainWindow):
         layout = QVBoxLayout(dialog)
         help_text = QLabel(
             "Select a Bash launcher script that loads your RELION module and/or\n"
-            "activates its conda environment, then runs exec relion. The script\n"
-            "starts with a clean software environment in the project folder.\n\n"
-            "Leave blank to use relion from Helicon's current PATH/environment.\n"
+            "activates its conda environment, then runs exec relion.\n"
+            "Clean environment: initialize all required software in the script.\n"
+            "User Bash setup: inherit the environment and read login profiles,\n"
+            "then source the script in that shell. Switch conda environments as needed.\n\n"
+            "With no script, use relion from the current environment (Clean)\n"
+            "or from the initialized login shell (User Bash setup).\n"
             "HELICON_RELION_LAUNCHER, when set, overrides this saved choice.\n"
             "Queued jobs also need environment setup in their submission template."
         )
         layout.addWidget(help_text)
+        startup_combo = QComboBox()
+        startup_combo.addItem("Clean environment (default)", "clean")
+        startup_combo.addItem("User Bash setup (interactive login shell)", "user-shell")
+        startup_combo.setCurrentIndex(max(0, startup_combo.findData(
+            str(settings.value("relion/startup", "clean"))
+        )))
+        layout.addWidget(startup_combo)
         row = QHBoxLayout()
         path_edit = QLineEdit(str(settings.value("relion/launcher", "") or ""))
         path_edit.setPlaceholderText("Absolute path to launcher script (optional)")
@@ -2017,6 +2027,7 @@ class FolderBrowserWidget(QMainWindow):
                 )
                 return
             settings.setValue("relion/launcher", str(path) if value else "")
+            settings.setValue("relion/startup", startup_combo.currentData())
             dialog.accept()
 
         buttons.accepted.connect(save)
@@ -2037,8 +2048,9 @@ class FolderBrowserWidget(QMainWindow):
         launcher = os.environ.get("HELICON_RELION_LAUNCHER") or str(
             QSettings("helicon", "display").value("relion/launcher", "") or ""
         )
+        startup = str(QSettings("helicon", "display").value("relion/startup", "clean"))
         try:
-            process, log = launch_relion(project, launcher)
+            process, log = launch_relion(project, launcher, startup=startup)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Cannot open RELION", str(exc))
             return

@@ -2314,6 +2314,8 @@ class TestFolderBrowser(object):
         from helicon.lib.gui.file_browser import FolderBrowserWidget
 
         monkeypatch.setenv("HELICON_RELION_LAUNCHER", "/site/relion.sh")
+        settings = MagicMock()
+        settings.value.return_value = "user-shell"
         process = MagicMock()
         process.poll.return_value = None
         log = tmp_path / "relion.log"
@@ -2321,10 +2323,14 @@ class TestFolderBrowser(object):
         try:
             with patch("helicon.lib.relion_launcher.launch_relion", return_value=(process, log)) as launch, patch(
                 "helicon.lib.gui.file_browser.QMessageBox.information"
-            ), patch("helicon.lib.gui.file_browser.QMessageBox.warning") as warning:
+            ), patch("helicon.lib.gui.file_browser.QMessageBox.warning") as warning, patch(
+                "helicon.lib.gui.file_browser.QSettings", return_value=settings
+            ):
                 widget._open_relion()
                 widget._open_relion()
-                launch.assert_called_once_with(str(tmp_path.resolve()), "/site/relion.sh")
+                launch.assert_called_once_with(
+                    str(tmp_path.resolve()), "/site/relion.sh", startup="user-shell"
+                )
                 process.poll.return_value = 1
                 widget._poll_relion()
                 assert not widget._relion_processes

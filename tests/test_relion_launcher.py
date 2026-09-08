@@ -97,6 +97,53 @@ class RelionLauncherTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0], ["/helicon/bin/relion"])
         self.assertEqual(popen.call_args.kwargs["env"]["PATH"], "/helicon/bin")
 
+    def test_user_shell_sources_script_after_startup_and_restores_project(self):
+        script = Path(self.temp.name) / "launch with spaces & quote'.sh"
+        script.write_text("module load relion\nexec relion\n")
+        with self.posix_os(), patch.object(launcher.shutil, "which", return_value="/bin/bash"), \
+                patch.object(launcher.subprocess, "Popen") as popen:
+            _, log = launcher.launch_relion(self.project, str(script), startup="user-shell")
+        self.addCleanup(log.unlink)
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], [
+            "/bin/bash", "--login", "-i", "-c", 'cd -- "$1" && source "$2"',
+            "helicon-relion", str(self.project.resolve()), str(script),
+        ])
+        self.assertEqual(kwargs["env"]["PATH"], "/helicon/bin")
+        self.assertTrue(kwargs["start_new_session"])
+
+    def test_user_shell_without_script_defers_relion_lookup_until_after_startup(self):
+        with self.posix_os(), patch.object(launcher.shutil, "which", return_value="/bin/bash") as which, \
+                patch.object(launcher.subprocess, "Popen") as popen:
+            _, log = launcher.launch_relion(self.project, startup="user-shell")
+        self.addCleanup(log.unlink)
+        which.assert_called_once_with("bash", path="/helicon/bin")
+        self.assertEqual(popen.call_args.args[0], [
+            "/bin/bash", "--login", "-i", "-c", 'cd -- "$1" && exec relion',
+            "helicon-relion", str(self.project.resolve()),
+        ])
+
+    def test_user_shell_preserves_site_settings(self):
+        env = {
+            "PATH": "/site/bin", "SLURM_CONF": "/site/slurm.conf",
+            "MODULEPATH": "/site/modules", "CONDA_PREFIX": "/helicon",
+        }
+        with self.posix_os(), patch.dict(launcher.os.environ, env, clear=True), \
+                patch.object(launcher.shutil, "which", return_value="/bin/bash"), \
+                patch.object(launcher.subprocess, "Popen") as popen:
+            _, log = launcher.launch_relion(self.project, startup="user-shell")
+        self.addCleanup(log.unlink)
+        self.assertEqual(popen.call_args.kwargs["env"], env)
+
+    def test_invalid_startup_and_missing_bash_fail_before_spawn(self):
+        with self.posix_os(), patch.object(launcher.shutil, "which", return_value=None), \
+                patch.object(launcher.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "startup"):
+                launcher.launch_relion(self.project, startup="invalid")
+            with self.assertRaisesRegex(FileNotFoundError, "Bash"):
+                launcher.launch_relion(self.project, startup="user-shell")
+            popen.assert_not_called()
+
     def test_missing_relion_gives_configuration_guidance(self):
         with self.posix_os(), patch.object(launcher.shutil, "which", return_value=None):
             with self.assertRaisesRegex(FileNotFoundError, "Configure RELION"):
