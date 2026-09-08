@@ -10,40 +10,70 @@ import numpy as np
 
 from helicon.lib.system import has_curvelet_fdct, has_curvelet_udct_gpu
 
-try:
-    import torch
+# torch is imported lazily rather than here at module level.  It is only ever
+# needed by the GPU-backed denoisers, and it bundles its own libomp; loading a
+# third OpenMP runtime alongside the ones sklearn and finufft bundle has
+# segfaulted the web app inside __kmp_fork_barrier.  Deferring the import keeps
+# torch out of sessions that never denoise, and out of the process entirely for
+# the web app's other tabs.
+_TORCH = None
 
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+
+def _apply_mps_patch(torch) -> None:
+    """Make curvelets' torch backend usable on MPS, which has no float64.
+
+    ``curvelets.torch`` hard-codes ``dtype=torch.float64`` in a few functions,
+    which MPS rejects; those functions are recompiled against the input's own
+    real dtype.  Best-effort -- any failure leaves the originals in place, as
+    the equivalent module-level block did.
+    """
+    try:
+        if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+            return
+
         import inspect
         import types as _types
 
-        def _patch_curvelets_for_mps():
-            import curvelets.torch._forward_transform as _ft
-            import curvelets.torch._udct as _u
+        import curvelets.torch._forward_transform as _ft
+        import curvelets.torch._udct as _u
 
-            _patched = 0
-            for _mod in [_ft, _u]:
-                for _name in dir(_mod):
-                    _obj = getattr(_mod, _name)
-                    if not isinstance(_obj, _types.FunctionType):
-                        continue
-                    _src = inspect.getsource(_obj)
-                    if "dtype=torch.float64" in _src:
-                        _new_src = _src.replace(
-                            "dtype=torch.float64",
-                            "dtype=image_frequency.real.dtype",
-                        )
-                        if _src != _new_src:
-                            _code = compile(_new_src, inspect.getfile(_obj), "exec")
-                            _ns = {}
-                            exec(_code, _obj.__globals__, _ns)
-                            setattr(_mod, _name, _ns[_name])
-                            _patched += 1
-            return _patched
+        for _mod in [_ft, _u]:
+            for _name in dir(_mod):
+                _obj = getattr(_mod, _name)
+                if not isinstance(_obj, _types.FunctionType):
+                    continue
+                _src = inspect.getsource(_obj)
+                if "dtype=torch.float64" not in _src:
+                    continue
+                _new_src = _src.replace(
+                    "dtype=torch.float64",
+                    "dtype=image_frequency.real.dtype",
+                )
+                if _src == _new_src:
+                    continue
+                _code = compile(_new_src, inspect.getfile(_obj), "exec")
+                _ns = {}
+                exec(_code, _obj.__globals__, _ns)
+                setattr(_mod, _name, _ns[_name])
+    except Exception:
+        pass
 
-        _patch_curvelets_for_mps()
-except Exception:
-    pass
+
+def _ensure_torch():
+    """Import torch on first use, applying the MPS patch exactly once.
+
+    Raises ``ImportError`` just as a bare ``import torch`` would, so callers
+    that let it propagate keep the behaviour they had when the import sat at
+    the top of each function.
+    """
+    global _TORCH
+    if _TORCH is None:
+        import torch
+
+        _apply_mps_patch(torch)
+        _TORCH = torch
+    return _TORCH
+
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +414,7 @@ def _udct_compatible_shape(shape: tuple[int, ...], num_scales: int) -> tuple[int
 
 
 def _get_device() -> torch.device:
-    import torch
+    torch = _ensure_torch()
 
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -394,7 +424,7 @@ def _get_device() -> torch.device:
 
 
 def _gpu_dtype(device: torch.device) -> torch.dtype:
-    import torch
+    torch = _ensure_torch()
 
     return torch.float32 if device.type == "mps" else torch.float64
 
@@ -405,7 +435,7 @@ def _move_grid_to_device(grid, device):
     MPS does not support float64 or int64, so those are downcast to float32 /
     int32. For CUDA the original dtypes are preserved.
     """
-    import torch
+    torch = _ensure_torch()
 
     def _to(item):
         if isinstance(item, torch.Tensor):
@@ -456,7 +486,7 @@ def _coeffs_to_numpy(tree: list, keep_as_numpy: bool = False) -> list:
 
 def _coeffs_from_numpy(tree: list, device, dtype: torch.dtype | None = None) -> list:
     """Recursively convert a nested list of numpy arrays to torch tensors on *device*."""
-    import torch
+    torch = _ensure_torch()
 
     lst = []
     for item in tree:
@@ -601,7 +631,7 @@ def curvelet_denoise_udct(
         use_gpu = False
 
     if use_gpu:
-        import torch
+        torch = _ensure_torch()
 
         device = _get_device()
         gpu_dtype = _gpu_dtype(device)
@@ -623,7 +653,7 @@ def curvelet_denoise_udct(
     new_coeffs = _udct_threshold_apply_thresholds(coeffs, thresholds)
 
     if use_gpu:
-        import torch
+        torch = _ensure_torch()
 
         device = _get_device()
         new_coeffs = _coeffs_from_numpy(new_coeffs, device)
@@ -680,7 +710,7 @@ def curvelet_denoise_batch_udct(
         use_gpu = False
 
     if use_gpu:
-        import torch
+        torch = _ensure_torch()
         from joblib import Parallel, delayed
 
         device = _get_device()
@@ -1171,7 +1201,7 @@ def curvelet_denoise_udct_tiled(
         grid = grid_cache[key]
 
         if use_gpu:
-            import torch
+            torch = _ensure_torch()
 
             device = _get_device()
             gpu_dtype = _gpu_dtype(device)
@@ -1194,7 +1224,7 @@ def curvelet_denoise_udct_tiled(
         retained_pct = 100.0 * kept / total if total > 0 else 0.0
 
         if use_gpu:
-            import torch
+            torch = _ensure_torch()
 
             device = _get_device()
             new_coeffs = _coeffs_from_numpy(new_coeffs, device)
@@ -1442,7 +1472,7 @@ def curvelet_denoise_3d_udct(
         volume = np.pad(volume, pads, mode="edge")
 
     if use_gpu:
-        import torch
+        torch = _ensure_torch()
 
         device = _get_device()
         gpu_dtype = _gpu_dtype(device)
@@ -1476,7 +1506,7 @@ def curvelet_denoise_3d_udct(
     logger.info("\tretained %.1f%% of curvelet coefficients", retained_pct)
 
     if use_gpu:
-        import torch
+        torch = _ensure_torch()
 
         device = _get_device()
         new_coeffs = _coeffs_from_numpy(new_coeffs, device)
@@ -1522,7 +1552,7 @@ def _curvelet_denoise_3d_udct_with_grid(
         Denoised volume (still normalized) and percentage of retained coefficients.
     """
     if device is not None:
-        import torch
+        torch = _ensure_torch()
 
         tensor = torch.from_numpy(np.ascontiguousarray(volume)).to(
             device=device, dtype=gpu_dtype
@@ -1552,7 +1582,7 @@ def _curvelet_denoise_3d_udct_with_grid(
     retained_pct = 100.0 * kept / total if total > 0 else 0.0
 
     if device is not None:
-        import torch
+        torch = _ensure_torch()
 
         new_coeffs = _coeffs_from_numpy(new_coeffs, device)
         result = grid.backward(new_coeffs)

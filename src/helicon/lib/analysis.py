@@ -1253,5 +1253,27 @@ def estimate_helicalTube_length(
     return data
 
 
-from .clustering import AgglomerativeClusteringWithMinSize  # noqa: F401
 from .alignment import align_images  # noqa: F401
+
+
+# AgglomerativeClusteringWithMinSize is re-exported here for callers that
+# expect it on this module, but importing it eagerly would drag in sklearn --
+# a second of import time, and a second bundled libomp in a process that may
+# already have finufft's.  PEP 562 lets the name resolve on first attribute
+# access instead, so only code that actually clusters pays for sklearn.
+_LAZY_REEXPORTS = {"AgglomerativeClusteringWithMinSize": ".clustering"}
+
+
+def __getattr__(name: str):
+    module = _LAZY_REEXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(module, __package__), name)
+    globals()[name] = value  # resolved once; later lookups skip __getattr__
+    return value
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_LAZY_REEXPORTS))
