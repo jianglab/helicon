@@ -29,6 +29,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QMenuBar,
+    QDialog,
+    QDialogButtonBox,
+    QMessageBox,
 )
 from PySide6.QtGui import (
     QPalette,
@@ -1229,6 +1232,14 @@ class FolderBrowserWidget(QMainWindow):
         self._open_terminal_action.triggered.connect(self._open_terminal)
         self._apps_menu.addAction(self._open_terminal_action)
 
+        self._configure_relion_action = QAction("Configure RELION…", self)
+        self._configure_relion_action.triggered.connect(self._configure_relion)
+        self._apps_menu.addAction(self._configure_relion_action)
+        self._relion_processes = {}
+        self._relion_timer = QTimer(self)
+        self._relion_timer.setInterval(1000)
+        self._relion_timer.timeout.connect(self._poll_relion)
+
         self._app_actions = {}
         for label, key, streamlit_mod, picker in _APP_LAUNCH_TABLE:
             action = QAction(label, self)
@@ -1296,6 +1307,13 @@ class FolderBrowserWidget(QMainWindow):
         # Stretch factor 1 makes the path box expand to fill all space up to
         # the filter controls at the right end of the row.
         nav_layout.addWidget(self._path_edit, 1)
+
+        self._relion_btn = QPushButton("Open RELION")
+        self._relion_btn.setToolTip(
+            "Open this project in RELION; setup: Apps → Configure RELION…"
+        )
+        self._relion_btn.clicked.connect(self._open_relion)
+        nav_layout.addWidget(self._relion_btn)
 
         self._recent_combo = QComboBox()
         self._recent_combo.setPlaceholderText("Recent")
@@ -1952,6 +1970,97 @@ class FolderBrowserWidget(QMainWindow):
         """Open the host OS terminal in the currently displayed folder."""
         _open_terminal(self._model._root_path)
 
+    def _configure_relion(self) -> None:
+        settings = QSettings("helicon", "display")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configure RELION")
+        layout = QVBoxLayout(dialog)
+        help_text = QLabel(
+            "Select a Bash launcher script that loads your RELION module and/or\n"
+            "activates its conda environment, then runs exec relion. The script\n"
+            "starts with a clean software environment in the project folder.\n\n"
+            "Leave blank to use relion from Helicon's current PATH/environment.\n"
+            "HELICON_RELION_LAUNCHER, when set, overrides this saved choice.\n"
+            "Queued jobs also need environment setup in their submission template."
+        )
+        layout.addWidget(help_text)
+        row = QHBoxLayout()
+        path_edit = QLineEdit(str(settings.value("relion/launcher", "") or ""))
+        path_edit.setPlaceholderText("Absolute path to launcher script (optional)")
+        row.addWidget(path_edit)
+        browse = QPushButton("Browse…")
+
+        def choose_script():
+            path, _ = QFileDialog.getOpenFileName(dialog, "RELION launcher script")
+            if path:
+                path_edit.setText(path)
+
+        browse.clicked.connect(choose_script)
+        row.addWidget(browse)
+        layout.addLayout(row)
+        override = os.environ.get("HELICON_RELION_LAUNCHER", "")
+        if override:
+            label = QLabel(f"Environment override: {override}")
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+
+        def save():
+            value = path_edit.text().strip()
+            path = Path(value).expanduser()
+            if value and (not path.is_absolute() or not path.is_file()):
+                QMessageBox.warning(
+                    dialog, "RELION launcher",
+                    "Select an existing script using an absolute path.",
+                )
+                return
+            settings.setValue("relion/launcher", str(path) if value else "")
+            dialog.accept()
+
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _open_relion(self) -> None:
+        from helicon.lib.relion_launcher import launch_relion
+
+        project = str(Path(self._model._root_path).resolve())
+        existing = self._relion_processes.get(project)
+        if existing and existing[0].poll() is None:
+            QMessageBox.information(
+                self, "RELION", "RELION is already running for this project."
+            )
+            return
+        launcher = os.environ.get("HELICON_RELION_LAUNCHER") or str(
+            QSettings("helicon", "display").value("relion/launcher", "") or ""
+        )
+        try:
+            process, log = launch_relion(project, launcher)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Cannot open RELION", str(exc))
+            return
+        self._relion_processes[project] = (process, log)
+        self.statusBar().showMessage(f"RELION starting. Launch log: {log}")
+        self._relion_timer.start()
+
+    def _poll_relion(self) -> None:
+        for project, (process, log) in list(self._relion_processes.items()):
+            code = process.poll()
+            if code is None:
+                continue
+            del self._relion_processes[project]
+            if code:
+                QMessageBox.warning(
+                    self, "RELION exited",
+                    f"RELION exited with status {code}.\nProject: {project}\n"
+                    f"See the launch log: {log}\nCheck Apps → Configure RELION…",
+                )
+        if not self._relion_processes:
+            self._relion_timer.stop()
+
     def _on_launch_app(self, checked: bool = False) -> None:
         """Launch the standalone tool listed in the Apps menu.
 
@@ -2134,6 +2243,9 @@ class FolderBrowserWidget(QMainWindow):
         self-delete on finish), and every result carries the model epoch so
         stale results are ignored.
         """
+        from helicon.lib.relion_launcher import is_relion_project
+
+        self._relion_btn.setVisible(is_relion_project(self._model._root_path))
         # Stop tracking any in-flight workers from a previous load.
         self._info_threads.clear()
 

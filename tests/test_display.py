@@ -2282,6 +2282,57 @@ class TestAutoContrast(object):
 
 
 class TestFolderBrowser(object):
+    def test_relion_button_tracks_project_navigation_and_refresh(self, tmp_path, qapp):
+        from helicon.lib.gui.file_browser import FolderBrowserWidget
+
+        project = tmp_path / "project"
+        project.mkdir()
+        marker = project / "default_pipeline.star"
+        marker.touch()
+        # Keep this navigation test independent of background metadata workers.
+        with patch("helicon.lib.gui.file_browser.FileBrowserModel.file_rows", return_value=[]), patch(
+            "helicon.lib.gui.file_browser.FileBrowserModel.dir_rows", return_value=[]
+        ):
+            widget = FolderBrowserWidget(start_dir=str(tmp_path))
+            try:
+                assert widget._relion_btn.isHidden()
+                widget._navigate_to(str(project))
+                assert not widget._relion_btn.isHidden()
+                widget._go_back()
+                assert widget._relion_btn.isHidden()
+                widget._navigate_to(str(project))
+                marker.unlink()
+                widget._refresh()
+                assert widget._relion_btn.isHidden()
+                marker.touch()
+                widget._refresh()
+                assert not widget._relion_btn.isHidden()
+            finally:
+                widget.close()
+
+    def test_relion_override_duplicate_launch_and_error(self, tmp_path, qapp, monkeypatch):
+        from helicon.lib.gui.file_browser import FolderBrowserWidget
+
+        monkeypatch.setenv("HELICON_RELION_LAUNCHER", "/site/relion.sh")
+        process = MagicMock()
+        process.poll.return_value = None
+        log = tmp_path / "relion.log"
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        try:
+            with patch("helicon.lib.relion_launcher.launch_relion", return_value=(process, log)) as launch, patch(
+                "helicon.lib.gui.file_browser.QMessageBox.information"
+            ), patch("helicon.lib.gui.file_browser.QMessageBox.warning") as warning:
+                widget._open_relion()
+                widget._open_relion()
+                launch.assert_called_once_with(str(tmp_path.resolve()), "/site/relion.sh")
+                process.poll.return_value = 1
+                widget._poll_relion()
+                assert not widget._relion_processes
+                assert not widget._relion_timer.isActive()
+                assert str(log) in warning.call_args.args[2]
+        finally:
+            widget.close()
+
     def test_text_display_window_uses_saved_theme(self, tmp_path, qapp):
         from PySide6.QtCore import QSettings
 
