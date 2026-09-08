@@ -2701,6 +2701,30 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             step=round(step_val, 3),
         )
 
+    def _prepare_image(i, img, threshold=True):
+        """Apply image *i*'s input options: negate, threshold, transpose, flip.
+
+        ``threshold=False`` skips only the thresholding and keeps everything
+        else, which is what automatic stitching resamples from. Thresholding
+        flattens the background to a constant, so compositing thresholded
+        images yields a stitched image with a dead flat background instead of
+        the raw noise -- unlike every other view in the tab, and unlike manual
+        stitching, which composites the untouched originals. The geometric
+        options have to stay either way: the auto-transform's rotation and
+        shift were measured through them, so dropping them would invalidate
+        the transform being composed on top.
+        """
+        work = -img if _param("negate", i, False) else img
+        if threshold:
+            work = helicon.threshold_data(
+                work, thresh_value=_param("threshold", i, threshold_rv())
+            )
+        if _param("transpose", i, False):
+            work = np.transpose(work)
+        if _param("flip", i, False):
+            work = np.fliplr(work)
+        return work
+
     # Plain effect, not reactive.event: in joint mode these settings live on
     # per-image controls, and naming a not-yet-created input in an event list
     # aborts the effect outright.
@@ -2708,17 +2732,9 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     def _threshold_selected_images():
         images = initial_image()
         req(len(images))
-        tmp = []
-        for i, img in enumerate(images):
-            thresh = _param("threshold", i, threshold_rv())
-            work = -img if _param("negate", i, False) else img
-            work = helicon.threshold_data(work, thresh_value=thresh)
-            if _param("transpose", i, False):
-                work = np.transpose(work)
-            if _param("flip", i, False):
-                work = np.fliplr(work)
-            tmp.append(work)
-        selected_images_thresholded.set(tmp)
+        selected_images_thresholded.set(
+            [_prepare_image(i, img) for i, img in enumerate(images)]
+        )
 
     # Sync checkbox/reactive values
     @reactive.effect
@@ -2970,7 +2986,16 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         # that had already tried to absorb it.
         images = selected_images_thresholded_rotated_shifted_cropped()
         req(len(images) > 1)
-        originals = selected_images_thresholded()
+        # Resample from the *unthresholded* images. Registration wants the
+        # threshold -- it suppresses the background that would otherwise
+        # dominate the correlation -- but the composite must not carry it, or
+        # the stitched image comes out with a flat background instead of the
+        # raw noise the inputs actually have. Manual stitching composites the
+        # untouched originals, and this is the same thing.
+        originals = [
+            _prepare_image(i, img, threshold=False)
+            for i, img in enumerate(initial_image())
+        ]
         if len(originals) != len(images):
             originals = images
 
