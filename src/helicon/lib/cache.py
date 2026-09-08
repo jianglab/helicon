@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging, sys, os, time, datetime
+import logging, sys, os, time, datetime, threading
 from pathlib import Path
 from typing import Any, Optional, List
 
@@ -129,6 +129,77 @@ class DummyMemory:
             return decorator(func)
 
 
+# How often a cache directory is swept for expired entries.  The sweep walks
+# the whole directory, so it is throttled: once per process, and no more often
+# than this across processes (tracked by a stamp file inside the directory).
+_PRUNE_INTERVAL = datetime.timedelta(days=1)
+_PRUNE_STAMP = ".helicon_last_prune"
+# cache_dir -> earliest monotonic time it may be swept again.  Checking this
+# first keeps the per-call cost to a dict lookup rather than a stat().
+_prune_next: dict = {}
+_prune_lock = threading.Lock()
+
+
+def _prune_expired(memory: Any, cache_dir: Any, age_limit: Any) -> None:
+    """Delete cache entries older than *age_limit* from *cache_dir*.
+
+    joblib's ``cache_validation_callback`` only recomputes an expired entry
+    when that exact key is requested again; entries never requested again stay
+    on disk forever, and nothing else reclaims them, so a cache grows without
+    bound.  ``Memory.reduce_size(age_limit=...)`` applies the same age rule to
+    the whole directory, which is what actually frees the space.
+
+    The sweep runs on a daemon thread -- it is pure housekeeping and must not
+    delay the call that triggered it -- and is skipped entirely when the cache
+    never expires.  Failures are logged and ignored: losing a sweep only costs
+    disk space, whereas raising here would break an otherwise good cache hit.
+    """
+    if age_limit is None or not hasattr(memory, "reduce_size"):
+        return
+
+    key = str(cache_dir)
+    interval = _PRUNE_INTERVAL.total_seconds()
+
+    # Claim the next slot up front, so concurrent calls take the cheap path and
+    # only one sweep thread per directory is ever in flight.  The throttle is
+    # purely time-based: a "once per process" guard would sweep only at start-up,
+    # when nothing has expired yet, and never again in a long-running app.
+    with _prune_lock:
+        if time.monotonic() < _prune_next.get(key, 0.0):
+            return
+        _prune_next[key] = time.monotonic() + interval
+
+    stamp = Path(cache_dir) / _PRUNE_STAMP
+    try:
+        if stamp.exists() and (time.time() - stamp.stat().st_mtime) < interval:
+            return  # another process swept this directory recently
+    except OSError:
+        pass
+
+    def _run():
+        try:
+            memory.reduce_size(age_limit=age_limit)
+            stamp.parent.mkdir(parents=True, exist_ok=True)
+            stamp.touch()
+        except Exception:
+            logger.debug("could not prune expired cache in %s", key, exc_info=True)
+
+    threading.Thread(target=_run, name="helicon-cache-prune", daemon=True).start()
+
+
+def _clear_function_cache(cached_func: Any) -> None:
+    """Empty one function's cache entries, leaving the rest of the directory.
+
+    Several functions typically share a cache directory (every
+    ``hill_compute`` helper shares ``cache_dir/"hill"``), so the whole-directory
+    ``Memory.clear()`` would discard their entries too.
+    """
+    clear = getattr(cached_func, "clear", None)
+    if clear is None:
+        return  # DummyMemory: nothing was ever cached
+    clear(warn=False)
+
+
 def cache(
     expires_after=datetime.timedelta(weeks=1),
     cache_dir: Optional[str] = None,
@@ -139,6 +210,15 @@ def cache(
 
     After the period expires, the cache is invalidated and the function is
     recomputed. If ``expires_after`` is None, the cache never expires.
+
+    Expired entries are also swept off disk in the background, at most once a
+    day per cache directory; without that, an expired entry is only ever
+    overwritten if its exact key is requested again, so keys that fall out of
+    use accumulate indefinitely.
+
+    The decorated function gains two methods: ``clear_cache()`` empties just
+    that function's entries, and ``clear_cache_dir()`` empties the whole
+    directory, which is usually shared with other cached functions.
 
     Parameters
     ----------
@@ -200,9 +280,11 @@ def cache(
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            _prune_expired(memory, cache_dir, expires_after)
             return cached_func(*args, **kwargs)
 
-        wrapper.clear_cache = lambda: memory.clear()
+        wrapper.clear_cache = lambda: _clear_function_cache(cached_func)
+        wrapper.clear_cache_dir = lambda: getattr(memory, "clear", lambda: None)()
         wrapper.get_cache_info = lambda: {
             "cache_dir": cache_dir,
             "cache_period": expires_after,
