@@ -37,6 +37,7 @@ GUI_EXCLUDED_OPERATIONS = frozenset(
         "process",
         "recoverFullFilaments",
         "splitByMicrograph",
+        "summary2D",
         # Handled outside the engine (path conversion happens at save time).
         "path",
         # Legacy plugin without argparse registration.

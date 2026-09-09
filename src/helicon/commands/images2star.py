@@ -51,6 +51,12 @@ def main(args: argparse.Namespace) -> None:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
+    if getattr(args, "summary2D", False):
+        from helicon.plugins.images2star import dispatch
+
+        dispatch("summary2D", None, args, {"summary2D": 0}, args.summary2D)
+        return
+
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
 
@@ -327,8 +333,13 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         The parser with arguments added.
     """
     # Infrastructure arguments
-    parser.add_argument("input_imageFiles", nargs="+", help="input image file(s)")
-    parser.add_argument("output_starFile", help="output star file name")
+    parser.add_argument(
+        "input_imageFiles", nargs="+",
+        help="input image file(s), or a Class2D folder with --summary2D",
+    )
+    parser.add_argument(
+        "output_starFile", help="output star file name, or PDF with --summary2D"
+    )
     parser.add_argument(
         "--csparcPassthroughFiles",
         metavar="<filename>",
@@ -480,6 +491,13 @@ def check_args(
         a.dest for a in parser._actions if type(a) is argparse._AppendAction
     ]
     all_options = helicon.get_option_list(sys.argv[1:])
+    from helicon.plugins.images2star import summary2d
+
+    summary2d.check_args(args, parser, all_options)
+    if getattr(args, "summary2D", False):
+        args.all_options = []
+        return args
+
     args.all_options = [
         o
         for o in all_options
