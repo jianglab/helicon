@@ -21,11 +21,43 @@ Geometry follows ``solver_gaussian``: centres are (x, y, z) with z the helical
 axis, and the projection is along x onto the (y, z) plane, so the image is
 (transverse, axial). Everything here works in pixels.
 
-Status: validated on synthetic data, where it recovers a known twist exactly.
-On real class averages it is close but not yet better than the elasticnet
-voxel solver -- see ``tests/test_gauss_analytic.py`` and the notes in
-``joint_peak`` for what is still missing. It is deliberately not registered in
-the pipeline's algorithm dispatch yet.
+Status: on synthetic data it recovers a known twist exactly, with a grid that
+does not contain the truth. On real data it is **not** competitive with the
+elasticnet voxel solver, and is deliberately not registered in the pipeline's
+algorithm dispatch. Benchmarked on eight good EMPIAR-10940 class averages
+(true twist 1.2 deg), scoring the joint curve the tab itself uses:
+
+    method                 joint peak   contrast   per-image   time/step
+    elasticnet (app)             1.20       1.12         6/8     ~1000 ms
+    analytic sigma=2.0           1.15       0.66         2/8       363 ms
+    analytic sigma=1.25..2.5  0.60-1.35        --       0-3/8   196-1071 ms
+
+So it is roughly 3x faster and lands within one grid step of the truth in its
+best configuration, but three things are wrong with it:
+
+* It is not robust. ``sigma`` is a genuine hyperparameter and swings the answer
+  from 0.60 to 1.35; elasticnet has no equivalent knob. Letting the score pick
+  the scale does not work, because scores are not comparable across sigma --
+  a coarser basis has fewer functions and a different attainable ceiling.
+* Per-image accuracy is much worse (2/8 against 6/8), and the joint curve is
+  markedly less sharp (contrast 0.66 against 1.12). Only the joint combination
+  rescues the answer.
+* The obvious hoped-for niche does not exist. A Gaussian basis is a smoothness
+  prior, so it should degrade gracefully as SNR falls; measured against added
+  noise it does the opposite, drifting 1.15 -> 1.50 while elasticnet holds
+  near the truth.
+
+Two things that do *not* explain the gap, so they need not be retried: refining
+a global psi/dy of the target changes nothing (the optimum sits at zero, the
+tab's auto-transform having already aligned the images), and computing the Gram
+by rasterising the basis and using BLAS is ~10x slower than the analytic pair
+sum as well as less accurate.
+
+The most likely remaining explanation is expressiveness: a cylindrical grid of
+isotropic Gaussians in one z-plane is strictly less expressive than the voxel
+basis elasticnet solves for, so the fit at the true twist is not the best fit.
+A multi-scale basis is the natural next attempt, but the Gram is O(G^2) and
+several scales made it impractically slow without a smarter Gram.
 """
 
 from __future__ import annotations
