@@ -31,3 +31,5 @@ AGENTS.md
 tests/output/
 .agents/
 .freebuff/
+.claude/
+output/

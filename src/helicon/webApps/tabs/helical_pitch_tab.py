@@ -231,9 +231,7 @@ def helical_pitch_tab_ui():
         ),
         ui.HTML(
             """
-<i><p style='margin:2px 0'>Developed by the <a href='https://jianglab.science.psu.edu/helicon' target='_blank'>Jiang Lab</a>. "
-            "Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>Helicon@GitHub</a>.</p></i>"
-</p>
+<i><p style='margin:2px 0'>Developed by the <a href='https://jianglab.science.psu.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>
 <script>
 (function() {
   if (window.__hp_xhair) return;

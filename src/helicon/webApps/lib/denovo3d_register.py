@@ -547,13 +547,66 @@ def solve_global(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def composite(images, transforms, feather=8):
+def _core_stats(image, margin_frac=0.25):
+    """Mean and std of an image's central columns, excluding its outer ends.
+
+    Class averages taper towards their axial ends -- fewer particles
+    contribute coherently there, so the ends are genuinely weaker than the
+    middle in every image, not just the mismatched ones. Measuring brightness
+    from the whole image lets that expected taper dilute the estimate, and
+    measuring it from just the overlap (which *is* the tapered end) makes the
+    estimate noisy and confuses real weakness with a contrast mismatch. The
+    central region is the one part of the image that reliably represents its
+    true brightness/contrast level.
+    """
+    h, w = image.shape
+    margin = int(round(w * margin_frac))
+    core = image[:, margin : w - margin] if w - 2 * margin >= max(8, w // 4) else image
+    return float(core.mean()), float(core.std())
+
+
+def _normalize_intensity(image, flatten_sigma_frac=1 / 6, core_margin_frac=0.25):
+    """Put an image on a common brightness/contrast footing before blending.
+
+    Two passes, for two different problems. First, a wide Gaussian low-pass
+    along the filament axis is subtracted off (a light high-pass): this
+    removes the smooth axial brightness gradient towards each image's ends --
+    weaker signal there comes from the class average itself, not from a
+    per-image contrast difference, so it should not be asked to average
+    cleanly against a neighbour's flat interior. The kernel is wide enough
+    (a sizeable fraction of the image width) that it tracks only that broad
+    trend and leaves ordinary structural spatial frequencies alone. Second,
+    the flattened image is rescaled to zero mean / unit std using its central
+    columns as the reference (see ``_core_stats``), since even after
+    flattening the ends carry less signal and would bias a whole-image
+    estimate.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    h, w = image.shape
+    sigma = max(4.0, w * flatten_sigma_frac)
+    baseline = gaussian_filter1d(image, sigma=sigma, axis=1, mode="nearest")
+    flattened = image - baseline
+
+    mean, std = _core_stats(flattened, core_margin_frac)
+    if std > 1e-6:
+        flattened = (flattened - mean) / std
+    return flattened
+
+
+def composite(images, transforms, feather=8, match_intensity=True):
     """Average the registered images onto one canvas.
 
     Averaging the overlaps rather than picking one image or blending with a
     seam: an overlap is genuinely the same object seen twice, so averaging is
     what raises the signal there. ``feather`` tapers each image's weight
     towards its ends so an image edge does not print a step into the composite.
+
+    ``match_intensity`` puts each image on a common brightness/contrast
+    footing before blending (see ``_normalize_intensity``), so overlaps
+    between images of differing contrast -- e.g. class averages built from
+    different numbers of particles, or with an axial brightness gradient --
+    average together instead of one side dominating.
 
     Returns (image, coverage) where coverage counts contributions per column.
     """
@@ -573,6 +626,8 @@ def composite(images, transforms, feather=8):
             t["psi"],
             t["dy"],
         ).astype(np.float64)
+        if match_intensity:
+            work = _normalize_intensity(work)
         h, w = work.shape
         ramp = np.ones(w)
         if feather and w > 2 * feather:
@@ -643,7 +698,12 @@ def auto_stitch(
     diagnostics["flip_conflicts"] = conflicts
     diagnostics["n_flipped"] = sum(1 for fx, fy in flips if fx or fy)
 
-    stitched, coverage = composite(images, transforms)
+    # Registered against a raw (un-normalised) composite throughout: matching
+    # each image's brightness/contrast changes its low-frequency content, and
+    # register_pair's correlation relies on that content lining up with the
+    # unmodified image being tested against it. Intensity matching is a
+    # cosmetic step for the composite a caller displays, not for this loop.
+    stitched, coverage = composite(images, transforms, match_intensity=False)
     for _ in range(max(0, refine_against_composite)):
         if stitched is None:
             break
@@ -667,7 +727,7 @@ def auto_stitch(
                 )
             )
         transforms = updated
-        stitched, coverage = composite(images, transforms)
+        stitched, coverage = composite(images, transforms, match_intensity=False)
 
     if coverage is not None:
         diagnostics["max_coverage"] = int(coverage.max())
@@ -676,6 +736,10 @@ def auto_stitch(
     if dxs:
         diagnostics["span_px"] = float(max(dxs) - min(dxs) + nx)
         diagnostics["span_gain"] = float(diagnostics["span_px"] / nx)
+
+    # Transforms are now settled; rebuild the returned image with intensity
+    # matching for display.
+    stitched, _coverage = composite(images, transforms)
     return stitched, transforms, diagnostics
 
 
