@@ -192,3 +192,93 @@ class TestGeometry:
         damped = sa.expand_project(*args, envelope=lambda z: torch.zeros_like(z))
         assert float(plain[1].abs().sum()) > 0
         assert float(damped[1].abs().sum()) == pytest.approx(0.0)
+
+
+class TestMemoryIsBounded:
+    """Guards against the failure mode that once exhausted the machine's RAM.
+
+    The self-energy sum broadcasts to (G, G, P, 2, 2) and autograd retains
+    every intermediate, so an unbounded pair count is not a slow path but an
+    out-of-memory kill.
+    """
+
+    def test_axial_dk_is_capped_regardless_of_the_fitted_width(self):
+        """A grown Gaussian must not be able to widen the truncation forever."""
+        nrep = 200
+        centres = np.array([[1.0, 0.0, 0.0]])
+        model = sa.expand_project(
+            torch.ones(1),
+            torch.tensor(centres),
+            _iso_raw(1, 400.0),
+            torch.tensor(1.2),
+            RISE,
+            1,
+            nrep,
+        )
+        assert sa.axial_dk(model, RISE) <= sa.MAX_AXIAL_DK
+
+    def test_cap_is_honoured_over_the_five_sigma_request(self):
+        nrep = 200
+        centres = np.array([[1.0, 0.0, 0.0]])
+        model = sa.expand_project(
+            torch.ones(1),
+            torch.tensor(centres),
+            _iso_raw(1, 80.0),
+            torch.tensor(1.2),
+            RISE,
+            1,
+            nrep,
+        )
+        assert sa.axial_dk(model, RISE, max_dk=4) == 4
+
+    def test_row_chunking_engages_for_large_problems(self):
+        """A configuration that would allocate ~1 GB must be split into chunks."""
+        G, P = 40, 18769
+        assert sa.self_energy_bytes(G, P) > 500 << 20
+        chunk = sa._row_chunk(G, P, 8)
+        assert chunk < G, "large problem must be chunked, not taken in one block"
+        per_chunk = chunk * G * P * 4 * 8
+        assert per_chunk <= sa.SELF_ENERGY_CHUNK_BYTES
+
+    def test_small_problems_are_not_chunked(self):
+        G, P = 6, 500
+        assert sa._row_chunk(G, P, 8) == G
+
+    def test_chunked_result_matches_unchunked(self):
+        """Chunking must be exact, not approximate."""
+        nrep = 12
+        centres = np.array([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [-2.0, 1.0, 0.0]])
+        model = sa.expand_project(
+            torch.ones(3),
+            torch.tensor(centres),
+            _iso_raw(3, 1.8),
+            torch.tensor(1.2),
+            RISE,
+            1,
+            nrep,
+        )
+        ref = sa.SELF_ENERGY_CHUNK_BYTES
+        try:
+            full = float(sa.self_energy(model, 6))
+            sa.SELF_ENERGY_CHUNK_BYTES = 1  # force one row per chunk
+            chunked = float(sa.self_energy(model, 6))
+        finally:
+            sa.SELF_ENERGY_CHUNK_BYTES = ref
+        assert chunked == pytest.approx(full, rel=1e-12)
+
+    def test_gradients_survive_checkpointed_chunking(self):
+        nrep = 10
+        centres = np.array([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0]])
+        amp = torch.ones(2, requires_grad=True)
+        raw = _iso_raw(2, 1.8).requires_grad_(True)
+        ref = sa.SELF_ENERGY_CHUNK_BYTES
+        try:
+            sa.SELF_ENERGY_CHUNK_BYTES = 1
+            model = sa.expand_project(
+                amp, torch.tensor(centres), raw, torch.tensor(1.2), RISE, 1, nrep
+            )
+            sa.self_energy(model, 4).backward()
+        finally:
+            sa.SELF_ENERGY_CHUNK_BYTES = ref
+        assert amp.grad is not None and torch.isfinite(amp.grad).all()
+        assert raw.grad is not None and torch.isfinite(raw.grad).all()

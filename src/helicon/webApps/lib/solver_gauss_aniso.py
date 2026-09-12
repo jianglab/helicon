@@ -48,6 +48,7 @@ Three things already tried, so they need not be repeated:
 
 import numpy as np
 import torch
+import torch.utils.checkpoint
 
 TWO_PI = 2.0 * np.pi
 
@@ -160,35 +161,86 @@ def _pairs(C, dk_max, device):
     return _PAIR_CACHE[key]
 
 
+# Peak-memory budget for one intermediate of the self-energy sum, in bytes.
+# The sum broadcasts to (G, G, P, 2, 2) and autograd retains every intermediate
+# for the backward pass, so the true footprint is several times this. Exceeding
+# it is not a slow path but an out-of-memory kill: an unbounded version of this
+# function once took the user's machine down.
+SELF_ENERGY_CHUNK_BYTES = 32 << 20
+
+
+def self_energy_bytes(n_gauss, n_pairs, itemsize=8):
+    """Bytes for the largest single intermediate of an unchunked self-energy."""
+    return n_gauss * n_gauss * n_pairs * 4 * itemsize
+
+
+def _row_chunk(n_gauss, n_pairs, itemsize):
+    per_row = max(1, n_gauss * n_pairs * 4 * itemsize)
+    return max(1, min(n_gauss, SELF_ENERGY_CHUNK_BYTES // per_row))
+
+
 def self_energy(model, dk_max):
-    """<f,f>, truncated in copy separation along the axis."""
+    """``<f, f>``, truncated in copy separation along the axis.
+
+    Evaluated in row chunks under gradient checkpointing. Chunking the forward
+    pass alone would not help: autograd would still retain every chunk's
+    intermediates until the backward pass. Checkpointing recomputes each chunk
+    instead, which bounds peak memory to roughly one chunk at the cost of one
+    extra forward evaluation.
+    """
     mu2, amp2, cov2 = model
     G, C = amp2.shape
     i, j = _pairs(C, dk_max, amp2.device)
-    return _overlap(
-        amp2[:, None, i],
-        mu2[:, None, i, :],
-        cov2[:, None, i, :, :],
-        amp2[None, :, j],
-        mu2[None, :, j, :],
-        cov2[None, :, j, :, :],
-    ).sum()
+    P = i.shape[0]
+    chunk = _row_chunk(G, P, amp2.element_size())
+
+    def _block(lo, hi):
+        return _overlap(
+            amp2[lo:hi, None, i],
+            mu2[lo:hi, None, i, :],
+            cov2[lo:hi, None, i, :, :],
+            amp2[None, :, j],
+            mu2[None, :, j, :],
+            cov2[None, :, j, :, :],
+        ).sum()
+
+    total = amp2.new_zeros(())
+    for lo in range(0, G, chunk):
+        hi = min(G, lo + chunk)
+        if torch.is_grad_enabled() and amp2.requires_grad:
+            total = total + torch.utils.checkpoint.checkpoint(
+                _block, lo, hi, use_reentrant=False
+            )
+        else:
+            total = total + _block(lo, hi)
+    return total
 
 
-def axial_dk(model, rise, n_sigma=5.0):
+# Hard ceiling on the axial truncation width, independent of the fitted model.
+# Five sigma of a *grown* Gaussian is unbounded, and the number of copy pairs
+# rises as C*(2*dk+1) up to C^2, so leaving this to the optimiser makes memory a
+# function of how wide the fit chooses to become.
+MAX_AXIAL_DK = 48
+
+
+def axial_dk(model, rise, n_sigma=5.0, max_dk=MAX_AXIAL_DK):
     """How many copy separations the self-overlap must span, from the CURRENT model.
 
-    This must be derived from the fitted covariance, not from the initial
-    sigma. With a fixed dk the optimiser can grow a Gaussian along the axis
-    until its own far-separated self-overlaps fall outside the truncation:
-    the denominator of the cosine loses mass the cross-term still counts, and
-    the score climbs above 1. That is a free reward for elongating, and Adam
-    finds it -- observed scores of 1.10 to 1.18 before this was tied down.
+    The width has to follow the fitted covariance rather than the initial
+    sigma: with a fixed dk the optimiser can grow a Gaussian along the axis
+    until its own far-separated self-overlaps fall outside the truncation, so
+    ``<f,f>`` loses mass the cross term still counts and the cosine climbs
+    above 1. Adam finds that reward reliably (1.10 to 1.18 observed).
+
+    But it must also be capped. Tying an allocation size to a quantity the
+    optimiser controls is how this function once exhausted the machine's
+    memory; the cap bounds the pair count no matter how wide the fit grows.
     """
     mu2, amp2, cov2 = model
     sig_z = float(cov2[..., 1, 1].max().detach().clamp_min(0.0).sqrt())
     C = amp2.shape[1]
-    return int(min(C - 1, np.ceil(n_sigma * sig_z / max(rise, 1e-6)) + 1))
+    want = int(np.ceil(n_sigma * sig_z / max(rise, 1e-6)) + 1)
+    return int(min(C - 1, max_dk, want))
 
 
 def score(model, target, tt, rise):
