@@ -59,6 +59,22 @@ any further attempt:
   aliased. At n=8 that is 45 degrees, harmless against a 0.6-2.0 search range,
   but a wide-open twist search would need n bounded by 360 / (range).
 
+  **That 1.15 is not robust, and the reason matters.** Optimising harder makes
+  it worse: eight restarts instead of three moves the joint peak to 1.00, and
+  doubling the iterations to 500 moves it to 0.60, with per-image answers
+  scattering from 0.6 to 2.0. An objective whose answer degrades as its
+  optimiser improves does not have its optimum at the true twist; the n=8
+  result rests partly on under-convergence. The tell is that the score at the
+  true twist stays within about one percent of each curve's maximum
+  (median s@1.2/max 0.986 to 0.994) in every configuration tried, so the
+  objective is nearly flat near the top and which point wins is decided by
+  optimiser noise.
+
+  Joint contrast is therefore not evidence of correctness here. It sits at
+  1.63 to 1.67 across configurations whose joint peaks are 1.15, 1.00 and
+  0.60: it measures how sharp the combined curve looks, not whether it peaks
+  in the right place.
+
 Three things already tried, so they need not be repeated:
 
 * Restarts. Convergence looked solved on 0-idx 2, 3 and 4 (all settling on 1.2
