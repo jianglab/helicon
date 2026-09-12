@@ -31,6 +31,34 @@ argmax turns on a fraction of a percent of bias. Anything that makes the model
 fit better -- more components, anisotropy, more restarts -- raises the fit
 everywhere and does not sharpen the peak.
 
+Two findings that changed the picture substantially, both worth applying to
+any further attempt:
+
+* **Do not use the image's own axial intensity profile as an envelope.** The
+  model needs *some* truncation, because the analytic objective integrates over
+  infinite space while the class average is a finite segment. But that profile
+  oscillates with the crossover pattern, which is the twist signal itself, so
+  imposing it explains the image with a statistic taken from the same image.
+  It is a confound, not a modelling choice: with a constrained isotropic grid
+  it appeared to *help* (1.45 -> 1.10) while with a free anisotropic model it
+  pinned all three test images to the top of the scan. A plain boxcar
+  truncates without injecting anything and is the right choice.
+
+* **Model the sub-symmetry (n*twist, n*rise) rather than every subunit.** The
+  rise here is 0.96 px, far below both the pixel size and sigma, so consecutive
+  copies overlap about fourfold and the projection is a smooth continuum that
+  barely moves with twist. Taking every n-th subunit separates the copies and,
+  more importantly, makes the azimuthal increment per copy n*twist, so a given
+  relative twist error produces an n-fold larger angular error. At n=8 the
+  joint peak over the eight good classes moves from 1.95 to 1.15 (truth 1.2)
+  and the joint contrast rises to 1.63, above elasticnet's 1.16 -- the first
+  measure on which this line beats the reference solver -- while costing about
+  nine times less per twist.
+
+  The model then only constrains twist modulo 360/n, so t and t + 360/n are
+  aliased. At n=8 that is 45 degrees, harmless against a 0.6-2.0 search range,
+  but a wide-open twist search would need n bounded by 360 / (range).
+
 Three things already tried, so they need not be repeated:
 
 * Restarts. Convergence looked solved on 0-idx 2, 3 and 4 (all settling on 1.2
@@ -226,21 +254,47 @@ MAX_AXIAL_DK = 48
 def axial_dk(model, rise, n_sigma=5.0, max_dk=MAX_AXIAL_DK):
     """How many copy separations the self-overlap must span, from the CURRENT model.
 
-    The width has to follow the fitted covariance rather than the initial
-    sigma: with a fixed dk the optimiser can grow a Gaussian along the axis
-    until its own far-separated self-overlaps fall outside the truncation, so
-    ``<f,f>`` loses mass the cross term still counts and the cosine climbs
-    above 1. Adam finds that reward reliably (1.10 to 1.18 observed).
+    Two things set the width, and leaving either out silently breaks the score.
 
-    But it must also be capped. Tying an allocation size to a quantity the
-    optimiser controls is how this function once exhausted the machine's
-    memory; the cap bounds the pair count no matter how wide the fit grows.
+    The width must follow the fitted covariance rather than the initial sigma:
+    with a fixed dk the optimiser can grow a Gaussian along the axis until its
+    own far-separated self-overlaps fall outside the truncation, so ``<f,f>``
+    loses mass the cross term still counts and the cosine climbs above 1. Adam
+    finds that reward reliably (1.10 to 1.18 observed).
+
+    It must also cover the axial SPREAD of the asymmetric unit. Copy ``k`` of
+    Gaussian ``g`` and copy ``k'`` of Gaussian ``h`` are separated along the
+    axis by ``(z_g - z_h) + (k - k') * rise``, so a copy-index difference only
+    tracks axial distance while every Gaussian sits at a similar z. Once the
+    fit spreads them out, pairs with large ``|dk|`` are still axially close,
+    and truncating them throws away real self-energy -- measured at 44% of the
+    true value, which inflated a 0.816 cosine to 1.228 and made a
+    capacity-regularised model look like it had solved the problem.
+
+    Both are then capped: tying an allocation size to a quantity the optimiser
+    controls is how this once exhausted the machine's memory.
     """
     mu2, amp2, cov2 = model
     sig_z = float(cov2[..., 1, 1].max().detach().clamp_min(0.0).sqrt())
+    z = mu2[..., 1].detach()
+    # spread of the asymmetric unit along the axis, measured at one copy index
+    spread = float((z[:, 0].max() - z[:, 0].min()).abs()) if z.shape[0] > 1 else 0.0
     C = amp2.shape[1]
-    want = int(np.ceil(n_sigma * sig_z / max(rise, 1e-6)) + 1)
+    want = int(np.ceil((n_sigma * sig_z + spread) / max(rise, 1e-6)) + 1)
     return int(min(C - 1, max_dk, want))
+
+
+def self_energy_fraction(model, dk, full_dk=None):
+    """Share of the true self-energy the truncation at ``dk`` retains.
+
+    A diagnostic for the failure above: any value well below 1 means the score
+    is inflated and must not be trusted.
+    """
+    C = model[1].shape[1]
+    with torch.no_grad():
+        part = float(self_energy(model, dk))
+        full = float(self_energy(model, min(C - 1, full_dk or C - 1)))
+    return part / full if full > 0 else 0.0
 
 
 def score(model, target, tt, rise):
