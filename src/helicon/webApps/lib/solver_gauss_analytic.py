@@ -135,6 +135,18 @@ def expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats, envelop
     return mu, amp, sig
 
 
+# Cap on one intermediate of the Gram sum. A fine basis makes G large, and the
+# sum forms (G, G, pairs) arrays -- at G=800 with 137 copies that is 700 MB per
+# offset. Bounding it matters: an unbounded version of the analogous sum in
+# solver_gauss_aniso once exhausted the machine's memory.
+GRAM_CHUNK_BYTES = 64 << 20
+
+
+def _gram_rows(n_gauss, n_pairs, itemsize=8):
+    per_row = max(1, n_gauss * n_pairs * itemsize)
+    return max(1, min(n_gauss, GRAM_CHUNK_BYTES // per_row))
+
+
 def gram_matrix(basis, dk_max):
     """``M_gh = <B_g, B_h>``, skipping copy pairs more than ``dk_max`` apart.
 
@@ -147,19 +159,22 @@ def gram_matrix(basis, dk_max):
     G, C = amp.shape
     M = np.zeros((G, G))
     idx = np.arange(C)
+    rows = _gram_rows(G, C)
     for d in range(-dk_max, dk_max + 1):
         i = idx[max(0, -d) : C - max(0, d)]
         if len(i) == 0:
             continue
         jj = i + d
-        M += iso_overlap(
-            amp[:, None, i],
-            mu[:, None, i, :],
-            sig[:, None, i],
-            amp[None, :, jj],
-            mu[None, :, jj, :],
-            sig[None, :, jj],
-        ).sum(-1)
+        for lo in range(0, G, rows):
+            hi = min(G, lo + rows)
+            M[lo:hi] += iso_overlap(
+                amp[lo:hi, None, i],
+                mu[lo:hi, None, i, :],
+                sig[lo:hi, None, i],
+                amp[None, :, jj],
+                mu[None, :, jj, :],
+                sig[None, :, jj],
+            ).sum(-1)
     return M
 
 
