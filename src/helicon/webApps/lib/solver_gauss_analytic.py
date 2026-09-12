@@ -97,13 +97,19 @@ def cylindrical_grid(radius_px, sigma_px):
 def expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats, envelope=None):
     """Replicate the asymmetric unit by the screw symmetry and project along x.
 
-    ``envelope`` is an optional callable ``z -> weight`` applied per copy. It
-    matters more than it looks: a class average shows a finite, tapered,
-    masked segment while a strictly symmetric model extends uniformly, and
-    without an envelope that mismatch is absorbed by whichever twist happens to
-    compensate for it. Supplying the image's own axial profile raised the fit
-    from 0.88 to 0.96 and moved the recovered twist from 1.45 to 1.10 on
-    EMPIAR-10940 class 2 (ground truth 1.2).
+    ``envelope`` is an optional callable ``z -> weight`` applied per copy. Some
+    truncation is genuinely needed: a class average is a finite segment while a
+    strictly symmetric model extends uniformly, and without an envelope that
+    mismatch is absorbed by whichever twist compensates for it.
+
+    It must, however, be **twist-independent** -- a boxcar over the image
+    extent. Passing the image's own axial profile injects the crossover
+    modulation, which is the twist signal, so the fit then explains the image
+    partly with a statistic drawn from that same image. This docstring
+    previously cited such a run (fit 0.88 -> 0.96, twist 1.45 -> 1.10 on class
+    2) as evidence the envelope helped; that result is a confound and should
+    not be relied on. With a freer model the same envelope pins every test
+    image to the top of the scan -- see ``solver_gauss_aniso``.
 
     Returns ``(mu, amp, sigma)`` shaped ``(G, C, 2)``, ``(G, C)``, ``(G, C)``.
     """
