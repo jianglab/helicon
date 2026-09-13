@@ -428,3 +428,34 @@ class TestRobustDefaults:
         )
         assert 0.0 <= score <= 1.0 + 1e-9
         assert rec3d.shape == (4, 96, 96)
+
+
+class TestDefaultBasisIsNotTooFine:
+    """A finer basis looks better by several metrics and is worse in the app.
+
+    Shipping sigma 4 A briefly moved the joint twist peak off the truth (1.1
+    against 1.2) and produced a reconstruction with roughly twice the crossovers
+    the geometry allows, while improving per-image counts. These guard the
+    default against being tightened again on the strength of those counts.
+    """
+
+    TYPICAL_RISE_ANGSTROM = 4.75
+
+    def test_default_sigma_spans_a_typical_rise(self):
+        """Copies must overlap into continuous density, not sit as a comb."""
+        assert sga.DEFAULT_SIGMA_ANGSTROM >= self.TYPICAL_RISE_ANGSTROM
+
+    def test_default_spacing_is_coarser_than_sigma(self):
+        assert sga.DEFAULT_SPACING_ANGSTROM > sga.DEFAULT_SIGMA_ANGSTROM
+
+    def test_default_basis_stays_small(self):
+        """197 functions at the validated geometry; a fine basis is ~5x that."""
+        grid = sga.full_field_grid(
+            16.0, sga.DEFAULT_SPACING_ANGSTROM / 5.0, sga.DEFAULT_SIGMA_ANGSTROM / 5.0
+        )
+        assert len(grid[0]) < 400
+
+    def test_grid_is_a_single_z_plane(self):
+        """Adding z planes was tried against the artefacts and did not help."""
+        centres, _ = sga.full_field_grid(8.0, 2.0, 1.2)
+        assert np.unique(centres[:, 2]).size == 1

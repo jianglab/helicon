@@ -38,30 +38,42 @@ reproduces it exactly -- supports of 2.5 and 3.0 px peak at 2.0 against a true
 MEASURED PERFORMANCE
 --------------------
 All 32 good EMPIAR-10940 class averages (true twist 1.2), scanning 0.6 to 2.0 in
-0.05 steps, run through the app pipeline as a user would, with the shipped 4 A
-basis:
+0.05 steps, run through the app pipeline as a user would:
 
     method          joint  <=1 step  <=0.15  med s@1.2/max  ms per image-twist
-    gauss_analytic   1.15     14/32   25/32         0.9989                 118
+    gauss_analytic   1.20      9/32   28/32         0.9981                  64
     elasticnet       1.30      8/32   28/32         0.9987                 740
 
-Six times faster, and better at the tight tolerance -- but the accuracy picture
-is mixed, not a clean win: the reference is better at the looser 0.15 tolerance
-(28/32 against 25/32), and both joint peaks sit one or two grid steps off the
-truth in opposite directions. The speed difference is the solid part.
+About ten times faster, with the joint peak on the truth where the reference is
+a grid step high, and per-image a dead heat. On a ten-image joint search run as
+the app runs it, this returns 1.2 and the reference returns 1.3.
 
-The reconstruction is basis-limited. By FSC against the elasticnet volume at the
-shipped default: 0.93 at 40 A, 0.85 at 25 A, 0.65 at 20 A, 0.45 at 15 A. That is
-a ~20 A map -- ample for finding the twist, not for looking at the result. Pass
-``sigma_angstrom=2.5`` (with ``spacing_angstrom`` about 4.2) when the map
-matters; that lifts the FSC to 0.82 at 15 A and 0.69 at 10 A, at roughly three
-times the cost.
+THE RECONSTRUCTION IS BASIS-LIMITED, AND THAT IS NOT CURRENTLY FIXABLE HERE
+----------------------------------------------------------------------------
+By FSC against the elasticnet volume the map is good to about 20 A: 0.93 at
+40 A, 0.65 at 20 A, 0.29 at 15 A, 0.16 at 10 A. Ample for finding the twist,
+not for looking at the result.
 
-The final volume is rendered by placing Gaussian copies at their exact
-symmetry-transformed positions rather than resampling the rendered asymmetric
-unit, which measures slightly better against elasticnet on every image tried.
-It is gated on return_3d, because it costs about 400 ms per task and the score
-does not depend on it.
+The obvious remedy -- a finer basis -- does not work, and this docstring
+previously recommended it, which was wrong. A finer basis raises the FSC (at
+sigma 2.5 A it reaches 0.82 at 15 A) and scores better on per-image twist
+counts, yet it makes the solver worse where it matters. On the first ten good
+classes, as the app runs them:
+
+    sigma 4A   joint 1.1   3/10 at the true twist   67 s
+    sigma 6A   joint 1.2   6/10                     18 s
+
+and at 4 A the reconstruction shows about five crossovers across the volume
+where the geometry allows three (pitch/2 = 142 px at twist 1.2 over a 345 px
+volume). The spurious doubling is not understood. Until it is, do not lower
+sigma: a higher-resolution map that encodes the wrong helical geometry is worse
+than a 20 A one that encodes the right geometry.
+
+A 4 A default shipped briefly on the strength of per-image counts measured in a
+standalone harness. Those counts improved while the joint peak -- the number the
+tab reports -- moved off the truth, and a user running the app caught it. Judge
+this solver on the joint answer and the reconstruction together, never on
+per-image counts alone.
 
 EARLIER MEASUREMENTS ON THIS MODULE ARE VOID
 ---------------------------------------------
@@ -316,8 +328,15 @@ def full_field_grid(radius_px, spacing_px=2.0, sigma_px=1.2):
 
     ``radius_px`` should be the image half-height, not the filament radius.
     Restricting the basis to the filament biases the recovered twist upward by
-    0.6-0.7 degrees on EMPIAR-10940; see this module's status notes for the
-    measurement and the mechanism.
+    0.6-0.7 degrees; see this module's status notes.
+
+    A single z plane suffices at the default sigma, which exceeds the rise, so
+    the symmetry copies overlap into continuous density. A version of this
+    function once added z planes across one rise on the theory that a finer
+    sigma leaves a comb along the axis whose aliasing explains the artefacts a
+    fine basis produces. It was measured and it does not: the artefacts are
+    unchanged with the extra planes, so the theory was wrong and the complexity
+    is not carried.
     """
     n = int(np.ceil(radius_px / spacing_px))
     xs = np.arange(-n, n + 1) * spacing_px
@@ -441,26 +460,25 @@ def last_gaussians():
 
 
 # Basis defaults, in angstroms so they follow the pixel size rather than being
-# tied to the one dataset they were tuned on.
+# tied to the one dataset they were tuned on. At the tab's default 5 A/px these
+# are 2 px spacing and 1.2 px sigma.
 #
-# Basis fineness trades cost against BOTH per-image twist accuracy and the
-# resolution of the reconstruction, so it is not simply a speed knob. Over the
-# 32 good class averages, with the volume compared to the elasticnet volume by
-# FSC:
+# DO NOT make the basis finer without re-checking the twist and the
+# reconstruction together. A finer basis scores better on per-image twist
+# counts and gives a higher-resolution-looking map, and is nonetheless worse:
+# measured on the first ten good class averages, as the app runs them,
 #
-#   sigma  spacing    G   joint  <=1 step  ms/img-twist   FSC vs elasticnet
-#                                                         @20A  @15A  @10A
-#   6.0A    10.0A   193    1.20      8/32            48   0.50  0.29  0.16
-#   4.0A     6.7A   437    1.15     16/32           110   0.66  0.46  0.26
-#   2.5A     4.2A  1125    1.15     19/32           369   0.85  0.82  0.69
+#     sigma 4A   joint 1.1   3/10 at the true twist   67 s
+#     sigma 6A   joint 1.2   6/10                     18 s
 #
-# 4 A is the default: it doubles per-image accuracy over a 6 A basis and stays
-# several times faster than the reference elasticnet (740 ms), which itself
-# manages 8/32. Drop to 2.5 A when the reconstruction matters more than the
-# search -- a 6 A basis band-limits the volume to about 20 A, which is fine for
-# finding the twist and not fine for looking at the result.
-DEFAULT_SPACING_ANGSTROM = 6.7
-DEFAULT_SIGMA_ANGSTROM = 4.0
+# and at 4 A the reconstruction shows about five crossovers across the volume
+# where the geometry allows three (pitch/2 = 142 px at twist 1.2, over a 345 px
+# volume). That spurious doubling is not understood. A 4 A default shipped
+# briefly on the strength of per-image counts from a standalone harness, and
+# was wrong: the joint peak is what the tab reports, and it moved away from the
+# truth. Per-image counts are not a sufficient criterion on their own.
+DEFAULT_SPACING_ANGSTROM = 10.0
+DEFAULT_SIGMA_ANGSTROM = 6.0
 DEFAULT_L1 = 1e-2
 DEFAULT_L2 = 1e-2
 
@@ -592,7 +610,6 @@ def gauss_analytic_reconstruct(
     )
     radius = support_radius(ny, reconstruct_diameter_2d_pixel)
     spacing, sigma, _ = fit_spacing_to_budget(radius, spacing, sigma)
-    grid = full_field_grid(radius, spacing_px=spacing, sigma_px=sigma)
 
     # rise_pixel arrives in 3D voxel units while the fit works in image pixels.
     # They coincide only when target_apix2d == target_apix3d, which is the tab's
@@ -600,6 +617,7 @@ def gauss_analytic_reconstruct(
     scale = float(scale2d_to_3d) or 1.0
     rise = (abs(float(rise_pixel)) / scale) or 1.0
     n_repeats = int(nx / 2 / rise) + 2
+    grid = full_field_grid(radius, spacing_px=spacing, sigma_px=sigma)
     A = design_matrix(
         grid, float(twist_degree), rise, int(max(csym, 1)), n_repeats, ny, nx
     )
