@@ -59,17 +59,36 @@ WHAT SURVIVES, BECAUSE IT WAS NOT MEASURED THAT WAY
 * A cosine objective is scale-invariant, so L1/L2 penalties against it are
   degenerate. Use least squares when penalising.
 
-psi/dy REFINEMENT IS NOT A DEAD END
--------------------------------------
-This module previously recorded that refining a global psi/dy "changes nothing,
-the optimum sits at zero" and need not be retried. That was wrong twice over:
-it was measured with the broken support, which suppresses exactly the outer
-radii where an in-plane rotation is most visible, and the test itself rotated
-the image with an interpolating resample that pushed the filament toward the
-frame edge. With the support fixed, psi/dy is responsive, and the convention
-recovers applied values exactly on synthetic data (six cases, psi and dy both
-exact). Whether refinement improves twist recovery on real images is a separate
-question and is still open.
+psi/dy REFINEMENT: RIGHT ANSWER, WRONG REASON
+-----------------------------------------------
+This module once recorded that refining a global psi/dy "changes nothing, the
+optimum sits at zero" because the tab's auto-transform had already aligned the
+images, and that it need not be retried. The advice happens to hold, but every
+part of the reasoning was wrong, and the evidence for it was worthless: it was
+measured with the broken support, which suppresses exactly the outer radii where
+an in-plane rotation is most visible, and the test rotated the image with an
+interpolating resample that pushed the filament toward the frame edge, so it was
+partly measuring clipping.
+
+Re-measured properly, the machinery is sound and the conclusion is different in
+kind. The convention recovers applied psi and dy exactly on synthetic data, six
+cases out of six. On real images the optimum is emphatically NOT at zero: over
+twelve good classes the refined psi scatters from -3 to +3 degrees with a mean
+near -0.25, i.e. no systematic tilt at all. Refining then costs accuracy rather
+than nothing:
+
+    psi = dy = 0    joint 1.25   6/12 within one step   med s@1.2/max 0.9987
+    psi/dy refined  joint 1.25   4/12 within one step   med s@1.2/max 0.9970
+
+and the refined per-image peaks move upward, five of twelve landing at 1.35.
+
+That pattern -- a scattered optimum with no consistent sign, and a fit that
+improves while the answer degrades -- is the signature of extra freedom
+absorbing signal, not of a misalignment being corrected. It is consistent with
+the tab's auto-transform genuinely leaving only a small residual (measured
+elsewhere at about 0.14 degrees mean), which is far below the several degrees
+this refinement chases. So: do not refine psi/dy here, because it fits noise,
+not because the optimum sits at zero.
 
 This module is not registered in the pipeline's algorithm dispatch.
 """
