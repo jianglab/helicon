@@ -6,88 +6,72 @@ and rotates/translates the centre; projection along x takes the (y, z)
 sub-block and scales the amplitude by sqrt(2*pi*det(Sigma)/det(Sigma_yz)).
 det(Sigma) is invariant under the rotation, so it is computed once.
 
-The objective is the analytic cosine against the stage-1 target mixture, so
-gradients are exact and nothing is rasterised -- unlike the older gauss
-solvers, which descended through a render against noisy pixels.
+Nothing is rasterised and gradients are exact, unlike the older gauss solvers
+which descended through a render against noisy pixels. Restricted to isotropic
+covariances this reproduces ``solver_gauss_analytic`` to machine precision,
+which the tests check.
 
-This is strictly more expressive than the fixed isotropic grid in
-``solver_gauss_analytic``, and on synthetic data that pays: with the truth
-inside the model class it recovers a known twist exactly (1.20, error 0.00),
-which no convex variant here manages.
+ALL REAL-DATA CONCLUSIONS PREVIOUSLY RECORDED HERE ARE VOID
+------------------------------------------------------------
+Every real-data measurement on this module was made while the basis support was
+capped at ``diameter/2 * 0.9``, inside the filament. That defect alone biases
+the recovered twist upward by 0.6-0.7 degrees and is now understood and fixed
+(see ``solver_gauss_analytic``, where the same pipeline with a full-field
+support reaches parity with the app's voxel elasticnet). The following claims
+were all drawn from that broken configuration and must not be cited or acted
+on without re-measurement:
 
-Status: it does NOT work on real class averages, and is not registered in the
-pipeline. Measured on the eight good EMPIAR-10940 classes (true twist 1.2),
-six restarts per twist:
+* that this solver "does not work" on real class averages, with a joint peak of
+  2.00 and half the images running to the top of the scan;
+* the diagnosis that the model "fits nearly as well at every twist", that the
+  score curve is intrinsically flat, and that nothing which improves the fit can
+  sharpen the peak;
+* that more restarts, or deterministic initialisation from the convex solve,
+  make matters worse and "need not be repeated";
+* that a fixed bank of anisotropic basis functions improves the fit while
+  collapsing discrimination, and hence that discrimination requires parsimony
+  and parsimony forces non-convexity;
+* the specific numbers attached to the sub-symmetry trick, and to the axial
+  envelope, on real data.
 
-    per image (0-idx)    2     3     4    10    11    15    16    19   joint
-    elasticnet        1.20  1.20  1.00  1.20  1.25  1.20  1.35  1.20    1.20
-    this solver       1.25  1.25  1.20  2.00  2.00  1.95  2.00  1.20    2.00
+The invariant underlying most of them -- the score at the true twist sitting
+just below the best twist -- was not a property of Gaussian models. It was the
+signature of a model that could not represent the true structure at all.
 
-Half the images run to the top of the scan. The reason is in the numbers
-rather than the optimiser: the score at the true twist is 0.98 to 1.00 of each
-curve's own maximum, i.e. the model fits nearly as well at every twist, so the
-curve is almost flat (joint contrast 0.41 against elasticnet's 1.16) and the
-argmax turns on a fraction of a percent of bias. Anything that makes the model
-fit better -- more components, anisotropy, more restarts -- raises the fit
-everywhere and does not sharpen the peak.
+WHAT SURVIVES, BECAUSE IT WAS NOT MEASURED THAT WAY
+-----------------------------------------------------
+* On synthetic data, with the truth inside the model class, this recovers a
+  known twist exactly. That was never support-limited, since the synthetic
+  support covered the synthetic structure.
+* The axial truncation must follow the fitted covariance *and* the axial spread
+  of the asymmetric unit, and must be capped. Getting this wrong lets the
+  optimiser inflate the cosine above 1 by elongating Gaussians out of the
+  truncation, and lets an allocation size be chosen by gradient descent, which
+  once exhausted the machine's memory. See :func:`axial_dk`.
+* An axial envelope must be twist-independent. The image's own axial profile
+  oscillates with the crossover pattern -- that is the twist signal -- so using
+  it explains the image with a statistic drawn from the image. The mechanism
+  stands even though the numbers once quoted for it do not.
+* Modelling the sub-symmetry (n*twist, n*rise) constrains twist only modulo
+  360/n, so the search range must be narrower than that. This is arithmetic and
+  holds regardless. Its cost saving -- roughly n-squared, since both the copy
+  count and the truncation width shrink -- is also real.
+* A cosine objective is scale-invariant, so L1/L2 penalties against it are
+  degenerate. Use least squares when penalising.
 
-Two findings that changed the picture substantially, both worth applying to
-any further attempt:
+psi/dy REFINEMENT IS NOT A DEAD END
+-------------------------------------
+This module previously recorded that refining a global psi/dy "changes nothing,
+the optimum sits at zero" and need not be retried. That was wrong twice over:
+it was measured with the broken support, which suppresses exactly the outer
+radii where an in-plane rotation is most visible, and the test itself rotated
+the image with an interpolating resample that pushed the filament toward the
+frame edge. With the support fixed, psi/dy is responsive, and the convention
+recovers applied values exactly on synthetic data (six cases, psi and dy both
+exact). Whether refinement improves twist recovery on real images is a separate
+question and is still open.
 
-* **Do not use the image's own axial intensity profile as an envelope.** The
-  model needs *some* truncation, because the analytic objective integrates over
-  infinite space while the class average is a finite segment. But that profile
-  oscillates with the crossover pattern, which is the twist signal itself, so
-  imposing it explains the image with a statistic taken from the same image.
-  It is a confound, not a modelling choice: with a constrained isotropic grid
-  it appeared to *help* (1.45 -> 1.10) while with a free anisotropic model it
-  pinned all three test images to the top of the scan. A plain boxcar
-  truncates without injecting anything and is the right choice.
-
-* **Model the sub-symmetry (n*twist, n*rise) rather than every subunit.** The
-  rise here is 0.96 px, far below both the pixel size and sigma, so consecutive
-  copies overlap about fourfold and the projection is a smooth continuum that
-  barely moves with twist. Taking every n-th subunit separates the copies and,
-  more importantly, makes the azimuthal increment per copy n*twist, so a given
-  relative twist error produces an n-fold larger angular error. At n=8 the
-  joint peak over the eight good classes moves from 1.95 to 1.15 (truth 1.2)
-  and the joint contrast rises to 1.63, above elasticnet's 1.16 -- the first
-  measure on which this line beats the reference solver -- while costing about
-  nine times less per twist.
-
-  The model then only constrains twist modulo 360/n, so t and t + 360/n are
-  aliased. At n=8 that is 45 degrees, harmless against a 0.6-2.0 search range,
-  but a wide-open twist search would need n bounded by 360 / (range).
-
-  **That 1.15 is not robust, and the reason matters.** Optimising harder makes
-  it worse: eight restarts instead of three moves the joint peak to 1.00, and
-  doubling the iterations to 500 moves it to 0.60, with per-image answers
-  scattering from 0.6 to 2.0. An objective whose answer degrades as its
-  optimiser improves does not have its optimum at the true twist; the n=8
-  result rests partly on under-convergence. The tell is that the score at the
-  true twist stays within about one percent of each curve's maximum
-  (median s@1.2/max 0.986 to 0.994) in every configuration tried, so the
-  objective is nearly flat near the top and which point wins is decided by
-  optimiser noise.
-
-  Joint contrast is therefore not evidence of correctness here. It sits at
-  1.63 to 1.67 across configurations whose joint peaks are 1.15, 1.00 and
-  0.60: it measures how sharp the combined curve looks, not whether it peaks
-  in the right place.
-
-Three things already tried, so they need not be repeated:
-
-* Restarts. Convergence looked solved on 0-idx 2, 3 and 4 (all settling on 1.2
-  by five restarts), but those are exactly the three images this model handles;
-  on the full set more restarts do not move the four that run to 2.0.
-* Deterministic initialisation from the convex isotropic solve. This removes
-  the seed dependence but injects that solve's own high-twist bias, and the
-  joint peak moves from 1.20 to 1.95 -- worse than random restarts.
-* A fixed bank of anisotropic basis functions, which keeps the amplitudes
-  linear and the problem convex. With 273 basis functions the fit improves
-  (0.916 -> 0.969) while discrimination collapses (contrast 1.18 -> 0.77):
-  discrimination tracks parsimony, and parsimony with free shapes is
-  inherently non-convex. That tension is the actual obstacle.
+This module is not registered in the pipeline's algorithm dispatch.
 """
 
 import numpy as np

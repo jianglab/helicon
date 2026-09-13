@@ -1,118 +1,85 @@
-"""Grid-free helical solver: a Gaussian mixture model scored analytically.
+"""Helical twist solver on a Gaussian basis.
 
-Two stages. Stage 1 fits the class average with a 2D Gaussian mixture, which
-acts as a denoiser and replaces the pixel data as the target. Stage 2 models
-the structure as Gaussians in one asymmetric unit, replicates them with the
-screw symmetry, and projects -- all in closed form, because projecting a
-Gaussian yields a Gaussian. Nothing is ever rasterised.
+The working method fits the class average directly in pixel space: a fixed
+basis of Gaussians spanning the reconstruction volume, replicated by the screw
+symmetry and projected, with the coefficients solved as a non-negative
+elasticnet on the pixel residual. One twist is scored by :func:`twist_score`.
 
-Why this is worth having over the earlier iterative Gaussian solvers: the
-projected model is **linear in the amplitudes**, so for fixed centres and
-sigmas the best amplitudes and the best achievable score come from one linear
-solve,
+Projection is analytic -- a 3D Gaussian projects to a 2D Gaussian exactly -- so
+the design matrix is built from closed-form components rather than by
+symmetrising and integrating a voxel volume.
 
-    score = max_a  <f_a, t> / (||f_a|| ||t||) = sqrt(u^T M^-1 u) / ||t||
+Geometry matches the app's own solver: centres are (x, y, z) with z the helical
+axis, projection is along x onto the (y, z) plane, and the image is
+(transverse, axial). Verified directly -- projecting a structure through
+:func:`helicon.apply_helical_symmetry` and through this module agree to
+cc = 0.999872, with every mirrored variant far worse. Everything works in pixels.
 
-with ``u_g = <B_g, t>`` and ``M_gh = <B_g, B_h>``. There are no restarts, no
-learning rate and no local minima -- which is what the gradient-descent
-versions kept losing to.
-
-Geometry follows ``solver_gaussian``: centres are (x, y, z) with z the helical
-axis, and the projection is along x onto the (y, z) plane, so the image is
-(transverse, axial). Everything here works in pixels.
-
-Status: this approach works, but only with the reconstruction support set
-correctly, which took a long investigation to find. Over the eight good
-EMPIAR-10940 classes (true twist 1.2), scored on the joint curve the tab uses:
-
-    method                              joint  <=1 step  <=0.15  med s@1.2/max  s/img-twist
-    Gaussian full-field elasticnet       1.20      9/32   29/32         0.9961         2.46
-    app voxel elasticnet (reference)     1.30      8/32   28/32         0.9987         0.62
-
-Measured over all 32 good class averages (the user's definitive list, 1-indexed
-3 4 5 11 12 16 17 20 22 27 29 31 33 34 37 42 43 46 47 49 51 55 56 57 59 62 63
-71 74 76 79 80), scanning 0.6 to 2.0 in steps of 0.05.
-
-The joint answer is exact here while the reference lands a grid step high, but
-per-image the two are a dead heat and the reference keeps a sharper curve and
-runs four times faster. Read this as parity on accuracy, not as beating it --
-and note the reference's joint peak moves with the scan range (it gives 1.20
-over the wider 0.5-2.5 range), so that particular comparison is not robust.
-
-**The support must cover the whole field, not just the filament.** Earlier
-versions here built the basis over ``diameter/2 * 0.9``, which cuts inside a
-17 px filament. That single choice, made early and inherited by every later
-variant, produced a systematic bias of +0.6 to +0.7 in twist and made the
-method look fundamentally broken. Measured on three classes, changing nothing
-else:
+THE SUPPORT MUST COVER THE WHOLE FIELD
+--------------------------------------
+Build the basis over the image half-height, not the filament radius. Earlier
+versions used ``diameter/2 * 0.9``, which cuts inside a 17 px filament, and
+that single choice biased the recovered twist upward by 0.6-0.7 degrees and
+made this whole approach look fundamentally broken. On three classes, changing
+nothing else:
 
     radius = 0.9 * diam/2   joint 1.90    med s@1.2/max 0.9186
     radius = diam/2         joint 1.90    med s@1.2/max 0.9641
     radius = image half     joint 1.20    med s@1.2/max 1.0000
 
-The mechanism explains the sign. In projection a basis function at radius r
-sweeps a transverse range proportional to r as the symmetry copies rotate, so
-to reproduce a filament of a given apparent width the model needs either large
-enough radii or more twist per copy. Capping the support removes the first
-option and the fit compensates with the second, biasing the answer upward.
+The mechanism explains the sign. A basis function at radius r sweeps a
+transverse range proportional to r as the symmetry copies rotate, so
+reproducing a filament of a given apparent width needs either large enough
+radii or more twist per copy; capping the support removes the first option and
+the fit compensates with the second. A synthetic structure of radius 4 px
+reproduces it exactly -- supports of 2.5 and 3.0 px peak at 2.0 against a true
+1.2 -- and both directions are pinned in the tests.
 
-This also explains why nothing else ever helped. Regularisation, basis type,
-basis resolution, sub-symmetry, adaptive growth, the objective and the target
-all operate *within* the support, and none can recover radii excluded before
-fitting begins. The invariant that ran through every failed experiment --
-score at the true twist sitting 1-9% below the best twist -- was not evidence
-that Gaussians cannot discriminate twist; it was evidence the true twist was
-never representable. With the full field that statistic is 0.9999.
+MEASURED PERFORMANCE
+--------------------
+Over all 32 good EMPIAR-10940 class averages (true twist 1.2), scanning 0.6 to
+2.0 in steps of 0.05, scored on the joint curve the tab uses:
 
-The axial extent, by contrast, does not matter: a single z plane scores the
-same as one spanning 4 px, which makes sense when the rise (0.95 px) is below
-the pixel size.
+    method                              joint  <=1 step  <=0.15  med s@1.2/max  s/img-twist
+    Gaussian full-field elasticnet       1.20      9/32   29/32         0.9961         2.46
+    app voxel elasticnet (reference)     1.30      8/32   28/32         0.9987         0.62
 
-What the working configuration is: full-field Cartesian basis at 2 px spacing
-with sigma 1.2 px, one z plane, projected analytically, and solved as
-non-negative elasticnet on the pixel residual (least squares, NOT the cosine --
-a cosine is scale-invariant, so L1/L2 penalties against it are degenerate and
-simply shrink every amplitude toward zero).
+The joint answer is exact while the reference lands a grid step high, but
+per-image the two are a dead heat and the reference keeps a sharper curve at a
+quarter of the cost. Read this as parity on accuracy, not as beating it -- and
+the reference's joint peak moves with the scan range (1.20 over the wider
+0.5-2.5), so that particular comparison is not robust.
 
-Previously recorded status, now superseded:
+Two further points. The objective must be least squares, not a cosine: a cosine
+is scale-invariant, so L1/L2 penalties against it merely shrink every amplitude
+and change nothing, which is why early regularisation sweeps read as null
+results. And the axial extent does not matter -- a single z plane matches one
+spanning 4 px, unsurprising when the rise (0.95 px) is below the pixel size.
 
-Status: on synthetic data it recovers a known twist exactly, with a grid that
-does not contain the truth. On real data it is **not** competitive with the
-elasticnet voxel solver, and is deliberately not registered in the pipeline's
-algorithm dispatch. Benchmarked on eight good EMPIAR-10940 class averages
-(true twist 1.2 deg), scoring the joint curve the tab itself uses:
+EARLIER MEASUREMENTS ON THIS MODULE ARE VOID
+---------------------------------------------
+Everything measured here before the support was fixed was measured with a model
+that could not represent the structure, and should not be relied on or cited.
+That includes: the conclusion that this approach is "not competitive"; the claim
+that sigma is a hyperparameter swinging the answer over 0.60-1.35; the reported
+per-image rate of 2/8; the finding that a Gaussian basis degrades faster than
+the voxel solver under added noise; the claim that arc-length basis sampling
+matters for twist bias; and the note that a non-negative lasso scored worse than
+the plain solve. None of these has been re-measured with the correct support.
 
-    method                 joint peak   contrast   per-image   time/step
-    elasticnet (app)             1.20       1.12         6/8     ~1000 ms
-    analytic sigma=2.0           1.15       0.66         2/8       363 ms
-    analytic sigma=1.25..2.5  0.60-1.35        --       0-3/8   196-1071 ms
+The invariant that ran through all of them -- the score at the true twist
+sitting 1-9% below the best twist -- was not evidence that Gaussians cannot
+discriminate twist. It was evidence that the true twist was never representable.
+With the full field that statistic is 0.9961.
 
-So it is roughly 3x faster and lands within one grid step of the truth in its
-best configuration, but three things are wrong with it:
+Still valid from that period, because it was established synthetically,
+numerically, or by direct comparison: the geometry check above; the overlap
+algebra in ``gauss_mixture``; that truncating the axial sum too tightly lets the
+normalised score exceed one; and that building the Gram by rasterising the basis
+for BLAS is about ten times slower than the analytic pair sum.
 
-* It is not robust. ``sigma`` is a genuine hyperparameter and swings the answer
-  from 0.60 to 1.35; elasticnet has no equivalent knob. Letting the score pick
-  the scale does not work, because scores are not comparable across sigma --
-  a coarser basis has fewer functions and a different attainable ceiling.
-* Per-image accuracy is much worse (2/8 against 6/8), and the joint curve is
-  markedly less sharp (contrast 0.66 against 1.12). Only the joint combination
-  rescues the answer.
-* The obvious hoped-for niche does not exist. A Gaussian basis is a smoothness
-  prior, so it should degrade gracefully as SNR falls; measured against added
-  noise it does the opposite, drifting 1.15 -> 1.50 while elasticnet holds
-  near the truth.
-
-Two things that do *not* explain the gap, so they need not be retried: refining
-a global psi/dy of the target changes nothing (the optimum sits at zero, the
-tab's auto-transform having already aligned the images), and computing the Gram
-by rasterising the basis and using BLAS is ~10x slower than the analytic pair
-sum as well as less accurate.
-
-The most likely remaining explanation is expressiveness: a cylindrical grid of
-isotropic Gaussians in one z-plane is strictly less expressive than the voxel
-basis elasticnet solves for, so the fit at the true twist is not the best fit.
-A multi-scale basis is the natural next attempt, but the Gram is O(G^2) and
-several scales made it impractically slow without a smarter Gram.
+This module is not registered in the pipeline's algorithm dispatch: at parity on
+accuracy and four times the cost, it is not a better default.
 """
 
 from __future__ import annotations
@@ -139,10 +106,14 @@ __all__ = [
 def cylindrical_grid(radius_px, sigma_px):
     """Basis centres on a cylinder, sampled at ~``sigma_px`` in radius and arc.
 
-    Sampling arc length rather than using a fixed number of angular steps
-    matters: with a constant count the outer shells are sampled far more
-    coarsely than sigma, leaving gaps the fit cannot cover, which biases the
-    recovered twist.
+    Sampling arc length rather than using a fixed number of angular steps keeps
+    the outer shells from being sampled more coarsely than sigma, which is
+    sensible on its own terms. The stronger claim once made here -- that a
+    constant angular count biases the recovered twist -- was measured with the
+    broken support and has not been re-tested; do not rely on it.
+
+    For the working pixel-space method prefer :func:`full_field_grid`, whose
+    support covers the image rather than the filament.
     """
     pts = [[0.0, 0.0, 0.0]]
     n_r = max(1, int(round(radius_px / sigma_px)))
@@ -170,6 +141,11 @@ def expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats, envelop
     2) as evidence the envelope helped; that result is a confound and should
     not be relied on. With a freer model the same envelope pins every test
     image to the top of the scan -- see ``solver_gauss_aniso``.
+
+    The working pixel-space method needs no envelope at all: the image frame
+    truncates the model, so :func:`design_matrix` passes none. An envelope is
+    only relevant to the analytic-target path, which integrates over infinite
+    space.
 
     Returns ``(mu, amp, sigma)`` shaped ``(G, C, 2)``, ``(G, C)``, ``(G, C)``.
     """
@@ -211,9 +187,11 @@ def gram_matrix(basis, dk_max):
     """``M_gh = <B_g, B_h>``, skipping copy pairs more than ``dk_max`` apart.
 
     Copies separated by many repeats along the axis overlap by nothing, so the
-    sum truncates without meaningful error -- ``dk_max`` should cover about
-    four sigma. Truncating too tightly under-counts ``<f,f>`` and lets the
-    normalised score exceed one, which is a useful tripwire.
+    sum truncates without meaningful error. ``dk_max`` should cover about five
+    sigma, which is what :func:`_dk_for` computes. Truncating too tightly
+    under-counts ``<f,f>`` and lets the normalised score exceed one, which is a
+    useful tripwire -- a cosine above 1 always means the truncation is wrong,
+    never that the fit is good.
     """
     mu, amp, sig = basis
     G, C = amp.shape
@@ -261,6 +239,10 @@ def nn_lasso(M, u, lam, iters=300, tol=1e-10):
     Coordinate descent on the Gram system. Convex, so one optimum and no
     restarts; the basis is small enough that this costs nothing next to
     building ``M``.
+
+    Superseded by :func:`nn_elasticnet`, which adds an L2 term and, more
+    importantly, is meant for the least-squares objective where penalties
+    actually bind.
     """
     G = len(u)
     a = np.zeros(G)
@@ -284,10 +266,16 @@ def nn_lasso(M, u, lam, iters=300, tol=1e-10):
 def best_score(basis, target, target_energy, ridge=1e-9, lam=0.0):
     """Best cosine between the projected model and the target, and the amplitudes.
 
-    With ``lam = 0`` this is the unconstrained optimum in closed form. A
-    positive ``lam`` switches to the non-negative lasso, which is the physical
-    choice (densities are non-negative) but on real data scored worse here, so
-    the default is the plain solve.
+    With ``lam = 0`` this is the unconstrained optimum in closed form; a
+    positive ``lam`` switches to the non-negative lasso.
+
+    Note this scores a **cosine**, which is scale-invariant, so an L1 penalty
+    against it is close to meaningless -- shrinking every amplitude lowers the
+    penalty without changing the score. That is why penalties appeared to do
+    nothing here. For a penalty that actually binds, use the least-squares path
+    (:func:`nn_elasticnet` with :func:`explained_variance`), which is what the
+    working method uses. The earlier note that the lasso "scored worse on real
+    data" was measured with the broken support and is void.
     """
     u = cross_vector(basis, target)
     M = gram_matrix(basis, dk_max=_dk_for(basis))
