@@ -40,15 +40,20 @@ MEASURED PERFORMANCE
 Over all 32 good EMPIAR-10940 class averages (true twist 1.2), scanning 0.6 to
 2.0 in steps of 0.05, scored on the joint curve the tab uses:
 
-    method                              joint  <=1 step  <=0.15  med s@1.2/max  s/img-twist
-    Gaussian full-field elasticnet       1.20      9/32   29/32         0.9961         2.46
-    app voxel elasticnet (reference)     1.30      8/32   28/32         0.9987         0.62
+    method            joint  contrast  <=1 step  <=0.15  med s@1.2/max  ms/img-twist
+    gauss_analytic     1.20      0.87      9/32   28/32         0.9981            64
+    elasticnet (ref)   1.30      1.13      8/32   28/32         0.9987           740
 
-The joint answer is exact while the reference lands a grid step high, but
-per-image the two are a dead heat and the reference keeps a sharper curve at a
-quarter of the cost. Read this as parity on accuracy, not as beating it -- and
-the reference's joint peak moves with the scan range (1.20 over the wider
-0.5-2.5), so that particular comparison is not robust.
+Run through the app pipeline exactly as a user would, so the timings include
+preprocessing and the reconstruction, not just the fit.
+
+The joint answer is exact while the reference lands a grid step high, and this
+runs about twelve times faster, but on accuracy read the two as close rather
+than as a win: per-image they are a dead heat (28/32 within 0.15 either way),
+the reference keeps a slightly sharper curve and a marginally better score at
+the true twist, and its joint peak moves with the scan range (1.20 over the
+wider 0.5-2.5), so that particular comparison is not robust. The speed
+difference, by contrast, is large and not in doubt.
 
 Two further points. The objective must be least squares, not a cosine: a cosine
 is scale-invariant, so L1/L2 penalties against it merely shrink every amplitude
