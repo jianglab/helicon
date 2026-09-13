@@ -37,29 +37,31 @@ reproduces it exactly -- supports of 2.5 and 3.0 px peak at 2.0 against a true
 
 MEASURED PERFORMANCE
 --------------------
-Over all 32 good EMPIAR-10940 class averages (true twist 1.2), scanning 0.6 to
-2.0 in steps of 0.05, scored on the joint curve the tab uses:
+All 32 good EMPIAR-10940 class averages (true twist 1.2), scanning 0.6 to 2.0 in
+0.05 steps, run through the app pipeline as a user would, with the shipped 4 A
+basis:
 
-    method            joint  contrast  <=1 step  <=0.15  med s@1.2/max  ms/img-twist
-    gauss_analytic     1.20      0.87      9/32   28/32         0.9981            64
-    elasticnet (ref)   1.30      1.13      8/32   28/32         0.9987           740
+    method          joint  <=1 step  <=0.15  med s@1.2/max  ms per image-twist
+    gauss_analytic   1.15     14/32   25/32         0.9989                 118
+    elasticnet       1.30      8/32   28/32         0.9987                 740
 
-Run through the app pipeline exactly as a user would, so the timings include
-preprocessing and the reconstruction, not just the fit.
+Six times faster, and better at the tight tolerance -- but the accuracy picture
+is mixed, not a clean win: the reference is better at the looser 0.15 tolerance
+(28/32 against 25/32), and both joint peaks sit one or two grid steps off the
+truth in opposite directions. The speed difference is the solid part.
 
-The joint answer is exact while the reference lands a grid step high, and this
-runs about twelve times faster, but on accuracy read the two as close rather
-than as a win: per-image they are a dead heat (28/32 within 0.15 either way),
-the reference keeps a slightly sharper curve and a marginally better score at
-the true twist, and its joint peak moves with the scan range (1.20 over the
-wider 0.5-2.5), so that particular comparison is not robust. The speed
-difference, by contrast, is large and not in doubt.
+The reconstruction is basis-limited. By FSC against the elasticnet volume at the
+shipped default: 0.93 at 40 A, 0.85 at 25 A, 0.65 at 20 A, 0.45 at 15 A. That is
+a ~20 A map -- ample for finding the twist, not for looking at the result. Pass
+``sigma_angstrom=2.5`` (with ``spacing_angstrom`` about 4.2) when the map
+matters; that lifts the FSC to 0.82 at 15 A and 0.69 at 10 A, at roughly three
+times the cost.
 
-Two further points. The objective must be least squares, not a cosine: a cosine
-is scale-invariant, so L1/L2 penalties against it merely shrink every amplitude
-and change nothing, which is why early regularisation sweeps read as null
-results. And the axial extent does not matter -- a single z plane matches one
-spanning 4 px, unsurprising when the rise (0.95 px) is below the pixel size.
+The final volume is rendered by placing Gaussian copies at their exact
+symmetry-transformed positions rather than resampling the rendered asymmetric
+unit, which measures slightly better against elasticnet on every image tried.
+It is gated on return_3d, because it costs about 400 ms per task and the score
+does not depend on it.
 
 EARLIER MEASUREMENTS ON THIS MODULE ARE VOID
 ---------------------------------------------
