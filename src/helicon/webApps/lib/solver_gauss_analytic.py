@@ -75,36 +75,34 @@ tab reports -- moved off the truth, and a user running the app caught it. Judge
 this solver on the joint answer and the reconstruction together, never on
 per-image counts alone.
 
-THE RECONSTRUCTION FILLS THE AXIS, AND THAT IS STRUCTURAL
-----------------------------------------------------------
+THE RECONSTRUCTION FILLS THE AXIS -- PARTLY, AND ONLY PARTLY, FIXABLE
+----------------------------------------------------------------------
 Use this solver for the twist/rise search, and elasticnet for the final map.
 
 On a hollow filament the reprojection shows a bright core where the data has a
 dark lane between the strands. The strands themselves are placed correctly --
-the transverse peak offsets match the input column by column, and there is no
-axial phase error -- but the space between them is filled. Measured on the
-EMPIAR-10940 classes, whose middle column sits at 0.079 of maximum, the fit
-gives 0.67.
+transverse peak offsets match the input column by column and there is no axial
+phase error -- but the space between them is filled. On the EMPIAR-10940
+classes, whose middle column sits at 0.079 of maximum, the fit gives 0.64.
 
-It is not the rendering, the symmetrisation, the basis width, or the penalty.
-The fit itself already shows it; sigma down to 3 A only reaches 0.497; L1 across
-a fiftyfold range changes nothing; and excluding an inner radius from the
-support changes nothing at all, which rules out on-axis basis functions as the
-source.
+Under the screw a basis function at radius r projects to y = r sin(theta(z)),
+which crosses the axis only at isolated z -- the real crossovers. What fills the
+lane is the function's TRANSVERSE WIDTH smearing each crossing. An earlier
+version of this note claimed the crossings fill the axis regardless of the
+basis, which is wrong: narrowing sigma across the filament measurably improves
+it, which is why the basis is now anisotropic (sigma 5 A across, 12.5 A along).
 
-The cause is the combination of helical symmetry and non-negativity. Under the
-screw, a basis function at radius r projects to y = r sin(theta(z)), so its
-copies sweep through the axis somewhere along the filament no matter where it
-sits. Every function therefore deposits density on the axis at some z, and with
-non-negative amplitudes nothing can cancel it. Allowing free-sign amplitudes
-confirms this exactly: the fit jumps from cc 0.73 to 0.91 and the centre falls
-to 0.013, a better match than the input's own 0.079.
+That only goes so far. Narrower still keeps improving the gap (sigma 3 A reaches
+0.55) but once 2*sigma is below the grid spacing the basis stops overlapping and
+individual functions show through as horizontal stripes -- traded one artefact
+for another. Held contiguous, the gap reaches about 0.64 against the data's
+0.079.
 
-But that cure is worse than the disease. With free signs the joint twist moves
-from 1.2 to 1.4: the constraint that ruins the picture is the same constraint
-that makes the twist identifiable, because without it the model can explain any
-twist. Reconstruction quality and twist accuracy are in direct tension here, and
-the default resolves it in favour of the twist.
+The remaining gap is non-negativity. Allowing free-sign amplitudes fits the
+image almost exactly -- cc rises from 0.73 to 0.91 and the centre falls to 0.013
+-- and simultaneously moves the joint twist from 1.2 to 1.4. The constraint that
+spoils the picture is the one that makes the twist identifiable, because without
+it the model explains any twist. The default keeps the twist.
 
 EARLIER MEASUREMENTS ON THIS MODULE ARE VOID
 ---------------------------------------------
@@ -150,6 +148,7 @@ __all__ = [
     "support_radius",
     "fit_spacing_to_budget",
     "gauss_analytic_reconstruct",
+    "DEFAULT_SIGMA_Z_ANGSTROM",
     "last_gaussians",
     "expand_project",
     "gram_matrix",
@@ -377,7 +376,16 @@ def full_field_grid(radius_px, spacing_px=2.0, sigma_px=1.2):
 
 
 def design_matrix(
-    grid, twist_deg, rise_px, csym, n_repeats, ny, nx, cutoff_sigma=3.5, chunk=200000
+    grid,
+    twist_deg,
+    rise_px,
+    csym,
+    n_repeats,
+    ny,
+    nx,
+    cutoff_sigma=3.5,
+    sigma_z=None,
+    chunk=200000,
 ):
     """``(n_pixels, G)`` matrix whose column g is basis fn g with all its copies.
 
@@ -385,42 +393,52 @@ def design_matrix(
     filament -- but each individual copy only reaches a few sigma, so the work
     is done per copy over a small footprint rather than per column over the
     whole image. That is the difference between ``P * G * C`` exponentials and
-    ``G * C * (2*cutoff*sigma)^2``, about fifty-fold here, and it is where
-    essentially all of this solver's time used to go.
+    ``G * C * (2*cutoff*sigma)^2``, about fifty-fold here.
+
+    ``sigma_z`` makes the basis anisotropic: the grid's sigma then applies
+    across the filament and ``sigma_z`` along it. The projection of a Gaussian
+    is separable in (y, z), so this is free. It matters because a basis function
+    swept by the screw traces ``y = r sin(theta(z))``, which crosses the axis
+    only at isolated z; a transversely wide function smears each crossing across
+    the dark lane between strands, while a narrow one does not.
     """
     centres, sigmas = grid
     mu, amp, sig = expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats)
+    sz = float(sigma_z) if sigma_z else None
     G, C = amp.shape
     g_of = np.repeat(np.arange(G), C)
-    yc = mu[..., 0].ravel() + ny / 2.0  # row coordinate
-    zc = mu[..., 1].ravel() + nx / 2.0  # column coordinate
+    yc = mu[..., 0].ravel() + ny / 2.0
+    zc = mu[..., 1].ravel() + nx / 2.0
     a = amp.ravel()
     s = sig.ravel()
+    s_z = np.full_like(s, sz) if sz else s
 
-    half = int(np.ceil(cutoff_sigma * float(s.max())))
-    off = np.arange(-half, half + 1)
-    w = off.size
+    hy = int(np.ceil(cutoff_sigma * float(s.max())))
+    hz = int(np.ceil(cutoff_sigma * float(s_z.max())))
+    offy = np.arange(-hy, hy + 1)
+    offz = np.arange(-hz, hz + 1)
 
-    # Drop copies whose entire footprint lies outside the image.
-    keep = (
-        (yc > -half) & (yc < ny + half) & (zc > -half) & (zc < nx + half) & (a != 0.0)
+    keep = (yc > -hy) & (yc < ny + hy) & (zc > -hz) & (zc < nx + hz) & (a != 0.0)
+    yc, zc, a, s, s_z, g_of = (
+        yc[keep],
+        zc[keep],
+        a[keep],
+        s[keep],
+        s_z[keep],
+        g_of[keep],
     )
-    yc, zc, a, s, g_of = yc[keep], zc[keep], a[keep], s[keep], g_of[keep]
 
     A = np.zeros(ny * nx * G)
     for lo in range(0, yc.size, chunk):
         hi = min(yc.size, lo + chunk)
-        r0 = np.floor(yc[lo:hi]).astype(np.int64)[:, None] + off[None, :]
-        c0 = np.floor(zc[lo:hi]).astype(np.int64)[:, None] + off[None, :]
-        dy = r0 - yc[lo:hi, None]
-        dz = c0 - zc[lo:hi, None]
-        inv2s2 = 0.5 / s[lo:hi, None] ** 2
-        ey = np.exp(-(dy**2) * inv2s2)  # (n, w) separable in y and z
-        ez = np.exp(-(dz**2) * inv2s2)
+        r0 = np.floor(yc[lo:hi]).astype(np.int64)[:, None] + offy[None, :]
+        c0 = np.floor(zc[lo:hi]).astype(np.int64)[:, None] + offz[None, :]
+        ey = np.exp(-0.5 * ((r0 - yc[lo:hi, None]) / s[lo:hi, None]) ** 2)
+        ez = np.exp(-0.5 * ((c0 - zc[lo:hi, None]) / s_z[lo:hi, None]) ** 2)
         vals = a[lo:hi, None, None] * ey[:, :, None] * ez[:, None, :]
-        ok_r = (r0 >= 0) & (r0 < ny)
-        ok_c = (c0 >= 0) & (c0 < nx)
-        valid = ok_r[:, :, None] & ok_c[:, None, :]
+        valid = ((r0 >= 0) & (r0 < ny))[:, :, None] & ((c0 >= 0) & (c0 < nx))[
+            :, None, :
+        ]
         flat = (
             np.clip(r0, 0, ny - 1)[:, :, None] * nx + np.clip(c0, 0, nx - 1)[:, None, :]
         ) * G + g_of[lo:hi, None, None]
@@ -509,7 +527,8 @@ def last_gaussians():
 # was wrong: the joint peak is what the tab reports, and it moved away from the
 # truth. Per-image counts are not a sufficient criterion on their own.
 DEFAULT_SPACING_ANGSTROM = 10.0
-DEFAULT_SIGMA_ANGSTROM = 6.0
+DEFAULT_SIGMA_ANGSTROM = 5.0  # across the filament
+DEFAULT_SIGMA_Z_ANGSTROM = 12.5  # along it
 DEFAULT_L1 = 1e-2
 DEFAULT_L2 = 1e-2
 
