@@ -25,12 +25,19 @@ Status: this approach works, but only with the reconstruction support set
 correctly, which took a long investigation to find. Over the eight good
 EMPIAR-10940 classes (true twist 1.2), scored on the joint curve the tab uses:
 
-    method                                  joint  per-image  med s@1.2/max  s/img-twist
-    Gaussian full-field elasticnet (G=197)   1.25       5/8         0.9999         2.38
-    app voxel elasticnet (reference)         1.30       4/8         0.9994         0.44
+    method                              joint  <=1 step  <=0.15  med s@1.2/max  s/img-twist
+    Gaussian full-field elasticnet       1.20      9/32   29/32         0.9961         2.46
+    app voxel elasticnet (reference)     1.30      8/32   28/32         0.9987         0.62
 
-So: comparable accuracy at roughly five times the cost. The margins are within
-noise on eight images; treat this as parity, not as an improvement.
+Measured over all 32 good class averages (the user's definitive list, 1-indexed
+3 4 5 11 12 16 17 20 22 27 29 31 33 34 37 42 43 46 47 49 51 55 56 57 59 62 63
+71 74 76 79 80), scanning 0.6 to 2.0 in steps of 0.05.
+
+The joint answer is exact here while the reference lands a grid step high, but
+per-image the two are a dead heat and the reference keeps a sharper curve and
+runs four times faster. Read this as parity on accuracy, not as beating it --
+and note the reference's joint peak moves with the scan range (it gives 1.20
+over the wider 0.5-2.5 range), so that particular comparison is not robust.
 
 **The support must cover the whole field, not just the filament.** Earlier
 versions here built the basis over ``diameter/2 * 0.9``, which cuts inside a
