@@ -89,6 +89,8 @@ accuracy and four times the cost, it is not a better default.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from .gauss_mixture import gen_overlap, iso_overlap, SQRT_2PI
@@ -103,6 +105,7 @@ __all__ = [
     "support_radius",
     "fit_spacing_to_budget",
     "gauss_analytic_reconstruct",
+    "last_gaussians",
     "expand_project",
     "gram_matrix",
     "cross_vector",
@@ -420,11 +423,42 @@ def twist_score(image, grid, twist_deg, rise_px, csym=1, lam1=1e-2, lam2=1e-2):
     return explained_variance(M, u, float(b @ b), a)
 
 
+_tls = threading.local()
+
+
+def last_gaussians():
+    """Gaussians fitted by the most recent call *on this thread*.
+
+    Lets the pipeline render the symmetrised volume by placing Gaussian copies
+    analytically rather than resampling voxel copies. That matters here because
+    the rise is sub-voxel: interpolating and averaging copies shifted by a
+    fraction of a pixel is exactly where a voxel symmetrisation blurs most.
+    Centres and covariances are in angstroms, as the renderer expects.
+    """
+    return getattr(_tls, "gaussians", None)
+
+
 # Basis defaults, in angstroms so they follow the pixel size rather than being
-# tied to the one dataset they were tuned on. At the tab's default 5 A/px these
-# are the validated 2 px spacing and 1.2 px sigma.
-DEFAULT_SPACING_ANGSTROM = 10.0
-DEFAULT_SIGMA_ANGSTROM = 6.0
+# tied to the one dataset they were tuned on.
+#
+# Basis fineness trades cost against BOTH per-image twist accuracy and the
+# resolution of the reconstruction, so it is not simply a speed knob. Over the
+# 32 good class averages, with the volume compared to the elasticnet volume by
+# FSC:
+#
+#   sigma  spacing    G   joint  <=1 step  ms/img-twist   FSC vs elasticnet
+#                                                         @20A  @15A  @10A
+#   6.0A    10.0A   193    1.20      8/32            48   0.50  0.29  0.16
+#   4.0A     6.7A   437    1.15     16/32           110   0.66  0.46  0.26
+#   2.5A     4.2A  1125    1.15     19/32           369   0.85  0.82  0.69
+#
+# 4 A is the default: it doubles per-image accuracy over a 6 A basis and stays
+# several times faster than the reference elasticnet (740 ms), which itself
+# manages 8/32. Drop to 2.5 A when the reconstruction matters more than the
+# search -- a 6 A basis band-limits the volume to about 20 A, which is fine for
+# finding the twist and not fine for looking at the result.
+DEFAULT_SPACING_ANGSTROM = 6.7
+DEFAULT_SIGMA_ANGSTROM = 4.0
 DEFAULT_L1 = 1e-2
 DEFAULT_L2 = 1e-2
 
@@ -558,7 +592,11 @@ def gauss_analytic_reconstruct(
     spacing, sigma, _ = fit_spacing_to_budget(radius, spacing, sigma)
     grid = full_field_grid(radius, spacing_px=spacing, sigma_px=sigma)
 
-    rise = abs(float(rise_pixel)) or 1.0
+    # rise_pixel arrives in 3D voxel units while the fit works in image pixels.
+    # They coincide only when target_apix2d == target_apix3d, which is the tab's
+    # default but not guaranteed.
+    scale = float(scale2d_to_3d) or 1.0
+    rise = (abs(float(rise_pixel)) / scale) or 1.0
     n_repeats = int(nx / 2 / rise) + 2
     A = design_matrix(
         grid, float(twist_degree), rise, int(max(csym, 1)), n_repeats, ny, nx
@@ -587,7 +625,25 @@ def gauss_analytic_reconstruct(
     denom = np.linalg.norm(pred) * np.linalg.norm(b)
     score = float(pred @ b / denom) if denom > 0 else 0.0
 
+    # Publish the fitted model in angstroms so the pipeline can symmetrise it
+    # analytically instead of resampling the rendered volume.
+    keep = coef > 0
+    n_keep = int(keep.sum())
+    cov3d = np.zeros((n_keep, 3, 3), dtype=float)
+    sig_a = np.asarray(grid[1])[keep] * apix2d
+    for i in range(3):
+        cov3d[:, i, i] = sig_a**2
+    apix3d = apix2d / scale
+    _tls.gaussians = dict(
+        amps=coef[keep],
+        centers=np.asarray(grid[0])[keep] * apix2d,
+        cov3d=cov3d,
+        twist_degree=float(twist_degree),
+        rise_angstrom=abs(float(rise_pixel)) * apix3d,
+        csym=int(max(csym, 1)),
+    )
+
     nz3 = int(reconstruct_length_3d_pixel) if reconstruct_length_3d_pixel > 0 else 4
     d3 = int(reconstruct_diameter_3d_pixel) if reconstruct_diameter_3d_pixel > 0 else ny
-    rec3d = _render_volume(grid[0], grid[1], coef, float(scale2d_to_3d), nz3, d3, d3)
+    rec3d = _render_volume(grid[0], grid[1], coef, scale, nz3, d3, d3)
     return (rec3d, None, None), score

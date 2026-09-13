@@ -416,6 +416,16 @@ def process_one_task(
             from .solver_gaussian_splat import last_gaussians
 
             gaussians = last_gaussians()  # thread-local: safe under the app's pool
+        elif solve_fn is gauss_analytic_reconstruct and return_3d:
+            # Only worth paying for when the map is actually wanted. Rendering
+            # the symmetrised volume from the Gaussians is exact but costs about
+            # 400 ms per task here, against ~200 ms for the whole rest of the
+            # task, and the score comes from the solver rather than from this
+            # volume -- so during a twist/rise search it would quadruple the
+            # cost to improve something only the final reconstruction uses.
+            from .solver_gauss_analytic import last_gaussians
+
+            gaussians = last_gaussians()
         else:
             gaussians = None
         if gaussians is not None:
