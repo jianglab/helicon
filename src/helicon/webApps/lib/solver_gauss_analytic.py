@@ -95,6 +95,9 @@ __all__ = [
     "nn_elasticnet",
     "explained_variance",
     "twist_score",
+    "support_radius",
+    "fit_spacing_to_budget",
+    "gauss_analytic_reconstruct",
     "expand_project",
     "gram_matrix",
     "cross_vector",
@@ -410,3 +413,176 @@ def twist_score(image, grid, twist_deg, rise_px, csym=1, lam1=1e-2, lam2=1e-2):
     u = A.T @ b
     a = nn_elasticnet(M, u, lam1 * np.abs(u).max(), lam2 * np.trace(M) / len(M))
     return explained_variance(M, u, float(b @ b), a)
+
+
+# Basis defaults, in angstroms so they follow the pixel size rather than being
+# tied to the one dataset they were tuned on. At the tab's default 5 A/px these
+# are the validated 2 px spacing and 1.2 px sigma.
+DEFAULT_SPACING_ANGSTROM = 10.0
+DEFAULT_SIGMA_ANGSTROM = 6.0
+DEFAULT_L1 = 1e-2
+DEFAULT_L2 = 1e-2
+
+# The support has to reach about twice the filament radius; less than that and
+# the recovered twist is biased upward (see the module docstring). Measured over
+# eight classes, with everything else fixed:
+#
+#     0.75 x diam/2   joint 2.00   med s@1.2/max 0.9320
+#     1.0  x diam/2   joint 1.90                 0.9586
+#     1.5  x diam/2   joint 1.30                 0.9980
+#     2.0  x diam/2   joint 1.20                 0.9999
+#
+# The margin above 2.0 guards against an under-estimated diameter. It is capped
+# by the image half-height, because basis functions outside the image explain
+# nothing, and by MAX_BASIS so a large box cannot blow up the design matrix:
+# the basis grows as radius^2, and at a 256 px box an uncapped radius would
+# reach ~12800 functions and a multi-gigabyte matrix.
+SUPPORT_DIAMETER_FACTOR = 2.5
+MAX_BASIS = 1500
+
+
+def support_radius(ny, filament_diameter_px=None):
+    """Radius for the basis support, in pixels."""
+    half = ny / 2.0
+    if not filament_diameter_px or filament_diameter_px <= 0:
+        return half
+    return float(min(half, SUPPORT_DIAMETER_FACTOR * filament_diameter_px / 2.0))
+
+
+def fit_spacing_to_budget(radius_px, spacing_px, sigma_px, max_basis=MAX_BASIS):
+    """Coarsen the grid if the requested one would exceed the basis budget.
+
+    Keeps sigma tied to the spacing so the basis stays able to represent a
+    smooth density rather than turning into isolated spikes.
+    """
+    ratio = sigma_px / max(spacing_px, 1e-9)
+    while True:
+        n = len(full_field_grid(radius_px, spacing_px, sigma_px)[0])
+        if n <= max_basis or spacing_px > radius_px:
+            return spacing_px, sigma_px, n
+        spacing_px *= 1.25
+        sigma_px = spacing_px * ratio
+
+
+def _render_volume(
+    centres_px, sigmas_px, amps, scale2d_to_3d, nz, ny, nx, cutoff_sigma=3.5
+):
+    """Render the fitted asymmetric unit onto a (nz, ny, nx) voxel grid.
+
+    Only the asymmetric unit is rendered; the pipeline applies the helical
+    symmetry afterwards, as it does for every other solver.
+    """
+    vol = np.zeros((nz, ny, nx), dtype=np.float32)
+    if not len(centres_px):
+        return vol
+    c = np.asarray(centres_px, float) * scale2d_to_3d
+    s = np.asarray(sigmas_px, float) * scale2d_to_3d
+    half = max(1, int(np.ceil(cutoff_sigma * float(s.max()))))
+    off = np.arange(-half, half + 1)
+    for (cx, cy, cz), sg, a in zip(c, s, np.asarray(amps, float)):
+        if a <= 0:
+            continue
+        xi = int(round(nx // 2 + cx))
+        yi = int(round(ny // 2 + cy))
+        zi = int(round(nz // 2 + cz))
+        xs = xi + off
+        ys = yi + off
+        zs = zi + off
+        vx = np.exp(-0.5 * ((xs - (nx // 2 + cx)) / sg) ** 2)
+        vy = np.exp(-0.5 * ((ys - (ny // 2 + cy)) / sg) ** 2)
+        vz = np.exp(-0.5 * ((zs - (nz // 2 + cz)) / sg) ** 2)
+        okx = (xs >= 0) & (xs < nx)
+        oky = (ys >= 0) & (ys < ny)
+        okz = (zs >= 0) & (zs < nz)
+        if not (okx.any() and oky.any() and okz.any()):
+            continue
+        blob = a * vz[okz, None, None] * vy[None, oky, None] * vx[None, None, okx]
+        vol[np.ix_(zs[okz], ys[oky], xs[okx])] += blob.astype(np.float32)
+    return vol
+
+
+def gauss_analytic_reconstruct(
+    projection_image,
+    scale2d_to_3d,
+    twist_degree,
+    rise_pixel,
+    csym=1,
+    tilt_degree=0.0,
+    psi_degree=0.0,
+    dy_pixel=0.0,
+    thresh_fraction=-1,
+    positive_constraint=-1,
+    reconstruct_diameter_3d_inner_pixel=0,
+    reconstruct_diameter_2d_pixel=-1,
+    reconstruct_diameter_3d_pixel=-1,
+    reconstruct_length_2d_pixel=-1,
+    reconstruct_length_3d_pixel=-1,
+    sym_oversample=-1,
+    interpolation="linear",
+    fsc_test=0,
+    score_metric="cosine",
+    target_apix2d=5.0,
+    verbose=0,
+    algorithm=None,
+    cpu=1,
+    **_ignored,
+):
+    """Solve one (twist, rise) on a Gaussian basis, with the standard signature.
+
+    A fixed basis of Gaussians spans the field, is replicated by the screw
+    symmetry and projected analytically, and the coefficients are fitted as a
+    non-negative elasticnet on the pixel residual. Convex, so the answer does
+    not depend on initialisation.
+
+    The support deliberately covers the whole image, not the filament: capping
+    it at the filament radius biases the recovered twist upward by 0.6-0.7
+    degrees (see the module docstring).
+    """
+    algorithm = algorithm or {}
+    image = np.asarray(projection_image, dtype=float)
+    ny, nx = image.shape
+
+    apix2d = float(target_apix2d) if target_apix2d else 5.0
+    spacing = max(
+        1.0, float(algorithm.get("spacing_angstrom", DEFAULT_SPACING_ANGSTROM)) / apix2d
+    )
+    sigma = max(
+        0.5, float(algorithm.get("sigma_angstrom", DEFAULT_SIGMA_ANGSTROM)) / apix2d
+    )
+    radius = support_radius(ny, reconstruct_diameter_2d_pixel)
+    spacing, sigma, _ = fit_spacing_to_budget(radius, spacing, sigma)
+    grid = full_field_grid(radius, spacing_px=spacing, sigma_px=sigma)
+
+    rise = abs(float(rise_pixel)) or 1.0
+    n_repeats = int(nx / 2 / rise) + 2
+    A = design_matrix(
+        grid, float(twist_degree), rise, int(max(csym, 1)), n_repeats, ny, nx
+    )
+    b = image.ravel()
+    M = A.T @ A
+    u = A.T @ b
+    # Honour the tab's alpha / l1_ratio controls when the user sets them, so
+    # those sliders are not silently inert for this solver; otherwise use the
+    # validated defaults. Penalty strength barely moves the twist answer here
+    # (unchanged over a hundredfold range), so this is about not surprising the
+    # user rather than about accuracy.
+    rel_l1, rel_l2 = DEFAULT_L1, DEFAULT_L2
+    alpha = algorithm.get("alpha", None)
+    if alpha is not None and float(alpha) >= 0:
+        ratio = float(algorithm.get("l1_ratio", 0.5))
+        rel_l1 = float(alpha) * ratio
+        rel_l2 = float(alpha) * (1.0 - ratio)
+    rel_l1 = float(algorithm.get("l1", rel_l1))
+    rel_l2 = float(algorithm.get("l2", rel_l2))
+    lam1 = rel_l1 * np.abs(u).max()
+    lam2 = rel_l2 * np.trace(M) / max(len(M), 1)
+    coef = nn_elasticnet(M, u, lam1, lam2)
+
+    pred = A @ coef
+    denom = np.linalg.norm(pred) * np.linalg.norm(b)
+    score = float(pred @ b / denom) if denom > 0 else 0.0
+
+    nz3 = int(reconstruct_length_3d_pixel) if reconstruct_length_3d_pixel > 0 else 4
+    d3 = int(reconstruct_diameter_3d_pixel) if reconstruct_diameter_3d_pixel > 0 else ny
+    rec3d = _render_volume(grid[0], grid[1], coef, float(scale2d_to_3d), nz3, d3, d3)
+    return (rec3d, None, None), score

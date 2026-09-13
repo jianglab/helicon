@@ -511,13 +511,27 @@ def denovo3d_tab_ui():
                         ui.input_radio_buttons(
                             "dn_lr_algorithm",
                             "Reconstruction algorithm",
-                            ["elasticnet", "lasso", "ridge", "lsq", "gauss_splat"],
+                            [
+                                "elasticnet",
+                                "gauss_analytic",
+                                "lasso",
+                                "ridge",
+                                "lsq",
+                                "gauss_splat",
+                            ],
                             selected="elasticnet",
                             inline=True,
                         ),
                         (
                             "Regularized least-squares variants reconstruct into a voxel"
                             " grid and are fast, so they suit the twist/rise search."
+                            " gauss_analytic solves the same regularized problem on a"
+                            " basis of Gaussians instead of voxels: because a Gaussian"
+                            " projects to a Gaussian exactly, its projections are built"
+                            " analytically rather than by resampling a volume, which"
+                            " makes it several times faster per twist/rise than"
+                            " elasticnet at comparable accuracy. It is convex, so the"
+                            " answer does not depend on any starting guess."
                             " gauss_splat instead fits anisotropic 3D Gaussians"
                             " (Gaussian-splatting style) to a single asymmetric unit and"
                             " replicates them helically; it reaches a higher-quality fit"

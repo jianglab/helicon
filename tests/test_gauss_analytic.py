@@ -253,3 +253,178 @@ class TestElasticnetSolver:
         grid = sga.full_field_grid(8.0)
         A = sga.design_matrix(grid, 1.2, 0.95, 1, 10, 16, 32)
         assert A.shape == (16 * 32, len(grid[0]))
+
+
+class TestSolverEntryPoint:
+    """The pipeline contract: ((rec3d, set1, set2), score)."""
+
+    NY, NX, RISE = 24, 64, 0.95
+
+    def _image(self):
+        radius = 4.0
+        centres = np.array(
+            [[radius * np.cos(t), radius * np.sin(t), 0.0] for t in (0.0, 2.1, 4.2)]
+        )
+        grid = (centres, np.full(len(centres), 1.2))
+        n_rep = int(self.NX / 2 / self.RISE) + 2
+        A = sga.design_matrix(grid, 1.2, self.RISE, 1, n_rep, self.NY, self.NX)
+        return (A @ np.array([1.0, 0.8, 0.6])).reshape(self.NY, self.NX)
+
+    def _run(self, twist, **kw):
+        return sga.gauss_analytic_reconstruct(
+            self._image(),
+            1.0,
+            twist,
+            self.RISE,
+            reconstruct_length_3d_pixel=4,
+            reconstruct_diameter_3d_pixel=self.NY,
+            target_apix2d=5.0,
+            **kw,
+        )
+
+    def test_returns_the_pipeline_contract(self):
+        (rec3d, s1, s2), score = self._run(1.2)
+        assert isinstance(score, float)
+        assert s1 is None and s2 is None
+        assert rec3d.shape == (4, self.NY, self.NY)
+        assert rec3d.dtype == np.float32
+
+    def test_score_is_a_cosine(self):
+        for twist in (0.8, 1.2, 1.8):
+            _, score = self._run(twist)
+            assert 0.0 <= score <= 1.0 + 1e-9
+
+    def test_prefers_the_true_twist(self):
+        _, right = self._run(1.2)
+        _, wrong = self._run(1.9)
+        assert right > wrong
+
+    def test_reconstruction_is_non_negative(self):
+        (rec3d, _, _), _ = self._run(1.2)
+        assert (rec3d >= 0).all()
+
+    def test_tolerates_unknown_keyword_arguments(self):
+        """The pipeline passes options this solver has no use for."""
+        _, score = self._run(
+            1.2,
+            sym_oversample=300,
+            interpolation="linear",
+            fsc_test=0,
+            thresh_fraction=-1,
+            tilt_degree=0.0,
+        )
+        assert 0.0 <= score <= 1.0 + 1e-9
+
+    @pytest.mark.parametrize("apix", [2.5, 5.0, 10.0])
+    def test_basis_is_the_same_physical_grid_at_any_pixel_size(self, apix):
+        """Defaults are in angstroms, so the basis tracks the structure, not the sampling.
+
+        Radius and spacing both scale as 1/apix, so a fixed physical field
+        yields the same number of basis functions however the image is sampled.
+        That is the point of expressing the defaults in angstroms rather than
+        pixels: they were tuned at 5 A/px and must not silently change meaning
+        on data binned differently.
+        """
+        field_angstrom = 80.0
+        grid = sga.full_field_grid(
+            field_angstrom / apix,
+            sga.DEFAULT_SPACING_ANGSTROM / apix,
+            sga.DEFAULT_SIGMA_ANGSTROM / apix,
+        )
+        reference = sga.full_field_grid(
+            field_angstrom / 5.0,
+            sga.DEFAULT_SPACING_ANGSTROM / 5.0,
+            sga.DEFAULT_SIGMA_ANGSTROM / 5.0,
+        )
+        assert len(grid[0]) == len(reference[0])
+
+    def test_alpha_and_l1_ratio_are_honoured(self):
+        """Those sliders exist in the tab; they must not be silently inert."""
+        _, plain = self._run(1.2)
+        _, heavy = self._run(1.2, algorithm={"alpha": 5.0, "l1_ratio": 1.0})
+        assert heavy != plain
+
+
+class TestDesignMatrixCulling:
+    def test_culled_matches_a_dense_evaluation(self):
+        """Footprint culling is an optimisation, not an approximation to notice."""
+        ny, nx, rise, n_rep = 16, 32, 0.95, 8
+        grid = sga.full_field_grid(8.0, spacing_px=2.0, sigma_px=1.2)
+        A = sga.design_matrix(grid, 1.3, rise, 1, n_rep, ny, nx, cutoff_sigma=6.0)
+        mu, amp, sig = sga.expand_project(grid[0], grid[1], 1.3, rise, 1, n_rep)
+        yy, xx = np.meshgrid(
+            np.arange(ny) - ny / 2.0, np.arange(nx) - nx / 2.0, indexing="ij"
+        )
+        pts = np.stack([yy.ravel(), xx.ravel()], -1)
+        d2 = ((pts[None, :, None, :] - mu[:, None, :, :]) ** 2).sum(-1)
+        dense = (amp[:, None, :] * np.exp(-0.5 * d2 / sig[:, None, :] ** 2)).sum(-1).T
+        assert np.abs(A - dense).max() / dense.max() < 1e-5
+
+    def test_columns_are_one_per_basis_function(self):
+        grid = sga.full_field_grid(8.0)
+        A = sga.design_matrix(grid, 1.2, 0.95, 1, 6, 16, 32)
+        assert A.shape == (16 * 32, len(grid[0]))
+        assert (A >= 0).all()
+
+
+class TestPipelineDispatch:
+    def test_gauss_analytic_is_routed(self):
+        from helicon.webApps.lib import denovo3d_pipeline as pipeline
+
+        assert pipeline.gauss_analytic_reconstruct is sga.gauss_analytic_reconstruct
+
+
+class TestRobustDefaults:
+    """Defaults must hold up on boxes and pixel sizes other than the tuned one."""
+
+    def test_support_reaches_twice_the_filament_radius(self):
+        """Less than that biases the twist upward; 2.0 was the measured threshold."""
+        assert sga.support_radius(256, 17) >= 2.0 * 17 / 2.0
+
+    def test_support_never_exceeds_the_image(self):
+        """Basis functions outside the image explain nothing."""
+        for ny, diam in ((32, 17), (32, 100), (64, 60)):
+            assert sga.support_radius(ny, diam) <= ny / 2.0 + 1e-9
+
+    def test_tight_box_is_unchanged_from_the_validated_setting(self):
+        """The 32 px EMPIAR-10940 box must still use the validated radius of 16."""
+        assert sga.support_radius(32, 17) == 16.0
+        assert sga.support_radius(32, 32) == 16.0
+
+    def test_unknown_diameter_falls_back_to_the_field(self):
+        assert sga.support_radius(64, None) == 32.0
+        assert sga.support_radius(64, 0) == 32.0
+
+    def test_large_box_does_not_explode_the_basis(self):
+        """The basis grows as radius^2; an uncapped 128 px radius is ~12800
+        functions and a multi-gigabyte design matrix."""
+        uncapped = len(sga.full_field_grid(128.0, 2.0, 1.2)[0])
+        assert uncapped > 10000
+        _, _, n = sga.fit_spacing_to_budget(128.0, 2.0, 1.2)
+        assert n <= sga.MAX_BASIS
+
+    def test_budget_leaves_a_small_basis_alone(self):
+        spacing, sigma, n = sga.fit_spacing_to_budget(16.0, 2.0, 1.2)
+        assert (spacing, sigma) == (2.0, 1.2)
+        assert n == len(sga.full_field_grid(16.0, 2.0, 1.2)[0])
+
+    def test_budget_keeps_sigma_proportional_to_spacing(self):
+        """Coarsening must not leave a spiky basis that cannot represent density."""
+        spacing, sigma, _ = sga.fit_spacing_to_budget(128.0, 2.0, 1.2)
+        assert sigma / spacing == pytest.approx(1.2 / 2.0, rel=1e-6)
+
+    def test_solver_runs_on_a_large_box_within_budget(self):
+        rng = np.random.default_rng(0)
+        img = rng.random((96, 128))
+        (rec3d, _, _), score = sga.gauss_analytic_reconstruct(
+            img,
+            1.0,
+            1.2,
+            0.95,
+            reconstruct_diameter_2d_pixel=0,
+            reconstruct_length_3d_pixel=4,
+            reconstruct_diameter_3d_pixel=96,
+            target_apix2d=5.0,
+        )
+        assert 0.0 <= score <= 1.0 + 1e-9
+        assert rec3d.shape == (4, 96, 96)

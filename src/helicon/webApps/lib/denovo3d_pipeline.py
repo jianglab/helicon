@@ -7,6 +7,7 @@ import helicon
 from .solver_fourier_bessel import fb_reconstruct
 from .solver_gaussian import gauss_reconstruct, gauss_fixed_reconstruct
 from .solver_gaussian_splat import gauss_splat_reconstruct
+from .solver_gauss_analytic import gauss_analytic_reconstruct
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +334,10 @@ def process_one_task(
             f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}"
         )
 
-    if algorithm["model"] == "gauss_splat":
+    if algorithm["model"] == "gauss_analytic":
+        solve_fn = gauss_analytic_reconstruct
+        label = "gauss_analytic_reconstruct"
+    elif algorithm["model"] == "gauss_splat":
         solve_fn = gauss_splat_reconstruct
         label = "gauss_splat_reconstruct"
     elif algorithm["model"] == "gauss_fixed":
