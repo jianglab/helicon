@@ -524,39 +524,78 @@ def fit_spacing_to_budget(radius_px, spacing_px, sigma_px, max_basis=MAX_BASIS):
 
 
 def _render_volume(
-    centres_px, sigmas_px, amps, scale2d_to_3d, nz, ny, nx, cutoff_sigma=3.5
+    centres_px,
+    sigmas_px,
+    amps,
+    scale2d_to_3d,
+    nz,
+    ny,
+    nx,
+    twist_deg=0.0,
+    rise_px=0.0,
+    csym=1,
+    cutoff_sigma=3.5,
 ):
     """Render the fitted asymmetric unit onto a (nz, ny, nx) voxel grid.
 
-    Only the asymmetric unit is rendered; the pipeline applies the helical
-    symmetry afterwards, as it does for every other solver.
+    The screw copies that fall inside the slab are rendered too, which matters
+    more than it sounds. The basis lies in one z plane, so without them the
+    volume is a single Gaussian bump in z; ``helicon.apply_helical_symmetry``
+    then replicates that bump every rise, and when the rise is sub-voxel -- 0.95
+    px here -- the replication beats against the pixel lattice. The result is a
+    strong axial modulation at the beat period (measured: 20 px, carrying 39% of
+    the axial power), visible as banding along the reconstruction.
+
+    Filling the slab with the copies first makes it axially continuous, so the
+    voxel symmetrisation has nothing to alias.
     """
     vol = np.zeros((nz, ny, nx), dtype=np.float32)
     if not len(centres_px):
         return vol
     c = np.asarray(centres_px, float) * scale2d_to_3d
     s = np.asarray(sigmas_px, float) * scale2d_to_3d
+    amps = np.asarray(amps, float)
+    rise = abs(float(rise_px)) * scale2d_to_3d
     half = max(1, int(np.ceil(cutoff_sigma * float(s.max()))))
     off = np.arange(-half, half + 1)
-    for (cx, cy, cz), sg, a in zip(c, s, np.asarray(amps, float)):
-        if a <= 0:
-            continue
-        xi = int(round(nx // 2 + cx))
-        yi = int(round(ny // 2 + cy))
-        zi = int(round(nz // 2 + cz))
-        xs = xi + off
-        ys = yi + off
-        zs = zi + off
-        vx = np.exp(-0.5 * ((xs - (nx // 2 + cx)) / sg) ** 2)
-        vy = np.exp(-0.5 * ((ys - (ny // 2 + cy)) / sg) ** 2)
-        vz = np.exp(-0.5 * ((zs - (nz // 2 + cz)) / sg) ** 2)
-        okx = (xs >= 0) & (xs < nx)
-        oky = (ys >= 0) & (ys < ny)
-        okz = (zs >= 0) & (zs < nz)
-        if not (okx.any() and oky.any() and okz.any()):
-            continue
-        blob = a * vz[okz, None, None] * vy[None, oky, None] * vx[None, None, okx]
-        vol[np.ix_(zs[okz], ys[oky], xs[okx])] += blob.astype(np.float32)
+
+    if rise > 1e-6:
+        k_max = int(np.ceil((nz / 2.0 + cutoff_sigma * float(s.max())) / rise)) + 1
+        ks = np.arange(-k_max, k_max + 1)
+    else:
+        ks = np.array([0])
+    js = np.arange(max(int(csym), 1))
+
+    for k in ks:
+        for j in js:
+            ang = np.deg2rad(float(twist_deg)) * k + 2 * np.pi * j / max(int(csym), 1)
+            ca, sa = np.cos(ang), np.sin(ang)
+            for (cx, cy, cz), sg, a in zip(c, s, amps):
+                if a <= 0:
+                    continue
+                rx = cx * ca - cy * sa
+                ry = cx * sa + cy * ca
+                rz = cz + rise * k
+                zi = int(round(nz // 2 + rz))
+                if zi + half < 0 or zi - half > nz - 1:
+                    continue
+                xi = int(round(nx // 2 + rx))
+                yi = int(round(ny // 2 + ry))
+                xs = xi + off
+                ys = yi + off
+                zs = zi + off
+                okx = (xs >= 0) & (xs < nx)
+                oky = (ys >= 0) & (ys < ny)
+                okz = (zs >= 0) & (zs < nz)
+                if not (okx.any() and oky.any() and okz.any()):
+                    continue
+                vx = np.exp(-0.5 * ((xs - (nx // 2 + rx)) / sg) ** 2)
+                vy = np.exp(-0.5 * ((ys - (ny // 2 + ry)) / sg) ** 2)
+                vz = np.exp(-0.5 * ((zs - (nz // 2 + rz)) / sg) ** 2)
+                blob = (
+                    a * vz[okz, None, None] * vy[None, oky, None] * vx[None, None, okx]
+                )
+                vol[np.ix_(zs[okz], ys[oky], xs[okx])] += blob.astype(np.float32)
     return vol
 
 
@@ -665,5 +704,16 @@ def gauss_analytic_reconstruct(
 
     nz3 = int(reconstruct_length_3d_pixel) if reconstruct_length_3d_pixel > 0 else 4
     d3 = int(reconstruct_diameter_3d_pixel) if reconstruct_diameter_3d_pixel > 0 else ny
-    rec3d = _render_volume(grid[0], grid[1], coef, scale, nz3, d3, d3)
+    rec3d = _render_volume(
+        grid[0],
+        grid[1],
+        coef,
+        scale,
+        nz3,
+        d3,
+        d3,
+        twist_deg=float(twist_degree),
+        rise_px=rise,
+        csym=int(max(csym, 1)),
+    )
     return (rec3d, None, None), score

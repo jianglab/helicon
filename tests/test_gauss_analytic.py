@@ -459,3 +459,67 @@ class TestDefaultBasisIsNotTooFine:
         """Adding z planes was tried against the artefacts and did not help."""
         centres, _ = sga.full_field_grid(8.0, 2.0, 1.2)
         assert np.unique(centres[:, 2]).size == 1
+
+
+class TestRenderedVolumeIsAxiallyContinuous:
+    """Guards the banding fix.
+
+    The basis lies in one z plane, so a slab rendered without the screw copies
+    is a single Gaussian bump in z. helicon.apply_helical_symmetry then repeats
+    that bump every rise, and with a sub-voxel rise (0.95 px here) the repetition
+    beats against the pixel lattice -- measured at a 20 px period carrying 39% of
+    the axial power, which is visible as banding along the reconstruction.
+    """
+
+    def test_slab_is_filled_along_z(self):
+        img = np.zeros((32, 128))
+        img[14:18, 20:108] = 1.0
+        (rec3d, _, _), _ = sga.gauss_analytic_reconstruct(
+            img,
+            1.0,
+            1.2,
+            0.95,
+            reconstruct_diameter_2d_pixel=17,
+            reconstruct_length_3d_pixel=4,
+            reconstruct_diameter_3d_pixel=32,
+            target_apix2d=5.0,
+        )
+        z = rec3d.sum(axis=(1, 2))
+        assert z.min() > 0.5 * z.max(), f"z profile not continuous: {z}"
+
+    def test_without_copies_the_slab_is_a_single_bump(self):
+        """The failure mode itself, so the mechanism stays documented."""
+        centres = np.array([[0.0, 3.0, 0.0], [0.0, -3.0, 0.0]])
+        sigmas = np.full(2, 1.2)
+        amps = np.ones(2)
+        bump = sga._render_volume(
+            centres, sigmas, amps, 1.0, 8, 32, 32, twist_deg=0.0, rise_px=0.0
+        )
+        z = bump.sum(axis=(1, 2))
+        assert z.min() < 0.1 * z.max()
+
+    def test_copies_do_not_change_the_score(self):
+        """Filling the slab is a rendering fix; the fit must be untouched."""
+        rng = np.random.default_rng(0)
+        img = rng.random((32, 128))
+        _, a = sga.gauss_analytic_reconstruct(
+            img,
+            1.0,
+            1.2,
+            0.95,
+            reconstruct_diameter_2d_pixel=17,
+            reconstruct_length_3d_pixel=4,
+            reconstruct_diameter_3d_pixel=32,
+            target_apix2d=5.0,
+        )
+        _, b = sga.gauss_analytic_reconstruct(
+            img,
+            1.0,
+            1.2,
+            0.95,
+            reconstruct_diameter_2d_pixel=17,
+            reconstruct_length_3d_pixel=1,
+            reconstruct_diameter_3d_pixel=32,
+            target_apix2d=5.0,
+        )
+        assert a == pytest.approx(b, rel=1e-12)
