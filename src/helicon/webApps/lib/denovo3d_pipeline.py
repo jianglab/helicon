@@ -6,7 +6,6 @@ import helicon
 
 from .solver_fourier_bessel import fb_reconstruct
 from .solver_gaussian import gauss_reconstruct, gauss_fixed_reconstruct
-from .solver_gaussian_splat import gauss_splat_reconstruct
 from .solver_gauss_analytic import gauss_analytic_reconstruct
 
 logger = logging.getLogger(__name__)
@@ -334,16 +333,13 @@ def process_one_task(
             f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}"
         )
 
-    if algorithm["model"] == "gauss_analytic":
+    if algorithm["model"] == "gauss":
         solve_fn = gauss_analytic_reconstruct
-        label = "gauss_analytic_reconstruct"
-    elif algorithm["model"] == "gauss_splat":
-        solve_fn = gauss_splat_reconstruct
-        label = "gauss_splat_reconstruct"
+        label = "gauss_reconstruct"
     elif algorithm["model"] == "gauss_fixed":
         solve_fn = gauss_fixed_reconstruct
         label = "gauss_fixed_reconstruct"
-    elif algorithm["model"] == "gauss":
+    elif algorithm["model"] == "gauss_legacy":
         solve_fn = gauss_reconstruct
         label = "gauss_reconstruct"
     elif algorithm["model"] == "fb":
@@ -412,57 +408,24 @@ def process_one_task(
             pitch_pixel = int(np.ceil(2 * rise / apix2d_orig))
         new_length = max(nx_orig, int(pitch_pixel * 1.2))
         cpu = helicon.available_cpu()
-        if solve_fn is gauss_splat_reconstruct:
-            from .solver_gaussian_splat import last_gaussians
+        # Symmetrise the rendered volume. The Gaussian solver renders its
+        # screw copies into the slab, so the slab is axially continuous and
+        # this resampling has nothing to alias.
+        rec3d_xform = helicon.apply_helical_symmetry(
+            data=rec3d,
+            apix=target_apix3d,
+            twist_degree=twist,
+            rise_angstrom=rise,
+            csym=csym,
+            new_size=(
+                new_length,
+                ny_orig,
+                ny_orig,
+            ),
+            new_apix=apix2d_orig,
+            cpu=cpu,
+        )
 
-            gaussians = last_gaussians()  # thread-local: safe under the app's pool
-        elif solve_fn is gauss_analytic_reconstruct and return_3d:
-            # Only worth paying for when the map is actually wanted. Rendering
-            # the symmetrised volume from the Gaussians is exact but costs about
-            # 400 ms per task here, against ~200 ms for the whole rest of the
-            # task, and the score comes from the solver rather than from this
-            # volume -- so during a twist/rise search it would quadruple the
-            # cost to improve something only the final reconstruction uses.
-            from .solver_gauss_analytic import last_gaussians
-
-            gaussians = last_gaussians()
-        else:
-            gaussians = None
-        if gaussians is not None:
-            # The Gaussian solvers keep an explicit model, so the symmetrised
-            # volume can be rendered analytically instead of resampling voxel
-            # copies: no interpolation error, and nothing is averaged away.
-            # Note the symmetry used is the one the model was fitted under
-            # (for an n-rise slab that is (n*twist, n*rise)), not (twist, rise).
-            from .solver_gaussian_splat import apply_helical_symmetry_gauss_to_grid
-
-            rec3d_xform = apply_helical_symmetry_gauss_to_grid(
-                amps=gaussians["amps"],
-                centers=gaussians["centers"],
-                cov3d=gaussians["cov3d"],
-                twist_degree=gaussians["twist_degree"],
-                rise_angstrom=gaussians["rise_angstrom"],
-                csym=gaussians["csym"],
-                nz=new_length,
-                ny=ny_orig,
-                nx=ny_orig,
-                apix=apix2d_orig,
-            )
-        else:
-            rec3d_xform = helicon.apply_helical_symmetry(
-                data=rec3d,
-                apix=target_apix3d,
-                twist_degree=twist,
-                rise_angstrom=rise,
-                csym=csym,
-                new_size=(
-                    new_length,
-                    ny_orig,
-                    ny_orig,
-                ),
-                new_apix=apix2d_orig,
-                cpu=cpu,
-            )
     # Use refined tilt/psi/dy if available from local refinement
     tilt_viz = tilt
     psi_viz = psi

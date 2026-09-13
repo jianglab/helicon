@@ -67,6 +67,7 @@ BOOKMARK_DEFAULTS = {
     "lr_l1_ratio": ("dn_lr_l1_ratio", 0.5),
     "top_n": ("dn_top_n_results", 10),
     "lr_algorithm": ("dn_lr_algorithm", "elasticnet"),
+    "rec_algorithm": ("dn_rec_algorithm", "elasticnet"),
     "positive": ("dn_positive_constraint", -1),
     "interpolation": ("dn_interpolation", "linear"),
     "score_metric": ("dn_score_metric", "cosine"),
@@ -510,38 +511,37 @@ def denovo3d_tab_ui():
                     ui.tooltip(
                         ui.input_radio_buttons(
                             "dn_lr_algorithm",
-                            "Reconstruction algorithm",
-                            [
-                                "elasticnet",
-                                "gauss_analytic",
-                                "lasso",
-                                "ridge",
-                                "lsq",
-                                "gauss_splat",
-                            ],
+                            "Search algorithm",
+                            ["elasticnet", "gauss", "lasso", "ridge", "lsq"],
                             selected="elasticnet",
                             inline=True,
                         ),
                         (
-                            "Regularized least-squares variants reconstruct into a voxel"
-                            " grid and are fast, so they suit the twist/rise search."
-                            " gauss_analytic solves the same regularized problem on a"
-                            " basis of Gaussians instead of voxels: because a Gaussian"
-                            " projects to a Gaussian exactly, its projections are built"
-                            " analytically rather than by resampling a volume, which"
-                            " makes it several times faster per twist/rise than"
-                            " elasticnet at comparable accuracy. It is convex, so the"
-                            " answer does not depend on any starting guess. Use it for"
-                            " the search and elasticnet for the final map: its"
-                            " reconstruction fills the hollow core of a filament,"
-                            " because non-negative Gaussians swept by the helical"
-                            " symmetry cannot carve the gap between strands."
-                            " gauss_splat instead fits anisotropic 3D Gaussians"
-                            " (Gaussian-splatting style) to a single asymmetric unit and"
-                            " replicates them helically; it reaches a higher-quality fit"
-                            " with far fewer parameters but is much slower per"
-                            " twist/rise combination, so it is best used to refine the"
-                            " reconstruction once the helical parameters are known."
+                            "Used while scanning twist/rise, where only the score"
+                            " matters. gauss solves the same regularized problem on a"
+                            " basis of Gaussians rather than voxels; a Gaussian projects"
+                            " to a Gaussian exactly, so its projections are built"
+                            " analytically instead of by resampling a volume, which"
+                            " makes it several times faster per twist/rise at comparable"
+                            " accuracy. It is convex, so the answer does not depend on a"
+                            " starting guess."
+                        ),
+                    ),
+                    ui.tooltip(
+                        ui.input_radio_buttons(
+                            "dn_rec_algorithm",
+                            "Reconstruction algorithm",
+                            ["elasticnet", "gauss", "lasso", "ridge", "lsq"],
+                            selected="elasticnet",
+                            inline=True,
+                        ),
+                        (
+                            "Used when a single twist/rise pair is requested, i.e. when"
+                            " the 3D map is what you want. Prefer elasticnet here."
+                            " gauss is built from non-negative Gaussians, which place"
+                            " the strands correctly but cannot carve the hollow core of"
+                            " a filament, so its map fills the dark lane between the"
+                            " strands. Search with gauss, reconstruct with elasticnet."
                         ),
                     ),
                     ui.layout_columns(
@@ -3293,8 +3293,13 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             dy_range_val = 0
             reconstruct_length = input.dn_reconstruct_length_rise() * rise
 
+            # A search cares only about the score; a single pair means the user
+            # wants the map, and the same solver is not best for both.
             algorithm = dict(
-                model=input.dn_lr_algorithm(), l1_ratio=input.dn_lr_l1_ratio()
+                model=(
+                    input.dn_rec_algorithm() if return_3d else input.dn_lr_algorithm()
+                ),
+                l1_ratio=input.dn_lr_l1_ratio(),
             )
             if input.dn_lr_alpha() >= 0:
                 algorithm["alpha"] = input.dn_lr_alpha()

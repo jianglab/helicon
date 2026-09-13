@@ -126,13 +126,12 @@ algebra in ``gauss_mixture``; that truncating the axial sum too tightly lets the
 normalised score exceed one; and that building the Gram by rasterising the basis
 for BLAS is about ten times slower than the analytic pair sum.
 
-This module is not registered in the pipeline's algorithm dispatch: at parity on
-accuracy and four times the cost, it is not a better default.
+Selectable in the tab as the "gauss" search algorithm. The tab offers a
+separate reconstruction algorithm, which should stay on elasticnet for the
+reason above.
 """
 
 from __future__ import annotations
-
-import threading
 
 import numpy as np
 
@@ -149,7 +148,6 @@ __all__ = [
     "fit_spacing_to_budget",
     "gauss_analytic_reconstruct",
     "DEFAULT_SIGMA_Z_ANGSTROM",
-    "last_gaussians",
     "expand_project",
     "gram_matrix",
     "cross_vector",
@@ -493,21 +491,6 @@ def twist_score(image, grid, twist_deg, rise_px, csym=1, lam1=1e-2, lam2=1e-2):
     return explained_variance(M, u, float(b @ b), a)
 
 
-_tls = threading.local()
-
-
-def last_gaussians():
-    """Gaussians fitted by the most recent call *on this thread*.
-
-    Lets the pipeline render the symmetrised volume by placing Gaussian copies
-    analytically rather than resampling voxel copies. That matters here because
-    the rise is sub-voxel: interpolating and averaging copies shifted by a
-    fraction of a pixel is exactly where a voxel symmetrisation blurs most.
-    Centres and covariances are in angstroms, as the renderer expects.
-    """
-    return getattr(_tls, "gaussians", None)
-
-
 # Basis defaults, in angstroms so they follow the pixel size rather than being
 # tied to the one dataset they were tuned on. At the tab's default 5 A/px these
 # are 2 px spacing and 1.2 px sigma.
@@ -733,24 +716,6 @@ def gauss_analytic_reconstruct(
     pred = A @ coef
     denom = np.linalg.norm(pred) * np.linalg.norm(b)
     score = float(pred @ b / denom) if denom > 0 else 0.0
-
-    # Publish the fitted model in angstroms so the pipeline can symmetrise it
-    # analytically instead of resampling the rendered volume.
-    keep = coef > 0
-    n_keep = int(keep.sum())
-    cov3d = np.zeros((n_keep, 3, 3), dtype=float)
-    sig_a = np.asarray(grid[1])[keep] * apix2d
-    for i in range(3):
-        cov3d[:, i, i] = sig_a**2
-    apix3d = apix2d / scale
-    _tls.gaussians = dict(
-        amps=coef[keep],
-        centers=np.asarray(grid[0])[keep] * apix2d,
-        cov3d=cov3d,
-        twist_degree=float(twist_degree),
-        rise_angstrom=abs(float(rise_pixel)) * apix3d,
-        csym=int(max(csym, 1)),
-    )
 
     nz3 = int(reconstruct_length_3d_pixel) if reconstruct_length_3d_pixel > 0 else 4
     d3 = int(reconstruct_diameter_3d_pixel) if reconstruct_diameter_3d_pixel > 0 else ny

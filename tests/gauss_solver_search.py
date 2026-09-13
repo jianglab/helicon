@@ -252,7 +252,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=["fb", "gauss", "gauss_fixed", "lsq"],
+        choices=["fb", "gauss_legacy", "gauss_fixed", "lsq"],
         default=None,
         help="Solver model to run (default: run gauss + lsq)",
     )
@@ -423,7 +423,7 @@ def main() -> int:
                 )
             else:
                 algo = dict(
-                    model="gauss",
+                    model="gauss_legacy",
                     gauss_n=args.gauss_n,
                     gauss_iter=args.gauss_iter,
                     gauss_lr=args.gauss_lr,
@@ -431,7 +431,7 @@ def main() -> int:
                     device="cpu",
                 )
             task = build_task(image, apix, twist, args.rise, algo)
-            all_tasks.append((i, "gauss", task))
+            all_tasks.append((i, "gauss_legacy", task))
 
     n_total = len(all_tasks)
     completed = 0
