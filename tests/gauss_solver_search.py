@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone test script comparing gauss_reconstruct vs lsq_reconstruct.
+"""Standalone test script comparing the gauss solver against lsq_reconstruct.
 
 Scans a twist range on the default EMPIAR-10940 2D class image and produces
 an overlay plot of the score curves for both solvers.
@@ -18,17 +18,14 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-# Override PyTorch thread limit before anything else imports it.
-# The gauss solver sets torch.set_num_threads(1) at import time for
+# Override PyTorch thread limit before anything else imports it.  The
+# Fourier-Bessel solver sets torch.set_num_threads(1) at import time for
 # multi-worker safety, but in this single-worker test we want full
-# parallelism.  We set it here, then the module-level call in
-# solver_gaussian.py is a no-op (PyTorch thread setting is sticky).
+# parallelism, and the thread setting is sticky once applied.
 os.environ["OMP_NUM_THREADS"] = str(os.cpu_count())
 os.environ["MKL_NUM_THREADS"] = str(os.cpu_count())
 import torch
 
-# First attempt — undone by solver_gaussian.py's module-level
-# torch.set_num_threads(1).  We restore it again after import below.
 torch.set_num_threads(os.cpu_count())
 
 import matplotlib
@@ -40,9 +37,8 @@ import numpy as np
 import helicon
 from helicon.webApps.lib import denovo3d_pipeline as pipeline
 
-# Restore full parallelism.  solver_gaussian.py calls
-# torch.set_num_threads(1) at module level for multi-worker safety,
-# but in this single-worker test we want all cores.
+# Restore full parallelism: a solver module may have pinned torch to one
+# thread at import time for multi-worker safety, but here we want all cores.
 torch.set_num_threads(os.cpu_count())
 
 try:
@@ -247,7 +243,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=["fb", "gauss_legacy", "lsq"],
+        choices=["fb", "gauss", "lsq"],
         default=None,
         help="Solver model to run (default: run gauss + lsq)",
     )
@@ -262,15 +258,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--fb-lr", type=float, default=0.01, help="FB solver learning rate"
     )
-    parser.add_argument("--gauss-n", type=int, default=100, help="Number of Gaussians")
     parser.add_argument(
-        "--gauss-iter", type=int, default=300, help="Number of iterations"
+        "--gauss-spacing",
+        type=float,
+        default=None,
+        help="Gaussian centre spacing (Å); solver default if omitted",
     )
-    parser.add_argument("--gauss-lr", type=float, default=0.01, help="Learning rate")
     parser.add_argument(
-        "--fine-tune-iter", type=int, default=100, help="Fine-tuning iterations"
+        "--gauss-sigma",
+        type=float,
+        default=None,
+        help="Gaussian width (Å); solver default if omitted",
     )
-    parser.add_argument("--n-restarts", type=int, default=2, help="Number of restarts")
     parser.add_argument(
         "--twist-start", type=float, default=0.5, help="Start twist (°)"
     )
@@ -375,16 +374,13 @@ def main() -> int:
             task = build_task(image, apix, twist, args.rise, algo)
             all_tasks.append((i, "fb", task))
         if run_gauss:
-            algo = dict(
-                model="gauss_legacy",
-                gauss_n=args.gauss_n,
-                gauss_iter=args.gauss_iter,
-                gauss_lr=args.gauss_lr,
-                n_restarts=args.n_restarts,
-                device="cpu",
-            )
+            algo = dict(model="gauss")
+            if args.gauss_spacing is not None:
+                algo["spacing_angstrom"] = args.gauss_spacing
+            if args.gauss_sigma is not None:
+                algo["sigma_angstrom"] = args.gauss_sigma
             task = build_task(image, apix, twist, args.rise, algo)
-            all_tasks.append((i, "gauss_legacy", task))
+            all_tasks.append((i, "gauss", task))
 
     n_total = len(all_tasks)
     completed = 0
