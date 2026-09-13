@@ -256,18 +256,38 @@ class TestElasticnetSolver:
 
 
 class TestSolverEntryPoint:
-    """The pipeline contract: ((rec3d, set1, set2), score)."""
+    """The pipeline contract: ((rec3d, set1, set2), score).
 
-    NY, NX, RISE = 24, 64, 0.95
+    NX is 128 rather than 64 because a 64 px image at 5 A/px is a 320 A
+    filament, and at the twist under test that is less than a quarter of a
+    pitch -- not one full crossover. The twist is barely determined by such an
+    image for any method, and the narrow basis in particular gets it wrong; see
+    TestShortFilamentsAreNotReliablyIndexable, which pins that limit rather than
+    hiding it.
+    """
 
-    def _image(self):
+    NY, NX, RISE = 24, 128, 0.95
+
+    def _grid(self, truth_sigma_px=1.2):
         radius = 4.0
         centres = np.array(
             [[radius * np.cos(t), radius * np.sin(t), 0.0] for t in (0.0, 2.1, 4.2)]
         )
-        grid = (centres, np.full(len(centres), 1.2))
-        n_rep = int(self.NX / 2 / self.RISE) + 2
-        A = sga.design_matrix(grid, 1.2, self.RISE, 1, n_rep, self.NY, self.NX)
+        return centres, np.full(len(centres), truth_sigma_px)
+
+    def _n_rep(self):
+        return int(self.NX / 2 / self.RISE) + 2
+
+    def _image(self, truth_sigma_px=1.2):
+        A = sga.design_matrix(
+            self._grid(truth_sigma_px),
+            1.2,
+            self.RISE,
+            1,
+            self._n_rep(),
+            self.NY,
+            self.NX,
+        )
         return (A @ np.array([1.0, 0.8, 0.6])).reshape(self.NY, self.NX)
 
     def _run(self, twist, **kw):
@@ -289,15 +309,46 @@ class TestSolverEntryPoint:
         assert rec3d.shape == (4, self.NY, self.NY)
         assert rec3d.dtype == np.float32
 
-    def test_score_is_a_cosine(self):
+    def test_score_is_a_correlation(self):
         for twist in (0.8, 1.2, 1.8):
             _, score = self._run(twist)
-            assert 0.0 <= score <= 1.0 + 1e-9
+            assert -1.0 - 1e-9 <= score <= 1.0 + 1e-9
+
+    def test_score_is_centred_not_a_plain_cosine(self):
+        """The reported score is Pearson correlation, not raw cosine.
+
+        Both vectors are non-negative -- the model by construction, the image
+        because it is thresholded -- so their cosine cannot fall much below a
+        large floor, and the twist only modulates the score on top of it. That
+        floor is what made the search curve look flat.
+
+        Checked on an imperfect model, since a perfect one scores 1 either way:
+        the model built at the wrong twist must score lower once centred than it
+        does on raw cosine, and the raw cosine must sit implausibly high for two
+        vectors that disagree.
+        """
+        b = self._image().ravel()
+        A = sga.design_matrix(
+            self._grid(), 1.9, self.RISE, 1, self._n_rep(), self.NY, self.NX
+        )
+        pred = A @ np.array([1.0, 0.8, 0.6])
+        raw = float(pred @ b / (np.linalg.norm(pred) * np.linalg.norm(b)))
+        centred = sga.correlation_score(pred, b)
+        assert centred < raw
+        assert raw > 0.5  # the floor this is meant to remove
+
+    def test_correlation_is_invariant_to_model_scale(self):
+        rng = np.random.default_rng(0)
+        p, t = rng.random(500), rng.random(500)
+        assert sga.correlation_score(p, t) == pytest.approx(
+            sga.correlation_score(3.7 * p, t)
+        )
 
     def test_prefers_the_true_twist(self):
         _, right = self._run(1.2)
-        _, wrong = self._run(1.9)
-        assert right > wrong
+        for wrong_twist in (0.8, 1.6, 1.9):
+            _, wrong = self._run(wrong_twist)
+            assert right > wrong, f"twist {wrong_twist} outscored the truth"
 
     def test_reconstruction_is_non_negative(self):
         (rec3d, _, _), _ = self._run(1.2)
@@ -430,20 +481,112 @@ class TestRobustDefaults:
         assert rec3d.shape == (4, 96, 96)
 
 
-class TestDefaultBasisIsNotTooFine:
-    """A finer basis looks better by several metrics and is worse in the app.
+class TestShortFilamentsAreNotReliablyIndexable:
+    """A known limit, recorded rather than hidden.
 
-    Shipping sigma 4 A briefly moved the joint twist peak off the truth (1.1
-    against 1.2) and produced a reconstruction with roughly twice the crossovers
-    the geometry allows, while improving per-image counts. These guard the
-    default against being tightened again on the strength of those counts.
+    Twist discrimination needs crossovers to look at. At twist 1.2 and rise
+    4.75 A the pitch is 1425 A, so half a pitch -- one crossover -- is 712 A. A
+    64 px image at 5 A/px is 320 A, under a quarter of a pitch, and the twist is
+    barely determined by it.
+
+    The narrow basis is worse there than the broad one it replaced: on a
+    synthetic structure of known twist it returns 1.4, 1.9 or 2.2 depending on
+    the width the structure was drawn with, where the old sigma 5 A basis
+    returned 1.2 for two of the three. That is the price of the sharper peak,
+    and it is paid where the answer was weakly determined anyway -- at 128 px
+    (640 A) the narrow basis is correct at every width tested.
+
+    This test asserts the length threshold, not the wrong answer, so it keeps
+    documenting the limit if the solver later improves.
+    """
+
+    RISE_PX, TRUE, APIX = 0.95, 1.2, 5.0
+
+    def _image(self, ny, nx, truth_sigma_px=1.2):
+        radius = 4.0
+        centres = np.array(
+            [[radius * np.cos(t), radius * np.sin(t), 0.0] for t in (0.0, 2.1, 4.2)]
+        )
+        grid = (centres, np.full(len(centres), truth_sigma_px))
+        n_rep = int(nx / 2 / self.RISE_PX) + 2
+        A = sga.design_matrix(grid, self.TRUE, self.RISE_PX, 1, n_rep, ny, nx)
+        return (A @ np.array([1.0, 0.8, 0.6])).reshape(ny, nx)
+
+    def _best_twist(self, ny, nx, truth_sigma_px):
+        twists = [0.8, 1.0, 1.2, 1.4, 1.6, 1.9, 2.2]
+        image = self._image(ny, nx, truth_sigma_px)
+        scores = [
+            sga.gauss_analytic_reconstruct(
+                image,
+                1.0,
+                t,
+                self.RISE_PX,
+                reconstruct_length_3d_pixel=4,
+                reconstruct_diameter_3d_pixel=ny,
+                target_apix2d=self.APIX,
+            )[1]
+            for t in twists
+        ]
+        return twists[int(np.argmax(scores))]
+
+    @pytest.mark.parametrize("truth_sigma_px", [0.8, 1.2, 2.0])
+    def test_recovers_the_twist_when_a_crossover_is_visible(self, truth_sigma_px):
+        """128 px at 5 A is 640 A, most of a half pitch. This must work."""
+        assert self._best_twist(24, 128, truth_sigma_px) == pytest.approx(self.TRUE)
+
+    def test_an_image_shorter_than_a_quarter_pitch_is_not_required_to_work(self):
+        """Pins the threshold: 320 A is below what the method can index.
+
+        Asserted as a property of the geometry so this stays meaningful if the
+        solver later handles the short case -- it does not assert failure.
+        """
+        half_pitch_angstrom = 360.0 / self.TRUE * (self.RISE_PX * self.APIX) / 2
+        assert 64 * self.APIX < half_pitch_angstrom / 2
+        assert 128 * self.APIX > half_pitch_angstrom * 0.8
+
+
+class TestDefaultBasisIsNotTooFine:
+    """The basis is narrow across the filament and wide along it, on purpose.
+
+    Those two directions are governed by different requirements and used to be
+    conflated, because the basis was isotropic.
+
+    ACROSS, narrow is what sharpens the twist peak. Transverse width is what
+    lets the fit smear a wrong twist into a plausible image, so a broad basis
+    scores well everywhere and the search curve goes flat. Measured on the 32
+    good classes: peak prominence 0.81 at sigma 5 A against 0.89 at 2.5 A, where
+    elasticnet on the same images scores 0.88.
+
+    ALONG, wide is what keeps the answer. Screw copies sit one rise apart, so a
+    basis narrow in z leaves them as a comb rather than continuous density; with
+    sigma_z pulled down to 2.5 A a synthetic structure of known twist recovers
+    1.0 instead of 1.2 at the app's image size.
+
+    Shipping sigma 4 A isotropic once moved the joint peak off the truth while
+    improving per-image counts, which is why the per-image count is never
+    sufficient on its own.
     """
 
     TYPICAL_RISE_ANGSTROM = 4.75
 
-    def test_default_sigma_spans_a_typical_rise(self):
-        """Copies must overlap into continuous density, not sit as a comb."""
-        assert sga.DEFAULT_SIGMA_ANGSTROM >= self.TYPICAL_RISE_ANGSTROM
+    def test_axial_sigma_spans_a_typical_rise(self):
+        """Copies must overlap into continuous density, not sit as a comb.
+
+        This is a constraint on the AXIAL width only: copies are spaced by the
+        rise along z, so that is the direction in which they have to merge.
+        """
+        assert sga.DEFAULT_SIGMA_Z_ANGSTROM >= self.TYPICAL_RISE_ANGSTROM
+
+    def test_transverse_sigma_is_narrow_enough_to_sharpen_the_peak(self):
+        """Across the filament the basis samples rather than describes."""
+        assert sga.DEFAULT_SIGMA_ANGSTROM <= sga.DEFAULT_SPACING_ANGSTROM / 3.0
+
+    def test_basis_is_anisotropic(self):
+        assert sga.DEFAULT_SIGMA_Z_ANGSTROM > sga.DEFAULT_SIGMA_ANGSTROM
+
+    def test_rendering_is_wider_than_the_fit(self):
+        """A narrow search basis renders a spiky map, so the map uses its own."""
+        assert sga.DEFAULT_RENDER_SIGMA_ANGSTROM > sga.DEFAULT_SIGMA_ANGSTROM
 
     def test_default_spacing_is_coarser_than_sigma(self):
         assert sga.DEFAULT_SPACING_ANGSTROM > sga.DEFAULT_SIGMA_ANGSTROM
