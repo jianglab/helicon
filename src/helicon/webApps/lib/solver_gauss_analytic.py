@@ -313,25 +313,58 @@ def full_field_grid(radius_px, spacing_px=2.0, sigma_px=1.2):
     return centres, np.full(len(centres), float(sigma_px))
 
 
-def design_matrix(grid, twist_deg, rise_px, csym, n_repeats, ny, nx, chunk=48):
-    """``(n_pixels, G)`` matrix whose column g is basis fn g with all its copies."""
+def design_matrix(
+    grid, twist_deg, rise_px, csym, n_repeats, ny, nx, cutoff_sigma=3.5, chunk=200000
+):
+    """``(n_pixels, G)`` matrix whose column g is basis fn g with all its copies.
+
+    Each column is dense-ish -- a basis function's copies run the length of the
+    filament -- but each individual copy only reaches a few sigma, so the work
+    is done per copy over a small footprint rather than per column over the
+    whole image. That is the difference between ``P * G * C`` exponentials and
+    ``G * C * (2*cutoff*sigma)^2``, about fifty-fold here, and it is where
+    essentially all of this solver's time used to go.
+    """
     centres, sigmas = grid
     mu, amp, sig = expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats)
-    yy, xx = np.meshgrid(
-        np.arange(ny) - ny / 2.0, np.arange(nx) - nx / 2.0, indexing="ij"
+    G, C = amp.shape
+    g_of = np.repeat(np.arange(G), C)
+    yc = mu[..., 0].ravel() + ny / 2.0  # row coordinate
+    zc = mu[..., 1].ravel() + nx / 2.0  # column coordinate
+    a = amp.ravel()
+    s = sig.ravel()
+
+    half = int(np.ceil(cutoff_sigma * float(s.max())))
+    off = np.arange(-half, half + 1)
+    w = off.size
+
+    # Drop copies whose entire footprint lies outside the image.
+    keep = (
+        (yc > -half) & (yc < ny + half) & (zc > -half) & (zc < nx + half) & (a != 0.0)
     )
-    pts = np.stack([yy.ravel(), xx.ravel()], -1)
-    G = amp.shape[0]
-    A = np.empty((pts.shape[0], G))
-    for lo in range(0, G, chunk):
-        hi = min(G, lo + chunk)
-        d2 = ((pts[None, :, None, :] - mu[lo:hi, None, :, :]) ** 2).sum(-1)
-        A[:, lo:hi] = (
-            (amp[lo:hi, None, :] * np.exp(-0.5 * d2 / sig[lo:hi, None, :] ** 2))
-            .sum(-1)
-            .T
+    yc, zc, a, s, g_of = yc[keep], zc[keep], a[keep], s[keep], g_of[keep]
+
+    A = np.zeros(ny * nx * G)
+    for lo in range(0, yc.size, chunk):
+        hi = min(yc.size, lo + chunk)
+        r0 = np.floor(yc[lo:hi]).astype(np.int64)[:, None] + off[None, :]
+        c0 = np.floor(zc[lo:hi]).astype(np.int64)[:, None] + off[None, :]
+        dy = r0 - yc[lo:hi, None]
+        dz = c0 - zc[lo:hi, None]
+        inv2s2 = 0.5 / s[lo:hi, None] ** 2
+        ey = np.exp(-(dy**2) * inv2s2)  # (n, w) separable in y and z
+        ez = np.exp(-(dz**2) * inv2s2)
+        vals = a[lo:hi, None, None] * ey[:, :, None] * ez[:, None, :]
+        ok_r = (r0 >= 0) & (r0 < ny)
+        ok_c = (c0 >= 0) & (c0 < nx)
+        valid = ok_r[:, :, None] & ok_c[:, None, :]
+        flat = (
+            np.clip(r0, 0, ny - 1)[:, :, None] * nx + np.clip(c0, 0, nx - 1)[:, None, :]
+        ) * G + g_of[lo:hi, None, None]
+        A += np.bincount(
+            flat[valid].ravel(), weights=vals[valid].ravel(), minlength=ny * nx * G
         )
-    return A
+    return A.reshape(ny * nx, G)
 
 
 def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
