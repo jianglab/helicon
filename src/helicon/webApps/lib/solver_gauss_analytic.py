@@ -75,6 +75,37 @@ tab reports -- moved off the truth, and a user running the app caught it. Judge
 this solver on the joint answer and the reconstruction together, never on
 per-image counts alone.
 
+THE RECONSTRUCTION FILLS THE AXIS, AND THAT IS STRUCTURAL
+----------------------------------------------------------
+Use this solver for the twist/rise search, and elasticnet for the final map.
+
+On a hollow filament the reprojection shows a bright core where the data has a
+dark lane between the strands. The strands themselves are placed correctly --
+the transverse peak offsets match the input column by column, and there is no
+axial phase error -- but the space between them is filled. Measured on the
+EMPIAR-10940 classes, whose middle column sits at 0.079 of maximum, the fit
+gives 0.67.
+
+It is not the rendering, the symmetrisation, the basis width, or the penalty.
+The fit itself already shows it; sigma down to 3 A only reaches 0.497; L1 across
+a fiftyfold range changes nothing; and excluding an inner radius from the
+support changes nothing at all, which rules out on-axis basis functions as the
+source.
+
+The cause is the combination of helical symmetry and non-negativity. Under the
+screw, a basis function at radius r projects to y = r sin(theta(z)), so its
+copies sweep through the axis somewhere along the filament no matter where it
+sits. Every function therefore deposits density on the axis at some z, and with
+non-negative amplitudes nothing can cancel it. Allowing free-sign amplitudes
+confirms this exactly: the fit jumps from cc 0.73 to 0.91 and the centre falls
+to 0.013, a better match than the input's own 0.079.
+
+But that cure is worse than the disease. With free signs the joint twist moves
+from 1.2 to 1.4: the constraint that ruins the picture is the same constraint
+that makes the twist identifiable, because without it the model can explain any
+twist. Reconstruction quality and twist accuracy are in direct tension here, and
+the default resolves it in favour of the twist.
+
 EARLIER MEASUREMENTS ON THIS MODULE ARE VOID
 ---------------------------------------------
 Everything measured here before the support was fixed was measured with a model
