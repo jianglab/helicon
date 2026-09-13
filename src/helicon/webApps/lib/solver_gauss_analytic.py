@@ -21,6 +21,54 @@ Geometry follows ``solver_gaussian``: centres are (x, y, z) with z the helical
 axis, and the projection is along x onto the (y, z) plane, so the image is
 (transverse, axial). Everything here works in pixels.
 
+Status: this approach works, but only with the reconstruction support set
+correctly, which took a long investigation to find. Over the eight good
+EMPIAR-10940 classes (true twist 1.2), scored on the joint curve the tab uses:
+
+    method                                  joint  per-image  med s@1.2/max  s/img-twist
+    Gaussian full-field elasticnet (G=197)   1.25       5/8         0.9999         2.38
+    app voxel elasticnet (reference)         1.30       4/8         0.9994         0.44
+
+So: comparable accuracy at roughly five times the cost. The margins are within
+noise on eight images; treat this as parity, not as an improvement.
+
+**The support must cover the whole field, not just the filament.** Earlier
+versions here built the basis over ``diameter/2 * 0.9``, which cuts inside a
+17 px filament. That single choice, made early and inherited by every later
+variant, produced a systematic bias of +0.6 to +0.7 in twist and made the
+method look fundamentally broken. Measured on three classes, changing nothing
+else:
+
+    radius = 0.9 * diam/2   joint 1.90    med s@1.2/max 0.9186
+    radius = diam/2         joint 1.90    med s@1.2/max 0.9641
+    radius = image half     joint 1.20    med s@1.2/max 1.0000
+
+The mechanism explains the sign. In projection a basis function at radius r
+sweeps a transverse range proportional to r as the symmetry copies rotate, so
+to reproduce a filament of a given apparent width the model needs either large
+enough radii or more twist per copy. Capping the support removes the first
+option and the fit compensates with the second, biasing the answer upward.
+
+This also explains why nothing else ever helped. Regularisation, basis type,
+basis resolution, sub-symmetry, adaptive growth, the objective and the target
+all operate *within* the support, and none can recover radii excluded before
+fitting begins. The invariant that ran through every failed experiment --
+score at the true twist sitting 1-9% below the best twist -- was not evidence
+that Gaussians cannot discriminate twist; it was evidence the true twist was
+never representable. With the full field that statistic is 0.9999.
+
+The axial extent, by contrast, does not matter: a single z plane scores the
+same as one spanning 4 px, which makes sense when the rise (0.95 px) is below
+the pixel size.
+
+What the working configuration is: full-field Cartesian basis at 2 px spacing
+with sigma 1.2 px, one z plane, projected analytically, and solved as
+non-negative elasticnet on the pixel residual (least squares, NOT the cosine --
+a cosine is scale-invariant, so L1/L2 penalties against it are degenerate and
+simply shrink every amplitude toward zero).
+
+Previously recorded status, now superseded:
+
 Status: on synthetic data it recovers a known twist exactly, with a grid that
 does not contain the truth. On real data it is **not** competitive with the
 elasticnet voxel solver, and is deliberately not registered in the pipeline's
@@ -68,6 +116,11 @@ from .gauss_mixture import gen_overlap, iso_overlap, SQRT_2PI
 
 __all__ = [
     "cylindrical_grid",
+    "full_field_grid",
+    "design_matrix",
+    "nn_elasticnet",
+    "explained_variance",
+    "twist_score",
     "expand_project",
     "gram_matrix",
     "cross_vector",
@@ -248,3 +301,84 @@ def _dk_for(basis):
     # Five sigma, not four: at four the truncation under-counts <f,f> enough
     # to push the normalised score slightly above one (measured 1.0001).
     return int(np.ceil(5 * float(sig.max()) / rise)) + 1
+
+
+def full_field_grid(radius_px, spacing_px=2.0, sigma_px=1.2):
+    """Cartesian basis covering the WHOLE field, not just the filament.
+
+    ``radius_px`` should be the image half-height, not the filament radius.
+    Restricting the basis to the filament biases the recovered twist upward by
+    0.6-0.7 degrees on EMPIAR-10940; see this module's status notes for the
+    measurement and the mechanism.
+    """
+    n = int(np.ceil(radius_px / spacing_px))
+    xs = np.arange(-n, n + 1) * spacing_px
+    pts = [[x, y, 0.0] for x in xs for y in xs if x * x + y * y <= radius_px**2]
+    centres = np.asarray(pts, float)
+    return centres, np.full(len(centres), float(sigma_px))
+
+
+def design_matrix(grid, twist_deg, rise_px, csym, n_repeats, ny, nx, chunk=48):
+    """``(n_pixels, G)`` matrix whose column g is basis fn g with all its copies."""
+    centres, sigmas = grid
+    mu, amp, sig = expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats)
+    yy, xx = np.meshgrid(
+        np.arange(ny) - ny / 2.0, np.arange(nx) - nx / 2.0, indexing="ij"
+    )
+    pts = np.stack([yy.ravel(), xx.ravel()], -1)
+    G = amp.shape[0]
+    A = np.empty((pts.shape[0], G))
+    for lo in range(0, G, chunk):
+        hi = min(G, lo + chunk)
+        d2 = ((pts[None, :, None, :] - mu[lo:hi, None, :, :]) ** 2).sum(-1)
+        A[:, lo:hi] = (
+            (amp[lo:hi, None, :] * np.exp(-0.5 * d2 / sig[lo:hi, None, :] ** 2))
+            .sum(-1)
+            .T
+        )
+    return A
+
+
+def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
+    """``min a^T M a - 2 a^T u + lam1||a||_1 + lam2||a||^2``, ``a >= 0``.
+
+    Least squares, not a cosine: a cosine is scale-invariant, so L1/L2 against
+    it is degenerate -- shrinking every amplitude lowers the penalty without
+    changing the fit, and the penalties simply do nothing.
+    """
+    G = len(u)
+    a = np.zeros(G)
+    d = np.diag(M).copy()
+    d[d <= 0] = 1e-12
+    r = u.copy()
+    for _ in range(iters):
+        delta = 0.0
+        for j in range(G):
+            aj = a[j]
+            new = max(0.0, (r[j] + d[j] * aj - 0.5 * lam1) / (d[j] + lam2))
+            if new != aj:
+                r -= M[:, j] * (new - aj)
+                delta = max(delta, abs(new - aj))
+                a[j] = new
+        if delta < tol:
+            break
+    return a
+
+
+def explained_variance(M, u, tt, a):
+    """``1 - ||f_a - t||^2 / ||t||^2``; comparable across twists, at most 1."""
+    if tt <= 0:
+        return 0.0
+    return float((2.0 * (a @ u) - a @ M @ a) / tt)
+
+
+def twist_score(image, grid, twist_deg, rise_px, csym=1, lam1=1e-2, lam2=1e-2):
+    """Score one twist against an image: fit the basis, report explained variance."""
+    ny, nx = image.shape
+    n_repeats = int(nx / 2 / max(rise_px, 1e-6)) + 2
+    A = design_matrix(grid, twist_deg, rise_px, csym, n_repeats, ny, nx)
+    b = np.asarray(image, float).ravel()
+    M = A.T @ A
+    u = A.T @ b
+    a = nn_elasticnet(M, u, lam1 * np.abs(u).max(), lam2 * np.trace(M) / len(M))
+    return explained_variance(M, u, float(b @ b), a)

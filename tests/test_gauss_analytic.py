@@ -174,3 +174,82 @@ class TestLasso:
         M = A @ A.T + np.eye(8)
         u = np.abs(rng.normal(0, 1, 8))
         assert np.allclose(sga.nn_lasso(M, u, 1e6), 0.0)
+
+
+class TestFullFieldSupport:
+    """The reconstruction support must cover the field, not just the filament.
+
+    Capping the basis at the filament radius biased the recovered twist upward
+    by 0.6-0.7 degrees on real data and made this whole approach look broken.
+    Both directions are pinned here so the choice cannot silently regress.
+    """
+
+    NY, NX = 24, 64
+    RISE = 0.95
+    TRUE = 1.2
+
+    def _image(self):
+        """Synthetic helical filament: a few Gaussians swept by the screw."""
+        radius = 4.0
+        centres = np.array(
+            [[radius * np.cos(t), radius * np.sin(t), 0.0] for t in (0.0, 2.1, 4.2)]
+        )
+        grid = (centres, np.full(len(centres), 1.2))
+        n_rep = int(self.NX / 2 / self.RISE) + 2
+        A = sga.design_matrix(grid, self.TRUE, self.RISE, 1, n_rep, self.NY, self.NX)
+        return (A @ np.array([1.0, 0.8, 0.6])).reshape(self.NY, self.NX)
+
+    def _peak(self, radius_px):
+        img = self._image()
+        grid = sga.full_field_grid(radius_px, spacing_px=2.0, sigma_px=1.2)
+        twists = np.arange(0.6, 2.01, 0.1)
+        scores = [sga.twist_score(img, grid, t, self.RISE) for t in twists]
+        return twists[int(np.argmax(scores))], max(scores)
+
+    def test_full_field_support_recovers_the_twist(self):
+        peak, _ = self._peak(self.NY / 2.0)
+        assert abs(peak - self.TRUE) <= 0.11, f"peaked at {peak}"
+
+    @pytest.mark.parametrize("radius", [2.5, 3.0])
+    def test_support_inside_the_structure_biases_the_twist_upward(self, radius):
+        """The failure mode, and it is specifically an UPWARD bias.
+
+        A basis function at radius r sweeps a transverse range proportional to
+        r as the symmetry copies rotate, so reproducing a filament of a given
+        apparent width needs either large enough radii or more twist per copy.
+        A support cut inside the structure removes the first option and the fit
+        compensates with the second. The synthetic structure here has radius 4.
+        """
+        peak, _ = self._peak(radius)
+        assert peak > self.TRUE + 0.3, f"expected an upward bias, peaked at {peak}"
+
+    def test_explained_variance_cannot_exceed_one(self):
+        img = self._image()
+        grid = sga.full_field_grid(self.NY / 2.0)
+        for t in (0.8, 1.2, 1.8):
+            assert sga.twist_score(img, grid, t, self.RISE) <= 1.0 + 1e-9
+
+
+class TestElasticnetSolver:
+    def test_l1_sparsifies_and_l2_shrinks(self):
+        """A penalty that does nothing is the signature of a scale-invariant loss."""
+        rng = np.random.default_rng(0)
+        A = rng.normal(0, 1, (12, 12))
+        M = A @ A.T + np.eye(12)
+        u = np.abs(rng.normal(0, 1, 12))
+        plain = sga.nn_elasticnet(M, u)
+        l1 = sga.nn_elasticnet(M, u, lam1=2.0)
+        l2 = sga.nn_elasticnet(M, u, lam2=5.0)
+        assert (l1 > 1e-12).sum() < (plain > 1e-12).sum()
+        assert np.linalg.norm(l2) < np.linalg.norm(plain)
+
+    def test_solution_is_non_negative(self):
+        rng = np.random.default_rng(1)
+        A = rng.normal(0, 1, (10, 10))
+        M = A @ A.T + np.eye(10)
+        assert (sga.nn_elasticnet(M, rng.normal(0, 1, 10), 0.1, 0.1) >= 0).all()
+
+    def test_design_matrix_shape(self):
+        grid = sga.full_field_grid(8.0)
+        A = sga.design_matrix(grid, 1.2, 0.95, 1, 10, 16, 32)
+        assert A.shape == (16 * 32, len(grid[0]))
