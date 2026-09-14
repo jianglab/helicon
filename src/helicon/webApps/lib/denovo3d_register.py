@@ -45,6 +45,37 @@ A genuine handedness flip is a mirror, not a rotation, and cannot be resolved
 from projections at all -- every image in one dataset shares the specimen's
 hand, so it is not something registration can or should decide.
 
+The two branches are not equally well determined, and the difference is large.
+Measured over 120 pairs of good EMPIAR-10940 classes, as the absolute change in
+correlation between a branch and its opposite:
+
+    x mirror (polarity)        mean 0.3233   median 0.3439   0% below 0.005
+    y mirror (180 about axis)  mean 0.0087   median 0.0042  57% below 0.005
+
+Polarity is decided overwhelmingly -- for the 60 pairs where the x mirror wins
+it raises the correlation from 0.60 to 0.92, at the same offset to within
+0.1 px, which is what a correct determination looks like. The y mirror is very
+nearly undecidable, and there is a reason: a 180 degree rotation about the
+filament axis is, for a helix, an axial translation of half a pitch, so it is
+not an independent relation at all. It competes with the dx search rather than
+describing something new, and its near-random vote is where all of the reported
+flip conflicts come from -- searching x only takes them from 45 to 0.
+
+Dropping the y branch was tried and is NOT correct in general, despite the
+above. The equivalent translation is half a pitch -- 144 px for twist 1.2 at
+4.944 A/pixel -- while the dx search reaches only 83 px for a 128 px image, so
+the shift that would substitute for the flip is out of range. Two images
+genuinely related by that rotation would then fail to register rather than
+registering with a different offset. The degeneracy is only near-perfect for
+windows much shorter than half a turn, which is why it looks harmless on these
+particular class averages. The end-to-end tests catch this: five of them fail
+with the branch removed, because their synthetic pattern is not helically
+symmetric and its y mirror is a genuinely different image.
+
+So the branch stays. What is worth knowing is that a y-flip reported on real
+helical data carries almost no evidence, and that the flip_conflicts diagnostic
+is dominated by it rather than by anything about polarity.
+
 The composite's twist reads high, and why is not known
 ------------------------------------------------------
 Scanned through the app pipeline, a composite of 16 good EMPIAR-10940 classes
@@ -76,11 +107,35 @@ Two explanations were tested and neither holds up:
   sub-pixel placement changes, with a spread of 8.6 px over eight jitter seeds.
   It was measuring its own instability.
 
-So the cause is open. Worth noting for whoever picks it up: 6 of those 117
-accepted pairs sit exactly at the largest offset the search can represent
-(MIN_OVERLAP caps |dx| at 83 px for a 128 px image), which is the signature of
-pairs genuinely further apart than the search can express. That is a lead, not
-a finding.
+Three further explanations were tested and also rejected, so the search space
+is mapped even though the cause is not found:
+
+* Sub-pixel placement. Registration was integer-only and the composite rounded.
+  Both are fixed now, and the twist did not move: 1.30 with sub-pixel placement,
+  with rounded placement, and under deliberate +-0.5 px jitter alike.
+
+* The offset clamp. MIN_OVERLAP caps |dx| at 83 px for a 128 px image, and 3 of
+  the accepted pairs sit exactly there. They are genuinely truncated -- freeing
+  the window moves them to about 86 px with better correlation -- but by only
+  3 px, and repairing or dropping them through auto_stitch changes nothing:
+  span 290, composite 291 px, twist 1.30 in all three cases, because the robust
+  global solve was already discarding them. Note also that widening the window
+  is actively harmful: at MIN_OVERLAP 0.15 the other 114 pairs move by a mean of
+  26 px and as much as 105, jumping to spurious matches on slivers of overlap.
+  MIN_OVERLAP is doing real work and should not be relaxed.
+
+* The flip branches. Searching x only removes every flip conflict and lengthens
+  the composite to 315 px, and the twist stays at 1.30. Variants that exclude
+  the x branch give 1.25, but they also accept a different and smaller set of
+  pairs -- 69 against 111 -- so that comparison is confounded with which pairs
+  were used, and does not show that polarity assignment is at fault. The x
+  branch itself is well behaved: chosen for exactly 60 of 120 pairs, at the same
+  offsets, with much higher correlation.
+
+So the cause is open, and the obvious candidates are used up. Anything further
+should probably start from the assembly itself -- what a composite of class
+averages that cluster in a few axial registers actually represents -- rather
+than from the registration, which these measurements keep exonerating.
 
 On mutual versus absolute alignment
 -----------------------------------
