@@ -169,6 +169,18 @@ image almost exactly -- cc rises from 0.73 to 0.91 and the centre falls to 0.013
 spoils the picture is the one that makes the twist identifiable, because without
 it the model explains any twist. The default keeps the twist.
 
+This is a property of the problem, not of the Gaussian basis, and an earlier
+version of this note implied otherwise. The voxel solver behaves the same way:
+elasticnet runs with its positivity constraint on -- the auto rule turns it on
+whenever the pitch exceeds twice the reconstruction length, which is every
+realistic case here -- and turning it off moves its joint peak from 1.20 to 1.45
+and drops its peak prominence from 1.00 to 0.65 on ten good classes. Both
+solvers need non-negativity to make the twist identifiable, and both degrade to
+about 1.4 without it. So the gauss/elasticnet difference in peak prominence,
+whatever causes it, is not that one of them may use negative density and the
+other may not; measured with both constrained, the gap is still there (0.72
+against 1.00 on the same ten images).
+
 EARLIER MEASUREMENTS ON THIS MODULE ARE VOID
 ---------------------------------------------
 Everything measured here before the support was fixed was measured with a model

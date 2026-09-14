@@ -76,66 +76,66 @@ So the branch stays. What is worth knowing is that a y-flip reported on real
 helical data carries almost no evidence, and that the flip_conflicts diagnostic
 is dominated by it rather than by anything about polarity.
 
-The composite's twist reads high, and why is not known
-------------------------------------------------------
+The machinery is verified end to end; the bias is in the data
+--------------------------------------------------------------
 Scanned through the app pipeline, a composite of 16 good EMPIAR-10940 classes
 puts its twist peak at 1.30, where the same 16 images searched jointly and
-unstitched give 1.20, the true value. The bias is reproducible and it survives
-every variant tried: sub-pixel placement, rounded placement, and deliberate
-+-0.5 px jitter all give 1.30. It is not a precision problem.
+unstitched give 1.20, the true value. The diagnostics do not catch it -- that
+run reports trustworthy, mean_corr 0.92, 111 accepted pairs and a meaningful
+closure -- because any systematic error in the placements is self-consistent
+around loops, so closure cannot see it.
 
-The diagnostics do not catch it -- that run reports trustworthy, mean_corr 0.92,
-111 accepted pairs and a meaningful closure -- which is what makes it worth a
-warning here. Any systematic error in the placements is self-consistent around
-loops, so closure cannot see it.
+The whole chain has since been checked against ground truth, which is the test
+that should have been run first. Tiles cut from a long synthetic filament of
+known twist, registered and reconciled and composited by this module, come back
+as the filament they were cut from:
 
-Two explanations were tested and neither holds up:
+    the long filament itself       900 px   cc 1.000   twist 1.20
+    composite, raw                 896 px   cc 0.999   twist 1.20
+    composite, intensity-matched   896 px   cc 0.562   twist 1.20
 
-* Alias selection. A quasi-periodic filament should give a dx profile with
-  several competing peaks, and correlation normalised over the overlapping
-  columns might favour the one with more overlap, pulling every pair inward.
-  Measured: all 117 accepted pairs on that data have a single clear peak, with
-  no rival within 0.10 correlation. The mechanism is not operating.
+and with MEASURED rather than simulated offsets the recovered placements fit the
+truth with slope +0.999 and reproduce the source at cc 0.995, with psi and dy
+exactly zero. Registration, the global solve, the sign convention between what
+register_pair reports and what composite consumes, and the assembly itself are
+therefore all correct. Whatever biases the real composite is a property of real
+class averages, not of this code.
 
-* An axial squeeze. If the placements were compressed the crossovers would sit
-  closer together, and since twist = 360*rise/pitch a short pitch reads as a
-  large twist -- the right direction. Measuring the composite's apparent
-  half-pitch from the oscillation of its projected width seemed to confirm it
-  (136.5 px against the 144.1 expected). That number should not be used: the
-  estimator is accurate on synthetic filaments at every length tested, but on
-  the real composite it is bimodal, returning either ~137 or ~146 depending on
-  sub-pixel placement changes, with a spread of 8.6 px over eight jitter seeds.
-  It was measuring its own instability.
+That matters for where to look next. A synthetic tile is a window onto one
+filament; a class average is an average over many filaments and many positions,
+grouped by appearance and centred on an origin the classification chose. Those
+are different objects, and only the first is what compositing assumes.
 
-Three further explanations were tested and also rejected, so the search space
-is mapped even though the cause is not found:
+Individually eliminated along the way, each by measurement, so none needs
+re-running:
 
-* Sub-pixel placement. Registration was integer-only and the composite rounded.
-  Both are fixed now, and the twist did not move: 1.30 with sub-pixel placement,
-  with rounded placement, and under deliberate +-0.5 px jitter alike.
+* Sub-pixel placement. Registration was integer-only and the composite rounded;
+  both are fixed, and the twist did not move -- 1.30 with sub-pixel placement,
+  with rounded placement, and under +-0.5 px jitter alike.
 
-* The offset clamp. MIN_OVERLAP caps |dx| at 83 px for a 128 px image, and 3 of
-  the accepted pairs sit exactly there. They are genuinely truncated -- freeing
-  the window moves them to about 86 px with better correlation -- but by only
-  3 px, and repairing or dropping them through auto_stitch changes nothing:
-  span 290, composite 291 px, twist 1.30 in all three cases, because the robust
-  global solve was already discarding them. Note also that widening the window
-  is actively harmful: at MIN_OVERLAP 0.15 the other 114 pairs move by a mean of
+* The offset clamp. MIN_OVERLAP caps |dx| at 83 px for a 128 px image and three
+  accepted pairs sit exactly there, genuinely truncated -- freeing the window
+  moves them to about 86 px with better correlation. But repairing or dropping
+  them through auto_stitch changes span, width and twist not at all, because the
+  robust global solve was already discarding them. Widening the window is
+  actively harmful: at MIN_OVERLAP 0.15 the other 114 pairs move by a mean of
   26 px and as much as 105, jumping to spurious matches on slivers of overlap.
-  MIN_OVERLAP is doing real work and should not be relaxed.
 
-* The flip branches. Searching x only removes every flip conflict and lengthens
-  the composite to 315 px, and the twist stays at 1.30. Variants that exclude
-  the x branch give 1.25, but they also accept a different and smaller set of
-  pairs -- 69 against 111 -- so that comparison is confounded with which pairs
-  were used, and does not show that polarity assignment is at fault. The x
-  branch itself is well behaved: chosen for exactly 60 of 120 pairs, at the same
-  offsets, with much higher correlation.
+* Alias selection. All 117 accepted pairs have a single clear dx peak with no
+  rival within 0.10 correlation, so there is nothing for the correlation to be
+  confused by.
 
-So the cause is open, and the obvious candidates are used up. Anything further
-should probably start from the assembly itself -- what a composite of class
-averages that cluster in a few axial registers actually represents -- rather
-than from the registration, which these measurements keep exonerating.
+* The flip branches. Searching x only removes every conflict and lengthens the
+  composite to 315 px, and the twist stays at 1.30. Variants excluding the x
+  branch give 1.25 but accept a different and smaller set of pairs (69 against
+  111), so that comparison is confounded.
+
+* Intensity matching. The returned composite is zero-meaned and about 87% of its
+  pixels are negative, which a non-negative model cannot represent at all. It
+  costs peak prominence -- 4.16 to 3.47 on the synthetic -- and changes the
+  answer nowhere: 1.20 on the synthetic and 1.30 on the real data either way.
+  The tab re-thresholds the stitched image before any solver sees it in any
+  case, so the negatives never reach one by that route.
 
 On mutual versus absolute alignment
 -----------------------------------
