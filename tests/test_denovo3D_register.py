@@ -71,7 +71,12 @@ def _windows(offsets, width=200, psi_amp=0.4, dy_amp=0.7, noise=0.02, seed=3):
 
 @pytest.mark.parametrize("true_dx", [0, 7, -13, 40, -55])
 def test_dx_profile_matches_brute_force(true_dx):
-    """The FFT search must be exact, not approximate."""
+    """The FFT search must be exact, not approximate.
+
+    ``_dx_profile`` returns a sub-pixel estimate, so the comparison is against
+    the integer sample it refines from; the refinement itself is pinned by
+    test_dx_profile_recovers_a_subpixel_offset.
+    """
     a = _long_filament(nx=300)[:, 40:200]
     b = _long_filament(nx=300)[:, 40 - true_dx : 200 - true_dx]
     dx, corr, _prom = R._dx_profile(a, b)
@@ -88,8 +93,60 @@ def test_dx_profile_matches_brute_force(true_dx):
         c = float((pa * pb).sum() / np.sqrt((pa**2).sum() * (pb**2).sum()))
         if c > best[0]:
             best = (c, k)
-    assert dx == best[1]
+    assert round(dx) == best[1]
+    assert abs(dx - best[1]) <= 0.5
     assert corr == pytest.approx(best[0], abs=1e-6)
+
+
+def test_dx_profile_sign_convention():
+    """Pin the sign, which nothing else did.
+
+    ``_dx_profile(a, b)`` returns the offset to apply to ``b`` to bring it onto
+    ``a``. Slicing ``b`` from ``shift`` pixels earlier in the same long image
+    therefore gives ``-shift``. The brute-force test compares only against its
+    own search, so it would pass with the sign inverted.
+    """
+    long_img = _long_filament(nx=400)
+    a = long_img[:, 60:260]
+    for shift in (11, -17, 33):
+        b = long_img[:, 60 - shift : 260 - shift]
+        dx, corr, _prom = R._dx_profile(a, b)
+        assert corr > 0.9
+        assert dx == pytest.approx(-shift, abs=0.5), f"shift {shift} gave {dx}"
+
+
+@pytest.mark.parametrize("frac", [0.25, 0.5, -0.3, 0.75])
+def test_dx_profile_recovers_a_subpixel_offset(frac):
+    """Axial offsets are not whole numbers of pixels, and rounding them is lossy.
+
+    At the tab's sampling one pixel is about one helical rise, so quantising the
+    pairwise offset discards the very scale the composite exists to preserve.
+    The correlation profile is smooth in the offset, so a parabola through the
+    three samples around the maximum recovers the remainder.
+    """
+    import helicon
+
+    long_img = _long_filament(nx=400)
+    a = long_img[:, 60:260]
+    shifted = helicon.transform_image(
+        image=np.ascontiguousarray(long_img),
+        rotation=0.0,
+        post_translation=(0.0, float(frac)),
+    )
+    b = shifted[:, 40:240]
+    dx, corr, _prom = R._dx_profile(a, b)
+    assert corr > 0.9
+    assert dx == pytest.approx(-(20 + frac), abs=0.15), f"got {dx}"
+
+
+def test_dx_profile_subpixel_is_a_refinement_not_a_jump():
+    """The estimate never leaves the sampling interval around the argmax."""
+    long_img = _long_filament(nx=400)
+    a = long_img[:, 60:260]
+    for shift in (0, 11, -17, 33):
+        b = long_img[:, 60 - shift : 260 - shift]
+        dx, _c, _p = R._dx_profile(a, b)
+        assert abs(dx - round(dx)) <= 0.5
 
 
 def test_dx_profile_accepts_unequal_widths():

@@ -104,13 +104,21 @@ def _flip(img, fx=False, fy=False):
     return np.ascontiguousarray(out)
 
 
-def _apply(img, psi=0.0, dy=0.0):
+def _apply(img, psi=0.0, dy=0.0, dx=0.0):
+    """Rotate by ``psi``, then shift by ``dy`` across and ``dx`` along the axis.
+
+    All three go into one ``transform_image`` call so the image is interpolated
+    once however many of them are non-zero. ``dx`` is the sub-pixel remainder of
+    an axial offset; the whole-pixel part is a slice and needs no interpolation.
+    """
     import helicon
 
     out = np.asarray(img, dtype=np.float32)
-    if psi or dy:
+    if psi or dy or dx:
         out = helicon.transform_image(
-            image=out, rotation=float(psi), post_translation=(float(dy), 0)
+            image=out,
+            rotation=float(psi),
+            post_translation=(float(dy), float(dx)),
         )
     return out
 
@@ -183,6 +191,22 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
     corr[cols < min_cols] = -2.0
     best = int(np.argmax(corr))
     valid = corr[corr > -2.0]
+    # Sub-pixel peak by fitting a parabola to the three samples around the
+    # maximum. The correlation profile is a smooth function of offset sampled on
+    # whole columns, so the integer argmax is quantised at one pixel -- about one
+    # helical rise at typical sampling, which is coarse next to the structure the
+    # composite is meant to preserve. The vertex is clamped to the sampling
+    # interval, since a parabola through a genuine maximum cannot place it
+    # further away, and a wider excursion means the three points were not a peak.
+    sub = float(k[best])
+    if 0 < best < len(corr) - 1:
+        cl, cc, cr = corr[best - 1], corr[best], corr[best + 1]
+        if cl > -2.0 and cr > -2.0:
+            denom = cl - 2.0 * cc + cr
+            if denom < -1e-12:  # strictly concave, i.e. a real maximum
+                delta = 0.5 * (cl - cr) / denom
+                if abs(delta) <= 0.5:
+                    sub = float(k[best]) + float(delta)
     # Peak prominence. A pair with little or no real overlap still produces a
     # best-scoring offset, and its correlation there can look respectable; what
     # gives it away is that the whole profile is equally good, i.e. no distinct
@@ -192,7 +216,7 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
         prom = float((corr[best] - valid.mean()) / valid.std())
     else:
         prom = 0.0
-    return int(k[best]), float(corr[best]), prom
+    return sub, float(corr[best]), prom
 
 
 def register_pair(
@@ -225,12 +249,12 @@ def register_pair(
     )
 
     def scan(src, psi0, dy0, half_psi, half_dy, step):
-        best = (-2.0, psi0, dy0, 0, 0.0)
+        best = (-2.0, psi0, dy0, 0.0, 0.0)
         for psi in np.arange(psi0 - half_psi, psi0 + half_psi + step / 2, step):
             for dy in np.arange(dy0 - half_dy, dy0 + half_dy + step / 2, step):
                 dx, c, prom = _dx_profile(a, _apply(src, psi, dy), min_overlap)
                 if c > best[0]:
-                    best = (c, float(psi), float(dy), int(dx), prom)
+                    best = (c, float(psi), float(dy), float(dx), prom)
         return best
 
     overall = None
@@ -621,10 +645,17 @@ def composite(images, transforms, feather=8, match_intensity=True):
     acc = np.zeros((ny, total), dtype=np.float64)
     wsum = np.zeros((ny, total), dtype=np.float64)
     for im, t in used:
+        # Split the axial offset: the whole-pixel part decides which columns of
+        # the canvas the image lands on, and the remainder is folded into the
+        # same interpolation that applies psi and dy. A fractional offset then
+        # costs no extra resampling and is not thrown away by rounding.
+        shift = float(t["dx"]) - x0
+        cell = int(np.floor(shift))
         work = _apply(
             _flip(im, t.get("flip_x", False), t.get("flip_y", False)),
             t["psi"],
             t["dy"],
+            shift - cell,
         ).astype(np.float64)
         if match_intensity:
             work = _normalize_intensity(work)
@@ -636,7 +667,7 @@ def composite(images, transforms, feather=8, match_intensity=True):
         weight = np.broadcast_to(ramp, (h, w)).copy()
 
         top = (ny - h) // 2
-        left = int(round(t["dx"] - x0))
+        left = cell
         acc[top : top + h, left : left + w] += work * weight
         wsum[top : top + h, left : left + w] += weight
 
