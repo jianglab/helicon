@@ -580,9 +580,13 @@ def denovo3d_tab_ui():
                             " basis of Gaussians rather than voxels; a Gaussian projects"
                             " to a Gaussian exactly, so its projections are built"
                             " analytically instead of by resampling a volume, which"
-                            " makes it several times faster per twist/rise at comparable"
-                            " accuracy. It is convex, so the answer does not depend on a"
-                            " starting guess."
+                            " makes it roughly ten times faster per twist/rise. It is"
+                            " convex, so the answer does not depend on a starting guess."
+                            " On the 32 good EMPIAR-10940 classes both solvers put the"
+                            " joint peak on the true twist, but elasticnet's peak stands"
+                            " out more clearly and is the more reliable of the two on a"
+                            " single class average, so prefer gauss when the scan is"
+                            " large and elasticnet when you have few images."
                         ),
                     ),
                     ui.tooltip(

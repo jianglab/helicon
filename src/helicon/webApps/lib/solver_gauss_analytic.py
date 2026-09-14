@@ -37,46 +37,73 @@ reproduces it exactly -- supports of 2.5 and 3.0 px peak at 2.0 against a true
 
 MEASURED PERFORMANCE
 --------------------
-All 32 good EMPIAR-10940 class averages (true twist 1.2), scanned through the
-app pipeline as a user would, against elasticnet on the same images. "Peak
-prominence" is how far the joint peak stands above the run of the curve in units
-of its own spread; "margin" is how far it stands above the best competitor more
-than 0.15 deg away, as a fraction of the curve's range:
+All 32 good EMPIAR-10940 class averages (true twist 1.2), prepared exactly as
+the tab prepares them and scanned through the app pipeline. Measured over
+0.8-1.8 deg in 0.05 steps, which resolves the peak; "prominence" is how far the
+joint peak stands above the run of the curve in units of its own spread, and
+"margin" how far above the best competitor more than 0.15 deg away, as a
+fraction of the curve's range:
 
-    method        joint peak   prominence   margin   per-image   ms/image-twist
-    gauss               1.20         0.92    0.095       23/32               76
-    elasticnet          1.20         0.88    0.024       13/32              739
+    method              joint peak   prominence   margin   per-image   ms
+    gauss, old default        1.15         0.60    0.055       11/32   ~70
+    gauss, current            1.20         0.62    0.065       19/32   111
+    elasticnet                1.20         1.14    0.130       23/32  1024
 
-So the peak is marginally sharper than the reference's, stands four times
-clearer of its nearest rival, and picks the right twist from a single class
-average about twice as often, at a tenth of the cost.
+On the tab's own defaults instead -- 0.1 to 2.0 deg in 0.1 steps -- both solvers
+put the joint peak on 1.2, with prominence 0.84 for gauss against 1.24 for
+elasticnet. The coarser grid also drops the per-image rate to 11/32 and 21/32,
+because images whose own peak sits at 1.15 or 1.25 have nowhere to land.
 
-THE SEARCH CURVE WAS FLAT FOR TWO REASONS, AND THEY ARE ONE FIX
-----------------------------------------------------------------
-It used to score 0.81 prominence against elasticnet's 0.88, which a user sees as
-a peak that will not stand out from the curve.
+Read that honestly. The current defaults fix the joint ANSWER, which the old
+ones got wrong by a grid step, and nearly double the number of single class
+averages that land on the truth. They do NOT make the peak stand out better
+than elasticnet's: elasticnet's peak is about twice as prominent and its margin
+twice as large, and it is the better solver on a single image.
 
-First, the basis was too wide ACROSS the filament. Transverse width is exactly
-what lets the fit smear a wrong twist into a plausible image, so a broad basis
-scores well at every twist and the curve flattens.
+What gauss is for is the search: it reaches the same joint answer about eight
+times faster. Use it to scan, and elasticnet to reconstruct.
 
-Second, the score was a raw cosine. The model is non-negative by construction
-and the image is thresholded, so both vectors sit in the positive orthant and
-their cosine cannot fall much below a floor around 0.72; the twist modulated the
-result by about two parts in a thousand on top of it. :func:`correlation_score`
-centres both vectors, which is the ordinary normalised cross-correlation used
-for image matching.
+An attempt was made to beat elasticnet's prominence and it failed. Sigma across
+the filament (2.5 to 7 A), sigma along it (off, 12.5 A), L1 (0.01 to 0.3) and
+the score metric were swept together on the correct images; nothing reached
+elasticnet's 1.13, and the best gauss configuration is the one above. Do not
+assume the gap is a tuning problem.
 
-These must not be separated. Centring the score on the OLD wide basis moves the
-joint peak from 1.20 to 1.30 -- worse than either change alone.
+A PREVIOUS VERSION OF THIS SECTION WAS WRONG, AND THE REASON MATTERS
+---------------------------------------------------------------------
+It claimed gauss scored 0.92 against elasticnet's 0.88 -- sharper than the
+reference, four times the margin, twice the per-image rate. Every one of those
+numbers came from a harness that prepared the images itself rather than the way
+the tab does, and drifted from it by about 3% in score. Per-image twist margins
+are 1e-3 to 1e-4, so a 3% shift is not a detail: it reversed the conclusion.
 
-Things that sounded right and did not work, so they are not worth retrying:
-subtracting the axially-uniform part of the image before scoring (the twist-free
-component) leaves the peak width unchanged and pushes it to 1.30; dropping the
-near-axis basis functions, which are the most twist-blind, costs the answer
-outright at a 30% inner cut; and a finer grid spacing makes things worse rather
-than better, because the fit is already sparse -- about 25 of 197 functions
-carry it.
+A harness is not the app until its numbers match the app's. Verify numerically
+-- run one class average through the tab, read the score curve out of the
+rendered plot, and require agreement to about four decimals -- before believing
+anything a standalone harness says. The three things a reimplementation gets
+wrong here are the Otsu threshold being a median over the SELECTED images, the
+rotation and shift being applied in ONE transform_image call rather than two,
+and both reaching the solver rounded to two decimals by the numeric widgets.
+
+WHY THE CURVE IS SHAPED THE WAY IT IS
+--------------------------------------
+Two properties of the fit drive the search curve, and both are needed for the
+joint answer to come out right.
+
+The basis is narrow ACROSS the filament. Transverse width is what lets the fit
+smear a wrong twist into a plausible image, so a broad basis scores well at
+every twist. Widening sigma back to the old 5 A costs the joint answer (1.15,
+11/32 correct) even with everything else kept.
+
+The score is a Pearson correlation, not a raw cosine. The model is non-negative
+by construction and the image is thresholded, so both vectors sit in the
+positive orthant and their cosine cannot fall much below a floor near 0.72,
+with the twist modulating the result on top of it. :func:`correlation_score`
+centres both vectors. With raw cosine the current basis gives 1.15 and 8/32;
+with centring, 1.20 and 19/32.
+
+Neither alone is enough: centring the score on the old wide basis gives 1.25,
+worse than the old default it would replace.
 
 THE RECONSTRUCTION IS BASIS-LIMITED, AND IT IS NOT DRAWN WITH THE FIT'S BASIS
 -----------------------------------------------------------------------------
@@ -91,17 +118,18 @@ halves the fraction of voxels carrying density (0.172 to 0.083) and looks spiky.
 An earlier version of this note said flatly "do not lower sigma", on the
 strength of a run where sigma 4 A improved per-image counts while the joint peak
 moved to 1.1 and the reconstruction grew about twice the crossovers the geometry
-allows. That was a fair reading of the evidence then and is wrong as general
-advice: with the score centred, the axial width held at 12.5 A, and the map
-rendered from its own wider basis, sigma 2.5 A improves the joint peak, the
-per-image rate, AND the map -- mean FSC against the elasticnet volume rises on
-every class tried (0.572 to 0.610, 0.580 to 0.600, 0.592 to 0.624, 0.525 to
-0.578). What made the old result bad was narrowing the basis in all three
-directions at once while scoring with a floor-bound cosine.
+allows. That was a fair reading of the evidence then and is too strong as
+general advice: with the score centred, the axial width held at 12.5 A, and the
+map rendered from its own wider basis, sigma 3.5 A improves the joint peak, the
+per-image rate, and the map together -- mean FSC against the elasticnet volume
+over four classes goes from 0.528 to 0.540. What made the old result bad was
+narrowing the basis in all three directions at once while scoring with a
+floor-bound cosine.
 
 The standing lesson from that episode is unchanged and is the important part:
 judge this solver on the joint answer and the reconstruction together, never on
-per-image counts alone.
+per-image counts alone -- and measure both on images prepared the way the tab
+prepares them.
 
 SHORT FILAMENTS ARE A KNOWN LIMIT
 ----------------------------------
@@ -127,7 +155,7 @@ which crosses the axis only at isolated z -- the real crossovers. What fills the
 lane is the function's TRANSVERSE WIDTH smearing each crossing. An earlier
 version of this note claimed the crossings fill the axis regardless of the
 basis, which is wrong: narrowing sigma across the filament measurably improves
-it, which is why the basis is anisotropic (sigma 2.5 A across, 12.5 A along).
+it, which is why the basis is anisotropic (sigma 3.5 A across, 12.5 A along).
 
 That only goes so far. Narrower still keeps improving the gap (sigma 3 A reaches
 0.55) but once 2*sigma is below the grid spacing the basis stops overlapping and
@@ -549,44 +577,36 @@ def twist_score(image, grid, twist_deg, rise_px, csym=1, lam1=1e-2, lam2=1e-2):
 # was wrong: the joint peak is what the tab reports, and it moved away from the
 # truth. Per-image counts are not a sufficient criterion on their own.
 DEFAULT_SPACING_ANGSTROM = 10.0
-# A quarter of the spacing, not half. The basis is a sampling basis for the
-# search, not a density model, and narrow samples make the twist peak stand out:
-# a broad Gaussian overlaps its neighbours enough that the fit can approximate
-# the image at a wrong twist, which raises the score everywhere and flattens the
-# curve. Measured over the 32 good classes, scanning 0.1-2.0 deg, against the
-# elasticnet curve on the same images:
+# Narrower than half the spacing, which is what it used to be. The basis is a
+# sampling basis for the search, not a density model, and narrow samples keep
+# the fit from reproducing the image at a wrong twist. Measured over the 32 good
+# classes, prepared as the tab prepares them:
 #
-#                              peak prominence   peak margin   per-image correct
-#     sigma 5.0 A, L1 1e-2           0.81           0.061            11/32
-#     sigma 2.5 A, L1 0.2            0.98           0.109            27/32
-#     elasticnet                     0.88           0.024            13/32
+#                                joint peak   prominence   per-image
+#     sigma 5.0 A, raw cosine          1.15         0.60       11/32
+#     sigma 3.5 A, centred score       1.20         0.62       19/32
+#     elasticnet                       1.20         1.13       23/32
 #
-# 2.5 A is also the floor at the tab's 5 A target pixel size, since sigma is
-# clamped to half a pixel -- below that a Gaussian sampled on the integer pixel
-# grid is one pixel plus aliasing.
-DEFAULT_SIGMA_ANGSTROM = 2.5  # across the filament, for the fit
+# The gain is in the joint answer and the per-image rate, not in prominence --
+# see the module docstring, which records the failed attempt to close that gap.
+DEFAULT_SIGMA_ANGSTROM = 3.5  # across the filament, for the fit
 # Along the axis the basis must stay WIDE, and for a different reason. Screw
 # copies sit one rise apart -- 4.75 A here -- so a basis narrow in z leaves them
-# as a comb instead of continuous density, and on a short filament that costs
-# the answer outright. With sigma 2.5 A in all three directions, a synthetic
-# structure of known twist recovers 1.0 instead of 1.2 at the app's image size;
-# holding sigma_z at 12.5 A recovers 1.2 at every image length and truth width
-# tested. Narrow across sharpens the peak, wide along keeps it honest, and they
-# do not trade against each other because the projection is separable in (y, z).
+# as a comb instead of continuous density. That shows up on synthetic structures
+# of known twist rather than on the class averages: dropping sigma_z to match
+# sigma scores BETTER on the real images (prominence 0.83, 22/32) and gets the
+# synthetic answer wrong in 3 of 9 cases. The synthetic test wins, because it
+# has ground truth and the class averages only have a consensus.
 DEFAULT_SIGMA_Z_ANGSTROM = 12.5  # along it
-# Rendering wants the opposite of what the search wants. The search basis is
-# deliberately narrow, which leaves the map spiky -- the fraction of voxels
-# above a tenth of the maximum halves, 0.172 to 0.083 -- so the volume is drawn
-# with a wider Gaussian that reads as density. Measured against the elasticnet
-# volume, this keeps the map slightly BETTER than the old broad basis gave:
-# mean FSC 0.610/0.600/0.624/0.578 against 0.572/0.580/0.592/0.525 on four
-# classes.
+# Rendering wants the opposite of what the search wants, so the map is drawn
+# with a wider Gaussian than the fit uses; rendering the search basis directly
+# gives a spiky volume. Mean FSC against the elasticnet volume over four
+# classes: 0.528 with the old wide basis, 0.540 now, so the map is slightly
+# better rather than sacrificed.
 DEFAULT_RENDER_SIGMA_ANGSTROM = 5.0
 # Sparse enough to stop the fit explaining a wrong twist, loose enough to keep
-# the answer. This is a knee, not a knife edge: every value from 0.1 to 0.5
-# beats the old 1e-2 on all three measures above, with prominence still rising
-# at 0.4 and the margin already falling. 0.3 is where the joint peak sits on the
-# truth rather than one grid step above it.
+# the answer. Swept from 0.01 to 0.3 on correctly prepared images; 0.3 is where
+# the joint peak sits on the truth rather than a grid step above it.
 DEFAULT_L1 = 0.3
 DEFAULT_L2 = 1e-2
 
@@ -621,9 +641,9 @@ def correlation_score(pred, target):
     standard normalised cross-correlation used for image matching.
 
     It is only safe together with the narrow basis. On the old sigma 5 A basis,
-    centring moves the joint peak from 1.20 to 1.30 on the 32 good classes; with
-    sigma 2.5 A it stays at 1.20 and the peak's prominence rises from 0.90 to
-    0.98. The two changes are one change.
+    centring moves the joint peak to 1.25 on the 32 good classes -- still wrong;
+    with sigma 3.5 A it lands on 1.20, and the per-image rate goes from 8/32 to
+    19/32. The two changes are one change.
 
     Because the score is centred, it is a ranking statistic for this solver and
     is not numerically comparable with the cosine the lsq family reports.

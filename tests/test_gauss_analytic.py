@@ -551,16 +551,17 @@ class TestDefaultBasisIsNotTooFine:
     Those two directions are governed by different requirements and used to be
     conflated, because the basis was isotropic.
 
-    ACROSS, narrow is what sharpens the twist peak. Transverse width is what
-    lets the fit smear a wrong twist into a plausible image, so a broad basis
-    scores well everywhere and the search curve goes flat. Measured on the 32
-    good classes: peak prominence 0.81 at sigma 5 A against 0.89 at 2.5 A, where
-    elasticnet on the same images scores 0.88.
+    ACROSS, narrow is what keeps the joint answer. Transverse width lets the fit
+    smear a wrong twist into a plausible image, so a broad basis scores well
+    everywhere. Measured on the 32 good classes prepared as the tab prepares
+    them, the old sigma 5 A basis puts the joint peak at 1.15 with 11/32 single
+    images correct; sigma 3.5 A puts it on 1.20 with 19/32.
 
-    ALONG, wide is what keeps the answer. Screw copies sit one rise apart, so a
-    basis narrow in z leaves them as a comb rather than continuous density; with
-    sigma_z pulled down to 2.5 A a synthetic structure of known twist recovers
-    1.0 instead of 1.2 at the app's image size.
+    ALONG, wide is what keeps the answer honest. Screw copies sit one rise
+    apart, so a basis narrow in z leaves them as a comb rather than continuous
+    density. Pulling sigma_z down to match sigma scores BETTER on the class
+    averages and gets a synthetic structure of known twist wrong in 3 of 9
+    cases, so the synthetic test decides it.
 
     Shipping sigma 4 A isotropic once moved the joint peak off the truth while
     improving per-image counts, which is why the per-image count is never
@@ -578,8 +579,12 @@ class TestDefaultBasisIsNotTooFine:
         assert sga.DEFAULT_SIGMA_Z_ANGSTROM >= self.TYPICAL_RISE_ANGSTROM
 
     def test_transverse_sigma_is_narrow_enough_to_sharpen_the_peak(self):
-        """Across the filament the basis samples rather than describes."""
-        assert sga.DEFAULT_SIGMA_ANGSTROM <= sga.DEFAULT_SPACING_ANGSTROM / 3.0
+        """Across the filament the basis samples rather than describes.
+
+        The bound is half the spacing because that is what the default used to
+        be, and widening back to it measurably flattens the peak.
+        """
+        assert sga.DEFAULT_SIGMA_ANGSTROM < sga.DEFAULT_SPACING_ANGSTROM / 2.0
 
     def test_basis_is_anisotropic(self):
         assert sga.DEFAULT_SIGMA_Z_ANGSTROM > sga.DEFAULT_SIGMA_ANGSTROM
