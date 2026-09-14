@@ -45,6 +45,43 @@ A genuine handedness flip is a mirror, not a rotation, and cannot be resolved
 from projections at all -- every image in one dataset shares the specimen's
 hand, so it is not something registration can or should decide.
 
+The composite's twist reads high, and why is not known
+------------------------------------------------------
+Scanned through the app pipeline, a composite of 16 good EMPIAR-10940 classes
+puts its twist peak at 1.30, where the same 16 images searched jointly and
+unstitched give 1.20, the true value. The bias is reproducible and it survives
+every variant tried: sub-pixel placement, rounded placement, and deliberate
++-0.5 px jitter all give 1.30. It is not a precision problem.
+
+The diagnostics do not catch it -- that run reports trustworthy, mean_corr 0.92,
+111 accepted pairs and a meaningful closure -- which is what makes it worth a
+warning here. Any systematic error in the placements is self-consistent around
+loops, so closure cannot see it.
+
+Two explanations were tested and neither holds up:
+
+* Alias selection. A quasi-periodic filament should give a dx profile with
+  several competing peaks, and correlation normalised over the overlapping
+  columns might favour the one with more overlap, pulling every pair inward.
+  Measured: all 117 accepted pairs on that data have a single clear peak, with
+  no rival within 0.10 correlation. The mechanism is not operating.
+
+* An axial squeeze. If the placements were compressed the crossovers would sit
+  closer together, and since twist = 360*rise/pitch a short pitch reads as a
+  large twist -- the right direction. Measuring the composite's apparent
+  half-pitch from the oscillation of its projected width seemed to confirm it
+  (136.5 px against the 144.1 expected). That number should not be used: the
+  estimator is accurate on synthetic filaments at every length tested, but on
+  the real composite it is bimodal, returning either ~137 or ~146 depending on
+  sub-pixel placement changes, with a spread of 8.6 px over eight jitter seeds.
+  It was measuring its own instability.
+
+So the cause is open. Worth noting for whoever picks it up: 6 of those 117
+accepted pairs sit exactly at the largest offset the search can represent
+(MIN_OVERLAP caps |dx| at 83 px for a 128 px image), which is the signature of
+pairs genuinely further apart than the search can express. That is a lead, not
+a finding.
+
 On mutual versus absolute alignment
 -----------------------------------
 Aligning images to a common reference makes them mutually consistent while
