@@ -35,14 +35,25 @@ def _wait_for(predicate, timeout=10.0, interval=0.1) -> bool:
 @pytest.fixture(autouse=True)
 def _reset_prune_throttle():
     """Each test gets a clean throttle table, and a short sweep interval."""
-    originals = (cache_mod._PRUNE_INTERVAL, cache_mod._PRUNE_INTERVAL_CAPPED)
+    originals = (
+        cache_mod._PRUNE_INTERVAL,
+        cache_mod._PRUNE_INTERVAL_CAPPED,
+        cache_mod._PRUNE_INTERVAL_FILLING,
+    )
     cache_mod._PRUNE_INTERVAL = datetime.timedelta(seconds=0)
     cache_mod._PRUNE_INTERVAL_CAPPED = datetime.timedelta(seconds=0)
+    cache_mod._PRUNE_INTERVAL_FILLING = datetime.timedelta(seconds=0)
     cache_mod._prune_next.clear()
+    cache_mod._prune_interval.clear()
     cache_mod._dir_bytes_limit.clear()
     yield
-    cache_mod._PRUNE_INTERVAL, cache_mod._PRUNE_INTERVAL_CAPPED = originals
+    (
+        cache_mod._PRUNE_INTERVAL,
+        cache_mod._PRUNE_INTERVAL_CAPPED,
+        cache_mod._PRUNE_INTERVAL_FILLING,
+    ) = originals
     cache_mod._prune_next.clear()
+    cache_mod._prune_interval.clear()
     cache_mod._dir_bytes_limit.clear()
 
 
@@ -130,6 +141,7 @@ class TestPruning:
 
         time.sleep(1.5)  # every entry is now expired
         cache_mod._prune_next.clear()
+        cache_mod._prune_interval.clear()
         f(0)  # any call triggers the sweep
 
         # Only the key just refreshed should survive.
@@ -243,8 +255,100 @@ class TestSizeCap:
         assert _wait_for(lambda: _dir_size_mb(tmp_path) <= 2.5)
 
     def test_capped_dirs_sweep_more_often(self):
-        """A cap can be blown through in hours; a week-long TTL cannot."""
+        """A cap can be blown through in minutes; a week-long TTL cannot."""
         assert DEFAULT_PRUNE_INTERVAL_CAPPED < DEFAULT_PRUNE_INTERVAL
+
+    def test_the_baseline_interval_is_short_next_to_the_write_rate(self):
+        """What a capped directory can reach is the interval times the rate.
+
+        A denovo3D twist search writes about 50 MB per reconstruction and takes
+        a few seconds over each, so the interval has to be short enough that a
+        burst of them cannot pass unswept. At one hour -- the value this
+        started at -- twelve such processes took the directory from 3 GB to
+        40 GB against a 5 GB cap between two sweeps, and took the disk to 99%
+        full. Overshoot is bounded, not eliminated: this is the bound.
+        """
+        writes_per_interval = (
+            DEFAULT_PRUNE_INTERVAL_CAPPED.total_seconds() / 4.0  # ~4 s each
+        )
+        assert (
+            writes_per_interval * 50e6 < 1e9
+        ), "a capped directory can gain more than a gigabyte between sweeps"
+
+    def test_filling_is_swept_sooner_than_baseline(self):
+        assert (
+            cache_mod._PRUNE_INTERVAL_FILLING.total_seconds()
+            < DEFAULT_PRUNE_INTERVAL_CAPPED.total_seconds()
+        )
+        assert 0 < cache_mod._PRUNE_FILL_FRACTION < 1
+
+
+class TestSweepAnswersToSize:
+    """The interval a sweep asks for next depends on how full it left things.
+
+    Enforcing a size cap on a fixed clock cannot bound a directory: the bound
+    is the write rate times the interval, and neither of those is the cap. So a
+    directory found near its cap must be looked at again sooner.
+    """
+
+    def _make(self, tmp_path):
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return b"x" * 200_000  # 200 KB
+
+        return f
+
+    def _recorded_interval(self, tmp_path):
+        return cache_mod._stamp_interval(Path(tmp_path) / cache_mod._PRUNE_STAMP, -1.0)
+
+    def test_a_directory_left_near_its_cap_asks_to_be_swept_sooner(self, tmp_path):
+        # A baseline short enough that sweeps actually run during the writes,
+        # and a filling interval far from it so the two cannot be confused.
+        cache_mod._PRUNE_INTERVAL_CAPPED = datetime.timedelta(seconds=0.05)
+        cache_mod._PRUNE_INTERVAL_FILLING = datetime.timedelta(seconds=7)
+        f = self._make(tmp_path)
+        helicon.set_cache_dir_limit(tmp_path, "2M")
+        for i in range(40):  # 8 MB written against a 2 MB cap
+            f(i)
+            time.sleep(0.02)
+        assert _wait_for(lambda: self._recorded_interval(tmp_path) == 7.0), (
+            f"at {_dir_size_mb(tmp_path):.2f} MB of a 2 MB cap the sweep still "
+            f"asked to wait {self._recorded_interval(tmp_path)}s"
+        )
+        assert cache_mod._prune_interval[str(tmp_path)] == 7.0
+
+    def test_an_empty_directory_keeps_the_baseline_interval(self, tmp_path):
+        cache_mod._PRUNE_INTERVAL_CAPPED = datetime.timedelta(seconds=600)
+        cache_mod._PRUNE_INTERVAL_FILLING = datetime.timedelta(seconds=7)
+        f = self._make(tmp_path)
+        helicon.set_cache_dir_limit(tmp_path, "100M")
+        f(0)  # 200 KB against a 100 MB cap
+        assert _wait_for(lambda: self._recorded_interval(tmp_path) == 600.0)
+
+    def test_a_process_that_never_swept_honours_the_stamp(self, tmp_path):
+        """A fresh worker in a pool must not fall back to the long interval."""
+        stamp = Path(tmp_path) / cache_mod._PRUNE_STAMP
+        stamp.write_text("7.0")
+        assert cache_mod._stamp_interval(stamp, 600.0) == 7.0
+
+    def test_an_unreadable_stamp_falls_back(self, tmp_path):
+        stamp = Path(tmp_path) / cache_mod._PRUNE_STAMP
+        stamp.write_text("")  # the empty stamp older versions wrote
+        assert cache_mod._stamp_interval(stamp, 600.0) == 600.0
+        stamp.write_text("not a number")
+        assert cache_mod._stamp_interval(stamp, 600.0) == 600.0
+        assert cache_mod._stamp_interval(Path(tmp_path) / "absent", 600.0) == 600.0
+
+    def test_changing_the_cap_forgets_the_learned_interval(self, tmp_path):
+        cache_mod._prune_interval[str(tmp_path)] = 7.0
+        helicon.set_cache_dir_limit(tmp_path, "9M")
+        assert str(tmp_path) not in cache_mod._prune_interval
+
+    def test_dir_size_counts_nested_files(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        (tmp_path / "a" / "one").write_bytes(b"x" * 1000)
+        (tmp_path / "two").write_bytes(b"y" * 500)
+        assert cache_mod._dir_size(tmp_path) == 1500
 
 
 class TestDenovo3DCap:
@@ -336,3 +440,100 @@ class TestClearScope:
         )
         f.clear_cache()
         f.clear_cache_dir()
+
+
+class TestEverythingUsesTheOneCacheRoot:
+    """Every cache and log location has to come from ``setup_cache_dir``.
+
+    Spelling out ``~/.cache/helicon`` picks one of the four places that function
+    may choose and ignores the rest -- HELION_CACHE_DIR and the ``/fast-scratch``
+    preference both move the cache, and anything that hardcoded the home path
+    stayed behind, which is exactly where a user would not look for it.
+    """
+
+    def test_no_source_file_hardcodes_the_home_cache_path(self):
+        import helicon.lib.cache as cache_mod
+
+        root = Path(cache_mod.__file__).resolve().parents[2] / "helicon"
+        offenders = []
+        for path in root.rglob("*.py"):
+            if path.name == "cache.py":
+                continue  # the resolver itself is allowed to name the default
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for n, line in enumerate(text.splitlines(), 1):
+                if '".cache"' in line and "#" not in line.split('".cache"')[0]:
+                    offenders.append(f"{path.name}:{n}")
+        assert not offenders, f"hardcoded cache paths: {offenders}"
+
+    def test_the_denovo3d_log_follows_the_cache_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HELION_CACHE_DIR", str(tmp_path / "elsewhere"))
+        import importlib
+
+        import helicon.lib.cache as cache_mod
+
+        importlib.reload(cache_mod)
+        assert cache_mod.setup_cache_dir() == tmp_path / "elsewhere"
+
+    def test_cached_functions_all_name_a_subfolder(self):
+        """One folder per feature under the root, so a user can clear just the
+        one they mean -- and so a size cap set on one cannot evict another's."""
+        import helicon.lib.cache as cache_mod
+
+        root = Path(cache_mod.__file__).resolve().parents[2] / "helicon"
+        bare = []
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "cache_dir=str(helicon.cache_dir)" in text:
+                bare.append(path.name)
+        assert not bare, f"cache the root directly: {bare}"
+
+
+class TestDamagedCacheEntries:
+    """A cache entry that cannot be read must not take the caller down with it.
+
+    ``joblib.memory.expires_after`` indexes ``metadata["time"]`` directly, so a
+    metadata.json that was truncated -- by a disk filling mid-write, or by
+    eviction running alongside a write -- raised KeyError out of the cached
+    call. Observed killing nine tasks of a sixty-task denovo3D search.
+    """
+
+    def _validate(self, seconds=3600):
+        import joblib
+
+        return cache_mod._tolerate_unreadable_metadata(
+            joblib.memory.expires_after(seconds=seconds)
+        )
+
+    def test_metadata_without_a_time_is_a_miss(self):
+        assert self._validate()({}) is False
+
+    def test_metadata_of_the_wrong_shape_is_a_miss(self):
+        for junk in (None, "not a dict", [1, 2, 3], {"time": "yesterday"}):
+            assert self._validate()(junk) is False
+
+    def test_a_fresh_entry_is_still_valid(self):
+        assert self._validate()({"time": time.time()}) is True
+
+    def test_an_expired_entry_is_still_expired(self):
+        assert self._validate(seconds=1)({"time": time.time() - 10}) is False
+
+    def test_a_damaged_entry_is_recomputed_rather_than_raising(self, tmp_path):
+        """End to end: damage the metadata of a real cached call and make sure
+        the next call returns a value instead of raising."""
+        calls = []
+
+        @cache_mod.cache(cache_dir=str(tmp_path), expires_after=7, verbose=0)
+        def add(a, b):
+            calls.append((a, b))
+            return a + b
+
+        assert add(2, 3) == 5
+        assert len(calls) == 1
+        add(2, 3)
+        assert len(calls) == 1  # served from cache
+
+        for meta in tmp_path.rglob("metadata.json"):
+            meta.write_text("{}")  # what a truncated write leaves behind
+
+        assert add(2, 3) == 5  # recomputed, not raised
+        assert len(calls) == 2

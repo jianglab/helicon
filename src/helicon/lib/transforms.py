@@ -51,6 +51,8 @@ from .filters import low_high_pass_filter, normalize_percentile
 
 try:
     from numba import jit, set_num_threads, prange
+
+    from .numba_compat import cached_jit
 except ImportError:
     import warnings
 
@@ -62,6 +64,9 @@ except ImportError:
     def jit(*args, **kwargs):
         return lambda f: f
 
+    def cached_jit(_jit, **kwargs):
+        return lambda f: f
+
     def set_num_threads(n: int):
         return
 
@@ -71,9 +76,9 @@ except ImportError:
 _USE_NUMBA_PARALLEL = platform.system() != "Darwin"
 
 
-@jit(
+@cached_jit(
+    jit,
     nopython=True,
-    cache=True,
     nogil=True,
     parallel=_USE_NUMBA_PARALLEL,
 )

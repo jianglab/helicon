@@ -63,6 +63,25 @@ def getLogger(logfile: str = "", verbose: int = 0) -> logging.Logger:
     logger = logging.getLogger(logfile)
     logger.setLevel(logging.DEBUG)
 
+    # Drop the handlers a previous call to this function attached, before
+    # attaching this call's. ``logging.getLogger(name)`` returns the SAME logger
+    # every time, so adding handlers unconditionally multiplies the output: two
+    # calls and every line is emitted twice, three and it is three times, and so
+    # on for the life of the process.
+    #
+    # That is not merely untidy. The console handler writes to stdout, which for
+    # the web app is a pipe to the process that launched it, and nothing
+    # guarantees the far end is being drained. Once the multiplied output fills
+    # the pipe buffer the write blocks and the whole app wedges -- seen as a
+    # search that runs fine the first time and hangs partway through the second,
+    # with every thread idle and the main one stuck in anon_pipe_write.
+    for handler in [h for h in logger.handlers if getattr(h, "_helicon", False)]:
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:  # pragma: no cover - closing is best effort
+            pass
+
     # save to the log file (plain text, no color)
     fh = logging.FileHandler(logfile, mode="at")
     fh.setLevel(logging.INFO)
@@ -86,6 +105,8 @@ def getLogger(logfile: str = "", verbose: int = 0) -> logging.Logger:
     elif verbose > 2:
         ch.setLevel(logging.DEBUG)
 
+    ch._helicon = True
+    fh._helicon = True
     logger.addHandler(ch)
     logger.addHandler(fh)
     if Path(logfile).stat().st_size > 0:

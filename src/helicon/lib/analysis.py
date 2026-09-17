@@ -6,6 +6,8 @@ import helicon
 try:  # pragma: no cover - depends on optional numba install
     from numba import njit
 
+    from .numba_compat import cached_jit
+
     _HAS_NUMBA = True
 except ImportError:  # pragma: no cover - depends on optional numba install
     _HAS_NUMBA = False
@@ -13,7 +15,7 @@ except ImportError:  # pragma: no cover - depends on optional numba install
 
 if _HAS_NUMBA:
 
-    @njit(cache=True, nogil=True)
+    @cached_jit(njit, nogil=True)
     def _fsc_shell_reduce(F1r, F2r, shell_flat, nshells):
         """Single-pass, numba-accelerated shell-binned FSC reduction.
 
@@ -50,7 +52,7 @@ if _HAS_NUMBA:
 
 if _HAS_NUMBA:
 
-    @njit(cache=True, nogil=True)
+    @cached_jit(njit, nogil=True)
     def _fsc_shell_sum(flat_num, flat_den1, flat_den2, shell_flat, nshells):
         """One-pass shell-binned accumulation over precomputed products.
 
@@ -1254,7 +1256,6 @@ def estimate_helicalTube_length(
 
 
 from .alignment import align_images  # noqa: F401
-
 
 # AgglomerativeClusteringWithMinSize is re-exported here for callers that
 # expect it on this module, but importing it eagerly would drag in sklearn --

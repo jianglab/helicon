@@ -103,6 +103,20 @@ def _fig_to_html(fig):
     return ui.HTML(html)
 
 
+def _denovo3d_logger():
+    """The tab's log, under whichever cache root helicon resolved.
+
+    Not ``~/.cache/helicon`` spelled out, which is only one of the four places
+    ``setup_cache_dir`` may choose: it also honours HELION_CACHE_DIR and
+    prefers ``/fast-scratch`` when that exists. Hardcoding the home path sent
+    the log somewhere other than the cache whenever either applied, which is
+    the one thing a user looking for it would not expect.
+    """
+    log_dir = helicon.cache_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return helicon.getLogger(logfile=str(log_dir / "helicon.denovo3D.log"), verbose=1)
+
+
 def _rank(results, n_images, log=None):
     """Order solver results best-first, jointly when several images were solved.
 
@@ -3201,11 +3215,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             # A stitched image collapses the selection into one image
             labels = [f"Stitched: {'+'.join(str(l) for l in labels)}"][: len(images)]
 
-        _log_dir = pathlib.Path.home() / ".cache" / "helicon"
-        _log_dir.mkdir(parents=True, exist_ok=True)
-        log = helicon.getLogger(
-            logfile=str(_log_dir / "helicon.denovo3D.log"), verbose=1
-        )
+        log = _denovo3d_logger()
 
         # Build twist/rise parameter grid
         if (
@@ -3348,11 +3358,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
     @reactive.extended_task
     async def _reconstruction_task(tasks, cpu, abort_ref, n_images=1):
-        _log_dir = pathlib.Path.home() / ".cache" / "helicon"
-        _log_dir.mkdir(parents=True, exist_ok=True)
-        log = helicon.getLogger(
-            logfile=str(_log_dir / "helicon.denovo3D.log"), verbose=1
-        )
+        log = _denovo3d_logger()
 
         try:
             with ui.Progress(min=0, max=len(tasks)) as p:
