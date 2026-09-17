@@ -442,7 +442,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     async def _auto_load_default_map():
         if map_data() is not None or skip_default_map():
             return
-        logger.error("[HI3D] Auto-loading default map emd-10499")
+        logger.debug("[HI3D] Auto-loading default map emd-10499")
         try:
             result = await asyncio.to_thread(_download_emd, "10499")
             _set_map(*result)
@@ -453,7 +453,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(input.hi3d_change_emd)
     async def _change_and_load_emd():
-        logger.error("[HI3D] _change_and_load_emd: fired")
+        logger.debug("[HI3D] _change_and_load_emd: fired")
         import random
 
         try:
@@ -541,25 +541,86 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         url = input.hi3d_url_map()
         if not url or not url.strip():
             return
-        ui.modal_show(
-            ui.modal(
-                f"Downloading {url.strip()}...",
-                title="Loading",
-                easy_close=False,
-                footer=None,
-            )
+        progress = {"done": 0, "total": 0}
+        result = await _run_download(
+            url.strip(), lambda: _download_url(url, progress), progress
         )
-        try:
-            result = await asyncio.to_thread(_download_url, url)
+        if result is not None:
             _set_map(*result)
-        except Exception as e:
-            ui.modal_show(
-                ui.modal(str(e), title="Download failed", easy_close=True, footer=None)
-            )
-        finally:
-            ui.modal_remove()
 
-    def _download_emd(emd_id):
+    def _fetch_to_file(url, handle, progress=None):
+        """Stream ``url`` into an open file, recording progress as it goes.
+
+        Streamed rather than buffered through ``resp.content`` so the caller can
+        say how far along it is. The EMDB helical set runs to half a gigabyte
+        for the largest maps, and a modal that says only "Downloading..." for
+        several minutes is indistinguishable from one that has hung -- which is
+        exactly how it was reported.
+
+        ``progress`` is a plain dict, not a reactive value: this runs in a
+        worker thread, where reactive writes are not allowed. The coroutine that
+        started the thread polls it.
+        """
+        import requests
+
+        resp = requests.get(url, timeout=60, stream=True)
+        resp.raise_for_status()
+        if progress is not None:
+            progress["total"] = int(resp.headers.get("content-length") or 0)
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            if chunk:
+                handle.write(chunk)
+                if progress is not None:
+                    progress["done"] += len(chunk)
+
+    async def _run_download(label, work, progress):
+        """Run a download off the loop, reporting bytes as they arrive.
+
+        A progress bar, not a modal with a text output in it. Two earlier
+        attempts failed for instructive reasons: re-showing the modal to
+        refresh the count rebuilds the dialog several times a second, which
+        reads as flashing; and putting a text output inside the modal never
+        updated at all, because a reactive value set from inside an effect that
+        is still running is not flushed to the browser until that effect
+        returns -- which here is when the download has already finished.
+        Progress messages are sent to the client as they are made, which is the
+        whole point of them.
+
+        Returns the result, or None if it failed, the failure already on screen.
+        """
+        with ui.Progress(min=0, max=1) as bar:
+            bar.set(0, message=f"Downloading {label}", detail="connecting...")
+            task = asyncio.create_task(asyncio.to_thread(work))
+            shown = -1
+            while not task.done():
+                await asyncio.sleep(0.3)
+                done, total = progress.get("done", 0), progress.get("total", 0)
+                if total:
+                    pct = int(100 * done / total)
+                    if pct != shown:
+                        shown = pct
+                        bar.set(
+                            done / total,
+                            message=f"Downloading {label}",
+                            detail=f"{done / 1e6:.0f} of {total / 1e6:.0f} MB ({pct}%)",
+                        )
+                elif done:
+                    bar.set(
+                        0,
+                        message=f"Downloading {label}",
+                        detail=f"{done / 1e6:.0f} MB",
+                    )
+            try:
+                return await task
+            except Exception as e:
+                ui.modal_show(
+                    ui.modal(
+                        str(e), title="Download failed", easy_close=True, footer=None
+                    )
+                )
+                return None
+
+    def _download_emd(emd_id, progress=None):
         """Download map from EMDB and return (data, apix, crs, label).
 
         Pure I/O: no reactive writes, no UI calls. Safe to run in a
@@ -567,17 +628,13 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         invoke :func:`_set_map` on the main asyncio loop so reactive
         invalidation cascades run on the correct event loop.
         """
-        logger.error("[HI3D] _download_emd: starting download for emd-%s", emd_id)
+        logger.debug("[HI3D] _download_emd: starting download for emd-%s", emd_id)
         import mrcfile
 
         url = get_emdb_map_url(f"emd-{emd_id}")
-        logger.error("[HI3D] _download_emd: url=%s", url)
+        logger.debug("[HI3D] _download_emd: url=%s", url)
         with tempfile.NamedTemporaryFile(suffix=".map.gz", delete=False) as tmp:
-            import requests
-
-            resp = requests.get(url, timeout=120)
-            resp.raise_for_status()
-            tmp.write(resp.content)
+            _fetch_to_file(url, tmp, progress)
             gz_path = tmp.name
         mrc_path = gz_path[:-3]
         with gzip.open(gz_path, "rb") as f_in, open(mrc_path, "wb") as f_out:
@@ -588,10 +645,10 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
             crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
         Path(gz_path).unlink(missing_ok=True)
         Path(mrc_path).unlink(missing_ok=True)
-        logger.error("[HI3D] _download_emd: download complete, shape=%s", d.shape)
+        logger.debug("[HI3D] _download_emd: download complete, shape=%s", d.shape)
         return d, apix_val, crs, f"EMD-{emd_id}"
 
-    def _download_url(url):
+    def _download_url(url, progress=None):
         """Fetch a map from an ``http(s)``/``ftp`` URL (or local path) and return
         ``(data, apix, crs, label)``.  Pure I/O — no reactive writes, no UI.
 
@@ -608,15 +665,13 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         else:
             suffix = ".map"
 
-        logger.error("[HI3D] _download_url: starting for %s", url_stripped)
+        logger.debug("[HI3D] _download_url: starting for %s", url_stripped)
 
         if url_stripped.startswith(("http://", "https://", "ftp://")):
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 import requests
 
-                resp = requests.get(url_stripped, timeout=120)
-                resp.raise_for_status()
-                tmp.write(resp.content)
+                _fetch_to_file(url_stripped, tmp, progress)
                 local_path = Path(tmp.name)
         else:
             local_path = Path(url_stripped)
@@ -640,7 +695,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
             mrc_path.unlink(missing_ok=True)
 
         label = Path(url_stripped).name or url_stripped
-        logger.error("[HI3D] _download_url: download complete, shape=%s", d.shape)
+        logger.debug("[HI3D] _download_url: download complete, shape=%s", d.shape)
         return d, apix_val, crs, label
 
     async def _do_load_emd(emd_id):
@@ -654,23 +709,12 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         which dropped ``_run_computation`` from the flush queue and left the
         main indexing plot showing the old map.
         """
-        ui.modal_show(
-            ui.modal(
-                f"Downloading EMD-{emd_id}...",
-                title="Loading",
-                easy_close=False,
-                footer=None,
-            )
+        progress = {"done": 0, "total": 0}
+        result = await _run_download(
+            f"EMD-{emd_id}", lambda: _download_emd(emd_id, progress), progress
         )
-        try:
-            result = await asyncio.to_thread(_download_emd, emd_id)
+        if result is not None:
             _set_map(*result)
-        except Exception as e:
-            ui.modal_show(
-                ui.modal(str(e), title="Download failed", easy_close=True, footer=None)
-            )
-        finally:
-            ui.modal_remove()
 
     def _set_map(d, apix_val, crs, label):
         if d.ndim != 3 or d.shape[0] < 32:
@@ -692,7 +736,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         logger.error(
             "[HI3D] _set_map: setting map_data shape=%s apix=%s", d.shape, apix_val
         )
-        logger.error("[HI3D] _set_map: setting map_data shape=%s", d.shape)
+        logger.debug("[HI3D] _set_map: setting map_data shape=%s", d.shape)
         map_data.set(d)
         map_apix.set(apix_val)
         map_crs.set(crs)
@@ -701,9 +745,30 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         project.input_map_apix.set(apix_val)
         nz, ny, nx = d.shape
         map_info_text.set(f"{nx}×{ny}×{nz} voxels | {apix_val:.4g} Å/voxel")
-        # Set default rmin/rmax
-        rmin_val.set(0.0)
-        rmax_val.set(round(min(nx, ny) / 2 * apix_val, 1))
+        # Radial range: where the density actually is, not the whole box.
+        #
+        # ``estimate_radial_range`` was ported into hi3d_core along with the
+        # rest of HI3D but never called, so the range defaulted to 0..half-box
+        # and every map started by including the empty middle and the empty
+        # corners. Matching the original: threshold the radial profile at a
+        # tenth of its range above the background taken from the outermost
+        # bins, and take the first and last radius above it, in angstroms.
+        #
+        # Failures here fall back to the old whole-box default rather than
+        # leaving the range unset, since a profile that defeats the estimate --
+        # a blank map, say -- should still give the user something to adjust.
+        rmin_default, rmax_default = 0.0, round(min(nx, ny) / 2 * apix_val, 1)
+        try:
+            rp = compute_radial_profile(d)
+            radial_profile_data.set(rp)
+            r_lo, r_hi = estimate_radial_range(rp, thresh_ratio=0.1)
+            if r_hi > r_lo:
+                rmin_default = round(r_lo * apix_val, 1)
+                rmax_default = round(r_hi * apix_val, 1)
+        except Exception:
+            logger.debug("[HI3D] auto radial range failed", exc_info=True)
+        rmin_val.set(rmin_default)
+        rmax_val.set(rmax_default)
         # Reset section controls
         section_index.set(0)
         # Reset fitting
@@ -729,14 +794,14 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     def _update_section():
         data = map_data()
         if data is None:
-            logger.error("[HI3D] _update_section: map_data is None, skipping")
+            logger.debug("[HI3D] _update_section: map_data is None, skipping")
             return
-        logger.error("[HI3D] _update_section: map_data shape=%s", data.shape)
+        logger.debug("[HI3D] _update_section: map_data shape=%s", data.shape)
         try:
             axis_str = input.hi3d_section_axis()
             half_offset = input.hi3d_section_index()  # centered: -n//2 .. n-1-n//2
         except Exception as e:
-            logger.error("[HI3D] _update_section: input not ready: %s", e)
+            logger.debug("[HI3D] _update_section: input not ready: %s", e)
             axis_str = "0"
             half_offset = None
         axis = int(axis_str) if axis_str is not None else 0
@@ -991,8 +1056,15 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         input.hi3d_dz,
         input.hi3d_peak_width,
         input.hi3d_peak_height,
-        input.hi3d_rmin,
-        input.hi3d_rmax,
+        # The reactive values, NOT input.hi3d_rmin/rmax. Those inputs live in a
+        # panel that renders only once a map and its radial profile exist, so at
+        # first load they do not exist at all -- and naming a missing input here
+        # silences the whole effect, which meant the indexing never ran and the
+        # results pane sat on "Run indexing to see results" forever. The sync
+        # effect above pushes the typed values into these, so changes still
+        # arrive; these merely always exist.
+        rmin_val,
+        rmax_val,
         map_data,
     )
     def _run_computation():
