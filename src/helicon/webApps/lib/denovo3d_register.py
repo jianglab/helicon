@@ -45,6 +45,98 @@ A genuine handedness flip is a mirror, not a rotation, and cannot be resolved
 from projections at all -- every image in one dataset shares the specimen's
 hand, so it is not something registration can or should decide.
 
+The two branches are not equally well determined, and the difference is large.
+Measured over 120 pairs of good EMPIAR-10940 classes, as the absolute change in
+correlation between a branch and its opposite:
+
+    x mirror (polarity)        mean 0.3233   median 0.3439   0% below 0.005
+    y mirror (180 about axis)  mean 0.0087   median 0.0042  57% below 0.005
+
+Polarity is decided overwhelmingly -- for the 60 pairs where the x mirror wins
+it raises the correlation from 0.60 to 0.92, at the same offset to within
+0.1 px, which is what a correct determination looks like. The y mirror is very
+nearly undecidable, and there is a reason: a 180 degree rotation about the
+filament axis is, for a helix, an axial translation of half a pitch, so it is
+not an independent relation at all. It competes with the dx search rather than
+describing something new, and its near-random vote is where all of the reported
+flip conflicts come from -- searching x only takes them from 45 to 0.
+
+Dropping the y branch was tried and is NOT correct in general, despite the
+above. The equivalent translation is half a pitch -- 144 px for twist 1.2 at
+4.944 A/pixel -- while the dx search reaches only 83 px for a 128 px image, so
+the shift that would substitute for the flip is out of range. Two images
+genuinely related by that rotation would then fail to register rather than
+registering with a different offset. The degeneracy is only near-perfect for
+windows much shorter than half a turn, which is why it looks harmless on these
+particular class averages. The end-to-end tests catch this: five of them fail
+with the branch removed, because their synthetic pattern is not helically
+symmetric and its y mirror is a genuinely different image.
+
+So the branch stays. What is worth knowing is that a y-flip reported on real
+helical data carries almost no evidence, and that the flip_conflicts diagnostic
+is dominated by it rather than by anything about polarity.
+
+The machinery is verified end to end; the bias is in the data
+--------------------------------------------------------------
+Scanned through the app pipeline, a composite of 16 good EMPIAR-10940 classes
+puts its twist peak at 1.30, where the same 16 images searched jointly and
+unstitched give 1.20, the true value. The diagnostics do not catch it -- that
+run reports trustworthy, mean_corr 0.92, 111 accepted pairs and a meaningful
+closure -- because any systematic error in the placements is self-consistent
+around loops, so closure cannot see it.
+
+The whole chain has since been checked against ground truth, which is the test
+that should have been run first. Tiles cut from a long synthetic filament of
+known twist, registered and reconciled and composited by this module, come back
+as the filament they were cut from:
+
+    the long filament itself       900 px   cc 1.000   twist 1.20
+    composite, raw                 896 px   cc 0.999   twist 1.20
+    composite, intensity-matched   896 px   cc 0.562   twist 1.20
+
+and with MEASURED rather than simulated offsets the recovered placements fit the
+truth with slope +0.999 and reproduce the source at cc 0.995, with psi and dy
+exactly zero. Registration, the global solve, the sign convention between what
+register_pair reports and what composite consumes, and the assembly itself are
+therefore all correct. Whatever biases the real composite is a property of real
+class averages, not of this code.
+
+That matters for where to look next. A synthetic tile is a window onto one
+filament; a class average is an average over many filaments and many positions,
+grouped by appearance and centred on an origin the classification chose. Those
+are different objects, and only the first is what compositing assumes.
+
+Individually eliminated along the way, each by measurement, so none needs
+re-running:
+
+* Sub-pixel placement. Registration was integer-only and the composite rounded;
+  both are fixed, and the twist did not move -- 1.30 with sub-pixel placement,
+  with rounded placement, and under +-0.5 px jitter alike.
+
+* The offset clamp. MIN_OVERLAP caps |dx| at 83 px for a 128 px image and three
+  accepted pairs sit exactly there, genuinely truncated -- freeing the window
+  moves them to about 86 px with better correlation. But repairing or dropping
+  them through auto_stitch changes span, width and twist not at all, because the
+  robust global solve was already discarding them. Widening the window is
+  actively harmful: at MIN_OVERLAP 0.15 the other 114 pairs move by a mean of
+  26 px and as much as 105, jumping to spurious matches on slivers of overlap.
+
+* Alias selection. All 117 accepted pairs have a single clear dx peak with no
+  rival within 0.10 correlation, so there is nothing for the correlation to be
+  confused by.
+
+* The flip branches. Searching x only removes every conflict and lengthens the
+  composite to 315 px, and the twist stays at 1.30. Variants excluding the x
+  branch give 1.25 but accept a different and smaller set of pairs (69 against
+  111), so that comparison is confounded.
+
+* Intensity matching. The returned composite is zero-meaned and about 87% of its
+  pixels are negative, which a non-negative model cannot represent at all. It
+  costs peak prominence -- 4.16 to 3.47 on the synthetic -- and changes the
+  answer nowhere: 1.20 on the synthetic and 1.30 on the real data either way.
+  The tab re-thresholds the stitched image before any solver sees it in any
+  case, so the negatives never reach one by that route.
+
 On mutual versus absolute alignment
 -----------------------------------
 Aligning images to a common reference makes them mutually consistent while
@@ -104,13 +196,21 @@ def _flip(img, fx=False, fy=False):
     return np.ascontiguousarray(out)
 
 
-def _apply(img, psi=0.0, dy=0.0):
+def _apply(img, psi=0.0, dy=0.0, dx=0.0):
+    """Rotate by ``psi``, then shift by ``dy`` across and ``dx`` along the axis.
+
+    All three go into one ``transform_image`` call so the image is interpolated
+    once however many of them are non-zero. ``dx`` is the sub-pixel remainder of
+    an axial offset; the whole-pixel part is a slice and needs no interpolation.
+    """
     import helicon
 
     out = np.asarray(img, dtype=np.float32)
-    if psi or dy:
+    if psi or dy or dx:
         out = helicon.transform_image(
-            image=out, rotation=float(psi), post_translation=(float(dy), 0)
+            image=out,
+            rotation=float(psi),
+            post_translation=(float(dy), float(dx)),
         )
     return out
 
@@ -183,6 +283,22 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
     corr[cols < min_cols] = -2.0
     best = int(np.argmax(corr))
     valid = corr[corr > -2.0]
+    # Sub-pixel peak by fitting a parabola to the three samples around the
+    # maximum. The correlation profile is a smooth function of offset sampled on
+    # whole columns, so the integer argmax is quantised at one pixel -- about one
+    # helical rise at typical sampling, which is coarse next to the structure the
+    # composite is meant to preserve. The vertex is clamped to the sampling
+    # interval, since a parabola through a genuine maximum cannot place it
+    # further away, and a wider excursion means the three points were not a peak.
+    sub = float(k[best])
+    if 0 < best < len(corr) - 1:
+        cl, cc, cr = corr[best - 1], corr[best], corr[best + 1]
+        if cl > -2.0 and cr > -2.0:
+            denom = cl - 2.0 * cc + cr
+            if denom < -1e-12:  # strictly concave, i.e. a real maximum
+                delta = 0.5 * (cl - cr) / denom
+                if abs(delta) <= 0.5:
+                    sub = float(k[best]) + float(delta)
     # Peak prominence. A pair with little or no real overlap still produces a
     # best-scoring offset, and its correlation there can look respectable; what
     # gives it away is that the whole profile is equally good, i.e. no distinct
@@ -192,7 +308,7 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
         prom = float((corr[best] - valid.mean()) / valid.std())
     else:
         prom = 0.0
-    return int(k[best]), float(corr[best]), prom
+    return sub, float(corr[best]), prom
 
 
 def register_pair(
@@ -225,12 +341,12 @@ def register_pair(
     )
 
     def scan(src, psi0, dy0, half_psi, half_dy, step):
-        best = (-2.0, psi0, dy0, 0, 0.0)
+        best = (-2.0, psi0, dy0, 0.0, 0.0)
         for psi in np.arange(psi0 - half_psi, psi0 + half_psi + step / 2, step):
             for dy in np.arange(dy0 - half_dy, dy0 + half_dy + step / 2, step):
                 dx, c, prom = _dx_profile(a, _apply(src, psi, dy), min_overlap)
                 if c > best[0]:
-                    best = (c, float(psi), float(dy), int(dx), prom)
+                    best = (c, float(psi), float(dy), float(dx), prom)
         return best
 
     overall = None
@@ -621,10 +737,17 @@ def composite(images, transforms, feather=8, match_intensity=True):
     acc = np.zeros((ny, total), dtype=np.float64)
     wsum = np.zeros((ny, total), dtype=np.float64)
     for im, t in used:
+        # Split the axial offset: the whole-pixel part decides which columns of
+        # the canvas the image lands on, and the remainder is folded into the
+        # same interpolation that applies psi and dy. A fractional offset then
+        # costs no extra resampling and is not thrown away by rounding.
+        shift = float(t["dx"]) - x0
+        cell = int(np.floor(shift))
         work = _apply(
             _flip(im, t.get("flip_x", False), t.get("flip_y", False)),
             t["psi"],
             t["dy"],
+            shift - cell,
         ).astype(np.float64)
         if match_intensity:
             work = _normalize_intensity(work)
@@ -636,7 +759,7 @@ def composite(images, transforms, feather=8, match_intensity=True):
         weight = np.broadcast_to(ramp, (h, w)).copy()
 
         top = (ny - h) // 2
-        left = int(round(t["dx"] - x0))
+        left = cell
         acc[top : top + h, left : left + w] += work * weight
         wsum[top : top + h, left : left + w] += weight
 

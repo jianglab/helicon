@@ -4,6 +4,8 @@ from pathlib import Path
 import numpy as np
 import helicon
 
+from .solver_gauss_analytic import gauss_analytic_reconstruct
+
 logger = logging.getLogger(__name__)
 
 from .image_loader import (
@@ -329,8 +331,12 @@ def process_one_task(
             f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}"
         )
 
-    solve_fn = lsq_reconstruct
-    label = "lsq_reconstruct"
+    if algorithm["model"] == "gauss":
+        solve_fn = gauss_analytic_reconstruct
+        label = "gauss_reconstruct"
+    else:
+        solve_fn = lsq_reconstruct
+        label = "lsq_reconstruct"
     with helicon.Timer(
         f"{label}: {round(pitch, 1)}Å/twist={round(twist, 3)}° rise={round(rise, 3)}Å",
         verbose=verbose > 10,
@@ -371,7 +377,6 @@ def process_one_task(
             target_apix2d=target_apix2d,
             verbose=verbose,
             algorithm=algorithm,
-            refine_tilt_psi_dy_range=refine_range,
         )
         if algorithm.get("model", "lsq") in (
             "lsq",
@@ -382,6 +387,7 @@ def process_one_task(
             "lreg",
         ):
             solve_kwargs["cpu"] = n_cpu
+            solve_kwargs["refine_tilt_psi_dy_range"] = refine_range
         (rec3d, rec3d_set_1, rec3d_set_2), score = solve_fn(**solve_kwargs)
     with helicon.Timer("apply_helical_symmetry", verbose=verbose > 10):
         twist_degree = twist if abs(twist) < 90 else 180 - abs(twist)
@@ -391,6 +397,9 @@ def process_one_task(
             pitch_pixel = int(np.ceil(2 * rise / apix2d_orig))
         new_length = max(nx_orig, int(pitch_pixel * 1.2))
         cpu = helicon.available_cpu()
+        # Symmetrise the rendered volume. The Gaussian solver renders its
+        # screw copies into the slab, so the slab is axially continuous and
+        # this resampling has nothing to alias.
         rec3d_xform = helicon.apply_helical_symmetry(
             data=rec3d,
             apix=target_apix3d,
@@ -405,6 +414,7 @@ def process_one_task(
             new_apix=apix2d_orig,
             cpu=cpu,
         )
+
     # Use refined tilt/psi/dy if available from local refinement
     tilt_viz = tilt
     psi_viz = psi

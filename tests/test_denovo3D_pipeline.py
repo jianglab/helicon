@@ -165,6 +165,89 @@ class TestProcessOneTask(object):
         result = pipeline.process_one_task(**params)
         assert result is not None
 
+    def _strict_solver(self, seen):
+        """A solver whose signature has no ``**kwargs``, like fb_reconstruct had.
+
+        It names exactly the arguments the pipeline sends for a model outside
+        the lsq/elasticnet/lasso/ridge family, so anything extra -- ``cpu`` or
+        ``refine_tilt_psi_dy_range``, which only that family accepts -- raises
+        TypeError instead of being swallowed. The gauss solver cannot play this
+        role: it absorbs unknown keywords into ``**_ignored``, so the bug this
+        guards against would pass silently there.
+        """
+
+        def solver(
+            projection_image,
+            scale2d_to_3d,
+            twist_degree,
+            rise_pixel,
+            csym,
+            tilt_degree,
+            psi_degree,
+            dy_pixel,
+            thresh_fraction,
+            positive_constraint,
+            reconstruct_diameter_3d_inner_pixel,
+            reconstruct_diameter_2d_pixel,
+            reconstruct_diameter_3d_pixel,
+            reconstruct_length_2d_pixel,
+            reconstruct_length_3d_pixel,
+            sym_oversample,
+            interpolation,
+            fsc_test,
+            score_metric,
+            target_apix2d,
+            verbose,
+            algorithm,
+        ):
+            seen["called"] = True
+            nz = int(reconstruct_length_3d_pixel) or 4
+            d = int(reconstruct_diameter_3d_pixel) or 8
+            vol = np.zeros((nz, d, d), dtype=np.float32)
+            vol[nz // 2, d // 2, d // 2] = 1.0
+            return (vol, None, None), 0.5
+
+        return solver
+
+    def test_with_strict_signature_model(self, monkeypatch):
+        """A solver whose signature has no **kwargs must run through the real
+        pipeline dispatch without raising -- regression test for the
+        refine_tilt_psi_dy_range kwarg previously being sent unconditionally to
+        solvers that don't accept it (fixed in
+        denovo3d_pipeline.process_one_task)."""
+        seen = {}
+        monkeypatch.setattr(
+            pipeline, "lsq_reconstruct", self._strict_solver(seen), raising=False
+        )
+        params = dict(
+            self.base_params,
+            data=self.data,
+            algorithm=dict(model="strict"),
+        )
+        result = pipeline.process_one_task(**params)
+        assert seen.get("called"), "the stub solver was never reached"
+        assert result is not None
+        score, return_data, param_tuple = result
+        assert isinstance(score, (float, np.floating))
+
+    def test_with_strict_signature_model_and_tilt_psi_dy(self, monkeypatch):
+        """The same, with the refinement ranges set that used to leak through."""
+        seen = {}
+        monkeypatch.setattr(
+            pipeline, "lsq_reconstruct", self._strict_solver(seen), raising=False
+        )
+        params = dict(
+            self.base_params,
+            data=self.data,
+            tilt=5,
+            psi=10,
+            dy=2,
+            algorithm=dict(model="strict"),
+        )
+        result = pipeline.process_one_task(**params)
+        assert seen.get("called"), "the stub solver was never reached"
+        assert result is not None
+
     @patch("helicon.read_image_2d")
     def test_loads_data_when_none(self, mock_read):
         mock_read.return_value = np.random.rand(16, 16).astype(np.float32)

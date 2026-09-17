@@ -27,6 +27,24 @@ except ImportError:
 
 cache_dir = helicon.cache_dir / "denovo3D"
 
+# Sampling used for the helical-symmetry constraint matrix.
+#
+# NOTE: with "linear" (the UI default) this matrix comes out EMPTY for every
+# practical volume length -- measured 0 equations for nz <= 8, versus 6,102
+# (nz=4) to 37,904 (nz=8) with "nn". The trilinear path requires all 8 corners
+# of the interpolation cell to lie inside the cylindrical mask for BOTH
+# symmetry mates, which at these volume sizes rejects every voxel. So the
+# explicit helical-symmetry regularisation has been silently inactive.
+#
+# Switching it on ("nn") was measured to change nothing: on 8 good class
+# averages the twist peak was identical in every case and the score margins
+# differed only in the 5th decimal. The reason is that the symmetry is already
+# enforced *implicitly* by build_A_data_matrix, which maps image pixels back
+# into the short volume through the helical relation; the explicit voxel-equality
+# equations are redundant with it. Left as the pass-through default so the
+# solver does not pay for thousands of redundant equations.
+_HSYM_INTERP = None  # None -> use the data matrix's interpolation
+
 
 def lsq_reconstruct(
     projection_image,
@@ -349,6 +367,21 @@ def lsq_reconstruct(
         n_nonzeros += A_hsym.count_nonzero()
     sparsity = 1 - n_nonzeros / (n_eqns * n_unknowns)
 
+    # Non-negativity is what makes the twist identifiable, not merely a
+    # physical nicety about density. Measured on ten good EMPIAR-10940 classes
+    # (true twist 1.2), scanning 0.8-1.8:
+    #
+    #     positive_constraint  auto   joint peak 1.20   prominence 1.00
+    #     positive_constraint  on     joint peak 1.20   prominence 1.00
+    #     positive_constraint  off    joint peak 1.45   prominence 0.65
+    #
+    # auto and on are identical because the rule below turns it on whenever the
+    # pitch exceeds twice the reconstruction length, which is every realistic
+    # case: 288 px against 8 at twist 1.2. Freed of the constraint the solver
+    # fits better and answers worse, because a free-sign volume can explain any
+    # twist. The Gaussian solver degrades the same way and by the same margin
+    # (1.2 to 1.4 with free-sign amplitudes), so this is a property of the
+    # problem rather than of either basis.
     pitch_pixel = round(rise_pixel * 360 / abs(twist_degree))
     positive = positive_constraint > 0 or (
         positive_constraint < 0 and pitch_pixel > round(reconstruct_length_3d_pixel * 2)
@@ -669,6 +702,13 @@ def refine_tilt_psi_dy(
         cpu=cpu,
     )
 
+    # The symmetry matrix uses nearest-neighbour sampling regardless of the
+    # interpolation chosen for the *data* matrix.  The trilinear path requires
+    # all 8 corners of the interpolation cell to lie inside the cylindrical mask
+    # for BOTH symmetry mates, which at realistic volume lengths rejects every
+    # voxel: measured 0 equations for nz <= 8 with "linear" versus 6,102 (nz=4)
+    # to 37,904 (nz=8) with "nn".  Since "linear" is the UI default, the helical
+    # symmetry regularisation was silently inactive in production.
     A_hsym, b_hsym = build_A_helical_sym_matrix(
         nz=reconstruct_length_3d_pixel,
         ny=reconstruct_diameter_3d_pixel,
@@ -681,7 +721,7 @@ def refine_tilt_psi_dy(
         min_sym_pairs=min(
             max_equations, int(max(n_2d_pixels, n_3d_voxels) * sym_oversample)
         ),
-        interpolation=interpolation,
+        interpolation=_HSYM_INTERP or interpolation,
         verbose=verbose,
     )
 
