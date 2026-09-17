@@ -440,3 +440,49 @@ class TestClearScope:
         )
         f.clear_cache()
         f.clear_cache_dir()
+
+
+class TestEverythingUsesTheOneCacheRoot:
+    """Every cache and log location has to come from ``setup_cache_dir``.
+
+    Spelling out ``~/.cache/helicon`` picks one of the four places that function
+    may choose and ignores the rest -- HELION_CACHE_DIR and the ``/fast-scratch``
+    preference both move the cache, and anything that hardcoded the home path
+    stayed behind, which is exactly where a user would not look for it.
+    """
+
+    def test_no_source_file_hardcodes_the_home_cache_path(self):
+        import helicon.lib.cache as cache_mod
+
+        root = Path(cache_mod.__file__).resolve().parents[2] / "helicon"
+        offenders = []
+        for path in root.rglob("*.py"):
+            if path.name == "cache.py":
+                continue  # the resolver itself is allowed to name the default
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for n, line in enumerate(text.splitlines(), 1):
+                if '".cache"' in line and "#" not in line.split('".cache"')[0]:
+                    offenders.append(f"{path.name}:{n}")
+        assert not offenders, f"hardcoded cache paths: {offenders}"
+
+    def test_the_denovo3d_log_follows_the_cache_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HELION_CACHE_DIR", str(tmp_path / "elsewhere"))
+        import importlib
+
+        import helicon.lib.cache as cache_mod
+
+        importlib.reload(cache_mod)
+        assert cache_mod.setup_cache_dir() == tmp_path / "elsewhere"
+
+    def test_cached_functions_all_name_a_subfolder(self):
+        """One folder per feature under the root, so a user can clear just the
+        one they mean -- and so a size cap set on one cannot evict another's."""
+        import helicon.lib.cache as cache_mod
+
+        root = Path(cache_mod.__file__).resolve().parents[2] / "helicon"
+        bare = []
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "cache_dir=str(helicon.cache_dir)" in text:
+                bare.append(path.name)
+        assert not bare, f"cache the root directly: {bare}"

@@ -75,7 +75,11 @@ def main(args):
     return result
 
 
-@helicon.cache(expires_after=None, ignore=["plot_file"])
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "trueFSC"),
+    expires_after=None,
+    ignore=["plot_file"],
+)
 def compute_truefsc(
     map1_file,
     map2_file,
@@ -1111,11 +1115,11 @@ def add_args(parser):
         help="use the same mask for both maps (1) or separate masks (0)",
     )
     parser.add_argument(
-        "--showPlot", 
+        "--showPlot",
         metavar="<0|1>",
-        type=int, 
-        default=1, 
-        help="show plots on screen (1) or not (0)"
+        type=int,
+        default=1,
+        help="show plots on screen (1) or not (0)",
     )
 
     group = parser.add_mutually_exclusive_group()
@@ -1167,9 +1171,9 @@ def add_args(parser):
     )
 
     parser.add_argument(
-        "--verbose", 
+        "--verbose",
         metavar="<0-2>",
-        type=int, 
-        default=1, 
-        help="verbose level (0-2). Default: 1"
+        type=int,
+        default=1,
+        help="verbose level (0-2). Default: 1",
     )

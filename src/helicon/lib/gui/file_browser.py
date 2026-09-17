@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 
-from helicon.lib.cache import cache
+from helicon.lib.cache import cache, setup_cache_dir
 from helicon.lib.terminal import _open_terminal, _spawn_detached
 
 from PySide6.QtWidgets import (
@@ -1990,9 +1990,12 @@ class FolderBrowserWidget(QMainWindow):
         startup_combo = QComboBox()
         startup_combo.addItem("Clean environment (default)", "clean")
         startup_combo.addItem("User Bash setup (interactive login shell)", "user-shell")
-        startup_combo.setCurrentIndex(max(0, startup_combo.findData(
-            str(settings.value("relion/startup", "clean"))
-        )))
+        startup_combo.setCurrentIndex(
+            max(
+                0,
+                startup_combo.findData(str(settings.value("relion/startup", "clean"))),
+            )
+        )
         layout.addWidget(startup_combo)
         row = QHBoxLayout()
         path_edit = QLineEdit(str(settings.value("relion/launcher", "") or ""))
@@ -2014,7 +2017,8 @@ class FolderBrowserWidget(QMainWindow):
             label.setTextFormat(Qt.TextFormat.PlainText)
             layout.addWidget(label)
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
         )
 
         def save():
@@ -2022,7 +2026,8 @@ class FolderBrowserWidget(QMainWindow):
             path = Path(value).expanduser()
             if value and (not path.is_absolute() or not path.is_file()):
                 QMessageBox.warning(
-                    dialog, "RELION launcher",
+                    dialog,
+                    "RELION launcher",
                     "Select an existing script using an absolute path.",
                 )
                 return
@@ -2066,7 +2071,8 @@ class FolderBrowserWidget(QMainWindow):
             del self._relion_processes[project]
             if code:
                 QMessageBox.warning(
-                    self, "RELION exited",
+                    self,
+                    "RELION exited",
                     f"RELION exited with status {code}.\nProject: {project}\n"
                     f"See the launch log: {log}\nCheck Apps → Configure RELION…",
                 )
@@ -2438,7 +2444,9 @@ class FolderBrowserWidget(QMainWindow):
         super().closeEvent(event)
 
 
-@cache(expires_after=timedelta(days=7))
+@cache(
+    cache_dir=str(setup_cache_dir() / "file_browser"), expires_after=timedelta(days=7)
+)
 def _folder_is_helical(folder: str) -> bool:
     """Check if any ``model.star`` in *folder* has ``rlnIsHelix = 1``.
 

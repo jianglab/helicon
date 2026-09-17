@@ -533,7 +533,12 @@ class EMDB:
 ################################################################################
 
 
-@helicon.cache(cache_dir=str(helicon.cache_dir), expires_after=7, verbose=0)  # 7 days
+# In the emdb folder, with the other EMDB fetches. Pointed at the cache root it
+# landed in the shared joblib/ tree alongside unrelated features, which is both
+# harder to find and impossible to clear on its own.
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "emdb"), expires_after=7, verbose=0
+)  # 7 days
 def get_emd_entries(fields: list[str]) -> pd.DataFrame:
     """Fetch EMDB entry metadata from the EMDB API.
 
