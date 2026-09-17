@@ -814,6 +814,32 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         script, div = components(fig)
         return ui.HTML(script + div)
 
+    @reactive.effect
+    @reactive.event(input.hi3d_rmin, input.hi3d_rmax)
+    def _sync_radial_range():
+        """Carry the typed radial range into the values everything else reads.
+
+        Without this the rmin/rmax inputs were inert: nothing read
+        ``input.hi3d_rmin`` anywhere, so the markers on the radial profile and
+        the cylindrical projection that follows kept the defaults computed when
+        the map loaded.
+
+        It has to be written back rather than read where needed, because the
+        panel holding these inputs is rendered from ``rmin_val``/``rmax_val``
+        and is re-rendered whenever the radial profile is recomputed. Left
+        unsynced, that re-render reseeds the input from the stale default and
+        the user's entry vanishes as they watch.
+        """
+        try:
+            lo = float(input.hi3d_rmin())
+            hi = float(input.hi3d_rmax())
+        except (SilentException, TypeError, ValueError):
+            return
+        if lo != rmin_val():
+            rmin_val.set(lo)
+        if hi != rmax_val():
+            rmax_val.set(hi)
+
     # ── Radial profile ──────────────────────────────────────
     @render.ui
     def hi3d_radial_profile():
@@ -965,6 +991,8 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         input.hi3d_dz,
         input.hi3d_peak_width,
         input.hi3d_peak_height,
+        input.hi3d_rmin,
+        input.hi3d_rmax,
         map_data,
     )
     def _run_computation():
