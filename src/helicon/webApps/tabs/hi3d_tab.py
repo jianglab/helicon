@@ -27,6 +27,67 @@ _DEFAULT_URL = (
 )
 
 
+def lattice_line_segments(twist, phase_degree, rise, y_min, y_max):
+    """One lattice line, wrapped into the plot's twist axis and cut at its edges.
+
+    The markers of a given C-symmetry copy sit at ``(twist * n + phase, rise * n)``
+    for integer ``n``, so in unwrapped twist they are colinear -- the direction the
+    arrow shows. The plot's twist axis only spans one turn, though, so that line
+    leaves one edge and comes back at the other.
+
+    Each returned segment therefore ENDS exactly on +-180 and the next BEGINS
+    exactly on the opposite edge at the same rise, so the family reads as one
+    continuous line if the picture were tiled side by side. The crossings are
+    solved for rather than found by sampling: a sampled split stops a little
+    short of the edge, leaving a ragged gap exactly where continuity is the
+    thing being shown.
+
+    Returns ``(xs, ys)`` lists ready for a Bokeh ``multi_line``.
+    """
+    if rise <= 0 or y_max <= y_min:
+        return [], []
+
+    n_lo, n_hi = sorted((y_min / rise, y_max / rise))
+
+    def wrapped(n):
+        return (twist * n + phase_degree + 180.0) % 360.0 - 180.0
+
+    if abs(twist) < 1e-12:  # a vertical line: no crossings to find
+        x = wrapped(0.0)
+        return [[x, x]], [[n_lo * rise, n_hi * rise]]
+
+    # twist * n + phase == -180 (mod 360) is where the line leaves the axis.
+    k_lo = int(np.floor((twist * n_lo + phase_degree + 180.0) / 360.0))
+    k_hi = int(np.ceil((twist * n_hi + phase_degree + 180.0) / 360.0))
+    crossings = sorted(
+        n
+        for k in range(min(k_lo, k_hi) - 1, max(k_lo, k_hi) + 2)
+        for n in [(-180.0 + 360.0 * k - phase_degree) / twist]
+        if n_lo < n < n_hi
+    )
+
+    xs, ys = [], []
+    edges = [n_lo] + crossings + [n_hi]
+    for a, b in zip(edges[:-1], edges[1:]):
+        if b - a <= 1e-12:
+            continue
+        # On a crossing the wrap is exact, so take the edge value rather than
+        # whatever floating point lands on: leaving at +180 must arrive at -180.
+        xa = (
+            -180.0
+            if (a in crossings and twist > 0)
+            else (180.0 if a in crossings else wrapped(a))
+        )
+        xb = (
+            180.0
+            if (b in crossings and twist > 0)
+            else (-180.0 if b in crossings else wrapped(b))
+        )
+        xs.append([xa, xb])
+        ys.append([a * rise, b * rise])
+    return xs, ys
+
+
 @module.ui
 def hi3d_tab_ui():
     return ui.layout_sidebar(
@@ -209,6 +270,18 @@ def hi3d_tab_ui():
                         ui.input_checkbox("hi3d_show_peaks", "Peaks", value=True),
                         ui.input_checkbox("hi3d_show_arrow", "Arrow", value=True),
                         ui.input_checkbox("hi3d_show_lattice", "Lattice", value=True),
+                        ui.tooltip(
+                            ui.input_checkbox(
+                                "hi3d_show_lattice_lines",
+                                "Lattice lines",
+                                value=True,
+                            ),
+                            "Draw a dashed line through each C-symmetry copy's"
+                            " lattice markers, along the twist/rise direction the"
+                            " arrow shows. A line leaves one edge of the twist axis"
+                            " and returns at the other, so it reads as continuous if"
+                            " the plot were tiled side by side.",
+                        ),
                     ),
                 ),
             ),
@@ -409,7 +482,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         )
         return ui.p(
             ui.a(f"All {n} helical structures in EMDB", href=url, target="_blank"),
-                style="font-size:9pt; color:var(--bs-secondary-color); margin-top:2px;",
+            style="font-size:9pt; color:var(--bs-secondary-color); margin-top:2px;",
         )
 
     # ── EMDB info ───────────────────────────────────────────
@@ -437,7 +510,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
             return ui.p(
                 ui.a(f"EMD-{emd_id}", href=entry_url, target="_blank"),
                 rest,
-            style="font-size:9pt; color:var(--bs-secondary-color); margin-top:2px;",
+                style="font-size:9pt; color:var(--bs-secondary-color); margin-top:2px;",
             )
         except Exception:
             return None
@@ -647,7 +720,10 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         info = map_info_text()
         if not info:
             return None
-        return ui.p(info, style="font-size:9pt; color:var(--bs-secondary-color); margin-top:4px;")
+        return ui.p(
+            info,
+            style="font-size:9pt; color:var(--bs-secondary-color); margin-top:4px;",
+        )
 
     @reactive.effect
     def _update_section():
@@ -1315,6 +1391,25 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
                 xs = np.fmod(t * nn + np.max(nn) * 360, 360)
                 xs[xs > 180] -= 360
                 ys = r * nn
+                # Lines first, markers second, so a line passes under the
+                # circles it threads rather than through them. Bokeh draws in
+                # the order glyphs are added; "underlay" is not the way to get
+                # this, since that puts them beneath the ACF image itself, where
+                # nothing can be seen of them at all.
+                if input.hi3d_show_lattice_lines():
+                    for si in range(c):
+                        seg_x, seg_y = lattice_line_segments(
+                            t, 360.0 / c * si, r, -(h // 2) * dz, (h // 2) * dz
+                        )
+                        if seg_x:
+                            fig.multi_line(
+                                xs=seg_x,
+                                ys=seg_y,
+                                line_color=colors[si],
+                                line_width=1,
+                                line_dash="dashed",
+                            )
+
                 for si in range(c):
                     xsym = np.fmod(xs + 360 / c * si, 360)
                     xsym[xsym > 180] -= 360
