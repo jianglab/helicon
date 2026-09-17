@@ -257,8 +257,31 @@ def cylindrical_grid(radius_px, sigma_px):
     return centres, np.full(len(centres), float(sigma_px))
 
 
-def expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats, envelope=None):
+def expand_project(
+    centres,
+    sigmas,
+    twist_deg,
+    rise_px,
+    csym,
+    n_repeats,
+    envelope=None,
+    phi_degree=0.0,
+):
     """Replicate the asymmetric unit by the screw symmetry and project along x.
+
+    ``phi_degree`` turns the whole assembly about the helical axis before
+    projecting, which is what lets several images share one basis while each
+    views it from its own direction. It enters exactly where the screw's own
+    rotation does, since both are rotations about that axis and they commute.
+
+    This is the raw basis rotation, positive in the usual sense: a centre on
+    +x moves to +y at 90 degrees. It is NOT the azimuth
+    ``denovo3d_align.align_to_model`` reports -- measured against a window of
+    known azimuth, the reported value has to be negated here (cc 0.97-0.99
+    against 0.07-0.40 for the other sign), the same as in the voxel solver's
+    ``build_A_data_matrix``. Reasoning about which way each convention turns
+    got this backwards; the calibration is what settles it. Callers should use
+    :func:`gauss_joint_reconstruct`, which negates for them.
 
     ``envelope`` is an optional callable ``z -> weight`` applied per copy. Some
     truncation is genuinely needed: a class average is a finite segment while a
@@ -287,7 +310,11 @@ def expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats, envelop
     js = np.arange(csym, dtype=float)
     K, J = np.meshgrid(ks, js, indexing="ij")
     k, j = K.ravel(), J.ravel()
-    ang = np.deg2rad(twist_deg) * k + 2 * np.pi * j / max(csym, 1)
+    ang = (
+        np.deg2rad(twist_deg) * k
+        + 2 * np.pi * j / max(csym, 1)
+        + np.deg2rad(phi_degree)
+    )
     ca, sa = np.cos(ang), np.sin(ang)
 
     x, y, z = centres[:, 0:1], centres[:, 1:2], centres[:, 2:3]
@@ -463,6 +490,7 @@ def design_matrix(
     cutoff_sigma=3.5,
     sigma_z=None,
     chunk=200000,
+    phi_degree=0.0,
 ):
     """``(n_pixels, G)`` matrix whose column g is basis fn g with all its copies.
 
@@ -480,7 +508,9 @@ def design_matrix(
     the dark lane between strands, while a narrow one does not.
     """
     centres, sigmas = grid
-    mu, amp, sig = expand_project(centres, sigmas, twist_deg, rise_px, csym, n_repeats)
+    mu, amp, sig = expand_project(
+        centres, sigmas, twist_deg, rise_px, csym, n_repeats, phi_degree=phi_degree
+    )
     sz = float(sigma_z) if sigma_z else None
     G, C = amp.shape
     g_of = np.repeat(np.arange(G), C)
@@ -767,6 +797,65 @@ def _render_volume(
     return vol
 
 
+def _basis_setup(
+    ny,
+    nx,
+    target_apix2d,
+    algorithm,
+    reconstruct_diameter_2d_pixel,
+    scale2d_to_3d,
+    rise_pixel,
+):
+    """Basis, spacing, sigmas and repeat count for one fit.
+
+    Shared by the single-image and joint fits so that the two cannot drift
+    apart: a joint fit whose basis differed from the single-image one would not
+    be comparable with it, and the comparison is the whole point.
+    """
+    apix2d = float(target_apix2d) if target_apix2d else 5.0
+    spacing = max(
+        1.0, float(algorithm.get("spacing_angstrom", DEFAULT_SPACING_ANGSTROM)) / apix2d
+    )
+    sigma = max(
+        0.5, float(algorithm.get("sigma_angstrom", DEFAULT_SIGMA_ANGSTROM)) / apix2d
+    )
+    radius = support_radius(ny, reconstruct_diameter_2d_pixel)
+    spacing, sigma, _ = fit_spacing_to_budget(radius, spacing, sigma)
+    render_sigma = max(
+        sigma,
+        float(algorithm.get("render_sigma_angstrom", DEFAULT_RENDER_SIGMA_ANGSTROM))
+        / apix2d,
+    )
+    sigma_z = max(
+        sigma,
+        float(algorithm.get("sigma_z_angstrom", DEFAULT_SIGMA_Z_ANGSTROM)) / apix2d,
+    )
+    scale = float(scale2d_to_3d) or 1.0
+    rise = (abs(float(rise_pixel)) / scale) or 1.0
+    return dict(
+        grid=full_field_grid(radius, spacing_px=spacing, sigma_px=sigma),
+        rise=rise,
+        n_repeats=int(nx / 2 / rise) + 2,
+        sigma=sigma,
+        sigma_z=sigma_z,
+        render_sigma=render_sigma,
+        scale=scale,
+    )
+
+
+def _penalties(algorithm, M, u):
+    """Elasticnet penalties, honouring the tab's alpha / l1_ratio controls."""
+    rel_l1, rel_l2 = DEFAULT_L1, DEFAULT_L2
+    alpha = algorithm.get("alpha", None)
+    if alpha is not None and float(alpha) >= 0:
+        ratio = float(algorithm.get("l1_ratio", 0.5))
+        rel_l1 = float(alpha) * ratio
+        rel_l2 = float(alpha) * (1.0 - ratio)
+    rel_l1 = float(algorithm.get("l1", rel_l1))
+    rel_l2 = float(algorithm.get("l2", rel_l2))
+    return rel_l1 * np.abs(u).max(), rel_l2 * np.trace(M) / max(len(M), 1)
+
+
 def gauss_analytic_reconstruct(
     projection_image,
     scale2d_to_3d,
@@ -807,40 +896,21 @@ def gauss_analytic_reconstruct(
     algorithm = algorithm or {}
     image = np.asarray(projection_image, dtype=float)
     ny, nx = image.shape
-
-    apix2d = float(target_apix2d) if target_apix2d else 5.0
-    spacing = max(
-        1.0, float(algorithm.get("spacing_angstrom", DEFAULT_SPACING_ANGSTROM)) / apix2d
+    setup = _basis_setup(
+        ny,
+        nx,
+        target_apix2d,
+        algorithm,
+        reconstruct_diameter_2d_pixel,
+        scale2d_to_3d,
+        rise_pixel,
     )
-    sigma = max(
-        0.5, float(algorithm.get("sigma_angstrom", DEFAULT_SIGMA_ANGSTROM)) / apix2d
-    )
-    radius = support_radius(ny, reconstruct_diameter_2d_pixel)
-    spacing, sigma, _ = fit_spacing_to_budget(radius, spacing, sigma)
-    # The map is drawn with a wider Gaussian than the fit uses: the narrow
-    # search basis samples the density rather than describing it, and rendering
-    # it directly gives a spiky volume. Never narrower than the fit's sigma, so
-    # a user who deliberately asks for a broad basis still gets it.
-    render_sigma = max(
-        sigma,
-        float(algorithm.get("render_sigma_angstrom", DEFAULT_RENDER_SIGMA_ANGSTROM))
-        / apix2d,
-    )
-    # Along the axis the basis stays wide so the screw copies merge into
-    # continuous density instead of a comb; never narrower than the transverse
-    # sigma, which is what makes this anisotropic rather than just different.
-    sigma_z = max(
-        sigma,
-        float(algorithm.get("sigma_z_angstrom", DEFAULT_SIGMA_Z_ANGSTROM)) / apix2d,
-    )
-
-    # rise_pixel arrives in 3D voxel units while the fit works in image pixels.
-    # They coincide only when target_apix2d == target_apix3d, which is the tab's
-    # default but not guaranteed.
-    scale = float(scale2d_to_3d) or 1.0
-    rise = (abs(float(rise_pixel)) / scale) or 1.0
-    n_repeats = int(nx / 2 / rise) + 2
-    grid = full_field_grid(radius, spacing_px=spacing, sigma_px=sigma)
+    grid = setup["grid"]
+    rise = setup["rise"]
+    n_repeats = setup["n_repeats"]
+    sigma_z = setup["sigma_z"]
+    render_sigma = setup["render_sigma"]
+    scale = setup["scale"]
     A = design_matrix(
         grid,
         float(twist_degree),
@@ -859,16 +929,7 @@ def gauss_analytic_reconstruct(
     # validated defaults. Penalty strength barely moves the twist answer here
     # (unchanged over a hundredfold range), so this is about not surprising the
     # user rather than about accuracy.
-    rel_l1, rel_l2 = DEFAULT_L1, DEFAULT_L2
-    alpha = algorithm.get("alpha", None)
-    if alpha is not None and float(alpha) >= 0:
-        ratio = float(algorithm.get("l1_ratio", 0.5))
-        rel_l1 = float(alpha) * ratio
-        rel_l2 = float(alpha) * (1.0 - ratio)
-    rel_l1 = float(algorithm.get("l1", rel_l1))
-    rel_l2 = float(algorithm.get("l2", rel_l2))
-    lam1 = rel_l1 * np.abs(u).max()
-    lam2 = rel_l2 * np.trace(M) / max(len(M), 1)
+    lam1, lam2 = _penalties(algorithm, M, u)
     coef = nn_elasticnet(M, u, lam1, lam2)
 
     pred = A @ coef
@@ -889,3 +950,112 @@ def gauss_analytic_reconstruct(
         csym=int(max(csym, 1)),
     )
     return (rec3d, None, None), score
+
+
+def gauss_joint_reconstruct(
+    images,
+    phis,
+    scale2d_to_3d,
+    twist_degree,
+    rise_pixel,
+    csym=1,
+    reconstruct_diameter_2d_pixel=-1,
+    reconstruct_diameter_3d_pixel=-1,
+    reconstruct_length_3d_pixel=-1,
+    target_apix2d=5.0,
+    algorithm=None,
+    verbose=0,
+    **_ignored,
+):
+    """One Gaussian basis fitted to several images, each at its own azimuth.
+
+    The joint system costs almost nothing extra. Each image contributes its own
+    design matrix ``A_i``, but the normal equations only ever need
+    ``M = sum_i A_i^T A_i`` and ``u = sum_i A_i^T b_i``, both ``(G, G)`` and
+    ``(G,)`` whatever the number of images, so the stacked matrix is never
+    formed. Adding images costs one design matrix each and leaves the solve
+    unchanged -- unlike the voxel joint solver, where the equation count grows
+    with the image count and has to be rationed.
+
+    ``phis`` are azimuths in the convention ``denovo3d_align.align_to_model``
+    reports. The sign is flipped here rather than at every call site, so this
+    and the voxel joint solver take the same numbers and mean the same thing.
+
+    Images are scaled to unit variance before stacking, so that one image with
+    a large dynamic range cannot dominate the shared fit -- the same hazard
+    ``denovo3d_joint`` guards against when combining score curves.
+
+    Returns ``(volume, info)`` with ``info`` carrying the joint ``score``, the
+    ``per_image`` scores, and the fitted ``coefficients``.
+    """
+    algorithm = algorithm or {}
+    images = [np.asarray(im, dtype=float) for im in images]
+    if not images:
+        raise ValueError("no images")
+    if len(phis) != len(images):
+        raise ValueError("one azimuth per image is required")
+
+    ny, nx = images[0].shape
+    setup = _basis_setup(
+        ny,
+        nx,
+        target_apix2d,
+        algorithm,
+        reconstruct_diameter_2d_pixel,
+        scale2d_to_3d,
+        rise_pixel,
+    )
+    grid = setup["grid"]
+
+    mats, targets = [], []
+    M = u = None
+    for image, phi in zip(images, phis):
+        if image.shape != (ny, nx):
+            raise ValueError("all images must have the same shape")
+        sd = float(image.std())
+        b = (image / sd if sd > 0 else image).ravel()
+        A = design_matrix(
+            grid,
+            float(twist_degree),
+            setup["rise"],
+            int(max(csym, 1)),
+            setup["n_repeats"],
+            ny,
+            nx,
+            sigma_z=setup["sigma_z"],
+            phi_degree=-float(phi),
+        )
+        mats.append(A)
+        targets.append(b)
+        Mi, ui = A.T @ A, A.T @ b
+        M = Mi if M is None else M + Mi
+        u = ui if u is None else u + ui
+
+    lam1, lam2 = _penalties(algorithm, M, u)
+    coef = nn_elasticnet(M, u, lam1, lam2)
+
+    per_image = [correlation_score(A @ coef, b) for A, b in zip(mats, targets)]
+    score = correlation_score(
+        np.concatenate([A @ coef for A in mats]), np.concatenate(targets)
+    )
+
+    nz3 = int(reconstruct_length_3d_pixel) if reconstruct_length_3d_pixel > 0 else 4
+    d3 = int(reconstruct_diameter_3d_pixel) if reconstruct_diameter_3d_pixel > 0 else ny
+    rec3d = _render_volume(
+        grid[0],
+        np.full_like(grid[1], setup["render_sigma"]),
+        coef,
+        setup["scale"],
+        nz3,
+        d3,
+        d3,
+        twist_deg=float(twist_degree),
+        rise_px=setup["rise"],
+        csym=int(max(csym, 1)),
+    )
+    return rec3d, dict(
+        score=float(score),
+        per_image=[float(v) for v in per_image],
+        coefficients=coef,
+        positive=True,
+    )

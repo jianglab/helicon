@@ -12,12 +12,17 @@ logger = logging.getLogger(__name__)
 
 try:
     from numba import jit, set_num_threads, prange
+
+    from ...lib.numba_compat import cached_jit
 except ImportError:
     logger.warning(
         "failed to load numba. The program will run correctly but will be much slower. Run 'pip install numba' to install numba and speed up the program"
     )
 
     def jit(*args, **kwargs):
+        return lambda f: f
+
+    def cached_jit(_jit, **kwargs):
         return lambda f: f
 
     def set_num_threads(n: int):
@@ -44,6 +49,146 @@ cache_dir = helicon.cache_dir / "denovo3D"
 # equations are redundant with it. Left as the pass-through default so the
 # solver does not pay for thousands of redundant equations.
 _HSYM_INTERP = None  # None -> use the data matrix's interpolation
+
+
+def solve_equations(
+    A_data,
+    b_data,
+    A_hsym,
+    b_hsym,
+    positive=False,
+    algorithm="elasticnet",
+    train_fraction=1.0,
+    score_metric="cosine",
+    img_shape_2d=None,
+    target_apix2d=5.0,
+    verbose=0,
+):
+    if not (A_hsym is None or b_hsym is None):
+        from scipy.sparse import vstack
+
+        A = vstack((A_data, A_hsym))
+        b = np.concatenate((b_data, b_hsym))
+    else:
+        A = A_data
+        b = b_data
+    if 0 < train_fraction < 1:
+        shuffled_indices = np.arange(A.shape[0])
+        np.random.shuffle(shuffled_indices)
+        n = int(len(shuffled_indices) * train_fraction + 0.5)
+        A_train = A[shuffled_indices[:n], :]
+        b_train = b[shuffled_indices[:n]]
+        A_test = A[shuffled_indices[n:], :]
+        b_test = b[shuffled_indices[n:]]
+    else:
+        A_train = A
+        b_train = b
+        A_test = None
+        b_test = None
+
+    tol = 1e-2
+    max_iter = 200
+
+    if (
+        algorithm["model"] == "lsq"
+    ):  # ordinary linear least square without regularization
+        if positive:
+            lb = 0.0
+            ub = np.max(b_data)
+            logger.info(
+                "Imposing constraint for the reconstruction: lb=%s ub=%s",
+                round(lb, 6),
+                round(ub, 6),
+            )
+        else:
+            lb = -np.inf
+            ub = np.inf
+
+        from scipy.optimize import lsq_linear
+
+        res = lsq_linear(
+            A,
+            b,
+            bounds=(lb, ub),
+            tol=tol,
+            max_iter=max_iter,
+            lsmr_maxiter=1000,
+            lsmr_tol="auto",
+            verbose=verbose,
+        )
+        return res.x.astype(np.float32), None
+
+    if (
+        algorithm["model"] == "lreg"
+    ):  # ordinary linear least square without regularization
+        from sklearn.linear_model import LinearRegression
+
+        if positive:
+            A_train = A_train.toarray()
+            logger.warning(
+                "--algorithm=lreq with positive contraints uses very large amount memory!"
+            )
+        model = LinearRegression(fit_intercept=True, positive=positive)
+    elif algorithm["model"] == "lasso":
+        from sklearn.linear_model import Lasso
+
+        model = Lasso(
+            alpha=algorithm.get("alpha", 1e-4),
+            fit_intercept=True,
+            positive=positive,
+            selection="random",
+            tol=tol,
+            max_iter=max_iter,
+        )
+    elif algorithm["model"] == "elasticnet":
+        from sklearn.linear_model import ElasticNet
+
+        model = ElasticNet(
+            alpha=algorithm.get("alpha", 1e-4),
+            l1_ratio=algorithm.get("l1_ratio", 0.5),
+            fit_intercept=True,
+            positive=positive,
+            selection="random",
+            tol=tol,
+            max_iter=max_iter,
+        )
+    elif algorithm["model"] == "ridge":
+        from sklearn.linear_model import Ridge
+
+        model = Ridge(
+            alpha=algorithm.get("alpha", 1),
+            fit_intercept=True,
+            positive=positive,
+            tol=tol,
+            max_iter=max_iter,
+        )
+    elif algorithm["model"] == "ard":
+        from sklearn.linear_model import ARDRegression
+
+        A_train = A_train.toarray()
+        model = ARDRegression(
+            alpha_1=algorithm.get("alpha", 1e-6),
+            alpha_2=algorithm.get("alpha", 1e-6),
+            fit_intercept=True,
+            tol=tol,
+            max_iter=max_iter,
+        )
+
+    model.fit(X=A_train, y=b_train)
+    res = model.coef_.astype(np.float32)
+    if not np.any(res):
+        if algorithm["model"] in ["lreg"]:
+            res[len(res) // 2] = 1
+        else:
+            while not np.any(res):
+                model.alpha *= 0.1
+                model.fit(X=A_train, y=b_train)
+                res = model.coef_.astype(np.float32)
+    if A_test is not None and b_test is not None:
+        score = helicon.cosine_similarity(A_test.dot(res), b_test)
+    else:
+        score = None
+    return res, score
 
 
 def lsq_reconstruct(
@@ -219,145 +364,6 @@ def lsq_reconstruct(
             b
         ), f"ERROR: {len(b_set_1)=:,}\t{len(b_set_2)=:,}\t{len(b)=:,}"
         return (A_set_1, b_set_1), (A_set_2, b_set_2)
-
-    def solve_equations(
-        A_data,
-        b_data,
-        A_hsym,
-        b_hsym,
-        positive=False,
-        algorithm="elasticnet",
-        train_fraction=1.0,
-        score_metric="cosine",
-        img_shape_2d=None,
-        target_apix2d=5.0,
-        verbose=0,
-    ):
-        if not (A_hsym is None or b_hsym is None):
-            from scipy.sparse import vstack
-
-            A = vstack((A_data, A_hsym))
-            b = np.concatenate((b_data, b_hsym))
-        else:
-            A = A_data
-            b = b_data
-        if 0 < train_fraction < 1:
-            shuffled_indices = np.arange(A.shape[0])
-            np.random.shuffle(shuffled_indices)
-            n = int(len(shuffled_indices) * train_fraction + 0.5)
-            A_train = A[shuffled_indices[:n], :]
-            b_train = b[shuffled_indices[:n]]
-            A_test = A[shuffled_indices[n:], :]
-            b_test = b[shuffled_indices[n:]]
-        else:
-            A_train = A
-            b_train = b
-            A_test = None
-            b_test = None
-
-        tol = 1e-2
-        max_iter = 200
-
-        if (
-            algorithm["model"] == "lsq"
-        ):  # ordinary linear least square without regularization
-            if positive:
-                lb = 0.0
-                ub = np.max(b_data)
-                logger.info(
-                    "Imposing constraint for the reconstruction: lb=%s ub=%s",
-                    round(lb, 6),
-                    round(ub, 6),
-                )
-            else:
-                lb = -np.inf
-                ub = np.inf
-
-            from scipy.optimize import lsq_linear
-
-            res = lsq_linear(
-                A,
-                b,
-                bounds=(lb, ub),
-                tol=tol,
-                max_iter=max_iter,
-                lsmr_maxiter=1000,
-                lsmr_tol="auto",
-                verbose=verbose,
-            )
-            return res.x.astype(np.float32), None
-
-        if (
-            algorithm["model"] == "lreg"
-        ):  # ordinary linear least square without regularization
-            from sklearn.linear_model import LinearRegression
-
-            if positive:
-                A_train = A_train.toarray()
-                logger.warning(
-                    "--algorithm=lreq with positive contraints uses very large amount memory!"
-                )
-            model = LinearRegression(fit_intercept=True, positive=positive)
-        elif algorithm["model"] == "lasso":
-            from sklearn.linear_model import Lasso
-
-            model = Lasso(
-                alpha=algorithm.get("alpha", 1e-4),
-                fit_intercept=True,
-                positive=positive,
-                selection="random",
-                tol=tol,
-                max_iter=max_iter,
-            )
-        elif algorithm["model"] == "elasticnet":
-            from sklearn.linear_model import ElasticNet
-
-            model = ElasticNet(
-                alpha=algorithm.get("alpha", 1e-4),
-                l1_ratio=algorithm.get("l1_ratio", 0.5),
-                fit_intercept=True,
-                positive=positive,
-                selection="random",
-                tol=tol,
-                max_iter=max_iter,
-            )
-        elif algorithm["model"] == "ridge":
-            from sklearn.linear_model import Ridge
-
-            model = Ridge(
-                alpha=algorithm.get("alpha", 1),
-                fit_intercept=True,
-                positive=positive,
-                tol=tol,
-                max_iter=max_iter,
-            )
-        elif algorithm["model"] == "ard":
-            from sklearn.linear_model import ARDRegression
-
-            A_train = A_train.toarray()
-            model = ARDRegression(
-                alpha_1=algorithm.get("alpha", 1e-6),
-                alpha_2=algorithm.get("alpha", 1e-6),
-                fit_intercept=True,
-                tol=tol,
-                max_iter=max_iter,
-            )
-
-        model.fit(X=A_train, y=b_train)
-        res = model.coef_.astype(np.float32)
-        if not np.any(res):
-            if algorithm["model"] in ["lreg"]:
-                res[len(res) // 2] = 1
-            else:
-                while not np.any(res):
-                    model.alpha *= 0.1
-                    model.fit(X=A_train, y=b_train)
-                    res = model.coef_.astype(np.float32)
-        if A_test is not None and b_test is not None:
-            score = helicon.cosine_similarity(A_test.dot(res), b_test)
-        else:
-            score = None
-        return res, score
 
     n_eqns = A_data.shape[0]
     n_unknowns = A_data.shape[1]
@@ -947,7 +953,7 @@ def build_A_helical_sym_matrix(
 
     if interpolation in ["linear", "linear01", "linear11"]:
 
-        @jit(nopython=True, cache=True, nogil=True)
+        @cached_jit(jit, nopython=True, nogil=True)
         def loop_kji(
             Zi,
             Yi,
@@ -1179,7 +1185,7 @@ def build_A_helical_sym_matrix(
 
     else:  # nearest neighbor
 
-        @jit(nopython=True, cache=True, nogil=True)
+        @cached_jit(jit, nopython=True, nogil=True)
         def loop_kji(
             Zi,
             Yi,
@@ -1359,6 +1365,7 @@ def build_A_data_matrix(
     interpolation,
     verbose=0,
     cpu=1,
+    phi_degree=0.0,
 ):
     """Build the sparse data matrix A and target vector b for least-squares reconstruction.
 
@@ -1384,6 +1391,10 @@ def build_A_data_matrix(
         In-plane rotation in degrees.
     dy_pixel : float
         Perpendicular shift in 2D pixels.
+    phi_degree : float, optional
+        Azimuth of this image about the helical axis, in degrees. Zero for a
+        single-image reconstruction; a joint reconstruction gives each image
+        its own. Defaults to 0.
     reconstruct_diameter_2d_pixel : int
     reconstruct_length_2d_pixel : int
     reconstruct_diameter_3d_pixel : int
@@ -1433,6 +1444,20 @@ def build_A_data_matrix(
     r = R.from_euler("yx", (tilt_degree, psi_degree), degrees=True)
     coords0 = r.apply(coords0, inverse=True)
 
+    # Per-image azimuth. Rotations about the helical axis commute with the
+    # symmetry fold below, which rotates by twist*hi + 360*ci/csym about the
+    # same axis, so applying it here is identical to adding phi to every one of
+    # those angles -- and it reaches both interpolation branches from one place.
+    #
+    # This is the only per-image unknown a joint reconstruction needs. An image
+    # is a window of the filament at some axial position, but for a helically
+    # symmetric volume an axial shift IS an azimuthal rotation, so the position
+    # and the azimuth are one parameter, not two.
+    if phi_degree:
+        coords0 = R.from_euler("z", phi_degree, degrees=True).apply(
+            coords0, inverse=True
+        )
+
     # sparse A matrix
     csr_A = []
     csr_b = []  # one value for each pixel in pixel_vals
@@ -1440,7 +1465,7 @@ def build_A_data_matrix(
     n_b = 0
     if interpolation in ["linear", "linear10", "linear11"]:
 
-        @jit(nopython=True, cache=True, nogil=True)
+        @cached_jit(jit, nopython=True, nogil=True)
         def loop_kji(Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals):
             nz, ny, nx = Z.shape
             mz, my, mx = mask.shape
@@ -1551,7 +1576,7 @@ def build_A_data_matrix(
 
     else:  # nearest neighbor
 
-        @jit(nopython=True, cache=True, nogil=True)
+        @cached_jit(jit, nopython=True, nogil=True)
         def loop_kji(Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals):
             nz, ny, nx = Z.shape
             mz, my, mx = mask.shape

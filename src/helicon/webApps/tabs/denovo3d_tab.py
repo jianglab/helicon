@@ -45,6 +45,14 @@ logger = logging.getLogger(__name__)
 # common threshold/rotation/crop to all of them, solving each and combining the
 # score curves.
 MODE_JOINT = "Joint parameter search"
+# The projection-matching route, kept beside the curve-averaging one rather
+# than replacing it. The two agree on every set measured so far -- 1.20, 1.25
+# and 1.20 on two ten-class sets and all 33 of EMPIAR-10940 -- so there is no
+# evidence for promoting this one over the method that is already validated;
+# what it adds is a roughly doubled margin on the full set, placements that
+# settle, and a composite you can look at. Leaving both in place means the
+# agreement stays checkable on the user's own data instead of being asserted.
+MODE_PROJMATCH = "Joint search by projection matching"
 MODE_STITCH = "Stitch manually"
 MODE_AUTOSTITCH = "Stitch automatically"
 
@@ -584,8 +592,8 @@ def denovo3d_tab_ui():
                         ui.input_radio_buttons(
                             "dn_lr_algorithm",
                             "Search algorithm",
-                            ["elasticnet", "gauss", "lasso", "ridge", "lsq"],
-                            selected="elasticnet",
+                            ["gauss", "elasticnet", "lasso", "ridge", "lsq"],
+                            selected="gauss",
                             inline=True,
                         ),
                         (
@@ -607,7 +615,7 @@ def denovo3d_tab_ui():
                         ui.input_radio_buttons(
                             "dn_rec_algorithm",
                             "Reconstruction algorithm",
-                            ["elasticnet", "gauss", "lasso", "ridge", "lsq"],
+                            ["gauss", "elasticnet", "lasso", "ridge", "lsq"],
                             selected="elasticnet",
                             inline=True,
                         ),
@@ -747,14 +755,22 @@ def denovo3d_tab_ui():
                 style="display: flex; flex-direction: column; align-items: flex-start;"
                 " width: fit-content; gap: 10px; margin-bottom: 0",
             ),
-            # Transform controls and their buttons share a column so the
-            # buttons sit directly beneath the card rather than at the far
-            # left of the page.
+            # Transform controls and their buttons share a row: the buttons
+            # sit to the right of whichever card is showing rather than under
+            # it, which keeps them beside the sliders they act on instead of
+            # pushing the next control further down an already tall card. The
+            # two card outputs are mutually exclusive by mode, so nesting them
+            # in a column here means the buttons land beside either one.
             ui.div(
-                ui.output_ui("dn_joint_per_image_transform_ui"),
-                ui.output_ui("dn_generate_image_transformation_single"),
+                ui.div(
+                    ui.output_ui("dn_joint_per_image_transform_ui"),
+                    ui.output_ui("dn_generate_image_transformation_single"),
+                    style="display: flex; flex-direction: column;"
+                    " align-items: flex-start; gap: 6px;",
+                ),
                 ui.output_ui("dn_transform_buttons_ui"),
-                style="display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 0",
+                style="display: flex; flex-direction: row; align-items: flex-start;"
+                " gap: 10px; margin-bottom: 0",
             ),
             # Its own column to the right of the transform card, so the two
             # sets of controls read as separate things rather than one stack.
@@ -779,19 +795,12 @@ def denovo3d_tab_ui():
             ),
             ui.output_ui("dn_twist_card"),
             ui.output_ui("dn_rise_card"),
-            ui.card(
-                ui.card_header("Csym"),
-                ui.input_numeric(
-                    "dn_csym",
-                    "n",
-                    value=1,
-                    min=1,
-                    step=1,
-                    width="70px",
-                    update_on="blur",
-                ),
-                style="height: 115px",
-            ),
+            # Server-rendered like its two neighbours, not static. Built into
+            # the page directly it shipped with the initial HTML while the
+            # twist and rise cards were still waiting on the websocket, so on
+            # every load the Csym card appeared on its own for a moment before
+            # the row it belongs to filled in around it.
+            ui.output_ui("dn_csym_card"),
             ui.output_ui("dn_show_run_button"),
             ui.panel_conditional(
                 "input['dn_twist_min']!==input['dn_twist_max'] || input['dn_rise_min']!==input['dn_rise_max']",
@@ -886,6 +895,11 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     # manual card carries flips: without them a transferred state would still
     # not reproduce the composite.
     autostitch_transforms = reactive.value([])
+
+    # (twist, rise) -> the composite of every image at the placement that twist
+    # implies, produced by the projection-matching route and shown beside the
+    # per-image reconstructions. Empty on every other route.
+    projmatch_composites = reactive.value({})
 
     @reactive.calc
     def transformed_gallery_title():
@@ -1619,6 +1633,15 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         """True when the automatic stitch route owns the display."""
         return len(selected_images_original()) > 1 and _multi_mode() == MODE_AUTOSTITCH
 
+    def _projmatch_active():
+        """True when the projection-matching search route is chosen.
+
+        It solves the same per-image tasks as the plain joint search -- so the
+        per-image views are unchanged -- and then re-ranks the twists by fitting
+        one volume to all the images at once, each at its own azimuth.
+        """
+        return len(selected_images_original()) > 1 and _multi_mode() == MODE_PROJMATCH
+
     @render.ui
     @reactive.event(selected_images_original)
     def dn_multi_mode_ui():
@@ -1637,7 +1660,40 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             ui.input_radio_buttons(
                 "dn_multi_mode",
                 "Multiple images selected — what to do with them:",
-                choices=[MODE_JOINT, MODE_AUTOSTITCH, MODE_STITCH],
+                # Labels carry their own tooltip. The four routes do quite
+                # different things to the same selection and the names alone do
+                # not say which, least of all what the two joint searches cost
+                # relative to each other.
+                choices={
+                    MODE_JOINT: ui.tooltip(
+                        ui.span(MODE_JOINT),
+                        "Score every twist against each image separately, then"
+                        " combine the score curves. Fast, and the method the"
+                        " published measurements were made with.",
+                    ),
+                    MODE_PROJMATCH: ui.tooltip(
+                        ui.span(MODE_PROJMATCH),
+                        "Score every twist by fitting ONE reconstruction to all"
+                        " the images at once, each placed at its own azimuth."
+                        " Several times slower, and it also draws the images"
+                        " composited at the positions each twist implies. On"
+                        " the data measured so far it agrees with the plain"
+                        " joint search.",
+                    ),
+                    MODE_AUTOSTITCH: ui.tooltip(
+                        ui.span(MODE_AUTOSTITCH),
+                        "Register the images to each other by correlation and"
+                        " combine them into one longer image, which covers more"
+                        " of the helical pitch than any single class does.",
+                    ),
+                    MODE_STITCH: ui.tooltip(
+                        ui.span(MODE_STITCH),
+                        "Place each image by hand -- rotation, shift and flip"
+                        " per image -- then combine them. An automatic stitch,"
+                        " or a joint search, can hand its layout over as the"
+                        " starting point.",
+                    ),
+                },
                 selected=_multi_mode(),
                 inline=True,
             ),
@@ -1654,15 +1710,26 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         """
         if not len(selected_images_thresholded()):
             return ui.div()
-        return ui.layout_columns(
+        # Hidden on the manual stitch route until something has been stitched.
+        # Until then each image is placed by its own card, and these two act on
+        # the shared transform -- so before a composite exists there is nothing
+        # for them to auto-transform or reset, and offering them only invites a
+        # click that appears to do nothing. Once the stitch has collapsed the
+        # selection into one image they apply to it, and come back.
+        if _stitching_active() and not len(stitched_image_displayed()):
+            return ui.div()
+        # Stacked, not side by side: they now sit in a narrow column beside the
+        # transform card, where two buttons in a row would either overflow it
+        # or squeeze their labels onto two lines each.
+        return ui.div(
             ui.input_action_button(
                 "dn_auto_transform", label="Auto Transform", class_="btn-primary"
             ),
             ui.input_action_button(
                 "dn_reset_transform", label="Reset Transform", class_="btn-primary"
             ),
-            col_widths=6,
-            style="max-width: 420px; margin-top: 4px;",
+            style="display: flex; flex-direction: column; gap: 6px;"
+            " width: 160px; flex: 0 0 auto; margin-top: 4px;",
         )
 
     # ── Render: main area galleries ──────────────────────────────────
@@ -1703,6 +1770,9 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         """
         if not _stitching_active():
             return ui.div()
+        # No button for seeding the layout from a search: a projection-matching
+        # search already places every image, and hands that layout over on its
+        # own, exactly as the automatic stitcher does with its own.
         return ui.input_action_button(
             "dn_perform_stitching",
             label="Stitch Images",
@@ -2066,6 +2136,23 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 for i, label in enumerate(labels)
             ],
             style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 0;",
+        )
+
+    @render.ui
+    def dn_csym_card():
+        """Csym, rendered server-side so it arrives with twist and rise."""
+        return ui.card(
+            ui.card_header("Csym"),
+            ui.input_numeric(
+                "dn_csym",
+                "n",
+                value=1,
+                min=1,
+                step=1,
+                width="70px",
+                update_on="blur",
+            ),
+            style="height: 115px",
         )
 
     @render.ui
@@ -3463,6 +3550,10 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         )
 
         abort_flag[0] = False
+        # Everything the task needs is read here, on this side of the boundary.
+        # An extended task may not read reactive sources at all -- doing so
+        # raises, the run dies inside the catch-all below, and the only symptom
+        # is a search that produces nothing.
         _reconstruction_task(
             tasks,
             n_cpu,
@@ -3470,11 +3561,24 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             len(images),
             display_model,
             input.dn_top_n_results(),
+            _projmatch_active(),
+            input.dn_lr_algorithm(),
+            list(images),
+            input.dn_rec_algorithm(),
         )
 
     @reactive.extended_task
     async def _reconstruction_task(
-        tasks, cpu, abort_ref, n_images=1, display_model=None, top_n=1
+        tasks,
+        cpu,
+        abort_ref,
+        n_images=1,
+        display_model=None,
+        top_n=1,
+        projmatch=False,
+        lr_algorithm="elasticnet",
+        images=None,
+        rec_algorithm=None,
     ):
         log = _denovo3d_logger()
 
@@ -3541,7 +3645,110 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 log.info(
                     f"{n_discarded}/{len(tasks)} results are None and thus discarded"
                 )
-            ranked = _rank(results, n_images, log)
+
+            async def _rank_final(results, log=None):
+                """Rank, by whichever joint method the route asks for.
+
+                Used everywhere a *final* ranking is produced -- including after
+                the display re-solve, which otherwise re-ranked with the plain
+                joint method and silently undid the projection-matching order.
+                The interim rankings inside the solve loop deliberately stay on
+                the cheap method: projection matching costs a refinement per
+                twist, which is worth paying once, not on every progress update.
+
+                Run in a worker thread, for the same reason the solve above is:
+                it takes minutes, and called straight from this coroutine it
+                blocked the event loop for all of them. Nothing was serviced
+                while it ran -- no progress, no other effects -- and a session
+                left unattended that long can lose its connection, after which
+                the *next* run looks stuck whichever route it uses.
+                """
+                from concurrent.futures import ThreadPoolExecutor
+
+                ranked = _rank(results, n_images, log)
+                if not (projmatch and n_images > 1 and images and not abort_ref[0]):
+                    projmatch_composites.set({})
+                    return ranked
+
+                # The per-image results are kept exactly as solved, so the
+                # per-image views are identical on both joint routes and only
+                # the ordering -- and the composite -- differ.
+                seen = dict(i=0, n=0, twist=0.0)
+
+                def _on_pair(i, n, twist):
+                    seen.update(i=i, n=n, twist=twist)
+                    return not abort_ref[0]
+
+                def _work():
+                    return denovo3d_joint.rank_by_projection_matching(
+                        results,
+                        images,
+                        algorithm=dict(model=lr_algorithm),
+                        display_algorithm=(
+                            dict(model=rec_algorithm)
+                            if rec_algorithm and rec_algorithm != lr_algorithm
+                            else None
+                        ),
+                        log=log,
+                        progress=_on_pair,
+                    )
+
+                loop = asyncio.get_running_loop()
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = loop.run_in_executor(pool, _work)
+                    with ui.Progress(min=0, max=1) as pm:
+                        pm.set(0, message="Matching projections across images")
+                        while not future.done():
+                            await asyncio.sleep(0.1)
+                            if seen["n"]:
+                                pm.set(
+                                    seen["i"] / seen["n"],
+                                    message="Matching projections across images",
+                                    detail=f"twist {seen['twist']:.3f}"
+                                    f" ({seen['i'] + 1}/{seen['n']})",
+                                )
+                        matched, composites = await future
+
+                if abort_ref[0]:
+                    projmatch_composites.set({})
+                    return ranked
+                projmatch_composites.set(composites)
+
+                # Hand the winning twist's placements to the manual stitch, the
+                # same way the automatic stitcher hands over its own layout. An
+                # azimuth is an axial position, so the search has already
+                # worked out where every image sits; making the user press a
+                # button to have that computed again -- which is what this used
+                # to do -- was redundant twice over, since the answer was
+                # already in hand.
+                best = matched[0][2] if matched else None
+                found = (
+                    composites.get((round(float(best[5]), 6), round(float(best[6]), 6)))
+                    if best is not None
+                    else None
+                )
+                if found and found.get("placed") is not None:
+                    try:
+                        autostitch_transforms.set(
+                            denovo3d_joint.placements_as_transforms(
+                                found["phis"],
+                                found["placed"],
+                                found["twist"],
+                                found["rise"],
+                                found["apix2d"],
+                                int(np.shape(images[0])[1]),
+                                two_fold=found["two_fold"],
+                            )
+                        )
+                    except Exception:  # pragma: no cover - a layout is a bonus
+                        logger.warning(
+                            "could not express the placements as a manual"
+                            " stitch layout:\n%s",
+                            traceback.format_exc(),
+                        )
+                return matched
+
+            ranked = await _rank_final(results, log)
             reconstruction_results_raw.set(list(results))
             reconstruction_results.set(ranked)
 
@@ -3550,9 +3757,24 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
                 )
                 reconstruction_results_raw.set(list(results))
-                reconstruction_results.set(_rank(results, n_images, log))
+                reconstruction_results.set(await _rank_final(results, log))
         except Exception:
             log.error("Reconstruction task failed:\n%s", traceback.format_exc())
+            # Say so on screen. Swallowed silently, a failure here is
+            # indistinguishable from a slow run: the progress bar goes, no
+            # results appear, and the app looks hung rather than broken. That
+            # is exactly how a RuntimeError raised inside this task -- for
+            # reading a reactive source, which an extended task may not do --
+            # presented itself.
+            try:
+                ui.notification_show(
+                    "The search failed. See helicon.denovo3D.log under"
+                    f" {helicon.cache_dir / 'logs'} for the details.",
+                    type="error",
+                    duration=15,
+                )
+            except Exception:  # pragma: no cover - no session to notify
+                pass
 
     async def _redraw_with(
         tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
@@ -3661,6 +3883,32 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             ordered += [v for k, v in group.items() if k not in image_order]
             if not ordered:
                 ordered = [ranked_result]
+
+            # The whole-set views come first, before this twist's per-image
+            # rows: every selected image laid onto one canvas at the axial
+            # position its azimuth implies, and directly beneath it the long
+            # side projection of the volume that placement produced. They share
+            # a canvas -- one period plus an image width -- so they line up
+            # column for column and can be read against each other.
+            #
+            # A picture, not a score. Measured, the composite's contrast peaks
+            # at a different twist from the fit (see placement_composite), so
+            # take the ranking from the score and this from the eye.
+            pictures = projmatch_composites().get(pair) or {}
+            twist_val, rise_val = pair
+            stamp = f"|twist={round(twist_val, 3)}deg|rise={round(rise_val, 6)}A"
+            composite = pictures.get("composite")
+            model = pictures.get("model")
+            if composite is not None and np.size(composite):
+                labels.append(f"{ri+1}: all {len(ordered)} images placed{stamp}")
+                images.append(np.asarray(composite, dtype=np.float32))
+            if model is not None and np.size(model):
+                labels.append(f"{ri+1}: model projection{stamp}")
+                images.append(np.asarray(model, dtype=np.float32))
+            zview = pictures.get("zview")
+            if zview is not None and np.size(zview):
+                labels.append(f"{ri+1}: model Z{stamp}")
+                images.append(np.asarray(zview, dtype=np.float32))
 
             for result in ordered:
                 (
