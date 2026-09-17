@@ -203,6 +203,35 @@ algebra in ``gauss_mixture``; that truncating the axial sum too tightly lets the
 normalised score exceed one; and that building the Gram by rasterising the basis
 for BLAS is about ten times slower than the analytic pair sum.
 
+Carried over from the free-anisotropic experiment
+------------------------------------------------
+A sibling solver gave every Gaussian a full free covariance and fitted it by
+gradient descent. It is not in this tree, and its real-data verdict -- that it
+"does not work", that the score curve is intrinsically flat -- was **retracted
+by its own author**: every one of those measurements was taken under the
+support bug described above, which is enough to void them. Nobody should cite
+that verdict, and nobody should assume the approach was fairly tried. It was
+not; it was abandoned mid-measurement.
+
+Three things it established do carry over, because they were not measured that
+way:
+
+* Modelling the sub-symmetry -- fitting ``(n*twist, n*rise)`` instead of
+  ``(twist, rise)`` -- constrains the twist only **modulo 360/n**, so a search
+  range wider than that is ambiguous by construction. This is arithmetic and
+  holds regardless of solver. The saving is roughly n-squared, since both the
+  copy count and the truncation width shrink with n.
+* The axial truncation width must be **capped**, and must never be derived from
+  a quantity the optimiser itself controls. Left free, the optimiser elongates
+  Gaussians out of the truncation to inflate the score -- the cosine-above-one
+  tripwire that :func:`gram_matrix` documents -- and, worse, the allocation size
+  ends up chosen by gradient descent, which once exhausted the machine's memory.
+  This solver is safe by construction, its sigmas being fixed, but anything that
+  fits shapes rather than only amplitudes has to re-establish it.
+* On synthetic data, with the truth inside the model class, a free anisotropic
+  basis recovers a known twist exactly. Whatever defeats it on real images is
+  therefore about representability, not about the optimiser.
+
 Selectable in the tab as the "gauss" search algorithm. The tab offers a
 separate reconstruction algorithm, which should stay on elasticnet for the
 reason above.
