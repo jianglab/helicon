@@ -486,3 +486,54 @@ class TestEverythingUsesTheOneCacheRoot:
             if "cache_dir=str(helicon.cache_dir)" in text:
                 bare.append(path.name)
         assert not bare, f"cache the root directly: {bare}"
+
+
+class TestDamagedCacheEntries:
+    """A cache entry that cannot be read must not take the caller down with it.
+
+    ``joblib.memory.expires_after`` indexes ``metadata["time"]`` directly, so a
+    metadata.json that was truncated -- by a disk filling mid-write, or by
+    eviction running alongside a write -- raised KeyError out of the cached
+    call. Observed killing nine tasks of a sixty-task denovo3D search.
+    """
+
+    def _validate(self, seconds=3600):
+        import joblib
+
+        return cache_mod._tolerate_unreadable_metadata(
+            joblib.memory.expires_after(seconds=seconds)
+        )
+
+    def test_metadata_without_a_time_is_a_miss(self):
+        assert self._validate()({}) is False
+
+    def test_metadata_of_the_wrong_shape_is_a_miss(self):
+        for junk in (None, "not a dict", [1, 2, 3], {"time": "yesterday"}):
+            assert self._validate()(junk) is False
+
+    def test_a_fresh_entry_is_still_valid(self):
+        assert self._validate()({"time": time.time()}) is True
+
+    def test_an_expired_entry_is_still_expired(self):
+        assert self._validate(seconds=1)({"time": time.time() - 10}) is False
+
+    def test_a_damaged_entry_is_recomputed_rather_than_raising(self, tmp_path):
+        """End to end: damage the metadata of a real cached call and make sure
+        the next call returns a value instead of raising."""
+        calls = []
+
+        @cache_mod.cache(cache_dir=str(tmp_path), expires_after=7, verbose=0)
+        def add(a, b):
+            calls.append((a, b))
+            return a + b
+
+        assert add(2, 3) == 5
+        assert len(calls) == 1
+        add(2, 3)
+        assert len(calls) == 1  # served from cache
+
+        for meta in tmp_path.rglob("metadata.json"):
+            meta.write_text("{}")  # what a truncated write leaves behind
+
+        assert add(2, 3) == 5  # recomputed, not raised
+        assert len(calls) == 2

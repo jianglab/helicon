@@ -201,6 +201,35 @@ def set_cache_dir_limit(cache_dir: Any, bytes_limit: Any) -> None:
         _prune_interval.pop(key, None)
 
 
+def _tolerate_unreadable_metadata(validate: Any) -> Any:
+    """Treat an entry whose metadata cannot be read as a miss, not a crash.
+
+    ``joblib.memory.expires_after`` reads ``metadata["time"]`` outright, so an
+    entry whose ``metadata.json`` is absent, truncated or otherwise unparseable
+    takes down the call that touched it:
+
+        File ".../joblib/memory.py", line 1239, in cache_validation_callback
+            computation_age = time.time() - metadata["time"]
+        KeyError: 'time'
+
+    Which is the wrong response to a damaged cache. The entry is not readable,
+    so the answer is that there is nothing usable here -- recompute and
+    overwrite it -- rather than failing the work the cache was meant to speed
+    up. Observed on the denovo3D cache after the disk filled during a write,
+    where it killed nine tasks of a sixty-task search; eviction running
+    alongside writes can leave the same damage.
+    """
+
+    def validate_or_miss(metadata):
+        try:
+            return validate(metadata)
+        except (KeyError, TypeError, ValueError):
+            logger.debug("unreadable cache metadata; treating as a miss")
+            return False
+
+    return validate_or_miss
+
+
 def _dir_size(cache_dir: Any) -> int:
     """Bytes used by *cache_dir*, symlinks and unreadable entries ignored."""
     total = 0
@@ -382,8 +411,8 @@ def cache(
     if expires_after is None:
         cache_validation_callback = lambda x: True
     else:
-        cache_validation_callback = joblib.memory.expires_after(
-            seconds=expires_after.total_seconds()
+        cache_validation_callback = _tolerate_unreadable_metadata(
+            joblib.memory.expires_after(seconds=expires_after.total_seconds())
         )
 
     if cache_dir is None:
