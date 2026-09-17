@@ -9,9 +9,13 @@ src/helicon/__pycache__/
 src/helicon/lib/__pycache__/
 src/helicon/webApps/whereIsMyClass/__pycache__/
 tests/__pycache__/
-Icon_
-Icon
-Icon
+# macOS writes a custom-folder icon into a file literally named "Icon"
+# followed by a carriage return. A bare "Icon" pattern does not match it,
+# and neither does the usual "Icon" + two carriage returns trick, because
+# this file has CRLF line endings and git eats the trailing CR as the
+# terminator. A control-character class sidesteps line endings entirely,
+# and unlike "Icon?" it does not also swallow Icons/ or Icon1.
+Icon[[:cntrl:]]
 .syncthing.*
 temp/
 .DS_Store
@@ -20,7 +24,6 @@ temp/
 dist/
 __pycache__
 ~syncthing*
-Icon
 denoised/
 *.so
 *.pyc
