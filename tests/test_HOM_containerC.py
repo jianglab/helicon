@@ -1,4 +1,11 @@
 import pytest
+
+# helicon.commands.HOM_containerC reaches pytz, which is not a declared
+# dependency of the project. Skip rather than fail collection where it is
+# absent: a collection error takes the whole run down with it, so one missing
+# optional package hid every other test in the suite.
+pytest.importorskip("pytz")
+
 import argparse
 import sys
 import os

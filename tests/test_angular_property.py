@@ -5,7 +5,14 @@ and range invariants for angle-wrapping functions.
 """
 
 import math
+
 import numpy as np
+import pytest
+
+# hypothesis drives these property tests and is not a declared dependency, so
+# skip rather than fail collection where it is absent.
+pytest.importorskip("hypothesis")
+
 from hypothesis import given, settings, strategies as st
 from helicon.lib.angular import (
     euler_relion2eman,
