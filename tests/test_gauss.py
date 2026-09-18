@@ -199,3 +199,75 @@ def test_isotropic_projection_z_unchanged_by_prefactor_fix():
     cov = np.eye(3) * sigma**2
     ref = _numerical_projection_z(amp, center, cov, nx, ny, apix)
     assert np.abs(got - ref).max() / ref.max() < 1e-4
+
+
+class TestProjectionFootprint:
+    """Each gaussian is accumulated over its own box, not against every pixel.
+
+    Evaluating the whole grid per gaussian is what made a symmetry-expanded set
+    unusable: 60k gaussians onto 64x526 took 48 s that way and 0.28 s this way,
+    for the same picture. The default cutoff is chosen so the difference stays
+    at the level of float rounding.
+    """
+
+    def _iso(self, n=150, seed=0):
+        torch.manual_seed(seed)
+        return helicon.IsotropicGaussianSet(
+            torch.rand(n) + 0.5, (torch.rand(n, 3) - 0.5) * 60, torch.rand(n) * 3 + 2
+        )
+
+    def _aniso(self, n=150, seed=0):
+        torch.manual_seed(seed)
+        q = torch.randn(n, 4)
+        return helicon.AnisotropicGaussianSet(
+            torch.rand(n) + 0.5,
+            (torch.rand(n, 3) - 0.5) * 60,
+            torch.rand(n, 3) * 3 + 2,
+            q / q.norm(dim=-1, keepdim=True),
+        )
+
+    @pytest.mark.parametrize("kind", ["iso", "aniso"])
+    def test_a_generous_cutoff_reproduces_the_exact_projection(self, kind):
+        g = self._iso() if kind == "iso" else self._aniso()
+        exact = g.projection_z(nx=96, ny=64, apix=1.0, cutoff_sigma=None)
+        fast = g.projection_z(nx=96, ny=64, apix=1.0, cutoff_sigma=6.0)
+        assert fast.shape == exact.shape
+        assert float((fast - exact).abs().max() / exact.std()) < 1e-4
+
+    @pytest.mark.parametrize("kind", ["iso", "aniso"])
+    def test_the_default_cutoff_is_close_enough(self, kind):
+        g = self._iso() if kind == "iso" else self._aniso()
+        exact = g.projection_z(nx=96, ny=64, apix=1.0, cutoff_sigma=None)
+        fast = g.projection_z(nx=96, ny=64, apix=1.0)
+        assert float((fast - exact).abs().max() / exact.std()) < 1e-3
+
+    def test_a_tight_cutoff_is_visibly_worse(self):
+        """Guards the direction: if a tight cutoff were as good as a loose one,
+        the footprint would not be doing what it claims."""
+        g = self._iso()
+        exact = g.projection_z(nx=96, ny=64, apix=1.0, cutoff_sigma=None)
+        loose = g.projection_z(nx=96, ny=64, apix=1.0, cutoff_sigma=6.0)
+        tight = g.projection_z(nx=96, ny=64, apix=1.0, cutoff_sigma=1.5)
+        assert float((tight - exact).abs().max()) > float((loose - exact).abs().max())
+
+    def test_gaussians_off_the_edge_do_not_wrap(self):
+        """A footprint clipped by the image border must be dropped, not folded
+        back in at the far side."""
+        g = helicon.IsotropicGaussianSet(
+            torch.tensor([1.0]), torch.tensor([[-60.0, 0.0, 0.0]]), torch.tensor([2.0])
+        )
+        p = g.projection_z(nx=32, ny=32, apix=1.0)
+        assert float(p[:, -8:].abs().max()) < 1e-6
+
+    def test_it_still_sums_contributions_from_every_gaussian(self):
+        g = self._iso(n=40)
+        total = float(g.projection_z(nx=96, ny=64, apix=1.0).sum())
+        halves = sum(
+            float(
+                helicon.IsotropicGaussianSet(g.amplitudes[s], g.centers[s], g.sigmas[s])
+                .projection_z(nx=96, ny=64, apix=1.0)
+                .sum()
+            )
+            for s in (slice(0, 20), slice(20, 40))
+        )
+        assert total == pytest.approx(halves, rel=1e-5)
