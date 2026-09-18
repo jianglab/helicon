@@ -97,13 +97,24 @@ def _apply_helical_symmetry_jit(
     nz0, ny0, nx0 = data.shape
     if new_size != data.shape:
         nz1, ny1, nx1 = new_size
-        nz2, ny2, nx2 = max(nz0, nz1), max(ny0, ny1), max(nx0, nx1)
-        data_work = np.zeros((nz2, ny2, nx2), dtype=np.float32)
     else:
-        data_work = np.zeros((nz0, ny0, nx0), dtype=np.float32)
+        nz1, ny1, nx1 = nz0, ny0, nx0
 
-    nz, ny, nx = data_work.shape
-    w = np.zeros((nz, ny, nx), dtype=np.float32)
+    # Allocated at the OUTPUT size, not at the element-wise maximum of input and
+    # output. A helical output is long and narrow where the input is cubic, so
+    # that maximum is bigger than either: 384^3 in and 1578x128x128 out gave
+    # 1578x384x384, which is 931 MB per buffer and there are two of them, to
+    # produce 103 MB. Everything outside the centre was then computed and thrown
+    # away by the crop that used to end this function -- nine voxels of work for
+    # every one kept.
+    #
+    # The crop was centred, so output index k corresponds to padded index
+    # k + nz//2 - nz1//2, and (k_padded - nz//2) is exactly (k - nz1//2).
+    # Centring on the output size therefore gives the same samples with no crop.
+    data_work = np.zeros((nz1, ny1, nx1), dtype=np.float32)
+    w = np.zeros((nz1, ny1, nx1), dtype=np.float32)
+
+    nz, ny, nx = nz1, ny1, nx1
 
     hsym_max = max(1, int(nz * new_apix / rise_angstrom))
     hsyms = range(-hsym_max, hsym_max + 1)
@@ -173,13 +184,6 @@ def _apply_helical_symmetry_jit(
                         w[k, j, i] += 1.0
     mask = w > 0
     data_work = np.where(mask, data_work / w, data_work)
-    if data_work.shape != new_size:
-        nz1, ny1, nx1 = new_size
-        data_work = data_work[
-            nz // 2 - nz1 // 2 : nz // 2 + nz1 // 2,
-            ny // 2 - ny1 // 2 : ny // 2 + ny1 // 2,
-            nx // 2 - nx1 // 2 : nx // 2 + nx1 // 2,
-        ]
     return data_work
 
 

@@ -972,7 +972,11 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                 detail="This may take a while ...",
             )
             t0 = time()
-            with ThreadPoolExecutor(max_workers=helicon.available_cpu()) as executor:
+            # Sized by memory as well as by cores: each map in flight holds a
+            # volume of its own, so a pool of one-per-core asks for several
+            # gigabytes at once on a many-core machine.
+            n_workers = compute.projection_workers(len(active_maps))
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 futures = {
                     executor.submit(
                         compute.symmetrize_project_align_one_map,

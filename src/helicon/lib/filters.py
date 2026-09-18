@@ -335,41 +335,46 @@ def low_high_pass_filter(
     if data.ndim not in [2, 3]:
         raise ValueError("Input data must be a 2D or 3D array.")
 
-    if data.ndim == 2:
-        fft = np.fft.fft2(data)
-        ny, nx = fft.shape
-        Y, X = np.meshgrid(
-            np.arange(ny, dtype=np.float32) - ny // 2,
-            np.arange(nx, dtype=np.float32) - nx // 2,
-            indexing="ij",
-        )
-        Y /= ny // 2
-        X /= nx // 2
-        R2 = X**2 + Y**2
-    else:  # 3D case
-        fft = np.fft.fftn(data)
-        nz, ny, nx = fft.shape
-        Z, Y, X = np.meshgrid(
-            np.arange(nz, dtype=np.float32) - nz // 2,
-            np.arange(ny, dtype=np.float32) - ny // 2,
-            np.arange(nx, dtype=np.float32) - nx // 2,
-            indexing="ij",
-        )
-        Z /= nz // 2
-        Y /= ny // 2
-        X /= nx // 2
-        R2 = X**2 + Y**2 + Z**2
+    # Real-input FFT, in the precision it was handed, with the radius built by
+    # broadcasting. The straightforward version -- np.fft.fftn, a meshgrid per
+    # axis, np.real of the inverse -- costs about ten times the volume it is
+    # filtering, which on a 384^3 map measured 2.4 GB for a 226 MB input:
+    #
+    #   * numpy's FFT always promotes to complex128, so the spectrum alone was
+    #     four times the float32 input; scipy's keeps single precision single;
+    #   * only half the spectrum is needed for real input, so rfftn halves it
+    #     again;
+    #   * three full meshgrid arrays were built to make one radius; broadcasting
+    #     three 1-D axes costs nothing;
+    #   * and np.real() returns a VIEW, so the whole complex buffer stayed alive
+    #     behind the result, which was also handed downstream with a stride of
+    #     two -- slow for anything that walks it.
+    #
+    # Same filter, same output to within float32 rounding.
+    from scipy import fft as _fft
+
+    real_dtype = np.float32 if data.dtype == np.float32 else np.float64
+    work = np.asarray(data, dtype=real_dtype)
+
+    spectrum = _fft.rfftn(work)
+    axes_k = [(np.fft.fftfreq(n).astype(real_dtype) * 2.0) for n in work.shape[:-1]]
+    axes_k.append(np.fft.rfftfreq(work.shape[-1]).astype(real_dtype) * 2.0)
+
+    R2 = None
+    for axis, k in enumerate(axes_k):
+        shape = [1] * work.ndim
+        shape[axis] = k.size
+        term = (k * k).reshape(shape)
+        R2 = term if R2 is None else R2 + term
 
     if 0 < low_pass_fraction < 1:
         f2 = np.log(2) / (low_pass_fraction**2)
-        filter_lp = np.exp(-f2 * R2)
-        fft *= np.fft.fftshift(filter_lp)
+        spectrum *= np.exp(-f2 * R2)
     if 0 < high_pass_fraction < 1:
         f2 = np.log(2) / (high_pass_fraction**2)
-        filter_hp = 1.0 - np.exp(-f2 * R2)
-        fft *= np.fft.fftshift(filter_hp)
-    ret = np.real(np.fft.ifftn(fft))
-    return ret
+        spectrum *= 1.0 - np.exp(-f2 * R2)
+
+    return _fft.irfftn(spectrum, s=work.shape)
 
 
 def down_scale(data: np.ndarray, target_apix: float, apix_orig: float) -> np.ndarray:
