@@ -46,6 +46,12 @@ curvelet_fdct = ['curvepy-fdct>=1.0']
 
 curvelet_udct = ['curvelets']
 
+# The torch-backed Gaussian representation in helicon.lib.gauss and the free
+# anisotropic solver that uses it. Optional because torch has no Intel-mac
+# wheels for the Python versions this project supports; helicon imports without
+# it and simply does not expose those names.
+gauss = ['torch']
+
 all = [
     "helicon[shiny]",
     "helicon[streamlit]",
