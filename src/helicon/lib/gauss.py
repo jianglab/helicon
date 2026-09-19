@@ -389,12 +389,65 @@ class AnisotropicGaussianSet:
         """
         if cutoff_sigma is None:
             return self._projection_z_exact(nx, ny, apix, batch_size)
+        return self._projection_2d(
+            row_axis=1,
+            col_axis=0,
+            n_rows=ny,
+            n_cols=nx,
+            apix=apix,
+            batch_size=batch_size,
+            cutoff_sigma=cutoff_sigma,
+        )
 
+    def projection_x(
+        self,
+        nz: int,
+        ny: int,
+        apix: float,
+        batch_size: int = 10_000,
+        cutoff_sigma: float = 4.0,
+    ):
+        """Project along x onto an ``ny`` by ``nz`` grid: the side view.
+
+        This is the gaussian counterpart of ``volume.sum(axis=2).T`` on a
+        volume shaped ``(nz, ny, nx)``, and it follows helicon's convention
+        that the helical axis is z in 3D and runs along the columns of a 2D
+        image. Rows are y, across the filament; columns are z, along it.
+        """
+        return self._projection_2d(
+            row_axis=1,
+            col_axis=2,
+            n_rows=ny,
+            n_cols=nz,
+            apix=apix,
+            batch_size=batch_size,
+            cutoff_sigma=cutoff_sigma,
+        )
+
+    def _projection_2d(
+        self,
+        row_axis: int,
+        col_axis: int,
+        n_rows: int,
+        n_cols: int,
+        apix: float,
+        batch_size: int,
+        cutoff_sigma: float,
+    ):
+        """Marginalise over the remaining axis and render the two that are left.
+
+        Integrating one axis out of a 3D gaussian leaves a 2D gaussian whose
+        covariance is the corresponding sub-block, with the integrated axis
+        contributing only a prefactor -- the Schur complement
+        ``det(cov_3d) / det(cov_2d)``, which is that axis's conditional
+        variance.
+        """
         rot = quaternion_to_rotation_matrix(self.quaternions)
         cov_3d = torch.bmm(
             rot, torch.bmm(torch.diag_embed(self.sigmas**2), rot.transpose(1, 2))
         )
-        cov_2d = cov_3d[:, :2, :2]
+        keep = torch.tensor([row_axis, col_axis], device=self.device)
+        cov_2d = cov_3d[:, keep][:, :, keep]
         inv_2d = torch.inverse(cov_2d)
         schur = torch.det(cov_3d) / torch.det(cov_2d).clamp_min(1e-12)
         scale = self.amplitudes * torch.sqrt((2 * torch.pi) * schur) / apix
@@ -402,32 +455,34 @@ class AnisotropicGaussianSet:
         # pixel coordinates of the centres, and a box big enough for the widest
         # gaussian along each axis (the marginal sigma is the sqrt of the
         # diagonal, which bounds the rotated extent)
-        cx = self.centers[:, 0] / apix + nx // 2
-        cy = self.centers[:, 1] / apix + ny // 2
+        cx = self.centers[:, col_axis] / apix + n_cols // 2
+        cy = self.centers[:, row_axis] / apix + n_rows // 2
         half_x = int(
-            torch.ceil(cutoff_sigma * cov_2d[:, 0, 0].clamp_min(0).sqrt().max() / apix)
+            torch.ceil(cutoff_sigma * cov_2d[:, 1, 1].clamp_min(0).sqrt().max() / apix)
         )
         half_y = int(
-            torch.ceil(cutoff_sigma * cov_2d[:, 1, 1].clamp_min(0).sqrt().max() / apix)
+            torch.ceil(cutoff_sigma * cov_2d[:, 0, 0].clamp_min(0).sqrt().max() / apix)
         )
         half_x = max(half_x, 1)
         half_y = max(half_y, 1)
 
-        proj = torch.zeros(ny * nx, dtype=torch.float32, device=self.device)
+        proj = torch.zeros(n_rows * n_cols, dtype=torch.float32, device=self.device)
 
         def quad(sel, dy, dx):
             ax = dx * apix
             ay = dy * apix
             ic = inv_2d[sel]
             q = (
-                ic[:, 0, 0].unsqueeze(1) * ax * ax
+                ic[:, 1, 1].unsqueeze(1) * ax * ax
                 + (ic[:, 0, 1] + ic[:, 1, 0]).unsqueeze(1) * ax * ay
-                + ic[:, 1, 1].unsqueeze(1) * ay * ay
+                + ic[:, 0, 0].unsqueeze(1) * ay * ay
             )
             return scale[sel].unsqueeze(1) * torch.exp(-0.5 * q)
 
-        _accumulate_footprints(proj, ny, nx, cy, cx, half_y, half_x, quad, batch_size)
-        return proj.reshape(ny, nx)
+        _accumulate_footprints(
+            proj, n_rows, n_cols, cy, cx, half_y, half_x, quad, batch_size
+        )
+        return proj.reshape(n_rows, n_cols)
 
     def _projection_z_exact(
         self, nx: int, ny: int, apix: float, batch_size: int = 10_000
@@ -693,9 +748,41 @@ class IsotropicGaussianSet:
         """
         if cutoff_sigma is None:
             return self._projection_z_exact(nx, ny, apix, batch_size)
+        return self._projection_2d(1, 0, ny, nx, apix, batch_size, cutoff_sigma)
 
-        cx = self.centers[:, 0] / apix + nx // 2
-        cy = self.centers[:, 1] / apix + ny // 2
+    def projection_x(
+        self,
+        nz: int,
+        ny: int,
+        apix: float,
+        batch_size: int = 10_000,
+        cutoff_sigma: float = 4.0,
+    ):
+        """Project along x onto an ``ny`` by ``nz`` grid: the side view.
+
+        The counterpart of ``volume.sum(axis=2).T``, following helicon's
+        convention that the helical axis is z in 3D and runs along the columns
+        of a 2D image.
+        """
+        return self._projection_2d(1, 2, ny, nz, apix, batch_size, cutoff_sigma)
+
+    def _projection_2d(
+        self,
+        row_axis: int,
+        col_axis: int,
+        n_rows: int,
+        n_cols: int,
+        apix: float,
+        batch_size: int,
+        cutoff_sigma: float,
+    ):
+        """Render two axes of an isotropic set, marginalising over the third.
+
+        Isotropy makes the marginal trivial: the surviving 2D gaussian has the
+        same sigma, and the integrated axis contributes ``sqrt(2 pi) * sigma``.
+        """
+        cx = self.centers[:, col_axis] / apix + n_cols // 2
+        cy = self.centers[:, row_axis] / apix + n_rows // 2
         half = max(1, int(torch.ceil(cutoff_sigma * self.sigmas.max() / apix)))
         scale = (
             self.amplitudes
@@ -703,14 +790,16 @@ class IsotropicGaussianSet:
             * self.sigmas
             / apix
         )
-        proj = torch.zeros(ny * nx, dtype=torch.float32, device=self.device)
+        proj = torch.zeros(n_rows * n_cols, dtype=torch.float32, device=self.device)
 
         def quad(sel, dy, dx):
             s2 = (self.sigmas[sel] / apix).unsqueeze(1) ** 2
             return scale[sel].unsqueeze(1) * torch.exp(-0.5 * (dx * dx + dy * dy) / s2)
 
-        _accumulate_footprints(proj, ny, nx, cy, cx, half, half, quad, batch_size)
-        return proj.reshape(ny, nx)
+        _accumulate_footprints(
+            proj, n_rows, n_cols, cy, cx, half, half, quad, batch_size
+        )
+        return proj.reshape(n_rows, n_cols)
 
     def _projection_z_exact(
         self, nx: int, ny: int, apix: float, batch_size: int = 10_000

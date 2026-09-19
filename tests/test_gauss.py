@@ -271,3 +271,65 @@ class TestProjectionFootprint:
             for s in (slice(0, 20), slice(20, 40))
         )
         assert total == pytest.approx(halves, rel=1e-5)
+
+
+class TestProjectionX:
+    """``projection_x`` is the side view: the gaussian form of the volume path.
+
+    The helicalProjection search builds its reference as
+    ``volume.sum(axis=2).T`` on a volume shaped ``(nz, ny, nx)``, so anything
+    that replaces that volume has to produce the same picture -- rows across
+    the filament, columns along it. A transposed or mirrored projection would
+    still align against a query and would quietly rank every map wrongly, so
+    this is pinned against the sampled volume rather than against itself.
+    """
+
+    def _aniso(self, n=40, seed=3):
+        torch.manual_seed(seed)
+        q = torch.randn(n, 4)
+        return helicon.AnisotropicGaussianSet(
+            torch.rand(n) + 0.5,
+            (torch.rand(n, 3) - 0.5) * 30,
+            torch.rand(n, 3) * 2 + 2,
+            q / q.norm(dim=-1, keepdim=True),
+        )
+
+    def _iso(self, n=40, seed=3):
+        torch.manual_seed(seed)
+        return helicon.IsotropicGaussianSet(
+            torch.rand(n) + 0.5, (torch.rand(n, 3) - 0.5) * 30, torch.rand(n) * 2 + 2
+        )
+
+    @pytest.mark.parametrize("kind", ["iso", "aniso"])
+    def test_it_matches_the_sampled_volume_summed_along_x(self, kind):
+        g = self._iso() if kind == "iso" else self._aniso()
+        n, apix = 64, 1.0
+        vol = g.sample_volume(nx=n, ny=n, nz=n, apix=apix)
+        expected = vol.sum(axis=2).T * apix
+        got = g.projection_x(nz=n, ny=n, apix=apix, cutoff_sigma=6.0)
+        assert got.shape == expected.shape == (n, n)
+        assert float((got - expected).abs().max() / expected.std()) < 5e-3
+
+    @pytest.mark.parametrize("kind", ["iso", "aniso"])
+    def test_projection_z_still_matches_the_volume_summed_along_z(self, kind):
+        # the refactor that added projection_x rewrote projection_z through a
+        # shared helper; this is the equivalent identity for the original axis
+        g = self._iso() if kind == "iso" else self._aniso()
+        n, apix = 64, 1.0
+        vol = g.sample_volume(nx=n, ny=n, nz=n, apix=apix)
+        expected = vol.sum(axis=0) * apix
+        got = g.projection_z(nx=n, ny=n, apix=apix, cutoff_sigma=6.0)
+        assert float((got - expected).abs().max() / expected.std()) < 5e-3
+
+    def test_the_two_axes_disagree_for_an_asymmetric_set(self):
+        # a guard against projection_x silently being projection_z: they must
+        # differ for a set that is not symmetric under swapping x and z
+        torch.manual_seed(5)
+        g = helicon.IsotropicGaussianSet(
+            torch.tensor([1.0, 1.0]),
+            torch.tensor([[10.0, 0.0, 0.0], [0.0, 0.0, -12.0]]),
+            torch.tensor([3.0, 3.0]),
+        )
+        pz = g.projection_z(nx=64, ny=64, apix=1.0)
+        px = g.projection_x(nz=64, ny=64, apix=1.0)
+        assert float((pz - px).abs().max()) > 0.1 * float(pz.abs().max())
