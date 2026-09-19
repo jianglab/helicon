@@ -78,9 +78,9 @@ def handle(
             new_nz=nz,
             new_nxy=nx,
         )
-        _, param_dict = helicon.parse_param_str(param)
+        _, user_param = helicon.parse_param_str(param)
         param_dict, param_changed, param_unsuppported = helicon.validate_param_dict(
-            param=param_dict, param_ref=param_dict_default
+            param=user_param, param_ref=param_dict_default
         )
         if len(param_unsuppported):
             logger.warning("ignoring unknown parameters: %s", param_unsuppported)
@@ -95,7 +95,15 @@ def handle(
             raise HeliconError("\\tcsym (>0) must be specified")
         new_apix = float(param_dict.get("new_apix", apix))
         new_nz = int(param_dict["new_nz"])
-        new_nxy = int(param_dict["new_nxy"])
+        # ``new_nxy`` asks for a square transverse plane, so it may only be
+        # imposed when it was actually asked for. Defaulting it to ``nx`` and
+        # passing ``(new_nz, new_nxy, new_nxy)`` silently rewrote ny to nx for
+        # any volume that was not already square across: a (4, 5, 6) map came
+        # back (4, 6, 6), losing a row of density without a word.
+        if "new_nxy" in user_param:
+            new_ny = new_nx = int(param_dict["new_nxy"])
+        else:
+            new_ny, new_nx = ny, nx
         center_len = float(param_dict["center_len"])
         center_n_rise = float(param_dict["center_n_rise"])
         center_fraction = float(param_dict["center_fraction"])
@@ -122,7 +130,7 @@ def handle(
             rise_angstrom=rise,
             csym=csym,
             fraction=center_fraction,
-            new_size=(new_nz, new_nxy, new_nxy),
+            new_size=(new_nz, new_ny, new_nx),
             new_apix=new_apix,
             cpu=args.cpu,
         )
