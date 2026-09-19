@@ -431,7 +431,17 @@ class TestUDCTCompatibleShape:
         )
 
         np.random.seed(42)
-        for shape in [(63, 63), (3838, 3710)]:
+        # Shapes that need padding, small enough to fit in memory. The pair
+        # (3838, 3710) used to be here and made this test able to take down the
+        # machine it ran on: the UDCT window builder allocates a
+        # (12, 3840, 3712) float64 array per direction -- 1.27 GiB each -- and
+        # the process reached 23 GB before the kernel killed it, taking the
+        # whole test session with it. What is being checked is that padding
+        # survives a forward/backward round trip, which does not depend on the
+        # image being detector sized; the padding arithmetic at that size is
+        # covered by test_compatible_shape_large_non_divisible, which allocates
+        # nothing.
+        for shape in [(63, 63), (250, 246)]:
             orig = np.random.randn(*shape).astype(np.float64)
             pad_shape = _udct_compatible_shape(shape, 4)
             if pad_shape != shape:
@@ -439,7 +449,11 @@ class TestUDCTCompatibleShape:
                 padded = np.pad(orig, pads, mode="edge")
             else:
                 padded = orig
-            grid = _get_udct_grid(pad_shape, 4, 12)
+            # 3 wedges per direction, not 12: see
+            # test_non_square_round_trip_is_broken_upstream below. What this
+            # test is for is helicon's padding, so it uses a setting where the
+            # transform underneath it is exact.
+            grid = _get_udct_grid(pad_shape, 4, 3)
             coeffs = grid.forward(padded)
             recon = grid.backward(coeffs)
             recon_cropped = recon[: shape[0], : shape[1]]
@@ -447,6 +461,49 @@ class TestUDCTCompatibleShape:
             assert (
                 max_err < 0.01
             ), f"UDCT identity failed for {shape}: max_err={max_err:.4f}"
+
+
+class TestUDCTNonSquareUpstream:
+    """The UDCT round trip is not exact for non-square 2D input.
+
+    Found when the identity test was made small enough to finish: with its
+    original (3838, 3710) image it exhausted memory and was killed before ever
+    reaching its assertion, so the failure underneath had never been seen.
+
+    The defect is in curvelets 1.1 itself -- reproduced below with no helicon
+    code in the loop -- and depends on the scale and wedge counts rather than
+    on the padding: (256, 248) round trips to 4e-15 with 3 wedges per
+    direction and to 3.99 with 12. Square shapes are exact at every setting
+    tried, and 3D volumes are exact even when their axes differ, so this is
+    narrow. helicon's own defaults (numScales=3, wedgesPerDir=3) are inside
+    the sound region.
+
+    When curvelets fixes this, the xfail below turns into an unexpected pass
+    and says so.
+    """
+
+    @pytest.mark.xfail(
+        reason="curvelets 1.1: non-square 2D UDCT round trip is not exact "
+        "at higher wedge counts",
+        strict=False,
+    )
+    def test_non_square_round_trip_is_broken_upstream(self):
+        curvelets_numpy = pytest.importorskip("curvelets.numpy")
+
+        rng = np.random.default_rng(0)
+        image = rng.standard_normal((256, 248))
+        udct = curvelets_numpy.UDCT(image.shape, num_scales=4, wedges_per_direction=12)
+        recovered = udct.backward(udct.forward(image))
+        assert np.abs(image - recovered).max() < 0.01
+
+    def test_the_same_shape_is_exact_with_fewer_wedges(self):
+        curvelets_numpy = pytest.importorskip("curvelets.numpy")
+
+        rng = np.random.default_rng(0)
+        image = rng.standard_normal((256, 248))
+        udct = curvelets_numpy.UDCT(image.shape, num_scales=4, wedges_per_direction=3)
+        recovered = udct.backward(udct.forward(image))
+        assert np.abs(image - recovered).max() < 0.01
 
 
 class TestUDCTGPU:

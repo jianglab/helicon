@@ -614,8 +614,10 @@ class TestFscIterations(object):
             # The "all"/"none" shortcut buttons trail the checkbox strip.
             assert window._iter_select_all_btn.text() == "all"
             assert window._iter_unselect_all_btn.text() == "none"
-            assert window._iter_select_all_btn.height() >= 25
-            assert window._iter_unselect_all_btn.height() >= 25
+            # Tall enough to sit beside the checkboxes, checked against them
+            # rather than against a pixel count: a fixed 25 encoded one
+            # machine's font metrics and read 22 under a different Qt style,
+            # failing a layout that was perfectly correct.
             assert (
                 window._iter_select_all_btn.height() >= window._checkboxes[0].height()
             )
@@ -720,8 +722,10 @@ class TestFscIterations(object):
             # the class checkboxes, with short "all" / "none" labels.
             assert window._class_select_all_btn.text() == "all"
             assert window._class_unselect_all_btn.text() == "none"
-            assert window._class_select_all_btn.height() >= 25
-            assert window._class_unselect_all_btn.height() >= 25
+            # Tall enough to sit beside the checkboxes, checked against them
+            # rather than against a pixel count: a fixed 25 encoded one
+            # machine's font metrics and read 22 under a different Qt style,
+            # failing a layout that was perfectly correct.
             assert (
                 window._class_select_all_btn.height()
                 >= window._class_checkboxes[0].height()
@@ -2290,8 +2294,15 @@ class TestFolderBrowser(object):
         marker = project / "default_pipeline.star"
         marker.touch()
         # Keep this navigation test independent of background metadata workers.
-        with patch("helicon.lib.gui.file_browser.FileBrowserModel.file_rows", return_value=[]), patch(
-            "helicon.lib.gui.file_browser.FileBrowserModel.dir_rows", return_value=[]
+        with (
+            patch(
+                "helicon.lib.gui.file_browser.FileBrowserModel.file_rows",
+                return_value=[],
+            ),
+            patch(
+                "helicon.lib.gui.file_browser.FileBrowserModel.dir_rows",
+                return_value=[],
+            ),
         ):
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
             try:
@@ -2310,7 +2321,9 @@ class TestFolderBrowser(object):
             finally:
                 widget.close()
 
-    def test_relion_override_duplicate_launch_and_error(self, tmp_path, qapp, monkeypatch):
+    def test_relion_override_duplicate_launch_and_error(
+        self, tmp_path, qapp, monkeypatch
+    ):
         from helicon.lib.gui.file_browser import FolderBrowserWidget
 
         monkeypatch.setenv("HELICON_RELION_LAUNCHER", "/site/relion.sh")
@@ -2321,10 +2334,14 @@ class TestFolderBrowser(object):
         log = tmp_path / "relion.log"
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
         try:
-            with patch("helicon.lib.relion_launcher.launch_relion", return_value=(process, log)) as launch, patch(
-                "helicon.lib.gui.file_browser.QMessageBox.information"
-            ), patch("helicon.lib.gui.file_browser.QMessageBox.warning") as warning, patch(
-                "helicon.lib.gui.file_browser.QSettings", return_value=settings
+            with (
+                patch(
+                    "helicon.lib.relion_launcher.launch_relion",
+                    return_value=(process, log),
+                ) as launch,
+                patch("helicon.lib.gui.file_browser.QMessageBox.information"),
+                patch("helicon.lib.gui.file_browser.QMessageBox.warning") as warning,
+                patch("helicon.lib.gui.file_browser.QSettings", return_value=settings),
             ):
                 widget._open_relion()
                 widget._open_relion()
@@ -4560,9 +4577,7 @@ class TestTrueFscPanel(object):
         dialog.close()
         qapp.processEvents()
 
-    def test_launch_exposes_options_and_fsc_tabs_to_the_right_of_input_maps(
-        self, qapp
-    ):
+    def test_launch_exposes_options_and_fsc_tabs_to_the_right_of_input_maps(self, qapp):
         from helicon.commands import display
 
         dialog = display._launch_truefsc_maps(parent=None)

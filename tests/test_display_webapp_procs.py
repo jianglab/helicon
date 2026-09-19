@@ -102,7 +102,7 @@ def test_reuse_passes_saved_theme(monkeypatch):
         return _FakeResponse({"ok": True, "alive": True})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr("helicon.commands.display._get_display_theme", lambda: "Light")
+    monkeypatch.setattr("helicon.lib.gui.webapps._get_display_theme", lambda: "Light")
 
     _launch_or_reuse_web_app("WhereIsMyClass", {"helicon_tab": '"X"'})
 
@@ -360,8 +360,10 @@ def test_terminate_escalates_to_kill(monkeypatch):
     s.base_url = "http://localhost:1/"
     _WEB_APP_INSTANCES.append(s)
 
-    # Don't wait 2s real time
-    monkeypatch.setattr(d.time, "monotonic", lambda: 0.0)
+    # Don't wait 2s real time. The wait lives in helicon.lib.gui.webapps, which
+    # is where the clock has to be patched: commands.display only re-exports
+    # these helpers, and patching a re-export leaves the real call site alone.
+    monkeypatch.setattr("helicon.lib.gui.webapps.time.monotonic", lambda: 0.0)
 
     wait_calls = []
 

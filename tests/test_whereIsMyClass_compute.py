@@ -5,6 +5,35 @@ from unittest.mock import patch, MagicMock
 from helicon.webApps.lib import whereismyclass_compute as compute
 
 
+@pytest.fixture(autouse=True)
+def _without_the_shinywidgets_hook():
+    """Build ipywidgets outside a Shiny session, as these functions are tested.
+
+    Importing ``shinywidgets`` installs a PROCESS-WIDE ipywidgets construction
+    callback, and from then on every ``go.FigureWidget()`` anywhere in the
+    interpreter raises "shinywidgets requires that all ipywidgets be
+    constructed within an active Shiny session". Several helicon tab modules
+    import it, so whether these tests pass depended on whether some earlier
+    test in the session happened to import a tab -- they passed alone and
+    failed in the full run.
+
+    The hook is global state belonging to another library, so it is removed for
+    the duration of each test and put back afterwards rather than left off.
+    """
+    try:
+        from ipywidgets.widgets.widget import Widget
+    except ImportError:
+        yield
+        return
+
+    saved = getattr(Widget, "_widget_construction_callback", None)
+    Widget._widget_construction_callback = None
+    try:
+        yield
+    finally:
+        Widget._widget_construction_callback = saved
+
+
 class TestGetProjectRootDir(object):
     def test_star_file(self):
         result = compute.get_project_root_dir("/a/b/c/JobName/run_it020_data.star")
