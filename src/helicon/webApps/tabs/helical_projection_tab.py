@@ -14,11 +14,13 @@ import pandas as pd
 
 import helicon
 from shiny import reactive, render, ui, module, req
+from shiny.types import SilentException
 import plotly.express as px
 
 
 from ..lib.shared_state import ProjectState
 from ..lib import helical_projection_compute as compute
+from ..lib import helix_transform
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ BOOKMARK_DEFAULTS = {
     "scale_range": ("scale_range", 5),
     "rescale_apix": ("rescale_apix", True),
     "match_sf": ("match_sf", True),
+    "projection_method": ("projection_method", "volume"),
     "plot_scores": ("plot_scores", True),
     "hide_query": ("hide_query_image", False),
 }
@@ -192,19 +195,13 @@ def helical_projection_tab_ui():
                             ),
                             col_widths=6,
                         ),
-                    ),
-                    id="hp_tab",
-                ),
-                width="33vw",
-            ),
-            ui.div(
-                ui.h1(
-                    "HelicalProjection: compare 2D images with helical structure projections",
-                    style="font-weight: bold;",
-                ),
-                ui.div(
-                    ui.div(
-                        ui.output_ui("display_selected_image_gallery"),
+                        ui.input_radio_buttons(
+                            "sort_map_side_projections_by",
+                            "Sort projections by",
+                            choices=["selection", "similarity score"],
+                            selected="similarity score",
+                            inline=True,
+                        ),
                         ui.accordion(
                             ui.accordion_panel(
                                 "Filtering options:",
@@ -233,58 +230,78 @@ def helical_projection_tab_ui():
                             id="filtering_options",
                             open=False,
                         ),
-                        style="display: flex; flex-direction: column; align-items: flex-start; gap: 10px;",
-                    ),
-                    ui.layout_columns(
-                        ui.input_slider(
-                            "pre_rotation",
-                            "Rotation (°)",
-                            min=-90,
-                            max=90,
-                            value=0,
-                            step=0.1,
-                        ),
-                        ui.input_slider(
-                            "threshold",
-                            "Threshold",
-                            min=0.0,
-                            max=1.0,
-                            value=0.0,
-                            step=0.01,
-                        ),
-                        ui.input_slider(
-                            "vertical_crop_size",
-                            "Vertical crop size (px)",
-                            min=32,
-                            max=512,
-                            value=128,
-                            step=2,
-                        ),
-                        ui.input_slider(
-                            "shift_y",
-                            "Vertical shift (px)",
-                            min=-64,
-                            max=64,
-                            value=0,
-                            step=1,
-                        ),
                         ui.input_radio_buttons(
-                            "sort_map_side_projections_by",
-                            "Sort projections by",
-                            choices=["selection", "similarity score"],
-                            selected="similarity score",
+                            "projection_method",
+                            "Side projection from",
+                            choices={
+                                "volume": "Symmetrized volume",
+                                "gaussian": "Gaussian model (faster)",
+                            },
+                            selected="volume",
                             inline=True,
                         ),
+                        ui.help_text(
+                            "The gaussian model fits each map once, caches it, "
+                            "and expands the helical symmetry on a few hundred "
+                            "parameters instead of on voxels. Measured over 24 "
+                            "EMDB maps it returns the same best match and runs "
+                            "about twice as fast, but it cannot reproduce "
+                            "detail finer than the sampling it was fitted at."
+                        ),
+                    ),
+                    id="hp_tab",
+                ),
+                width="33vw",
+            ),
+            ui.div(
+                ui.h1(
+                    "HelicalProjection: compare 2D images with helical structure projections",
+                    style="font-weight: bold;",
+                ),
+                helix_transform.card_switching_script(
+                    [
+                        {
+                            "input": "display_selected_image",
+                            "cards": ".hp-pi-card",
+                            "key": "pi",
+                        }
+                    ]
+                ),
+                # The gallery gets the full width of the viewport to itself, so
+                # the images flow across and wrap rather than being squeezed
+                # into a column beside the controls; the transform UI and the
+                # buttons follow on a row of their own.
+                ui.div(
+                    ui.output_ui("display_selected_image_gallery"),
+                    style="width: 100%; margin-bottom: 10px;",
+                ),
+                ui.div(
+                    ui.output_ui("hp_per_image_transform_ui"),
+                    ui.output_ui("hp_shared_transform_ui"),
+                    ui.div(
+                        ui.input_action_button(
+                            "auto_transform", "Auto Transform", class_="btn-primary"
+                        ),
+                        ui.input_action_button("reset_transform", "Reset Transform"),
+                        style="display: flex; flex-direction: column; gap: 6px;"
+                        " min-width: 170px;",
+                    ),
+                    ui.div(
                         ui.input_task_button(
                             "compare_projections", "Compare projections"
                         ),
-                        col_widths=4,
+                        # The top-matches control belongs with the button that
+                        # produces the matches, and the rest of this row is
+                        # empty space it can use.
+                        ui.output_ui("select_top_n_ui"),
+                        style="display: flex; flex-direction: column;"
+                        " min-width: 170px; gap: 8px;",
                     ),
-                    style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 12px;",
+                    style="display: flex; flex-direction: row; flex-wrap: wrap;"
+                    " align-items: flex-start; gap: 10px; margin-bottom: 12px;",
                 ),
                 ui.div(
                     ui.output_ui("generate_score_plot_ui"),
-                    ui.output_ui("select_top_n_ui"),
                     ui.div(
                         ui.output_ui("display_map_side_projections_gallery"),
                         style="max-height: 80vh; overflow-y: auto;",
@@ -315,6 +332,14 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     selected_images_labels = reactive.value([])
     selected_image_diameter = reactive.value(0)
     selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
+    # per-image (rotation degrees, vertical shift pixels), set by Auto Transform
+    per_image_transforms = reactive.value([])
+    # the crop Auto Transform worked out, so per-image cards can start from it
+    auto_crop_size = reactive.value(0)
+    # measurements already made, keyed by image content: the transform runs on
+    # every change to the selection, and without this each change re-measures
+    # every image that was already selected
+    auto_transform_cache = {}
 
     emdb_df_original = reactive.value(None)
     emdb_df = reactive.value(None)
@@ -344,7 +369,9 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             image_size=reactive.value(128),
             initial_selected_indices=initial_selected_image_indices,
             enable_selection=True,
-            allow_multiple_selection=False,
+            # several class averages can be searched jointly: each is aligned
+            # to the same projection and the scores averaged
+            allow_multiple_selection=True,
         )
 
     @render.ui
@@ -358,16 +385,27 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             enable_selection=False,
         )
 
+    @reactive.calc
+    def selected_image_gallery_title():
+        n = len(selected_images_thresholded_rotated_shifted_cropped())
+        if n > 1:
+            return "Selected images (searched jointly, scores averaged):"
+        return "Selected image:"
+
     @render.ui
     def display_selected_image_gallery():
         return helicon.shiny.image_gallery(
             id=session.ns("display_selected_image"),
-            label=reactive.value("Selected image:"),
+            label=selected_image_gallery_title,
             images=selected_images_thresholded_rotated_shifted_cropped,
             image_labels=selected_images_labels,
             image_size=map_side_projection_vertical_display_size,
             justification="left",
-            enable_selection=False,
+            # clicking picks which image's transform card is shown, so the
+            # controls take one card's worth of space instead of N
+            enable_selection=len(selected_images_original()) > 1,
+            allow_multiple_selection=False,
+            initial_selected_indices=reactive.value([0]),
             display_dashed_line=True,
         )
 
@@ -445,18 +483,30 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def select_top_n_ui():
         req(len(map_side_projections_with_alignments()))
         n_results = len(map_side_projections_with_alignments())
+        # Label beside the box, not above it: in a 150px column the label wrapped
+        # onto a second line and left the field itself too narrow to read.
         return ui.div(
-            ui.layout_columns(
-                ui.input_numeric(
-                    "select_top_n",
-                    "Number of top matches:",
-                    min=0,
-                    value=min(10, n_results),
-                    width="150px",
-                ),
-                ui.input_action_button("select_top_n_button", "Select"),
-                col_widths=[4, 4],
+            ui.tags.style(
+                ".hp-top-n .shiny-input-container { margin-bottom: 0; width: auto; }"
             ),
+            ui.tags.label(
+                "Number of top matches:",
+                {"for": session.ns("select_top_n")},
+                style="white-space: nowrap; margin: 0;",
+            ),
+            ui.input_numeric(
+                "select_top_n",
+                None,
+                min=0,
+                value=min(10, n_results),
+                width="110px",
+            ),
+            ui.input_action_button(
+                "select_top_n_button", "Select", style="white-space: nowrap;"
+            ),
+            class_="hp-top-n",
+            style="display: flex; flex-direction: row; align-items: center;"
+            " gap: 8px; margin-bottom: 8px;",
         )
 
     # -- Auto-rotation/shift/diameter estimation --
@@ -738,32 +788,239 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             ]
         )
 
+    # ── Per-image transforms ────────────────────────────────────────
+    # Several class averages can be searched jointly, and each sits at its own
+    # angle and height: on ten good EMPIAR-10940 classes the rotations span
+    # -20.1 to +10.2 degrees. One shared rotation cannot straighten them all,
+    # so each image gets its own card and the shared sliders act as a nudge on
+    # top. This is the pattern denovo3D uses, and both tabs now drive it from
+    # helix_transform.
+
+    def _pi_id(kind, i):
+        return f"hp_pi_{kind}_{i}"
+
+    _PI_SHARED_ID = {
+        "rot": "pre_rotation",
+        "dy": "shift_y",
+        "vcrop": "vertical_crop_size",
+        "threshold": "threshold",
+    }
+
+    def _input_or(name, default=0.0):
+        """Read a dynamically created input, or a default before it exists.
+
+        Reading an unset input registers the dependency and then raises
+        SilentException, so catching it here still means the caller re-runs
+        once the input appears or the user changes it.
+        """
+        try:
+            value = input[name]()
+        except SilentException:
+            return default
+        return default if value is None else value
+
+    def _per_image_active():
+        """True when each selected image carries its own transform."""
+        return len(selected_images_original()) > 1
+
+    def _param(kind, i, default=0.0):
+        """Effective value of one setting for image ``i``."""
+        if _per_image_active():
+            return _input_or(_pi_id(kind, i), default)
+        return _input_or(_PI_SHARED_ID[kind], default)
+
+    @render.ui
+    def hp_shared_transform_ui():
+        """The shared sliders, shown only when one image is selected.
+
+        With several selected the per-image card is the manual transform UI --
+        it is the one that says which image it edits -- and showing both
+        invites edits to a control that image is not reading.
+        """
+        if _per_image_active():
+            return ui.div()
+        return ui.layout_columns(
+            ui.input_slider(
+                "pre_rotation", "Rotation (°)", min=-90, max=90, value=0, step=0.1
+            ),
+            ui.input_slider(
+                "threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.01
+            ),
+            ui.input_slider(
+                "vertical_crop_size",
+                "Vertical crop size (px)",
+                min=32,
+                max=512,
+                value=128,
+                step=2,
+            ),
+            ui.input_slider(
+                "shift_y", "Vertical shift (px)", min=-64, max=64, value=0, step=1
+            ),
+            col_widths=6,
+        )
+
+    @render.ui
+    @reactive.event(selected_images_original, per_image_transforms, auto_crop_size)
+    def hp_per_image_transform_ui():
+        """One transform card per selected image, only the clicked one shown.
+
+        All the cards stay in the DOM and are hidden with CSS, so each image
+        keeps whatever was typed into it while you click between them, and no
+        effect can read an input that does not exist.
+        """
+        if not _per_image_active():
+            return ui.div()
+        labels = list(selected_images_labels())
+        images = selected_images_original()
+        per = per_image_transforms()
+        ny = int(max(img.shape[0] for img in images))
+        cards = []
+        for i, img in enumerate(images):
+            label = labels[i] if i < len(labels) else str(i)
+            rot, shift = per[i] if i < len(per) else (0.0, 0.0)
+            cards.append(
+                ui.div(
+                    ui.card(
+                        ui.div(
+                            f"Image {label}",
+                            style="font-weight: bold; margin-bottom: 4px;",
+                        ),
+                        ui.layout_columns(
+                            ui.input_numeric(
+                                _pi_id("rot", i),
+                                "Rotation (°)",
+                                value=round(float(rot), 2),
+                                step=0.1,
+                                update_on="blur",
+                            ),
+                            ui.input_numeric(
+                                _pi_id("dy", i),
+                                "Vertical shift (px)",
+                                value=round(float(shift), 2),
+                                step=1,
+                                update_on="blur",
+                            ),
+                            ui.input_numeric(
+                                _pi_id("vcrop", i),
+                                "Vertical crop size (px)",
+                                value=int(
+                                    auto_crop_size()
+                                    or _input_or("vertical_crop_size", ny)
+                                ),
+                                min=32,
+                                step=2,
+                                update_on="blur",
+                            ),
+                            ui.input_numeric(
+                                _pi_id("threshold", i),
+                                "Threshold",
+                                value=float(_input_or("threshold", 0.0)),
+                                step=0.01,
+                                update_on="blur",
+                            ),
+                            col_widths=6,
+                        ),
+                    ),
+                    class_="hp-pi-card",
+                    **{"data-pi": str(i)},
+                    style="min-width: 360px;" + ("" if i == 0 else " display: none;"),
+                )
+            )
+        return ui.div(
+            ui.div(
+                "Per-image transform (click an image to edit it):",
+                style="font-weight: bold; margin-bottom: 4px;",
+            ),
+            *cards,
+            style="display: flex; flex-direction: column; gap: 4px;",
+        )
+
+    def _apply_auto_transform():
+        """Straighten and centre every selected image, as denovo3D does."""
+        images = selected_images_original()
+        if not len(images):
+            return
+        auto = helix_transform.auto_transform(images, cache=auto_transform_cache)
+        selected_image_diameter.set(auto.diameter)
+        crop = max(32, min(auto.crop_size, auto.ny // 2 * 2))
+        auto_crop_size.set(crop)
+        if len(images) > 1:
+            per_image_transforms.set(auto.per_image)
+            for i, (rot, shift) in enumerate(auto.per_image):
+                ui.update_numeric(_pi_id("rot", i), value=round(float(rot), 2))
+                ui.update_numeric(_pi_id("dy", i), value=round(float(shift), 2))
+                ui.update_numeric(_pi_id("vcrop", i), value=crop)
+            # the shared boxes stay at zero, where they nudge every image alike
+            ui.update_slider("pre_rotation", value=0.0)
+            ui.update_slider("shift_y", value=0)
+        else:
+            per_image_transforms.set([])
+            rot, shift = auto.per_image[0]
+            ui.update_slider("pre_rotation", value=round(float(rot), 1))
+            ui.update_slider("shift_y", value=int(round(float(shift))))
+        ui.update_slider("vertical_crop_size", value=crop)
+
     @reactive.effect
-    @reactive.event(
-        selected_images_original,
-        input.pre_rotation,
-        input.shift_y,
-        input.vertical_crop_size,
-        input.threshold,
-    )
+    @reactive.event(input.auto_transform)
+    def _auto_transform():
+        _apply_auto_transform()
+
+    @reactive.effect
+    @reactive.event(selected_images_original)
+    def _auto_transform_on_selection():
+        """Selecting images transforms them, without waiting to be asked.
+
+        Every route out of this tab needs the filaments horizontal and centred,
+        and doing it by hand first was a step with no decision in it. The button
+        stays, for re-running it after the selection is changed by other means.
+        """
+        _apply_auto_transform()
+
+    @reactive.effect
+    @reactive.event(input.reset_transform)
+    def _reset_transform():
+        images = selected_images_original()
+        req(len(images))
+        ny = int(max(img.shape[0] for img in images))
+        per_image_transforms.set([])
+        for i in range(len(images)):
+            ui.update_numeric(_pi_id("rot", i), value=0.0)
+            ui.update_numeric(_pi_id("dy", i), value=0.0)
+            ui.update_numeric(_pi_id("vcrop", i), value=ny // 2 * 2)
+            ui.update_numeric(_pi_id("threshold", i), value=0.0)
+        ui.update_slider("pre_rotation", value=0.0)
+        ui.update_slider("shift_y", value=0)
+        ui.update_slider("threshold", value=0.0)
+        ui.update_slider("vertical_crop_size", value=ny // 2 * 2)
+
+    # A plain effect, deliberately not reactive.event: the per-image inputs are
+    # created dynamically, and reactive.event reads every dependency up front,
+    # which would raise on inputs that do not exist yet.
+    @reactive.effect
     def _transform_crop_images():
         orig = selected_images_original()
         if not orig:
             return
-        thresh_val = input.threshold()
-        rot_val = input.pre_rotation()
-        shift_y_val = input.shift_y()
-        crop_sz = input.vertical_crop_size()
+        shared_rot = _input_or("pre_rotation", 0.0)
+        shared_shift = _input_or("shift_y", 0.0)
         transformed = []
-        for img in orig:
-            t_img = helicon.threshold_data(img, thresh_value=thresh_val)
-            if rot_val != 0 or shift_y_val != 0:
-                t_img = helicon.transform_image(
-                    t_img, rotation=rot_val, post_translation=(shift_y_val, 0)
-                )
-            ny_img, nx_img = t_img.shape
-            if crop_sz > 32 and crop_sz < ny_img:
-                t_img = helicon.crop_center(t_img, shape=(int(crop_sz), nx_img))
+        for i, img in enumerate(orig):
+            thresh_val = _param("threshold", i, 0.0)
+            rot_val = _param("rot", i, 0.0)
+            shift_val = _param("dy", i, 0.0)
+            crop_sz = _param("vcrop", i, img.shape[0])
+            if _per_image_active():
+                # the shared boxes are a common nudge on top of each image's own
+                rot_val += shared_rot
+                shift_val += shared_shift
+            t_img = helix_transform.apply_transform(
+                img,
+                rotation=rot_val,
+                shift_y=shift_val,
+                crop_size=crop_sz,
+                threshold=thresh_val,
+            )
             transformed.append(t_img)
         selected_images_thresholded_rotated_shifted_cropped.set(transformed)
 
@@ -957,12 +1214,13 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def _compare_projections():
         req(len(maps()))
         req(len(selected_images_thresholded_rotated_shifted_cropped()))
-        query_img = selected_images_thresholded_rotated_shifted_cropped()[0]
-        query_lbl = selected_images_labels()[0] if selected_images_labels() else "query"
+        query_imgs = list(selected_images_thresholded_rotated_shifted_cropped())
+        query_lbls = list(selected_images_labels()) or ["query"] * len(query_imgs)
         query_apix = image_apix()
         rescale = input.rescale_apix()
         length_xy_factor = input.length_xy()
         match_sf = input.match_sf()
+        projection_method = input.projection_method()
         scale_range = input.scale_range() / 100.0
         active_maps = [m for m in maps() if abs(m.twist) > 1e-3]
         results = []
@@ -981,14 +1239,15 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                     executor.submit(
                         compute.symmetrize_project_align_one_map,
                         m,
-                        query_img,
-                        query_lbl,
+                        query_imgs,
+                        query_lbls,
                         query_apix,
                         rescale,
                         length_xy_factor,
                         match_sf,
                         0,
                         scale_range,
+                        projection_method,
                     ): m
                     for m in active_maps
                 }
