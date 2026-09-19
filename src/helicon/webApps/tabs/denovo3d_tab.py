@@ -29,6 +29,11 @@ from shiny.types import SilentException
 from ..lib.shared_state import ProjectState
 
 from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register
+from ..lib import helix_transform
+from ..lib.helix_transform import (
+    estimate_helix_rotation_center_diameter as _estimate_helix_rotation_center_diameter,
+    refine_helix_rotation_center as _refine_helix_rotation_center,
+)
 from ..lib.helical_projection_utils import (
     _combine_images_for_display,
     _image_stitching_x_positions,
@@ -205,138 +210,6 @@ def _rank(results, n_images, log=None):
             + ", ".join(f"{k}={v:.2f}" for k, v in sorted(weights.items()))
         )
     return joint
-
-
-def _refine_helix_rotation_center(
-    data,
-    threshold=0.0,
-    max_iter=6,
-    tol=0.02,
-    estimate_rotation=True,
-    estimate_center=True,
-):
-    """Refine the rotation/centre estimate by guarded iteration.
-
-    ``_estimate_helix_rotation_center_diameter`` estimates the rotation once and
-    never re-checks it after rotating, so an image that is still off-horizontal
-    afterwards stays that way (measured residuals up to 2.4 deg on EMPIAR-10940
-    class averages, which is enough to push the twist search to the wrong
-    answer).
-
-    Iterating it naively is not safe -- the estimator is noisy and each
-    resampling degrades the next estimate, so plain iteration improved 24/42
-    images but made 16/42 worse.  This version therefore *measures* the residual
-    of each proposed correction and keeps it only if strictly better, which is
-    monotone by construction: measured over 42 class averages it improved 25 and
-    degraded none, halving the mean residual rotation (0.272 -> 0.137 deg) and
-    cutting the worst case from 2.39 to 0.52 deg.
-
-    Returns the same ``(rotation_deg, shift_y_px, diameter_px)`` triple.
-    """
-
-    def _apply(d, r, sh):
-        t = d
-        if r:
-            t = helicon.transform_image(image=t, rotation=r)
-        if sh:
-            t = helicon.transform_image(image=t, rotation=0, post_translation=(sh, 0))
-        return t
-
-    def _resid(r, sh):
-        t = _apply(data, r, sh)
-        r2, s2, _ = _estimate_helix_rotation_center_diameter(
-            t,
-            threshold=np.max(t) * 0.2,
-            estimate_rotation=estimate_rotation,
-            estimate_center=estimate_center,
-        )
-        # rotation dominates: a degree of tilt hurts far more than a pixel of shift
-        return abs(r2) + 0.1 * abs(s2), r2, s2
-
-    rot, shift, diameter = _estimate_helix_rotation_center_diameter(
-        data,
-        threshold=threshold,
-        estimate_rotation=estimate_rotation,
-        estimate_center=estimate_center,
-    )
-    best_cost, r2, s2 = _resid(rot, shift)
-    for _ in range(max_iter):
-        if abs(r2) < tol and abs(s2) < tol:
-            break
-        cand_r, cand_s = rot + r2, shift + s2
-        cost, nr2, ns2 = _resid(cand_r, cand_s)
-        if cost >= best_cost - 1e-9:
-            break  # no improvement -- keep what we have rather than risk drifting
-        t = _apply(data, cand_r, cand_s)
-        _, _, diameter = _estimate_helix_rotation_center_diameter(
-            t,
-            threshold=np.max(t) * 0.2,
-            estimate_rotation=estimate_rotation,
-            estimate_center=estimate_center,
-        )
-        rot, shift, best_cost, r2, s2 = cand_r, cand_s, cost, nr2, ns2
-    return rot, shift, diameter
-
-
-def _estimate_helix_rotation_center_diameter(
-    data, estimate_rotation=True, estimate_center=True, threshold=0
-):
-    """Estimate the rotation, vertical center shift, and diameter of a helix.
-
-    Returns
-    -------
-    tuple
-        (rotation_deg, shift_y_px, diameter_px)
-    """
-    from skimage.morphology import closing
-
-    ny, nx = data.shape
-
-    def _weighted_params(mask, intensity):
-        ys, xs = np.where(mask)
-        if len(ys) < 2:
-            return 0.0, 0.0, ny
-        w = intensity[ys, xs].astype(np.float64)
-        w = w - w.min() + 1e-8
-        cw = w.sum()
-        cy = (ys * w).sum() / cw
-        cx = (xs * w).sum() / cw
-        uy = ys - cy
-        ux = xs - cx
-        i_yy = (uy * uy * w).sum() / cw
-        i_xx = (ux * ux * w).sum() / cw
-        i_xy = (uy * ux * w).sum() / cw
-        theta = 0.5 * np.arctan2(2.0 * i_xy, i_yy - i_xx)
-        angle = np.rad2deg(theta) + 90.0
-        if abs(angle) > 90.0:
-            angle -= 180.0
-        diameter = int(ys.max() - ys.min() + 1)
-        if estimate_center:
-            shift = ny // 2 - cy
-        else:
-            shift = 0.0
-        return angle, shift, diameter
-
-    bw = closing(data > threshold, mode="ignore")
-    mask = bw > 0
-    if not mask.any():
-        return 0.0, 0.0, ny
-
-    if estimate_rotation:
-        rotation, _, _ = _weighted_params(mask, data)
-        rotation = helicon.set_to_periodic_range(rotation, min=-180, max=180)
-        data_rotated = helicon.transform_image(image=data, rotation=rotation)
-    else:
-        rotation = 0.0
-        data_rotated = data
-
-    bw_rot = closing(data_rotated > threshold, mode="ignore")
-    mask_rot = bw_rot > 0
-    if not mask_rot.any():
-        return rotation, 0.0, ny
-
-    _, shift_y, diameter = _weighted_params(mask_rot, data_rotated)
-    return rotation, shift_y, diameter
 
 
 def _prepare_download_map(
@@ -695,31 +568,15 @@ def denovo3d_tab_ui():
             "Denovo3D: de novo helical indexing and 3D reconstruction",
             style="font-weight: bold;",
         ),
-        ui.tags.script(
-            """
-            // Show only the card for the image clicked in a gallery. Purely
-            // visual: every card stays in the DOM so its inputs keep whatever
-            // the user typed. Two galleries drive two sets of cards -- the
-            // per-image transform cards and the manual stitching cards.
-            var _CARD_GALLERIES = [
-                {input: 'dn_active_image', cards: '.dn-pi-card', key: 'pi'},
-                {input: 'dn_stitch_active_image', cards: '.dn-ms-card', key: 'ms'}
-            ];
-            $(document).on('shiny:inputchanged', function(e) {
-                if (!e.name) return;
-                _CARD_GALLERIES.forEach(function(g) {
-                    if (e.name.indexOf(g.input) < 0) return;
-                    var v = e.value;
-                    var idx = Array.isArray(v) ? v[0] : v;
-                    if (idx === undefined || idx === null) return;
-                    document.querySelectorAll(g.cards).forEach(function(el) {
-                        el.style.display =
-                            (String(el.dataset[g.key]) === String(idx))
-                                ? '' : 'none';
-                    });
-                });
-            });
-            """
+        helix_transform.card_switching_script(
+            [
+                {"input": "dn_active_image", "cards": ".dn-pi-card", "key": "pi"},
+                {
+                    "input": "dn_stitch_active_image",
+                    "cards": ".dn-ms-card",
+                    "key": "ms",
+                },
+            ]
         ),
         ui.output_ui("dn_multi_mode_ui"),
         ui.div(
@@ -2994,22 +2851,15 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             estimate_rotation = True
             estimate_center = True
 
-        tmp = np.array(
-            [
-                _refine_helix_rotation_center(
-                    img,
-                    threshold=np.max(img) * 0.2,
-                    estimate_rotation=estimate_rotation,
-                    estimate_center=estimate_center,
-                )
-                for img in images
-            ]
+        auto = helix_transform.auto_transform(
+            images,
+            estimate_rotation=estimate_rotation,
+            estimate_center=estimate_center,
+            crop_factor=1.2 if input_data().is_3d else 2.0,
         )
-        diameter = np.max(tmp[:, 2])
-        if input_data().is_3d:
-            crop_size = int(diameter * 1.2) // 4 * 4
-        else:
-            crop_size = int(diameter * 2) // 4 * 4
+        tmp = np.array([(r, s, auto.diameter) for r, s in auto.per_image])
+        diameter = auto.diameter
+        crop_size = auto.crop_size
 
         if len(images) > 1:
             # Every class average sits at its own angle and height, and no
