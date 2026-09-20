@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, timedelta
@@ -282,6 +283,39 @@ def _add_recent_folder(path: str) -> None:
     cur = cur[:5]
     settings = QSettings("helicon", "display")
     settings.setValue("recent_folders", cur)
+
+
+_DIGIT_RUN = re.compile(r"(\d+)")
+
+
+def _natural_sort_key(text: str) -> list:
+    """Sort key that compares runs of digits as numbers.
+
+    Plain text order puts ``J10`` before ``J2``, which scatters a CryoSPARC
+    project's jobs: they are named ``J1`` to ``J121`` with no zero padding, so
+    the numbering only reads continuously if the digits are compared as
+    numbers. RELION's zero-padded ``job001`` is unaffected either way, and
+    micrograph names with frame numbers benefit the same way jobs do.
+
+    Digit runs sort before text at the same position, so ``J2`` precedes
+    ``J2a``, and the comparison is case-insensitive.
+
+    Parameters
+    ----------
+    text : str
+
+    Returns
+    -------
+    list
+        A list of ``(kind, number, text)`` triples, comparable between names.
+    """
+    key = []
+    for index, part in enumerate(_DIGIT_RUN.split(text or "")):
+        if index % 2:
+            key.append((0, int(part), ""))
+        elif part:
+            key.append((1, 0, part.lower()))
+    return key
 
 
 def _format_size(size_bytes: int) -> str:
@@ -1082,6 +1116,8 @@ class FileBrowserModel(QStandardItemModel):
                 if cell.data(ROLE_SORT) is not None
                 else (cell.text() or "")
             )
+            if column == COL_NAME and isinstance(data, str):
+                data = _natural_sort_key(data)
             is_dir = pair[type_col].data(ROLE_SORT) == "folder"
             return (0 if is_dir else 1, data)
 

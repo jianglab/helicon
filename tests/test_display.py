@@ -6970,3 +6970,70 @@ class TestStackGalleryUnpack(object):
         assert gallery._n == 3
         assert (gallery._img_w, gallery._img_h) == (8, 8)
         assert gallery._read_fn(0).shape == (8, 8)
+
+
+class TestNaturalNameSort(object):
+    """Folder names sort with their digit runs compared as numbers.
+
+    CryoSPARC names jobs J1 to J121 with no zero padding, so plain text order
+    puts J10 and J100 between J1 and J2 and the numbering stops reading
+    continuously. RELION's zero-padded job001 sorts the same either way.
+    """
+
+    def test_digit_runs_compare_as_numbers(self):
+        from helicon.lib.gui.file_browser import _natural_sort_key
+
+        names = ["J1", "J10", "J100", "J11", "J2", "J20", "J3", "J9"]
+        assert sorted(names, key=_natural_sort_key) == [
+            "J1",
+            "J2",
+            "J3",
+            "J9",
+            "J10",
+            "J11",
+            "J20",
+            "J100",
+        ]
+
+    def test_a_number_sorts_before_text_at_the_same_position(self):
+        from helicon.lib.gui.file_browser import _natural_sort_key
+
+        assert sorted(["J2a", "J2", "J10"], key=_natural_sort_key) == [
+            "J2",
+            "J2a",
+            "J10",
+        ]
+
+    def test_zero_padded_names_are_unaffected(self):
+        from helicon.lib.gui.file_browser import _natural_sort_key
+
+        names = ["job010", "job001", "job100"]
+        assert sorted(names, key=_natural_sort_key) == sorted(names)
+
+    def test_case_is_ignored(self):
+        from helicon.lib.gui.file_browser import _natural_sort_key
+
+        assert sorted(["b1", "A2", "a10"], key=_natural_sort_key) == [
+            "A2",
+            "a10",
+            "b1",
+        ]
+
+    def test_the_model_sorts_job_folders_numerically(self, tmp_path, qapp):
+        from PySide6.QtCore import Qt
+
+        from helicon.lib.gui.file_browser import (
+            COL_NAME,
+            FileBrowserModel,
+        )
+
+        for n in (1, 2, 3, 9, 10, 11, 20, 100):
+            (tmp_path / f"J{n}").mkdir()
+
+        model = FileBrowserModel(str(tmp_path))
+        model.sort(COL_NAME, Qt.SortOrder.AscendingOrder)
+        shown = [
+            model.item(row, COL_NAME).text().rstrip("/")
+            for row in range(model.rowCount())
+        ]
+        assert shown == ["J1", "J2", "J3", "J9", "J10", "J11", "J20", "J100"]
