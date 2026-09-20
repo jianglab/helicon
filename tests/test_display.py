@@ -6941,3 +6941,32 @@ class TestImages2StarDialog(object):
             dialog.close()
             dialog.deleteLater()
             self._pump(qapp)
+
+
+class TestStackGalleryUnpack(object):
+    """_parse_star_image_refs returns four values, and the caller took three.
+
+    StackGallery._parse_star raised ValueError for every star file opened
+    through it, which no test covered because nothing called it.
+    """
+
+    def test_a_star_stack_parses(self, tmp_path):
+        import mrcfile
+        import numpy as np
+
+        from helicon.lib.gui.gallery_backends import StackGallery
+
+        stack = tmp_path / "parts.mrcs"
+        with mrcfile.new(str(stack), overwrite=True) as f:
+            f.set_data(np.zeros((3, 8, 8), dtype=np.float32))
+        star = tmp_path / "particles.star"
+        star.write_text(
+            "data_particles\n\nloop_\n_rlnImageName #1\n"
+            + "".join("%06d@%s\n" % (i + 1, stack) for i in range(3))
+        )
+
+        gallery = StackGallery(str(star))
+        gallery._parse()
+        assert gallery._n == 3
+        assert (gallery._img_w, gallery._img_h) == (8, 8)
+        assert gallery._read_fn(0).shape == (8, 8)

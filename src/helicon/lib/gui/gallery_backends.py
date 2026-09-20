@@ -331,7 +331,10 @@ class StackGallery(BaseGallery):
         result = _parse_star_image_refs(self.star_path)
         if result is None:
             return
-        entries, first_shape, first_apix = result
+        # four values, not three: the count of unresolvable references comes
+        # back too. Unpacking three raised ValueError for every star file
+        # opened this way.
+        entries, first_shape, first_apix, _n_skipped = result
         self._n = len(entries)
         self._img_w, self._img_h = first_shape[0], first_shape[1]
         self._apix = first_apix
