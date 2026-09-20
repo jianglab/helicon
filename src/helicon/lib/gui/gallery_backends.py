@@ -675,6 +675,51 @@ class Class2dGallery(BaseGallery):
             panel.sort_reverse_changed.connect(lambda _: _on_sort_changed())
 
 
+class CryosparcClass2dGallery(Class2dGallery):
+    """Class averages from a CryoSPARC 2D job, sorted by abundance.
+
+    RELION states each class's share directly in ``model.star``. CryoSPARC
+    does not state it anywhere: it records one row per class in the averages
+    ``.cs`` -- carrying the slice that class occupies in the MRC -- and the
+    class each particle was assigned to in the particles ``.cs``. Counting
+    those assignments is the abundance.
+
+    Everything else, the sorting and the labels and the window, is the same
+    as for RELION, so only the parsing differs.
+    """
+
+    def _parse(self) -> None:
+        import mrcfile
+
+        from helicon.lib import cryosparc_project
+
+        settings = self._get_settings()
+        self._sort_column = settings.value("sort_column", "Abundance", type=str)
+        self._sort_reverse = settings.value("sort_reverse", True, type=bool)
+
+        result = cryosparc_project.class_abundance(self.star_path)
+        if result is None:
+            return
+        frames, fractions = result
+
+        self._entries = [(str(self.star_path), int(f)) for f in frames]
+        self._dists = [float(v) for v in fractions]
+        self._n = len(self._entries)
+        if self._n == 0:
+            return
+
+        with mrcfile.open(str(self.star_path), permissive=True) as mrc:
+            self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
+            sample = np.asarray(mrc.data)
+            if sample.ndim >= 3:
+                sample = sample[self._entries[0][1]]
+        self._img_h, self._img_w = sample.shape
+
+        self._apply_sort()
+        self._labels = self._make_labels()
+        self._parsed = True
+
+
 def gallery_for_star(star_path: str) -> BaseGallery | None:
     """Create the appropriate gallery class for a star file.
 

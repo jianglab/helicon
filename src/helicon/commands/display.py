@@ -766,7 +766,9 @@ def _launch_truefsc_maps(
 
             if not self._fsc_curve_items:
                 self._fsc_plot_widget.setVisible(False)
-                self._fsc_placeholder.setText("No plottable FSC curve data was returned.")
+                self._fsc_placeholder.setText(
+                    "No plottable FSC curve data was returned."
+                )
                 self._fsc_placeholder.setVisible(True)
                 return
             for _sample, legend_label in self._fsc_legend.items:
@@ -1727,6 +1729,91 @@ def _open_frame_in_slice_view(viewer, read_fn, idx, img_w, img_h, apix, name) ->
         pass
 
 
+def _open_image_ref_stack(
+    viewer,
+    entries,
+    first_shape,
+    first_apix,
+    name,
+    mode,
+    reuse_gallery=None,
+    tracker=None,
+) -> None:
+    """Show a set of referenced 2D images as one lazily-read stack.
+
+    Shared by the two formats that name their images rather than holding
+    them: a RELION ``data.star`` listing ``idx@stack.mrcs``, and a CryoSPARC
+    ``.cs`` dataset listing ``blob/path`` and ``blob/idx``.
+
+    Parameters
+    ----------
+    viewer : napari.Viewer
+        Target viewer, used for the slice mode.
+    entries : list of (int, str, float)
+        Frame index, MRC path, and an unused third element, per image.
+    first_shape : tuple
+        ``(nx, ny)`` of the first image.
+    first_apix : float
+        Pixel size in Angstroms.
+    name : str
+        Display name.
+    mode : str
+        ``"gallery"`` or anything else for the slice view.
+    reuse_gallery, tracker
+        Passed through when opening a gallery.
+    """
+    import mrcfile
+
+    if not entries:
+        return
+
+    n = len(entries)
+    with mrcfile.open(entries[0][1], permissive=True) as mrc:
+        frame = mrc.data[entries[0][0]] if mrc.data.ndim >= 3 else mrc.data
+        dtype = frame.dtype
+        # Contrast limits from the first frame only. Passing explicit
+        # contrast_limits stops napari from scanning the entire stack to
+        # compute a global range (which would force every referenced image to
+        # load). Continuous auto-contrast below keeps each navigated slice
+        # contrasted independently, so only the visible frame is read -- the
+        # lazy behaviour we want.
+        contrast = _auto_contrast(frame)
+
+    lazy = _LazyStarStack(entries, (n,) + first_shape, dtype)
+
+    if mode == "gallery":
+        _open_gallery(
+            read_fn=lazy.__getitem__,
+            n=n,
+            img_w=first_shape[0],
+            img_h=first_shape[1],
+            apix=first_apix,
+            name=name,
+            reuse_window=reuse_gallery,
+            tracker=tracker,
+        )
+        return
+
+    # This is a true image stack (frame index axis 0), not a 3D volume:
+    # hide the Z/Y/X axis selector.
+    _SliceDirectionWidget.set_stack_mode(True)
+    layer = viewer.add_image(
+        lazy,
+        name=name,
+        scale=(1.0,) + (first_apix,) * len(first_shape),
+        contrast_limits=contrast,
+        interpolation2d="linear",
+        interpolation3d="linear",
+    )
+    _enable_continuous_auto_contrast(layer, viewer)
+    viewer.dims.ndisplay = 2
+    # napari defaults the shown slice to the middle frame; start at frame 0.
+    step = list(viewer.dims.current_step)
+    step[0] = 0
+    viewer.dims.current_step = step
+    _reset_view(viewer)
+
+
 def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -> None:
     from pathlib import Path
 
@@ -1784,6 +1871,43 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         _open_2d_classes_gallery(path, reuse_window=reuse_gallery, tracker=_gallery)
         return
 
+    if ext in (".mrc", ".mrcs") and mode == "2dclasses":
+        # CryoSPARC class averages: the abundances are counted from the job's
+        # particles dataset rather than read from a header.
+        from helicon.lib.gui.gallery_backends import CryosparcClass2dGallery
+
+        CryosparcClass2dGallery(path).open(reuse_window=reuse_gallery, tracker=_gallery)
+        return
+
+    if ext == ".cs" and mode in ("slice", "gallery"):
+        # A CryoSPARC dataset names its images the way a data.star does.
+        from helicon.lib import cryosparc_project
+
+        refs = cryosparc_project.image_refs(path)
+        if refs is None:
+            return
+        entries, first_shape, first_apix, n_skipped = refs
+        if n_skipped:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(
+                None,
+                "Missing images",
+                f"{n_skipped} image(s) referenced in {Path(path).name} "
+                "could not be found on disk and were skipped.",
+            )
+        _open_image_ref_stack(
+            viewer,
+            entries,
+            first_shape,
+            first_apix,
+            Path(path).name,
+            mode,
+            reuse_gallery=reuse_gallery,
+            tracker=_gallery,
+        )
+        return
+
     # "text" mode: always open any star file as text, regardless of type.
     if ext == ".star" and mode == "text":
         _open_text_window(path, reuse_window=reuse_gallery)
@@ -1810,56 +1934,16 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
                 f"{n_skipped} image(s) referenced in {Path(path).name} "
                 "could not be found on disk and were skipped.",
             )
-        if not entries:
-            return
-
-        n = len(entries)
-        with mrcfile.open(entries[0][1], permissive=True) as mrc:
-            frame = mrc.data[entries[0][0]] if mrc.data.ndim >= 3 else mrc.data
-            dtype = frame.dtype
-            # Contrast limits from the first frame only. Passing explicit
-            # contrast_limits stops napari from scanning the entire stack to
-            # compute a global range (which would force every referenced
-            # image to load). Continuous auto-contrast below keeps each
-            # navigated slice contrasted independently, so only the visible
-            # frame is read -- the lazy behaviour we want.
-            contrast = _auto_contrast(frame)
-
-        stack_shape = (n,) + first_shape
-        lazy = _LazyStarStack(entries, stack_shape, dtype)
-
-        name = Path(path).name
-        if mode == "gallery":
-            _open_gallery(
-                read_fn=lazy.__getitem__,
-                n=n,
-                img_w=first_shape[0],
-                img_h=first_shape[1],
-                apix=first_apix,
-                name=name,
-                reuse_window=reuse_gallery,
-                tracker=_gallery,
-            )
-            return
-
-        # This is a true image stack (frame index axis 0), not a 3D volume:
-        # hide the Z/Y/X axis selector.
-        _SliceDirectionWidget.set_stack_mode(True)
-        layer = viewer.add_image(
-            lazy,
-            name=name,
-            scale=(1.0,) + (first_apix,) * len(first_shape),
-            contrast_limits=contrast,
-            interpolation2d="linear",
-            interpolation3d="linear",
+        _open_image_ref_stack(
+            viewer,
+            entries,
+            first_shape,
+            first_apix,
+            Path(path).name,
+            mode,
+            reuse_gallery=reuse_gallery,
+            tracker=_gallery,
         )
-        _enable_continuous_auto_contrast(layer, viewer)
-        viewer.dims.ndisplay = 2
-        # napari defaults the shown slice to the middle frame; start at frame 0.
-        step = list(viewer.dims.current_step)
-        step[0] = 0
-        viewer.dims.current_step = step
-        _reset_view(viewer)
         return
 
     if ext == ".bild":

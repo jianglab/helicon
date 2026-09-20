@@ -562,6 +562,11 @@ def _get_file_type_label(filepath: str) -> str:
     if ext == ".cs":
         return "CryoSPARC"
 
+    from helicon.lib import cryosparc_project
+
+    if cryosparc_project.is_metadata_file(filepath):
+        return "Metadata"
+
     if ext in (".html", ".htm"):
         return "Browser"
 
@@ -1743,9 +1748,19 @@ class FolderBrowserWidget(QMainWindow):
                 return ["text"]
             return ["slice", "gallery", "text", "images2star"]
         if ext == ".cs":
-            # CryoSPARC .cs files are npz archives; images2star is the one
-            # display action that can turn them into something else.
-            return ["images2star"]
+            # A CryoSPARC dataset that names images is an image stack, the way
+            # a RELION data.star is: ``blob/path`` and ``blob/idx`` say where
+            # each one lives. Those get the stack actions; a passthrough
+            # dataset carries inherited parameters and no images, and a
+            # volume's dataset points at a map, so both keep to images2star.
+            from helicon.lib import cryosparc_project
+
+            modes = ["images2star"]
+            if cryosparc_project.has_image_refs(path):
+                modes = ["slice", "gallery"] + modes
+                if cryosparc_project.is_helical(path):
+                    modes.append("denovo3D")
+            return modes
         if ext == ".mrcs":
             modes = ["slice", "gallery"]
             _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
@@ -1756,7 +1771,7 @@ class FolderBrowserWidget(QMainWindow):
                 modes.append("denovo3D")
             return modes
         if ext in _MRC_VOLUME_EXTENSIONS:
-            _has_volume = self._volume_has_nz_gt1(path)
+            _has_volume = self._mrc_is_volume(path)
             if _has_volume:
                 modes = [
                     "slice",
@@ -1768,8 +1783,19 @@ class FolderBrowserWidget(QMainWindow):
                 ]
             else:
                 # Single-slice (nz == 1) or unreadable .mrc/.map files are
-                # treated as 2D image stacks, not 3D volumes.
+                # treated as 2D image stacks, not 3D volumes -- as are the
+                # many-image stacks CryoSPARC writes with an .mrc suffix.
                 modes = ["slice", "gallery"]
+                from helicon.lib import cryosparc_project
+
+                if cryosparc_project.is_class_averages(path):
+                    # Sorting by abundance needs the particles dataset that
+                    # records each particle's class; offered only when the
+                    # companion files are actually there.
+                    if cryosparc_project.has_class_abundance(path):
+                        modes.append("2dclasses")
+                    if cryosparc_project.is_helical(path):
+                        modes.extend(["helicalProjection", "hill", "denovo3D"])
             if _has_volume:
                 _is_class3d_or_refine3d = any(
                     p.startswith("Class3D") or p.startswith("Refine3D")
@@ -1779,6 +1805,11 @@ class FolderBrowserWidget(QMainWindow):
                     str(Path(path).parent)
                 ):
                     modes.append("hi3d")
+                else:
+                    from helicon.lib import cryosparc_project
+
+                    if cryosparc_project.is_helical(path):
+                        modes.append("hi3d")
             return modes
         if ext == ".bild":
             return ["text", "3dplot", "chimerax"]
@@ -1797,6 +1828,25 @@ class FolderBrowserWidget(QMainWindow):
             return ["text"]
 
         return []
+
+    def _mrc_is_volume(self, path: str) -> bool:
+        """Whether an MRC-format file holds a 3D volume rather than a stack.
+
+        The header alone cannot say. CryoSPARC writes everything as ``.mrc``,
+        so a stack of 100 class averages has nz=100 and looks exactly like a
+        map -- one such stack measured 200 x 200 x 200, which no rule about
+        dimensions could ever call correctly. Where the file sits in a
+        CryoSPARC project, its job type and CryoSPARC's own naming say which
+        it is; everywhere else the Z extent is still the best signal there is.
+        """
+        from helicon.lib import cryosparc_project
+
+        kind = cryosparc_project.mrc_content(path)
+        if kind == "volume":
+            return True
+        if kind == "stack":
+            return False
+        return self._volume_has_nz_gt1(path)
 
     def _volume_has_nz_gt1(self, path: str) -> bool:
         """Return True if an MRC-format file has more than one Z slice."""
@@ -1832,7 +1882,7 @@ class FolderBrowserWidget(QMainWindow):
                 return False
             return True
         if ext in _MRC_VOLUME_EXTENSIONS:
-            return not self._volume_has_nz_gt1(path)
+            return not self._mrc_is_volume(path)
         if ext in _RASTER_IMAGE_EXTENSIONS:
             return True
         return False
@@ -1846,9 +1896,9 @@ class FolderBrowserWidget(QMainWindow):
         """
         from pathlib import Path
 
-        return Path(
-            path
-        ).suffix.lower() in _MRC_VOLUME_EXTENSIONS and self._volume_has_nz_gt1(path)
+        return Path(path).suffix.lower() in _MRC_VOLUME_EXTENSIONS and (
+            self._mrc_is_volume(path)
+        )
 
     def _on_selection_changed(self, selected, deselected) -> None:
         indexes = self._tree.selectionModel().selectedIndexes()
