@@ -52,6 +52,25 @@ curvelet_udct = ['curvelets']
 # it and simply does not expose those names.
 gauss = ['torch']
 
+# Everything the test suite needs beyond the runtime dependencies. Without
+# these, parts of the suite skip themselves quietly or cannot run at all:
+#
+#   pytest-playwright  the `page` fixture the web-app tests ask for; without
+#                      it those tests ERROR rather than skip
+#   hypothesis         the property tests in test_angular_property.py
+#   pytz               timestamp handling in test_HOM_containerC.py
+#   pypdf              the PDF assertions in test_class2d_summary.py
+#
+# The feature extras are separate on purpose: a suite run against
+# helicon[test] alone still skips the tests that need shiny, napari or torch.
+test = [
+    'pytest',
+    'pytest-playwright',
+    'hypothesis',
+    'pytz',
+    'pypdf',
+]
+
 all = [
     "helicon[shiny]",
     "helicon[streamlit]",
