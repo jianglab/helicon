@@ -96,3 +96,61 @@ class TestDataset(object):
         data, apix = self.emdb.read_emdb_map("1234")
         assert apix == 1.0
         assert data.shape == (10, 10, 10)
+
+
+class TestContourLevel:
+    """EMDB records the level its depositors recommend; reading it is free.
+
+    The XML this parses is already downloaded and cached for other purposes,
+    and the level is in the map's own units, which makes it a far better floor
+    for "what counts as density" than any fraction of the map's maximum.
+    """
+
+    def _emdb(self, xml):
+        from helicon.lib.dataset import EMDB
+
+        emdb = EMDB.__new__(EMDB)
+        emdb.read_emdb_xml = lambda emd_id: xml
+        return emdb
+
+    def test_it_finds_the_level_in_the_nested_metadata(self):
+        xml = {
+            "map": {
+                "contour_list": {
+                    "contour": {"level": "28.0", "primary": "true"},
+                }
+            }
+        }
+        assert self._emdb(xml).contour_level("emd-1427") == 28.0
+
+    def test_several_contours_give_the_first(self):
+        xml = {
+            "map": {
+                "contour_list": {
+                    "contour": [
+                        {"level": "0.032", "primary": "true"},
+                        {"level": "0.05"},
+                    ]
+                }
+            }
+        }
+        assert self._emdb(xml).contour_level("emd-0000") == 0.032
+
+    def test_an_entry_without_one_gives_none(self):
+        assert (
+            self._emdb({"map": {"dimensions": {"col": "256"}}}).contour_level(
+                "emd-0000"
+            )
+            is None
+        )
+
+    def test_unreadable_metadata_is_not_an_error(self):
+        from helicon.lib.dataset import EMDB
+
+        emdb = EMDB.__new__(EMDB)
+
+        def boom(emd_id):
+            raise OSError("no such file")
+
+        emdb.read_emdb_xml = boom
+        assert emdb.contour_level("emd-0000") is None

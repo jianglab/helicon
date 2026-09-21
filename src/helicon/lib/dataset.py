@@ -307,6 +307,52 @@ class EMDB:
             )
         return data, apix
 
+    def contour_level(self, emd_id: str):
+        """The contour level the depositors recommend for this map.
+
+        Every EMDB entry carries one, and it is a far better floor for
+        deciding which voxels are structure than any fraction of the map's
+        own maximum: it is chosen per entry by the people who built the map,
+        and it is in the map's own units. EMD-1427, whose voxels run -39 to
+        +46, recommends 28.0 -- which excludes its negative lumen entirely.
+
+        Read from the XML metadata this class already downloads and caches,
+        so it costs nothing extra and works against a local mirror.
+
+        Parameters
+        ----------
+        emd_id : str
+            EMDB entry ID.
+
+        Returns
+        -------
+        float or None
+            The primary contour level, or None when the entry does not
+            record one or its metadata cannot be read.
+        """
+        try:
+            xml = self.read_emdb_xml(emd_id=emd_id)
+        except Exception:
+            return None
+
+        def levels(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "level":
+                        yield value
+                    else:
+                        yield from levels(value)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from levels(item)
+
+        for value in levels(xml.get("map", xml) if isinstance(xml, dict) else xml):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def get_emdb_xml_url(self, emd_id: str):
         """Return the download URL for an EMDB XML metadata file.
 
