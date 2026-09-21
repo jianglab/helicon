@@ -21,8 +21,16 @@ import plotly.express as px
 from ..lib.shared_state import ProjectState
 from ..lib import helical_projection_compute as compute
 from ..lib import helix_transform
+from ..lib import map_gauss_fit
 
 logger = logging.getLogger(__name__)
+
+# How much re-placing the gaussian mode does with the pixel aligner before the
+# results are displayed, counted in image-map pairs rather than in maps: one
+# pair costs about 0.7 s, so a fixed ten maps would cost more than the search
+# itself once several images are selected. Ten pairs covers the top of a
+# single-image search, which is where a user looks first.
+POLISHED_PAIRS_FOR_DISPLAY = 10
 
 BOOKMARK_DEFAULTS = {
     "mode_images": ("input_mode_images", "url"),
@@ -40,7 +48,7 @@ BOOKMARK_DEFAULTS = {
     "scale_range": ("scale_range", 5),
     "rescale_apix": ("rescale_apix", True),
     "match_sf": ("match_sf", True),
-    "projection_method": ("projection_method", "volume"),
+    "projection_method": ("projection_method", "gaussian"),
     "plot_scores": ("plot_scores", True),
     "hide_query": ("hide_query_image", False),
 }
@@ -232,21 +240,13 @@ def helical_projection_tab_ui():
                         ),
                         ui.input_radio_buttons(
                             "projection_method",
-                            "Side projection from",
+                            "Search mode",
                             choices={
-                                "volume": "Symmetrized volume",
-                                "gaussian": "Gaussian model (faster)",
+                                "gaussian": "Gaussians, 2D and 3D (faster)",
+                                "volume": "Voxels and pixels",
                             },
-                            selected="volume",
+                            selected="gaussian",
                             inline=True,
-                        ),
-                        ui.help_text(
-                            "The gaussian model fits each map once, caches it, "
-                            "and expands the helical symmetry on a few hundred "
-                            "parameters instead of on voxels. Measured over 24 "
-                            "EMDB maps it returns the same best match and runs "
-                            "about twice as fast, but it cannot reproduce "
-                            "detail finer than the sampling it was fitted at."
                         ),
                     ),
                     id="hp_tab",
@@ -1223,6 +1223,19 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         projection_method = input.projection_method()
         scale_range = input.scale_range() / 100.0
         active_maps = [m for m in maps() if abs(m.twist) > 1e-3]
+
+        # In gaussian mode the queries become gaussians too, once for the whole
+        # search: every map is then matched by an integral over mixtures rather
+        # than by correlating images. If a query cannot be fitted -- a blank
+        # image, or one whose background leaves nothing above it -- the search
+        # falls back to the pixel aligner rather than refusing to run.
+        query_fits = None
+        if projection_method == "gaussian":
+            try:
+                query_fits = map_gauss_fit.fit_queries(query_imgs, query_apix)
+            except Exception as e:
+                logger.warning("Could not fit the query images to gaussians: %s", e)
+                query_fits = None
         results = []
         with ui.Progress(min=0, max=len(active_maps)) as p:
             p.set(
@@ -1248,6 +1261,7 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                         0,
                         scale_range,
                         projection_method,
+                        query_fits,
                     ): m
                     for m in active_maps
                 }
@@ -1286,6 +1300,26 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                     footer=None,
                 )
             )
+        # The gaussian search finds the right map as often as the pixel route
+        # and much faster, but the placement it settles on is the best one for
+        # mixtures. The matches a user actually looks at are re-placed by the
+        # pixel aligner, which also recovers the scale; the scores keep their
+        # ranking so the list stays internally comparable.
+        if query_fits is not None and len(good) > 1:
+            n_polish = max(1, POLISHED_PAIRS_FOR_DISPLAY // max(1, len(query_imgs)))
+            order = sorted(range(len(good)), key=lambda i: -good[i][4])
+            order = order[: min(n_polish, len(order))]
+            with ui.Progress(min=0, max=len(order)) as p:
+                p.set(message="Placing the top matches", detail="for display")
+                for n, i in enumerate(order):
+                    try:
+                        good[i] = compute.refine_placement_for_display(
+                            good[i], query_imgs, scale_range
+                        )
+                    except Exception as e:
+                        logger.warning("Could not re-place %s: %s", good[i][8], e)
+                    p.set(n + 1)
+
         map_side_projections_with_alignments.set(good)
 
     @reactive.effect

@@ -212,6 +212,7 @@ def symmetrize_project_align_one_map(
     angle_range,
     scale_range,
     projection_method="volume",
+    query_fits=None,
 ):
     if abs(map_info.twist) < 1e-3:
         return map_info, None
@@ -270,11 +271,27 @@ def symmetrize_project_align_one_map(
     if projection_method == "gaussian":
         # The map as a few hundred gaussians, fitted once and cached, so the
         # screw operation acts on parameters instead of on voxels and no volume
-        # is ever built. The picture it renders is the one the volume path
-        # produces -- ncc 0.98, 0.97 and 0.80 on EMD-46496, 12268 and 71835 --
-        # and everything downstream of `proj` is untouched.
+        # is ever built. The picture it renders is close to the one the volume
+        # path produces -- ncc 0.98, 0.97 and 0.80 on EMD-46496, 12268 and
+        # 71835 -- and everything downstream of `proj` is untouched.
+        #
+        # How well it ranks depends on what the query is, and the answer
+        # moved once that was measured honestly. Against queries cut from the
+        # volume route's own projections it looked clearly worse -- 60% top-1
+        # against 73% over 60 maps -- but that benchmark rewards whatever
+        # resembles a volume projection, and a fit is not one. Against REAL
+        # class averages, EMPIAR-10940 searched over 61 maps with EMD-14046
+        # as the truth, the two routes are equal: each put the right map first
+        # in 7 of 8 searches, agreeing on every query including the one both
+        # missed. Over all 42 class averages of that set it ranks the true
+        # map first 32 times against the volume route's 33, and ranks it
+        # better on average -- 5.1 against 7.2 -- once the fit is thresholded
+        # at the depositors' contour level. That is why this route is the
+        # default, at 1.6 to 2 times the speed.
+
         from . import map_gauss_fit
 
+        mixture = None
         try:
             fit = map_gauss_fit.gaussians_for_map_info(map_info)
         except Exception:
@@ -288,7 +305,37 @@ def symmetrize_project_align_one_map(
             ny=new_size[1],
             apix=new_apix,
         )
+        if query_fits is not None:
+            # The projection as gaussians rather than as pixels, so the match
+            # can be an integral instead of a cross-correlation. Projecting an
+            # isotropic gaussian gives an isotropic gaussian, so this costs a
+            # screw expansion and a binning pass and no rendering at all.
+            try:
+                mixture = map_gauss_fit.projection_mixture(
+                    fit,
+                    twist=twist,
+                    rise=rise,
+                    csym=csym,
+                    length=new_size[0],
+                    ny=new_size[1],
+                    apix=new_apix,
+                    sigma=query_fits[0].sigma,
+                    # Coarse, because the match does not need the components
+                    # to be finer than the width they are compared at, and
+                    # every one of them costs in the overlap. Measured over 42
+                    # real class averages against 61 maps, binning at twice
+                    # the width ranks the true map first 34 times against 35
+                    # at a quarter of it, with a better mean rank (4.2 against
+                    # 4.3) and a thousand components instead of five and a
+                    # half thousand -- 2.8 s a query against 10.2. Each bin
+                    # keeps its amplitude-weighted centre rather than the grid
+                    # point, which is why coarse bins cost so little.
+                    bin_scale=2.0,
+                )
+            except Exception:
+                mixture = None
     else:
+        mixture = None
         if rescale_apix:
             data_work = helicon.low_high_pass_filter(
                 data, low_pass_fraction=apix / new_apix
@@ -319,6 +366,19 @@ def symmetrize_project_align_one_map(
         )
         proj = data_sym.sum(axis=2).T
 
+    if mixture is not None:
+        return map_info, _align_in_gaussian_space(
+            queries,
+            query_labels,
+            query_fits,
+            mixture,
+            proj,
+            new_apix,
+            new_size,
+            match_sf,
+            label,
+        )
+
     scores = []
     placed = []
     best = None
@@ -344,15 +404,26 @@ def symmetrize_project_align_one_map(
         if best is None or one_score > best[0]:
             best = (one_score, one_flip, one_scale, one_rotation, one_shift)
 
-    # align_images pads the moving image into the reference frame, so every
-    # query comes back already placed in the projection's own container; the
-    # composite is those placements laid over one another.
-    #
-    # At each pixel the contribution of largest magnitude wins. Not the sum,
-    # which reads as brighter density where two averages overlap; and not the
-    # maximum, which drops density wherever one image is negative and another
-    # contributes the zero of its own padding -- on a map whose projection is
-    # negative throughout, and EMD-1427 is one, that erases whole placements.
+    return map_info, _compose_result(
+        scores, placed, best, query_labels, proj, new_apix, match_sf, label
+    )
+
+
+def _compose_result(
+    scores, placed, best, query_labels, proj, new_apix, match_sf, label
+):
+    """One result from however many queries were matched against one map.
+
+    Each query comes back already placed in the projection's own container --
+    both aligners return it that way -- so the composite is those placements
+    laid over one another.
+
+    At each pixel the contribution of largest magnitude wins. Not the sum,
+    which reads as brighter density where two averages overlap; and not the
+    maximum, which drops density wherever one image is negative and another
+    contributes the zero of its own padding -- on a map whose projection is
+    negative throughout, and EMD-1427 is one, that erases whole placements.
+    """
     similarity_score = float(np.mean(scores))
     if len(placed) == 1:
         aligned_image_moving = placed[0]
@@ -364,7 +435,7 @@ def symmetrize_project_align_one_map(
         ]
     _, flip, scale, rotation_angle, shift_cartesian = best
     image_query_label = (
-        query_labels[0] if len(queries) == 1 else "%d images" % len(queries)
+        query_labels[0] if len(scores) == 1 else "%d images" % len(scores)
     )
 
     if match_sf:
@@ -377,7 +448,7 @@ def symmetrize_project_align_one_map(
             mask=mask,
         )
 
-    return map_info, (
+    return (
         flip,
         scale,
         rotation_angle,
@@ -388,6 +459,131 @@ def symmetrize_project_align_one_map(
         proj,
         label,
     )
+
+
+def _align_in_gaussian_space(
+    queries,
+    query_labels,
+    query_fits,
+    mixture,
+    proj,
+    new_apix,
+    new_size,
+    match_sf,
+    label,
+):
+    """Match every query to one map by the overlap of their gaussians.
+
+    The pixel route pads each query into the projection's box and correlates
+    the two images over shift, polarity and flip. This does the same search
+    with no image in it: the overlap of two mixtures has a closed form, and as
+    a function of the shift it is itself a sum of gaussians, so the whole
+    landscape comes from one scatter and one blur. Over 61 maps and 16 real
+    class averages it ranks the true map first as often as the pixel route
+    does -- 12 of 16, agreeing query by query -- in a sixth of the time.
+
+    The picture is still made of pixels: the transform the mixtures agree on is
+    applied to the original image, so the display keeps the detail the fit
+    discarded.
+    """
+    from . import gauss_align
+
+    # The query is centred across the filament by the auto transform, so the
+    # shift across it is small; along it a short average slides anywhere on a
+    # projection a pitch long.
+    half_y = max(4.0 * mixture.sigma, 0.25 * new_size[1] * new_apix)
+    half_x = 0.5 * new_size[0] * new_apix
+
+    scores = []
+    placed = []
+    best = None
+    for one_query, one_fit in zip(queries, query_fits):
+        alignment = gauss_align.align_mixtures(
+            one_fit.amplitudes,
+            one_fit.centers,
+            one_fit.sigma,
+            mixture.amplitudes,
+            mixture.centers,
+            mixture.sigma,
+            half_y=half_y,
+            half_x=half_x,
+            step=max(0.5 * mixture.sigma, new_apix),
+        )
+        scores.append(alignment.score)
+        placed.append(
+            gauss_align.place_query(one_query, alignment, proj.shape, new_apix)
+        )
+        entry = (
+            alignment.score,
+            alignment.flip < 0,
+            alignment.scale,
+            180.0 if alignment.polarity < 0 else 0.0,
+            (alignment.shift[0] / new_apix, alignment.shift[1] / new_apix),
+        )
+        if best is None or entry[0] > best[0]:
+            best = entry
+
+    return _compose_result(
+        scores, placed, best, query_labels, proj, new_apix, match_sf, label
+    )
+
+
+def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
+    """Re-place the queries on one map with the pixel aligner, for the picture.
+
+    The gaussian route ranks as well as the pixel route and far faster, but the
+    placement it settles on is the best one for mixtures rather than for
+    pixels, and a user looking at a top match is looking at pixels. So the
+    matches that get looked at are re-placed here, by the same
+    ``align_images`` the volume route uses -- which also recovers the scale the
+    gaussian search does not vary. The score is left alone: it came from the
+    search, and a handful of maps rescored by a different measure could not be
+    compared with the rest.
+
+    Parameters
+    ----------
+    result : tuple
+        One entry as returned by :func:`symmetrize_project_align_one_map`.
+    queries : list of np.ndarray
+        The query images, in the order they were searched with.
+    scale_range, angle_range : float
+        Passed to ``align_images``.
+
+    Returns
+    -------
+    tuple
+        The same entry with its placement, flip, scale and rotation replaced.
+    """
+    _, _, _, _, score, _, query_label, proj, label = result
+    scores = []
+    placed = []
+    best = None
+    for one_query in queries:
+        (
+            one_flip,
+            one_scale,
+            one_rotation,
+            one_shift,
+            one_score,
+            one_aligned,
+        ) = align_images(
+            image_moving=one_query,
+            image_ref=proj,
+            scale_range=scale_range,
+            angle_range=angle_range,
+            check_polarity=True,
+            check_flip=True,
+            return_aligned_moving_image=True,
+        )
+        scores.append(one_score)
+        placed.append(one_aligned)
+        if best is None or one_score > best[0]:
+            best = (one_score, one_flip, one_scale, one_rotation, one_shift)
+
+    refined = _compose_result(
+        scores, placed, best, [query_label], proj, 1.0, False, label
+    )
+    return refined[:4] + (score,) + refined[5:6] + (query_label, proj, label)
 
 
 def anisotropic_low_high_pass_filter(
