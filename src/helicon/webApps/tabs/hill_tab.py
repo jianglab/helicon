@@ -584,6 +584,8 @@ def hill_tab_server(input, output, session, project: ProjectState):
     phase_data = reactive.value(None)
     pd_data = reactive.value(None)
     _last_transform_key = [None]
+    _last_ps_pd_selection = [None]
+    _previous_input_mode = [None]
     prev_data_from = reactive.value("main")
     avg_ps_pd_df = reactive.value({})
     avg_ps_pd_main_in_df = reactive.value({})
@@ -739,7 +741,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
     # ── Bokeh spinners and sliders for helix params ────────────
     curr_twist = _INIT_TWIST
     curr_rise = _INIT_RISE
-    curr_pitch = _INIT_PITCH
+    curr_pitch = hill.twist2pitch(curr_twist, curr_rise)
 
     spinner_twist = Spinner(
         title="Twist (°)",
@@ -792,7 +794,20 @@ def hill_tab_server(input, output, session, project: ProjectState):
         sizing_mode="stretch_width",
     )
 
-    # JS callbacks for spinners → Shiny inputs
+    # Send complete parameter sets through the module's actual input IDs.
+    helix_input_ids = {
+        name: session.ns(f"hill_{name}")
+        for name in ("twist", "pitch", "rise", "use_twist_pitch")
+    }
+    helix_controls = ColumnDataSource(
+        data=dict(
+            twist=[curr_twist],
+            rise=[curr_rise],
+            pitch=[curr_pitch],
+            keep=["Twist"],
+            tilt=[0.0],
+        )
+    )
     _setup_spinner_js(
         spinner_twist,
         spinner_pitch,
@@ -800,9 +815,9 @@ def hill_tab_server(input, output, session, project: ProjectState):
         slider_twist,
         slider_pitch,
         slider_rise,
-        MODULE_PREFIX,
+        helix_controls,
     )
-    _setup_slider_js(
+    slider_callbacks = _setup_slider_js(
         slider_twist,
         slider_pitch,
         slider_rise,
@@ -810,7 +825,8 @@ def hill_tab_server(input, output, session, project: ProjectState):
         spinner_pitch,
         spinner_rise,
         fig_ellipses,
-        MODULE_PREFIX,
+        helix_input_ids,
+        helix_controls,
     )
     _setup_spinner_throttle_js(spinner_rise, slider_rise, spinner_pitch, slider_pitch)
 
@@ -1192,9 +1208,29 @@ def hill_tab_server(input, output, session, project: ProjectState):
         ms = [str(m) for m in range(input.hill_m_max(), -input.hill_m_max() - 1, -1)]
         ui.update_checkbox_group("hill_ms", choices=ms, selected=prev)
 
+    @reactive.effect(priority=10)
+    @reactive.event(
+        input.hill_twist,
+        input.hill_rise,
+        input.hill_use_twist_pitch,
+        input.hill_out_of_plane_tilt,
+    )
+    def _sync_helix_controls():
+        twist, rise = input.hill_twist(), input.hill_rise()
+        req(np.isfinite(twist), np.isfinite(rise), rise > 0)
+        helix_controls.data = dict(
+            twist=[twist],
+            rise=[rise],
+            pitch=[hill.twist2pitch(twist, rise)],
+            keep=[input.hill_use_twist_pitch()],
+            tilt=[input.hill_out_of_plane_tilt()],
+        )
+
     # ── Layer line / display param changes ──────────────────────
     @reactive.effect
     @reactive.event(
+        selected_images,
+        input.hill_input_type,
         input.hill_m_max,
         input.hill_diameter,
         input.hill_csym,
@@ -1209,16 +1245,17 @@ def hill_tab_server(input, output, session, project: ProjectState):
         input.hill_pny,
         input.hill_twist,
         input.hill_rise,
-        ignore_init=True,
     )
     def _update_layerline_figures():
-        req(len(selected_images()) > 0)
         # Frame sizing is managed by _resize_main_plots — don't override it here.
         for e in fig_ellipses:
             for f in figs_image:
                 if e in f.renderers:
                     f.renderers.remove(e)
         fig_ellipses.clear()
+        _update_slider_renderers(slider_callbacks, fig_ellipses)
+        if not len(selected_images()):
+            return
         if input.hill_LL():
             curr_m_groups = hill.compute_layer_line_positions(
                 twist=input.hill_twist(),
@@ -1312,17 +1349,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
             "bessel": [bessel],
         }
 
-        # Re-setup slider JS with updated fig_ellipses references
-        _setup_slider_js(
-            slider_twist,
-            slider_pitch,
-            slider_rise,
-            spinner_twist,
-            spinner_pitch,
-            spinner_rise,
-            fig_ellipses,
-            MODULE_PREFIX,
-        )
+        _update_slider_renderers(slider_callbacks, fig_ellipses)
 
     # ── Color palette updates ────────────────────────────────────
     @reactive.effect
@@ -1568,8 +1595,6 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 ui.update_numeric("hill_rise", value=rise)
                 ui.update_numeric("hill_twist", value=twist)
                 ui.update_numeric("hill_csym", value=csym)
-                spinner_rise.value = rise
-                spinner_twist.value = twist
                 url = f"https://www.ebi.ac.uk/emdb/entry/{input.hill_img_file_emd_id()}"
                 msg = (
                     f'<a href="{url}" target="_blank" rel="noopener noreferrer">'
@@ -1625,6 +1650,16 @@ def hill_tab_server(input, output, session, project: ProjectState):
 
     # ── Image loading ────────────────────────────────────────────
 
+    @reactive.effect(priority=20)
+    @reactive.event(input.hill_input_mode_params)
+    def _reset_helix_after_emdb():
+        mode = input.hill_input_mode_params()
+        if _previous_input_mode[0] == "3" and mode == "2":
+            ui.update_numeric("hill_twist", value=_INIT_TWIST)
+            ui.update_numeric("hill_rise", value=_INIT_RISE)
+            ui.update_numeric("hill_csym", value=BOOKMARK_DEFAULTS["csym"][1])
+        _previous_input_mode[0] = mode
+
     @reactive.effect
     @reactive.event(input.hill_input_mode_params, input.hill_img_file_url)
     def _load_input_data_from_url():
@@ -1632,12 +1667,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
         url = input.hill_img_file_url()
         if not url:
             return
-        # Reset helical params to URL-mode defaults (EMDB mode may have changed them).
-        ui.update_numeric("hill_twist", value=_INIT_TWIST)
-        ui.update_numeric("hill_rise", value=_INIT_RISE)
-        ui.update_numeric("hill_csym", value=BOOKMARK_DEFAULTS["csym"][1])
-        spinner_twist.value = _INIT_TWIST
-        spinner_rise.value = _INIT_RISE
+        # Loading an image must not overwrite restored or user-edited helix params.
         try:
             data, apix = denovo3d_pipeline.get_images_from_url(url)
             input_data.set(data)
@@ -1825,8 +1855,6 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 ui.update_numeric("hill_angle", value=0.0)
                 ui.update_numeric("hill_dx", value=0.0)
                 ui.update_numeric("hill_dy", value=0.0)
-            # Pulse trigger for _apply_2d_transform_ps_pd
-            # _apply_2d_transform_ps_pd handles this via selected_images trigger
         else:
             if input.hill_inhibit_update():
                 ui.update_numeric("hill_mask_len", value=90.0)
@@ -2416,8 +2444,35 @@ def hill_tab_server(input, output, session, project: ProjectState):
         )
 
     # ── 2D transform reactive updates ───────────────────────────
-    @reactive.effect
+    @reactive.effect(priority=10)
     @reactive.event(
+        selected_images,
+        input.hill_input_type,
+        input.hill_apix,
+        input.hill_angle,
+        input.hill_dx,
+        input.hill_dy,
+    )
+    def _apply_2d_transform_ps_pd():
+        req(input.hill_input_type() in ("PS", "PD"))
+        images = selected_images()
+        req(len(images) == 1, input.hill_apix() > 0)
+        angle, dx, dy = input.hill_angle(), input.hill_dx(), input.hill_dy()
+        if images is not _last_ps_pd_selection[0]:
+            _last_ps_pd_selection[0] = images
+            if not input.hill_inhibit_update():
+                angle = dx = dy = 0.0
+                for name in ("angle", "dx", "dy"):
+                    ui.update_numeric(f"hill_{name}", value=0.0)
+        temp = hill.transform_2d_image(
+            images[0].astype(np.float64), angle, dx, dy, False, input.hill_apix()
+        )
+        _last_transform_key[0] = None
+        data_2d_transformed.set(temp)
+
+    @reactive.effect(priority=10)
+    @reactive.event(
+        input.hill_input_type,
         input.hill_apix,
         input.hill_angle,
         input.hill_dx,
@@ -2458,6 +2513,8 @@ def hill_tab_server(input, output, session, project: ProjectState):
             )
         # Skip if param key unchanged (redundant round-trip)
         key = (
+            id(selected_images()[0]),
+            input.hill_input_type(),
             input.hill_angle(),
             input.hill_dx(),
             input.hill_dy(),
@@ -3236,6 +3293,35 @@ def _init_layer_lines(fig_ellipses, figs_image):
     pass  # Not strictly needed; layer lines are built reactively
 
 
+# Shared by browser edits and server restoration. All controls change together;
+# callbacks caused by these assignments must not send partial values to Shiny.
+_HELIX_APPLY_CONTROLS_JS = """
+function apply_values(twist, pitch, rise) {
+    controls._hill_syncing = true;
+    try {
+        slider_twist.start = Math.min(-180, twist);
+        slider_twist.end = Math.max(180, twist);
+        if (pitch < slider_pitch.start || pitch > slider_pitch.end) {
+            slider_pitch.start = pitch / 2;
+            slider_pitch.end = pitch * 2;
+        }
+        if (rise < slider_rise.start || rise > slider_rise.end) {
+            slider_rise.start = rise / 2;
+            slider_rise.end = rise * 2;
+        }
+        spinner_pitch.low = Math.min(rise, pitch);
+        spinner_rise.high = Math.max(rise, pitch);
+        controls._hill_values = [twist, pitch, rise];
+        slider_twist.value = spinner_twist.value = twist;
+        slider_pitch.value = spinner_pitch.value = pitch;
+        slider_rise.value = spinner_rise.value = rise;
+    } finally {
+        controls._hill_syncing = false;
+    }
+}
+"""
+
+
 def _setup_spinner_js(
     spinner_twist,
     spinner_pitch,
@@ -3243,32 +3329,23 @@ def _setup_spinner_js(
     slider_twist,
     slider_pitch,
     slider_rise,
-    prefix,
+    controls,
 ):
-    """Set up CustomJS for Bokeh spinners to send values to Shiny."""
-    rise_code = f"""
-        Shiny.setInputValue("{prefix}_rise", spinner_rise.value, {{priority: 'event'}});
-        slider_rise.value = spinner_rise.value;
-    """
-    pitch_code = f"""
-        Shiny.setInputValue("{prefix}_pitch", spinner_pitch.value, {{priority: 'event'}});
-        slider_pitch.value = spinner_pitch.value;
-    """
-    twist_code = f"""
-        Shiny.setInputValue("{prefix}_twist", spinner_twist.value, {{priority: 'event'}});
-        slider_twist.value = spinner_twist.value;
-    """
-    args = dict(
-        spinner_twist=spinner_twist,
-        spinner_pitch=spinner_pitch,
-        spinner_rise=spinner_rise,
-        slider_twist=slider_twist,
-        slider_pitch=slider_pitch,
-        slider_rise=slider_rise,
-    )
-    spinner_twist.js_on_change("value", CustomJS(args=args, code=twist_code))
-    spinner_pitch.js_on_change("value", CustomJS(args=args, code=pitch_code))
-    spinner_rise.js_on_change("value", CustomJS(args=args, code=rise_code))
+    """Route spinner edits through the same atomic update as slider edits."""
+    for spinner, slider in zip(
+        (spinner_twist, spinner_pitch, spinner_rise),
+        (slider_twist, slider_pitch, slider_rise),
+    ):
+        spinner.js_on_change(
+            "value",
+            CustomJS(
+                args=dict(slider=slider, controls=controls),
+                code="""
+                if (!controls._hill_syncing && slider.value !== cb_obj.value)
+                    slider.value = cb_obj.value;
+            """,
+            ),
+        )
 
 
 def _setup_slider_js(
@@ -3279,69 +3356,79 @@ def _setup_slider_js(
     spinner_pitch,
     spinner_rise,
     fig_ellipses,
-    prefix,
+    input_ids,
+    controls,
 ):
-    """Set up CustomJS for Bokeh sliders to update layer lines and Shiny inputs."""
-    rise_code = f"""
-        var twist_sign = 1.;
-        if (slider_twist.value < 0) {{ twist_sign = -1.; }}
-        if ($("input[type='radio'][name='{prefix}_use_twist_pitch']:checked").val() == "Pitch") {{
-            var t = twist_sign * 360/(slider_pitch.value/slider_rise.value);
-            if (t != slider_twist.value) slider_twist.value = t;
-        }} else {{
-            var p = Math.abs(360/slider_twist.value * slider_rise.value);
-            if (p != slider_pitch.value) slider_pitch.value = p;
-        }}
-        if (spinner_rise.value != slider_rise.value) spinner_rise.value = slider_rise.value;
-        var pitch_inv = 1./slider_pitch.value;
-        var rise_inv = 1./slider_rise.value;
-        for (var fi = 0; fi < fig_ellipses.length; fi++) {{
-            var el = fig_ellipses[fi];
-            const m = el.tags[0];
-            const ns = el.tags[1];
-            var y = el.data_source.data.y;
-            for (var i = 0; i < ns.length; i++) {{
-                y[i] = m * rise_inv + ns[i] * pitch_inv;
-            }}
-            el.data_source.change.emit();
-        }}
-    """
-    pitch_code = f"""
-        var twist_sign = 1.;
-        if (slider_twist.value < 0) {{ twist_sign = -1.; }}
-        var t = twist_sign * 360/(slider_pitch.value/slider_rise.value);
-        if (t != slider_twist.value) slider_twist.value = t;
-        if (spinner_pitch.value != slider_pitch.value) spinner_pitch.value = slider_pitch.value;
-        var pitch_inv = 1./slider_pitch.value;
-        var rise_inv = 1./slider_rise.value;
-        for (var fi = 0; fi < fig_ellipses.length; fi++) {{
-            var el = fig_ellipses[fi];
-            const m = el.tags[0];
-            const ns = el.tags[1];
-            var y = el.data_source.data.y;
-            for (var i = 0; i < ns.length; i++) {{
-                y[i] = m * rise_inv + ns[i] * pitch_inv;
-            }}
-            el.data_source.change.emit();
-        }}
-    """
-    twist_code = f"""
-        var p = Math.abs(360/slider_twist.value * slider_rise.value);
-        if (p != slider_pitch.value) slider_pitch.value = p;
-        if (spinner_twist.value != slider_twist.value) spinner_twist.value = slider_twist.value;
-    """
+    """Register once; return callbacks whose renderer references can be updated."""
     args = dict(
-        fig_ellipses=fig_ellipses,
         slider_twist=slider_twist,
         slider_pitch=slider_pitch,
         slider_rise=slider_rise,
         spinner_twist=spinner_twist,
         spinner_pitch=spinner_pitch,
         spinner_rise=spinner_rise,
+        controls=controls,
     )
-    slider_twist.js_on_change("value", CustomJS(args=args, code=twist_code))
-    slider_pitch.js_on_change("value", CustomJS(args=args, code=pitch_code))
-    slider_rise.js_on_change("value", CustomJS(args=args, code=rise_code))
+    controls.js_on_change(
+        "data",
+        CustomJS(args=args, code=_HELIX_APPLY_CONTROLS_JS + """
+        const d = controls.data;
+        apply_values(d.twist[0], d.pitch[0], d.rise[0]);
+    """),
+    )
+    code = _HELIX_APPLY_CONTROLS_JS + """
+        if (controls._hill_syncing) return;
+        const host = window.Shiny ? window : window.parent;
+        let twist = slider_twist.value;
+        let pitch = slider_pitch.value;
+        const rise = slider_rise.value;
+        const previous = controls._hill_values;
+        const same = (a, b) => Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(a), Math.abs(b));
+        // Bokeh can execute CustomJS after the synchronous guard has cleared.
+        // Ignore delayed notifications for an already-applied complete tuple.
+        if (previous && same(previous[0], twist) && same(previous[1], pitch) && same(previous[2], rise))
+            return;
+        const sign = twist < 0 ? -1 : 1;
+        const radio = Array.from(host.document.getElementsByName(input_ids.use_twist_pitch))
+            .find(el => el.checked);
+        const keep = radio ? radio.value : controls.data.keep[0];
+        if (cb_obj === slider_pitch || (cb_obj === slider_rise && keep === "Pitch")) {
+            twist = sign * 360 * rise / pitch;
+        } else {
+            pitch = twist === 0 ? rise : Math.abs(360 * rise / twist);
+        }
+        if (![twist, pitch, rise].every(Number.isFinite) || pitch <= 0 || rise <= 0) return;
+        apply_values(twist, pitch, rise);
+        const tilt = controls.data.tilt[0] * Math.PI / 180;
+        for (const el of fig_ellipses) {
+            const m = el.tags[0];
+            const ns = el.tags[1];
+            const data = el.data_source.data;
+            for (let i = 0; i < ns.length; i++) {
+                data.y[i] = (m / rise + ns[i] / pitch) / Math.cos(tilt);
+            }
+            el.data_source.change.emit();
+        }
+        // Default priority batches this complete tuple into one Shiny update.
+        host.Shiny.setInputValue(input_ids.twist, twist);
+        host.Shiny.setInputValue(input_ids.pitch, pitch);
+        host.Shiny.setInputValue(input_ids.rise, rise);
+    """
+    callbacks = []
+    for slider in (slider_twist, slider_pitch, slider_rise):
+        callback = CustomJS(
+            args={**args, "fig_ellipses": list(fig_ellipses), "input_ids": input_ids},
+            code=code,
+        )
+        slider.js_on_change("value", callback)
+        callbacks.append(callback)
+    return callbacks
+
+
+def _update_slider_renderers(callbacks, renderers):
+    """Replace references without registering more callbacks or mutating old lists."""
+    for callback in callbacks:
+        callback.args = {**callback.args, "fig_ellipses": list(renderers)}
 
 
 def _setup_spinner_throttle_js(spinner_rise, slider_rise, spinner_pitch, slider_pitch):
