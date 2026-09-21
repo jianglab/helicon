@@ -64,6 +64,7 @@ from .lib.filters import (
     calculate_structural_factor,
     down_scale,
     generate_tapering_filter,
+    background_offset,
     low_high_pass_filter,
     match_structural_factors,
     normalize_mean_std,

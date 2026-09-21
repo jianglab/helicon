@@ -1,4 +1,6 @@
 import numpy as np
+import pytest
+
 from helicon.lib import filters
 
 
@@ -54,3 +56,40 @@ class TestFilters(object):
         assert tapering_filter.shape == (10, 10)
         assert tapering_filter.min() == 0
         assert tapering_filter.max() == 1
+
+
+class TestBackgroundOffset:
+    """Where the solvent sits, so density can be referenced to it.
+
+    Every package normalises its maps differently, so zero means something
+    different in each one and nothing that treats zero as "no density" can be
+    trusted across maps. EMD-1427 is the cautionary case: its solvent sits at
+    +1.26 and the inside of its tube at -3, so discarding everything below
+    zero keeps the solvent and throws away the structure.
+    """
+
+    def _map(self, offset=0.0, seed=0):
+        rng = np.random.default_rng(seed)
+        data = rng.normal(offset, 1.0, (32, 32, 32)).astype(np.float32)
+        data[12:20, 12:20, 12:20] += 30.0  # structure, the minority of the box
+        return data
+
+    def test_it_recovers_a_shifted_background(self):
+        assert filters.background_offset(self._map(offset=5.0)) == pytest.approx(
+            5.0, abs=0.1
+        )
+
+    def test_structure_does_not_drag_it(self):
+        plain = filters.background_offset(self._map())
+        assert plain == pytest.approx(0.0, abs=0.1)
+
+    def test_a_masked_map_reports_no_offset(self):
+        # most deposited maps are masked: their solvent is already exactly
+        # zero, and what sigma clipping finds inside such a mask is structure
+        data = self._map(offset=5.0)
+        keep = np.zeros(data.shape, dtype=bool)
+        keep[8:24, 8:24, 8:24] = True
+        assert filters.background_offset(np.where(keep, data, 0.0)) == 0.0
+
+    def test_an_empty_array_is_not_an_error(self):
+        assert filters.background_offset(np.zeros(0, dtype=np.float32)) == 0.0

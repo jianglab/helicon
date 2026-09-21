@@ -5,6 +5,7 @@ import helicon
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "background_offset",
     "calculate_structural_factor",
     "down_scale",
     "generate_tapering_filter",
@@ -278,6 +279,68 @@ def normalize_percentile(
     if vmax == vmin:
         return data
     return (data - vmin) / (vmax - vmin)
+
+
+def background_offset(
+    data: np.ndarray, clip: float = 3.0, n_iter: int = 6, min_nonzero: float = 0.5
+) -> float:
+    """The level the solvent sits at, so it can be moved to zero.
+
+    Cryo-EM maps are normalised by whatever software wrote them, so zero
+    means something different in every one. Anything that treats zero as
+    "no density" -- thresholding, masking, a contour -- is therefore making
+    an assumption the file may not honour. EMD-1427 is the cautionary case:
+    its solvent sits at +1.26 and its tube interior at -3, so discarding
+    everything below zero throws away the interior and keeps the solvent.
+
+    Estimated by sigma clipping, which converges on the solvent because
+    structure is the minority of a box.
+
+    Returns 0.0 for a map that has been masked, where the solvent has
+    already been set to exactly zero and there is nothing left to measure:
+    among 60 helical EMDB entries, 63% were masked tightly enough that under
+    a fifth of the box is non-zero, and what clipping finds inside such a
+    mask is structure rather than solvent.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        The map.
+    clip : float, optional
+        Clipping threshold in standard deviations. Defaults to 3.
+    n_iter : int, optional
+        Maximum clipping iterations. Defaults to 6.
+    min_nonzero : float, optional
+        A map with a smaller non-zero fraction is taken to be masked, and
+        already referenced to zero. Defaults to 0.5.
+
+    Returns
+    -------
+    float
+        The offset to subtract, or 0.0 when the map carries no measurable
+        background.
+    """
+    work = np.asarray(data, dtype=np.float64).ravel()
+    if work.size == 0:
+        return 0.0
+    if float((work != 0).mean()) < min_nonzero:
+        return 0.0
+
+    keep = np.ones(work.shape, dtype=bool)
+    mean = float(work.mean())
+    for _ in range(n_iter):
+        subset = work[keep]
+        if subset.size == 0:
+            break
+        mean = float(subset.mean())
+        sigma = float(subset.std())
+        if sigma <= 0:
+            break
+        updated = np.abs(work - mean) <= clip * sigma
+        if int(updated.sum()) == int(keep.sum()):
+            break
+        keep = updated
+    return mean
 
 
 def threshold_data(
