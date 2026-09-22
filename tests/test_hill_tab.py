@@ -56,10 +56,10 @@ def _controls(prefix="other-hill"):
     sliders = [Slider(start=1, end=100, value=v) for v in (30, 240, 20)]
     spinners = [Spinner(value=v) for v in (30, 240, 20)]
     state = ColumnDataSource(dict(twist=[30.], pitch=[240.], rise=[20.],
-                                 keep=["Twist"], tilt=[0.]))
-    ids = {k: f"{prefix}_{k}" for k in ("twist", "pitch", "rise", "use_twist_pitch")}
-    hill_tab._setup_spinner_js(*spinners, *sliders, state)
-    callbacks = hill_tab._setup_slider_js(*sliders, *spinners, [], ids, state)
+                                 keep=["Twist"], tilt=[0.], revision=[0]))
+    ids = {k: f"{prefix}_{k}" for k in (
+        "twist", "pitch", "rise", "use_twist_pitch", "helix_revision")}
+    callbacks = hill_tab._setup_helix_control_js(*sliders, *spinners, [], ids, state)
     return sliders, spinners, state, callbacks
 
 
@@ -81,6 +81,7 @@ class _Effects:
             hill_fft_top_only=False, hill_ll_colors="lime cyan", hill_LL=True,
             hill_LLText=True, hill_twist=30., hill_rise=20., hill_ms=["0"],
             hill_use_twist_pitch="Twist",
+            hill_helix_revision=0,
         )
         values.update(overrides)
         self.input = SimpleNamespace(**{k: reactive.Value(v) for k, v in values.items()})
@@ -254,7 +255,7 @@ def test_url_mode_keeps_restored_parameters_until_leaving_emdb():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["PS", "PD"])
+@pytest.mark.parametrize("mode", ["Image", "PS", "PD"])
 def test_layerlines_follow_selection_and_current_parameters(mode):
     async def run():
         h = _Effects(mode)
@@ -283,6 +284,8 @@ def test_layerlines_follow_selection_and_current_parameters(mode):
                     assert callback.args["fig_ellipses"] == h.ns["fig_ellipses"]
                     assert not any(r in old for r in callback.args["fig_ellipses"])
                 assert all(len(s.js_property_callbacks["change:value"]) == 1 for s in h.sliders)
+                assert all(len(s.js_property_callbacks["change:value_throttled"]) == 1
+                           for s in h.sliders)
             h.ns["selected_images"].set([])
             await reactive.flush()
             assert not h.ns["fig_ellipses"]
@@ -294,14 +297,14 @@ def test_layerlines_follow_selection_and_current_parameters(mode):
 
 @pytest.mark.parametrize("delayed", [False, True])
 def test_browser_control_callbacks_execute_without_feedback(delayed):
-    """Execute production JS, including nested change events, with a tiny host."""
+    """Preview locally, then commit once despite nested or delayed callbacks."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is needed to execute the Bokeh JavaScript callbacks")
     sliders, spinners, state, callbacks = _controls()
     payload = dict(
-        slider=callbacks[0].code,
-        spinner=spinners[0].js_property_callbacks["change:value"][0].code,
+        preview=sliders[0].js_property_callbacks["change:value"][0].code,
+        commit=sliders[0].js_property_callbacks["change:value_throttled"][0].code,
         restore=state.js_property_callbacks["change:data"][0].code,
         ids=callbacks[0].args["input_ids"],
         delayed=delayed,
@@ -318,16 +321,26 @@ function drain() {
         pending.shift()();
     }
 }
-const controls = {data: {keep:['Twist'], tilt:[0]}};
+const controls = {data: {twist:[30], pitch:[240], rise:[20],
+                         keep:['Twist'], tilt:[0], revision:[0]}};
 let keep = 'Twist';
 const host = {Shiny:{setInputValue:(id,v)=>sent.push([id,v])},
     document:{getElementsByName:id=>{assert.equal(id,p.ids.use_twist_pitch);return [{checked:true,value:keep}];}}};
 const window = {parent:host};
 function model(value) {
-    return { _value:value, cb:null, get value(){return this._value;},
-        set value(v){if(this._value !== v){this._value=v; if(this.cb){
-            if(p.delayed) pending.push(this.cb); else this.cb();
-        }}}};
+    return { _value:value, _value_throttled:value, value_cb:null, throttled_cb:null,
+        start:1, end:500, step:1, low:null, high:null,
+        get value(){return this._value;},
+        set value(v){if(this._value !== v){this._value=v; schedule(this.value_cb);}},
+        get value_throttled(){return this._value_throttled;},
+        set value_throttled(v){if(this._value_throttled !== v){
+            this._value_throttled=v; schedule(this.throttled_cb);
+        }}
+    };
+}
+function schedule(cb) {
+    if (!cb) return;
+    if (p.delayed) pending.push(cb); else cb();
 }
 const slider_twist=model(30), slider_pitch=model(240), slider_rise=model(20);
 const spinner_twist=model(30), spinner_pitch=model(240), spinner_rise=model(20);
@@ -338,41 +351,107 @@ function run(code, cb_obj, extra={}) {
     const a={...args,...extra,cb_obj};
     new Function(...Object.keys(a),code)(...Object.values(a));
 }
-for (const s of [slider_twist,slider_pitch,slider_rise]) s.cb=()=>run(p.slider,s);
-for (const [s,slider] of [[spinner_twist,slider_twist],[spinner_pitch,slider_pitch],[spinner_rise,slider_rise]])
-    s.cb=()=>run(p.spinner,s,{slider});
-slider_twist.value=40;
+const pairs = [[slider_twist,spinner_twist],[slider_pitch,spinner_pitch],[slider_rise,spinner_rise]];
+for (let origin=0; origin<pairs.length; origin++) {
+    for (const control of pairs[origin]) {
+        control.value_cb=()=>run(p.preview,control,{origin,control});
+        control.throttled_cb=()=>run(p.commit,control,{origin,control});
+    }
+}
+function release(control) {
+    control.value_throttled=control.value;
+    drain();
+}
+function expectBatch(values, revision) {
+    assert.deepEqual(sent.splice(0), [
+        [p.ids.twist,values[0]], [p.ids.pitch,values[1]],
+        [p.ids.rise,values[2]], [p.ids.helix_revision,revision],
+    ]);
+}
+
+// Rapid pitch previews must settle on the newest value without publishing.
+slider_pitch.value=200;
+if (p.delayed) pending.shift()(); // queue dependent callbacks from the first value
+slider_pitch.value=180;
 drain();
 assert.equal(slider_pitch.value,180);
-assert.deepEqual(sent.splice(0),[[p.ids.twist,40],[p.ids.pitch,180],[p.ids.rise,20]]);
+assert.equal(slider_twist.value,40);
+assert.equal(sent.length,0);
 assert.equal(el.data_source.data.y[1],1/20+1/180);
-spinner_rise.value=25;
+release(slider_pitch);
+expectBatch([40,180,20],1);
+
+// Current server acknowledgement is accepted but never echoed.
+controls.data={twist:[40],pitch:[180],rise:[20],keep:['Twist'],tilt:[0],revision:[1]};
+run(p.restore,controls);
 drain();
-assert.equal(slider_pitch.value,225);
-assert.equal(sent.splice(0).length,3);
+assert.equal(sent.length,0);
+
+// Twist slider previews continuously and commits on release.
+slider_twist.value=45;
+drain();
+assert.equal(slider_pitch.value,160);
+assert.equal(sent.length,0);
+release(slider_twist);
+expectBatch([45,160,20],2);
+
+// Rise slider in Keep Twist mode derives pitch. An old server response during
+// the drag cannot overwrite the active preview.
+slider_rise.value=25;
+drain();
+assert.equal(slider_pitch.value,200);
+controls.data={twist:[45],pitch:[160],rise:[20],keep:['Twist'],tilt:[0],revision:[1]};
+run(p.restore,controls);
+drain();
+assert.equal(slider_rise.value,25);
+assert.equal(slider_pitch.value,200);
+assert.equal(sent.length,0);
+release(slider_rise);
+expectBatch([45,200,25],3);
+
+// Rise slider in Keep Pitch mode derives twist.
 keep='Pitch';
 slider_rise.value=30;
 drain();
-assert.equal(slider_pitch.value,225);
-assert.equal(slider_twist.value,48);
-assert.equal(sent.splice(0).length,3);
-controls.data={twist:[-60],pitch:[180],rise:[30],keep:['Twist'],tilt:[0]};
-run(p.restore,controls);
+assert.equal(slider_pitch.value,200);
+assert.equal(slider_twist.value,54);
+assert.equal(sent.length,0);
+release(slider_rise);
+expectBatch([54,200,30],4);
+
+// All three spinner paths follow the same preview/commit contract.
+keep='Twist';
+spinner_twist.value=-60;
 drain();
 assert.equal(slider_twist.value,-60);
 assert.equal(spinner_pitch.value,180);
 assert.equal(sent.length,0);
-// This tuple does not round-trip exactly through 360 * rise / pitch.
-controls.data={twist:[29.4],pitch:[360*21.92/29.4],rise:[21.92],keep:['Twist'],tilt:[0]};
-run(p.restore,controls);
+release(spinner_twist);
+expectBatch([-60,180,30],5);
+
+spinner_pitch.value=150;
+drain();
+assert.equal(slider_twist.value,-72);
+assert.equal(sent.length,0);
+release(spinner_pitch);
+expectBatch([-72,150,30],6);
+
+spinner_rise.value=35;
+drain();
+assert.equal(slider_twist.value,-72);
+assert.equal(slider_pitch.value,175);
+assert.equal(sent.length,0);
+release(spinner_rise);
+expectBatch([-72,175,35],7);
+
+// Invalid edits restore the last valid preview and are not committed.
+spinner_pitch.value=0;
+drain();
+assert.equal(spinner_pitch.value,175);
+assert.equal(sent.length,0);
+run(p.commit,spinner_pitch,{origin:1,control:spinner_pitch});
 drain();
 assert.equal(sent.length,0);
-assert.equal(slider_twist.value,29.4);
-keep='Twist';
-slider_twist.value=0;
-drain();
-assert.equal(slider_pitch.value,21.92);
-assert.equal(sent.splice(0).length,3);
 """
     result = subprocess.run([node, "-e", script], input=json.dumps(payload),
                             text=True, capture_output=True)
