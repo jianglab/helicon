@@ -161,11 +161,9 @@ def fit_gaussians(
         maximum is a guess, and it excludes negative density outright
         (EMD-1427 recommends 28.0 for voxels running -39 to +46, so its
         negative lumen would never be fitted). It is available as
-        ``recommended_contour``. Measured, it makes the search worse: over 60
-        maps and 10 queries, fits masked at the contour put the right map
-        first half the time against 70% for the relative threshold, losing
-        clear hits rather than gaining them. Not used by default for that
-        reason.
+        ``recommended_contour``, and it is not applied by default; see
+        :func:`gaussians_for_map_info` for what it was measured to do and why
+        it earns no place in the search as it now stands.
 
         Note the units. The level EMDB publishes belongs to the raw map; by
         the time :func:`fit_map` has low-passed, symmetry-averaged and
@@ -565,12 +563,21 @@ def fit_map(
         and it excludes negative density outright.
 
         Measured against 42 real EMPIAR-10940 class averages searched over 61
-        maps: it recovers one of the two searches the unthresholded fit lost
-        (32 of 42 against 31, where the volume route gets 33) and improves the
-        mean rank of the true map from 7.6 to 5.1, which is better than the
-        volume route's 7.2. An earlier comparison said the opposite, but its
-        queries were cut from volume projections and so rewarded fits that
-        resemble them.
+        maps, its worth depends entirely on what does the matching. With the
+        match in pixels it recovered one of the two searches the unthresholded
+        fit lost (32 of 42 against 31, where the volume route gets 33) and
+        improved the mean rank of the true map from 7.6 to 5.1. With the match
+        in gaussians -- the route that now runs -- the advantage is gone: 34 of
+        42 against 35 without it, mean rank 4.2 against 4.4. An earlier
+        comparison said it was harmful, but its queries were cut from volume
+        projections and so rewarded fits that resemble them.
+
+        It also narrows what the fit draws, which no score reveals: the
+        density below the contour goes unfitted, so the model has no
+        periphery. On EMD-14046 a thresholded fit is 469 gaussians and a
+        filament 13 pixels wide at half maximum, against 807 gaussians and 15
+        pixels without it -- 15 being what the volume route's projection and
+        the class average both measure.
 
         Ignored when it would leave nothing to fit.
     n_components, sigma_scale
@@ -667,12 +674,25 @@ def gaussians_for_map(
     )
 
 
-def gaussians_for_map_info(map_info, fit_apix=2.0, n_components=600, sigma_scale=0.45):
+def gaussians_for_map_info(
+    map_info, fit_apix=2.0, n_components=600, sigma_scale=0.45, contour_level=None
+):
     """The fit for a :class:`MapInfo`, cached when the map has an identity.
 
     A map given as an EMDB entry, a URL or a file has a stable name, so its fit
     is cached under that name and is paid for once ever. A map handed over as
     an array in memory has no such name, so it is fitted on the spot.
+
+    The EMDB contour level is **not** applied by default, though
+    :func:`recommended_contour` will still fetch it for a caller that wants
+    it. It once earned its place: with the match done in pixels it ranked the
+    true map first 32 times in 42 against 31, and far better on average. With
+    the whole route in gaussians that advantage is gone -- 34 of 42 against 35
+    without it, mean rank 4.2 against 4.4, which is a wash -- and it has a
+    cost the score never showed. Everything below the contour goes unfitted,
+    so the model has no periphery: on EMD-14046 it draws a filament 13 pixels
+    wide at half maximum where the map's own projection, and the class average
+    it is compared against, are both 15. A user judging a match looks at that.
 
     Parameters
     ----------
@@ -685,7 +705,7 @@ def gaussians_for_map_info(map_info, fit_apix=2.0, n_components=600, sigma_scale
     -------
     MapGaussians
     """
-    level = recommended_contour(map_info.emd_id)
+    level = contour_level
 
     identity = None
     for candidate in (map_info.emd_id, map_info.url, map_info.filename):
