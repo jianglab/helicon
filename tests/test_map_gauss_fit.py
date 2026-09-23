@@ -4,6 +4,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import helicon
+from helicon.webApps.lib import helical_projection_compute as compute
 from helicon.webApps.lib import map_gauss_fit as mgf
 
 
@@ -117,16 +118,18 @@ class TestFitMap:
 
 
 class TestContourThreshold:
-    """EMDB publishes a recommended contour level, and the fit uses it.
+    """EMDB publishes a recommended contour level; a caller may pass it.
 
-    It looked harmful when it was first measured -- half the queries put the
-    right map first against 70% without it -- but that measurement used
-    queries cut from the volume route's own projections, which rewards
-    whatever most resembles a volume projection. Measured again over 42 real
-    class averages against 61 maps it is the better floor: 32 of 42 against
-    31, and a mean rank of 5.1 against 7.2. Depositors set these levels by
-    hand, so a wrong one is always possible, which is why the fit falls back
-    to a fraction of the maximum when an entry records none.
+    Its worth turned over twice under measurement. It looked harmful at first,
+    but those queries were cut from the volume route's own projections, which
+    rewards whatever resembles them. Measured against 42 real class averages
+    with the match done in pixels it was the better floor -- 32 of 42 against
+    31, mean rank 5.1 against 7.2. Measured again with the match done in
+    gaussians, which is the route that now runs, it is a wash: 34 of 42
+    against 35, mean rank 4.2 against 4.4. So the fit no longer applies it by
+    default, and for a reason no score showed -- everything below the contour
+    goes unfitted, and the model then draws a filament visibly thinner than
+    the map's own projection.
     """
 
     def test_a_level_excludes_density_below_it(self):
@@ -172,15 +175,31 @@ class TestContourThreshold:
         assert mgf.recommended_contour("emd-0000") is None
         assert mgf.recommended_contour(None) is None
 
-    def test_a_map_from_emdb_is_fitted_above_its_contour(self):
-        # measured over 42 real class averages: thresholding at the
-        # depositors' level recovers a search the unthresholded fit loses and
-        # improves the mean rank of the true map from 7.6 to 5.1
+    def test_a_map_from_emdb_is_fitted_without_a_contour_by_default(self):
+        # it is a wash for the ranking (34 of 42 against 35) and it costs the
+        # model its periphery, so the default fits everything
+        vol, apix, twist, rise = _tube()
+        map_info = compute.MapInfo(
+            data=vol, label="synthetic", apix=apix, twist=twist, rise=rise, csym=1
+        )
+        plain = mgf.gaussians_for_map_info(map_info, fit_apix=apix, n_components=120)
+        strict = mgf.gaussians_for_map_info(
+            map_info,
+            fit_apix=apix,
+            n_components=120,
+            contour_level=float(vol.max()) / 2,
+        )
+        assert len(plain) > len(strict)
+
+    def test_the_recommended_level_is_still_available_to_ask_for(self):
+        # a caller that wants the depositors' floor can still have it
         import inspect
 
         source = inspect.getsource(mgf.gaussians_for_map_info)
+        assert (
+            "contour_level" in inspect.signature(mgf.gaussians_for_map_info).parameters
+        )
         assert "recommended_contour" in source
-        assert "contour_level=level" in source
 
     def test_a_level_that_would_empty_the_map_is_ignored(self):
         vol, apix, twist, rise = _tube()
@@ -263,3 +282,48 @@ class TestFitQueries:
 
     def test_no_images_is_not_an_error(self):
         assert mgf.fit_queries([], apix=2.0) == []
+
+
+class TestTheFitIsReferencedToTheSolvent:
+    """Zero has to mean solvent before the fit's threshold can mean anything.
+
+    EMD-19855's solvent sits at -1.6e-4; every slice summed negative, the
+    symmetrised map came out empty, and the fit raised "no density above the
+    threshold". The same map shifted anywhere else must fit the same way.
+    """
+
+    def _offset_tube(self):
+        vol, apix, twist, rise = _tube()
+        # an unmasked-looking map: the whole box shifted until every slice
+        # sums negative, the condition EMD-19855 is in
+        offset = 2.0 * float(vol.sum(axis=(1, 2)).max()) / (vol.shape[1] * vol.shape[2])
+        return vol, vol - np.float32(offset), apix, twist, rise
+
+    def test_the_shifted_map_is_fitted(self):
+        vol, shifted, apix, twist, rise = self._offset_tube()
+        assert (shifted.sum(axis=(1, 2)) < 0).all()
+        fit = mgf.fit_map(
+            shifted, apix, twist, rise, 1, fit_apix=apix, n_components=200
+        )
+        assert len(fit) > 0
+
+    def test_it_is_the_same_fit_as_the_unshifted_map(self):
+        # not merely a similar picture: without the reference the fit still
+        # runs, but its threshold then sits in the wrong place and it covers
+        # the filament with 67 gaussians instead of 116
+        vol, shifted, apix, twist, rise = self._offset_tube()
+        kw = dict(fit_apix=apix, n_components=200)
+        plain = mgf.fit_map(vol, apix, twist, rise, 1, **kw)
+        moved = mgf.fit_map(shifted, apix, twist, rise, 1, **kw)
+        unreferenced = mgf.fit_map(
+            shifted, apix, twist, rise, 1, reference_to_background=False, **kw
+        )
+        assert len(moved) == len(plain)
+        assert np.allclose(moved.centers, plain.centers, atol=1e-3)
+        assert len(unreferenced) != len(plain)
+
+    def test_the_cache_key_distinguishes_referenced_fits(self):
+        import inspect
+
+        params = inspect.signature(mgf.gaussians_for_map).parameters
+        assert params["reference_to_background"].default is True

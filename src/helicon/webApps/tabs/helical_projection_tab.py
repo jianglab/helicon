@@ -8,6 +8,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,70 @@ logger = logging.getLogger(__name__)
 # itself once several images are selected. Ten pairs covers the top of a
 # single-image search, which is where a user looks first.
 POLISHED_PAIRS_FOR_DISPLAY = 10
+
+# Above this many maps, generating the x/y/z previews is worth confirming:
+# each map is a download of tens or hundreds of megabytes, and selecting a
+# whole filtered table is one click.
+MAPS_NEEDING_CONFIRMATION = 10
+
+
+def _emdb_link_script():
+    """Make the entry ids in the EMDB table open their entry.
+
+    The link is added to the *rendered* cells rather than to the data. Putting
+    an anchor in the frame makes the grid treat the column as HTML, and a
+    column of HTML cannot be filtered: typing an id that was on screen matched
+    nothing, which is a poor trade for a link in a table of 751 rows. This way
+    the column stays plain text -- filterable, sortable, and still what the
+    tab matches rows against.
+
+    The grid draws only the rows in view and redraws them on scroll, sort and
+    filter, so the work is repeated from a MutationObserver rather than done
+    once. The anchor stops its own click from bubbling, so following a link
+    does not also select that row.
+    """
+    return ui.tags.script(
+        r"""
+        (function () {
+            var GRID = 'helical_projection-display_emdb_dataframe';
+            var PATTERN = /^EMD-\d+$/;
+            function linkify() {
+                var grid = document.getElementById(GRID);
+                if (!grid) return;
+                var headers = grid.querySelectorAll('thead th');
+                var column = -1;
+                headers.forEach(function (th, i) {
+                    if (th.textContent.trim().toLowerCase() === 'emdb_id') column = i;
+                });
+                if (column < 0) return;
+                grid.querySelectorAll('tbody tr').forEach(function (tr) {
+                    var cell = tr.children[column];
+                    if (!cell || cell.querySelector('a')) return;
+                    var id = cell.textContent.trim();
+                    if (!PATTERN.test(id)) return;
+                    var a = document.createElement('a');
+                    a.href = 'https://www.ebi.ac.uk/emdb/' + id;
+                    a.target = '_blank';
+                    a.rel = 'noopener';
+                    a.textContent = id;
+                    a.addEventListener('click', function (e) { e.stopPropagation(); });
+                    cell.textContent = '';
+                    cell.appendChild(a);
+                });
+            }
+            function watch() {
+                var grid = document.getElementById(GRID);
+                if (!grid) return setTimeout(watch, 500);
+                linkify();
+                new MutationObserver(function () { linkify(); }).observe(
+                    grid, {childList: true, subtree: true});
+            }
+            document.addEventListener('DOMContentLoaded', watch);
+            watch();
+        })();
+        """
+    )
+
 
 BOOKMARK_DEFAULTS = {
     "mode_images": ("input_mode_images", "url"),
@@ -101,6 +166,7 @@ def helical_projection_tab_ui():
                             "input.input_mode_maps === 'amyloid_atlas' || input.input_mode_maps === 'EMDB-helical' || input.input_mode_maps === 'EMDB'",
                             ui.output_data_frame("display_emdb_dataframe"),
                         ),
+                        ui.output_ui("map_actions_ui"),
                         ui.output_ui("display_map_xyz_projections_gallery"),
                     ),
                     ui.nav_panel(
@@ -258,6 +324,7 @@ def helical_projection_tab_ui():
                     "HelicalProjection: compare 2D images with helical structure projections",
                     style="font-weight: bold;",
                 ),
+                _emdb_link_script(),
                 helix_transform.card_switching_script(
                     [
                         {
@@ -277,7 +344,6 @@ def helical_projection_tab_ui():
                 ),
                 ui.div(
                     ui.output_ui("hp_per_image_transform_ui"),
-                    ui.output_ui("hp_shared_transform_ui"),
                     ui.div(
                         ui.input_action_button(
                             "auto_transform", "Auto Transform", class_="btn-primary"
@@ -330,21 +396,22 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     initial_selected_image_indices = reactive.value([0])
     selected_images_original = reactive.value([])
     selected_images_labels = reactive.value([])
-    selected_image_diameter = reactive.value(0)
     selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
-    # per-image (rotation degrees, vertical shift pixels), set by Auto Transform
-    per_image_transforms = reactive.value([])
-    # the crop Auto Transform worked out, so per-image cards can start from it
-    auto_crop_size = reactive.value(0)
-    # measurements already made, keyed by image content: the transform runs on
-    # every change to the selection, and without this each change re-measures
-    # every image that was already selected
+    # key -> helix_transform.ImageTransform for every selected image, keyed by
+    # the image's label rather than its position in the selection
+    transform_state = reactive.value({})
+    # the next generation number for controls, see ImageTransform.generation
+    transform_generation = [0]
+    # measurements already made, keyed by image content, so adding an image to
+    # the selection measures that image and nothing else
     auto_transform_cache = {}
 
     emdb_df_original = reactive.value(None)
     emdb_df = reactive.value(None)
 
     maps = reactive.value([])
+    # which of the selected images the transform card is editing
+    active_selected_image = reactive.value(0)
     map_xyz_projections = reactive.value([])
     map_xyz_projection_title = reactive.value("Map XYZ projections:")
     map_xyz_projection_labels = reactive.value([])
@@ -405,7 +472,12 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             # controls take one card's worth of space instead of N
             enable_selection=len(selected_images_original()) > 1,
             allow_multiple_selection=False,
-            initial_selected_indices=reactive.value([0]),
+            # The image being edited, not the first one. This gallery shows
+            # the *transformed* images, so every slider move re-renders it,
+            # and a gallery re-render clicks its initial selection for real --
+            # which used to throw the card switcher back to image 1 in the
+            # middle of editing image 5.
+            initial_selected_indices=reactive.value([active_selected_image()]),
             display_dashed_line=True,
         )
 
@@ -507,48 +579,6 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             class_="hp-top-n",
             style="display: flex; flex-direction: row; align-items: center;"
             " gap: 8px; margin-bottom: 8px;",
-        )
-
-    # -- Auto-rotation/shift/diameter estimation --
-
-    @reactive.effect
-    @reactive.event(selected_images_original)
-    def _auto_estimate_rotation_shift_diameter():
-        req(len(selected_images_original()))
-        imgs = selected_images_original()
-        ny = int(np.max([img.shape[0] for img in imgs]))
-        tmp = np.array(
-            [
-                helicon.estimate_helix_rotation_center_diameter(
-                    img, threshold=np.max(img) * 0.2
-                )
-                for img in imgs
-            ]
-        )
-        rotation = float(np.mean(tmp[:, 0]))
-        shift_y = float(np.mean(tmp[:, 1]))
-        diameter = float(np.max(tmp[:, 2]))
-        crop_size = int(diameter * 3) // 4 * 4
-        min_val = float(np.min([np.min(img) for img in imgs]))
-        max_val = float(np.max([np.max(img) for img in imgs]))
-        step_val = (max_val - min_val) / 100
-        selected_image_diameter.set(diameter)
-        ui.update_slider("pre_rotation", value=round(rotation, 1))
-        ui.update_slider(
-            "shift_y", value=shift_y, min=-crop_size // 2, max=crop_size // 2
-        )
-        ui.update_slider(
-            "vertical_crop_size",
-            value=max(32, crop_size),
-            min=max(32, min(int(diameter) // 2 * 2, ny // 2)),
-            max=ny,
-        )
-        ui.update_slider(
-            "threshold",
-            value=min_val,
-            min=round(min_val, 3),
-            max=round(max_val, 3),
-            step=round(step_val, 3),
         )
 
     # -- Dynamic input UI --
@@ -677,6 +707,79 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             width="100%",
         )
 
+    @render.ui
+    def map_actions_ui():
+        """One row: take the table, drop the selection, make the previews.
+
+        The grid selects a row at a time, or a run of them with shift; there
+        is no select-all in it, and filtering the table down to a family of
+        structures and then taking all of them is how this tab is used. The
+        previews carry their count, because asking for 751 of them is 751
+        downloads and that should be a decision rather than a surprise.
+
+        The selection buttons belong to the three table modes; the previews
+        belong to every mode, including the single map a URL or an upload
+        gives. They share a row so the three do not each take one.
+
+        "Select all displayed" carries no count on purpose. The count would
+        have to come from the grid's filtered view, and read here it went
+        stale -- it changed only after the button was pressed, which is worse
+        than no number at all. The grid prints "Viewing rows 1 through N of M"
+        directly above these buttons, so the number is already on screen; the
+        click itself reads the view, and that read is always current.
+        """
+        buttons = []
+        df = emdb_df()
+        table_mode = input.input_mode_maps() in (
+            "amyloid_atlas",
+            "EMDB-helical",
+            "EMDB",
+        )
+        if table_mode and df is not None and not df.empty:
+            buttons += [
+                ui.input_action_button(
+                    "select_all_emdb_rows",
+                    "Select all displayed",
+                    class_="btn-sm btn-outline-secondary",
+                ),
+                ui.input_action_button(
+                    "clear_emdb_rows",
+                    "Clear selection",
+                    class_="btn-sm btn-outline-secondary",
+                ),
+            ]
+        n_maps = len(maps())
+        if n_maps:
+            buttons.append(
+                ui.input_action_button(
+                    "generate_xyz_projections",
+                    "Generate x/y/z projections (%d map%s)"
+                    % (n_maps, "" if n_maps == 1 else "s"),
+                    class_="btn-sm btn-outline-secondary",
+                )
+            )
+        if not buttons:
+            return None
+        return ui.div(
+            *buttons,
+            style="display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0;",
+        )
+
+    @reactive.effect
+    @reactive.event(input.select_all_emdb_rows)
+    async def _select_all_emdb_rows():
+        rows = list(display_emdb_dataframe.data_view_rows())
+        if not rows:
+            return
+        await display_emdb_dataframe.update_cell_selection(
+            {"type": "row", "rows": rows}
+        )
+
+    @reactive.effect
+    @reactive.event(input.clear_emdb_rows)
+    async def _clear_emdb_rows():
+        await display_emdb_dataframe.update_cell_selection({"type": "row", "rows": []})
+
     # -- Image loading --
 
     @reactive.effect
@@ -791,20 +894,20 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     # ── Per-image transforms ────────────────────────────────────────
     # Several class averages can be searched jointly, and each sits at its own
     # angle and height: on ten good EMPIAR-10940 classes the rotations span
-    # -20.1 to +10.2 degrees. One shared rotation cannot straighten them all,
-    # so each image gets its own card and the shared sliders act as a nudge on
-    # top. This is the pattern denovo3D uses, and both tabs now drive it from
-    # helix_transform.
+    # -20.1 to +10.2 degrees. So every selected image has its own transform,
+    # held here keyed by the image's label, and its own card of four sliders --
+    # one card for a single image, one per image for several, and no other
+    # controls.
+    #
+    # There used to be a second set, shared sliders for a single image that
+    # also acted as a "nudge" on every image once several were selected. Those
+    # sliders were hidden in that mode, but a removed control keeps its last
+    # value on the server, so the first image's rotation was silently added to
+    # every image selected after it -- the new image appeared to copy the old
+    # one's transform.
 
-    def _pi_id(kind, i):
-        return f"hp_pi_{kind}_{i}"
-
-    _PI_SHARED_ID = {
-        "rot": "pre_rotation",
-        "dy": "shift_y",
-        "vcrop": "vertical_crop_size",
-        "threshold": "threshold",
-    }
+    def _pi_id(kind, key, generation):
+        return "hp_pi_%s_%s_%d" % (kind, re.sub(r"\W", "_", str(key)), generation)
 
     def _input_or(name, default=0.0):
         """Read a dynamically created input, or a default before it exists.
@@ -819,209 +922,238 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             return default
         return default if value is None else value
 
-    def _per_image_active():
-        """True when each selected image carries its own transform."""
-        return len(selected_images_original()) > 1
+    def _next_generation():
+        transform_generation[0] += 1
+        return transform_generation[0]
 
-    def _param(kind, i, default=0.0):
-        """Effective value of one setting for image ``i``."""
-        if _per_image_active():
-            return _input_or(_pi_id(kind, i), default)
-        return _input_or(_PI_SHARED_ID[kind], default)
+    def _selected_by_key():
+        """The selected images keyed by label, in selection order."""
+        labels = list(selected_images_labels())
+        images = list(selected_images_original())
+        if len(labels) != len(images):
+            labels = [str(i + 1) for i in range(len(images))]
+        return dict(zip(labels, images))
 
-    @render.ui
-    def hp_shared_transform_ui():
-        """The shared sliders, shown only when one image is selected.
+    def _auto_transforms(keys, images_by_key):
+        """The automatic transform for these images, each measured on its own."""
+        made = {}
+        for key in keys:
+            image = images_by_key[key]
+            auto = helix_transform.auto_transform([image], cache=auto_transform_cache)
+            rotation, shift = auto.per_image[0]
+            made[key] = helix_transform.ImageTransform(
+                rotation=float(rotation),
+                shift_y=float(shift),
+                crop_size=max(32, min(auto.crop_size, int(image.shape[0]) // 2 * 2)),
+                threshold=float(np.min(image)),
+                generation=_next_generation(),
+            )
+        return made
 
-        With several selected the per-image card is the manual transform UI --
-        it is the one that says which image it edits -- and showing both
-        invites edits to a control that image is not reading.
+    def _as_controls_hold(state):
+        """The transforms as the user has left them, read from their controls."""
+        held = {}
+        for key, t in state.items():
+            held[key] = helix_transform.ImageTransform(
+                rotation=float(_input_or(_pi_id("rot", key, t.generation), t.rotation)),
+                shift_y=float(_input_or(_pi_id("dy", key, t.generation), t.shift_y)),
+                crop_size=int(
+                    _input_or(_pi_id("vcrop", key, t.generation), t.crop_size)
+                ),
+                threshold=float(
+                    _input_or(_pi_id("threshold", key, t.generation), t.threshold)
+                ),
+                generation=t.generation,
+            )
+        return held
+
+    @reactive.effect
+    @reactive.event(selected_images_original)
+    def _reconcile_transforms_with_selection():
+        """Adding an image transforms that image; nothing else changes.
+
+        Images already selected keep what they had, manual edits included, and
+        the card shown is the one for the image just added. Re-running the
+        automatic transform over the whole selection on every change is what
+        used to throw those edits away.
         """
-        if _per_image_active():
-            return ui.div()
-        return ui.layout_columns(
-            ui.input_slider(
-                "pre_rotation", "Rotation (°)", min=-90, max=90, value=0, step=0.1
-            ),
-            ui.input_slider(
-                "threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.01
-            ),
-            ui.input_slider(
-                "vertical_crop_size",
-                "Vertical crop size (px)",
-                min=32,
-                max=512,
-                value=128,
-                step=2,
-            ),
-            ui.input_slider(
-                "shift_y", "Vertical shift (px)", min=-64, max=64, value=0, step=1
-            ),
-            col_widths=6,
+        images_by_key = _selected_by_key()
+        previous = transform_state()
+        previous_keys = list(previous)
+        index = active_selected_image()
+        previous_active = (
+            previous_keys[index] if 0 <= index < len(previous_keys) else None
         )
+        state, _added, active = helix_transform.reconcile_transforms(
+            previous,
+            list(images_by_key),
+            _as_controls_hold(previous),
+            lambda new_keys: _auto_transforms(new_keys, images_by_key),
+            previous_active=previous_active,
+        )
+        active_selected_image.set(active)
+        transform_state.set(state)
 
     @render.ui
-    @reactive.event(selected_images_original, per_image_transforms, auto_crop_size)
+    @reactive.event(transform_state)
     def hp_per_image_transform_ui():
-        """One transform card per selected image, only the clicked one shown.
+        """One transform card per selected image, only the active one shown.
 
         All the cards stay in the DOM and are hidden with CSS, so each image
-        keeps whatever was typed into it while you click between them, and no
+        keeps whatever was set on it while you click between them, and no
         effect can read an input that does not exist.
         """
-        if not _per_image_active():
+        state = transform_state()
+        images_by_key = _selected_by_key()
+        if not state or any(key not in images_by_key for key in state):
             return ui.div()
-        labels = list(selected_images_labels())
-        images = selected_images_original()
-        per = per_image_transforms()
-        ny = int(max(img.shape[0] for img in images))
+        shown = active_selected_image()
         cards = []
-        for i, img in enumerate(images):
-            label = labels[i] if i < len(labels) else str(i)
-            rot, shift = per[i] if i < len(per) else (0.0, 0.0)
+        for i, (key, t) in enumerate(state.items()):
+            img = images_by_key[key]
+            # The four sliders, with ranges from this image: the crop cannot
+            # exceed its own height, a threshold means nothing outside its own
+            # range of values, and a shift beyond half the image moves the
+            # filament out of it.
+            ny_i = int(img.shape[0])
+            v_min = float(np.min(img))
+            v_max = float(np.max(img))
+            v_step = max((v_max - v_min) / 100.0, 1e-3)
+            shift_limit = max(1, ny_i // 2)
             cards.append(
                 ui.div(
                     ui.card(
                         ui.div(
-                            f"Image {label}",
+                            f"Image {key}",
                             style="font-weight: bold; margin-bottom: 4px;",
                         ),
                         ui.layout_columns(
-                            ui.input_numeric(
-                                _pi_id("rot", i),
+                            ui.input_slider(
+                                _pi_id("rot", key, t.generation),
                                 "Rotation (°)",
-                                value=round(float(rot), 2),
+                                min=-90,
+                                max=90,
+                                value=round(min(max(t.rotation, -90.0), 90.0), 1),
                                 step=0.1,
-                                update_on="blur",
                             ),
-                            ui.input_numeric(
-                                _pi_id("dy", i),
-                                "Vertical shift (px)",
-                                value=round(float(shift), 2),
-                                step=1,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                _pi_id("vcrop", i),
-                                "Vertical crop size (px)",
-                                value=int(
-                                    auto_crop_size()
-                                    or _input_or("vertical_crop_size", ny)
-                                ),
-                                min=32,
-                                step=2,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                _pi_id("threshold", i),
+                            ui.input_slider(
+                                _pi_id("threshold", key, t.generation),
                                 "Threshold",
-                                value=float(_input_or("threshold", 0.0)),
-                                step=0.01,
-                                update_on="blur",
+                                min=round(v_min, 3),
+                                max=round(v_max, 3),
+                                value=round(min(max(t.threshold, v_min), v_max), 3),
+                                step=round(v_step, 3),
+                            ),
+                            ui.input_slider(
+                                _pi_id("vcrop", key, t.generation),
+                                "Vertical crop size (px)",
+                                min=32,
+                                max=ny_i,
+                                value=int(min(max(t.crop_size, 32), ny_i)),
+                                step=2,
+                            ),
+                            ui.input_slider(
+                                _pi_id("dy", key, t.generation),
+                                "Vertical shift (px)",
+                                min=-shift_limit,
+                                max=shift_limit,
+                                value=int(
+                                    round(
+                                        min(max(t.shift_y, -shift_limit), shift_limit)
+                                    )
+                                ),
+                                step=1,
                             ),
                             col_widths=6,
                         ),
                     ),
                     class_="hp-pi-card",
                     **{"data-pi": str(i)},
-                    style="min-width: 360px;" + ("" if i == 0 else " display: none;"),
+                    style="min-width: 360px;"
+                    + ("" if i == shown else " display: none;"),
                 )
             )
+        heading = []
+        if len(cards) > 1:
+            heading = [
+                ui.div(
+                    "Per-image transform (click an image to edit it):",
+                    style="font-weight: bold; margin-bottom: 4px;",
+                )
+            ]
         return ui.div(
-            ui.div(
-                "Per-image transform (click an image to edit it):",
-                style="font-weight: bold; margin-bottom: 4px;",
-            ),
+            *heading,
             *cards,
             style="display: flex; flex-direction: column; gap: 4px;",
         )
 
-    def _apply_auto_transform():
-        """Straighten and centre every selected image, as denovo3D does."""
-        images = selected_images_original()
-        if not len(images):
-            return
-        auto = helix_transform.auto_transform(images, cache=auto_transform_cache)
-        selected_image_diameter.set(auto.diameter)
-        crop = max(32, min(auto.crop_size, auto.ny // 2 * 2))
-        auto_crop_size.set(crop)
-        if len(images) > 1:
-            per_image_transforms.set(auto.per_image)
-            for i, (rot, shift) in enumerate(auto.per_image):
-                ui.update_numeric(_pi_id("rot", i), value=round(float(rot), 2))
-                ui.update_numeric(_pi_id("dy", i), value=round(float(shift), 2))
-                ui.update_numeric(_pi_id("vcrop", i), value=crop)
-            # the shared boxes stay at zero, where they nudge every image alike
-            ui.update_slider("pre_rotation", value=0.0)
-            ui.update_slider("shift_y", value=0)
-        else:
-            per_image_transforms.set([])
-            rot, shift = auto.per_image[0]
-            ui.update_slider("pre_rotation", value=round(float(rot), 1))
-            ui.update_slider("shift_y", value=int(round(float(shift))))
-        ui.update_slider("vertical_crop_size", value=crop)
-
     @reactive.effect
     @reactive.event(input.auto_transform)
     def _auto_transform():
-        _apply_auto_transform()
+        """Straighten and centre every selected image again, on request."""
+        images_by_key = _selected_by_key()
+        req(len(images_by_key))
+        transform_state.set(_auto_transforms(list(images_by_key), images_by_key))
 
     @reactive.effect
-    @reactive.event(selected_images_original)
-    def _auto_transform_on_selection():
-        """Selecting images transforms them, without waiting to be asked.
-
-        Every route out of this tab needs the filaments horizontal and centred,
-        and doing it by hand first was a step with no decision in it. The button
-        stays, for re-running it after the selection is changed by other means.
-        """
-        _apply_auto_transform()
+    @reactive.event(input.display_selected_image)
+    def _remember_active_selected_image():
+        """Which card the user is on, so a re-render can put them back."""
+        value = input.display_selected_image()
+        if isinstance(value, (list, tuple)):
+            value = value[0] if len(value) else None
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            return
+        if 0 <= index < len(selected_images_original()):
+            active_selected_image.set(index)
 
     @reactive.effect
     @reactive.event(input.reset_transform)
     def _reset_transform():
-        images = selected_images_original()
-        req(len(images))
-        ny = int(max(img.shape[0] for img in images))
-        per_image_transforms.set([])
-        for i in range(len(images)):
-            ui.update_numeric(_pi_id("rot", i), value=0.0)
-            ui.update_numeric(_pi_id("dy", i), value=0.0)
-            ui.update_numeric(_pi_id("vcrop", i), value=ny // 2 * 2)
-            ui.update_numeric(_pi_id("threshold", i), value=0.0)
-        ui.update_slider("pre_rotation", value=0.0)
-        ui.update_slider("shift_y", value=0)
-        ui.update_slider("threshold", value=0.0)
-        ui.update_slider("vertical_crop_size", value=ny // 2 * 2)
+        images_by_key = _selected_by_key()
+        req(len(images_by_key))
+        transform_state.set(
+            {
+                key: helix_transform.ImageTransform(
+                    rotation=0.0,
+                    shift_y=0.0,
+                    crop_size=int(img.shape[0]) // 2 * 2,
+                    threshold=float(np.min(img)),
+                    generation=_next_generation(),
+                )
+                for key, img in images_by_key.items()
+            }
+        )
 
     # A plain effect, deliberately not reactive.event: the per-image inputs are
     # created dynamically, and reactive.event reads every dependency up front,
     # which would raise on inputs that do not exist yet.
     @reactive.effect
     def _transform_crop_images():
-        orig = selected_images_original()
-        if not orig:
+        images_by_key = _selected_by_key()
+        state = transform_state()
+        # the state catches up with a new selection one step later; until it
+        # has, there is nothing consistent to draw
+        if not images_by_key or list(state) != list(images_by_key):
             return
-        shared_rot = _input_or("pre_rotation", 0.0)
-        shared_shift = _input_or("shift_y", 0.0)
         transformed = []
-        for i, img in enumerate(orig):
-            thresh_val = _param("threshold", i, 0.0)
-            rot_val = _param("rot", i, 0.0)
-            shift_val = _param("dy", i, 0.0)
-            crop_sz = _param("vcrop", i, img.shape[0])
-            if _per_image_active():
-                # the shared boxes are a common nudge on top of each image's own
-                rot_val += shared_rot
-                shift_val += shared_shift
-            t_img = helix_transform.apply_transform(
-                img,
-                rotation=rot_val,
-                shift_y=shift_val,
-                crop_size=crop_sz,
-                threshold=thresh_val,
+        for key, img in images_by_key.items():
+            t = state[key]
+            transformed.append(
+                helix_transform.apply_transform(
+                    img,
+                    rotation=_input_or(_pi_id("rot", key, t.generation), t.rotation),
+                    shift_y=_input_or(_pi_id("dy", key, t.generation), t.shift_y),
+                    crop_size=_input_or(
+                        _pi_id("vcrop", key, t.generation), t.crop_size
+                    ),
+                    threshold=_input_or(
+                        _pi_id("threshold", key, t.generation), t.threshold
+                    ),
+                )
             )
-            transformed.append(t_img)
         selected_images_thresholded_rotated_shifted_cropped.set(transformed)
 
     # -- Map loading --
@@ -1158,29 +1290,101 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             return
         df_sel = display_emdb_dataframe.data().iloc[sel_idx]
         maps_tmp = []
+        unreadable = []
         for _, row in df_sel.iterrows():
-            emdb_id = compute.extract_emdb_id(str(row["emdb_id"]))
-            twist = row["twist"] if "twist" in row and not pd.isna(row["twist"]) else 0
-            rise = row["rise"] if "rise" in row and not pd.isna(row["rise"]) else 0
-            csym_str = (
-                str(row["csym"]) if "csym" in row and not pd.isna(row["csym"]) else "C1"
-            )
-            csym = int(csym_str[1:]) if len(csym_str) > 1 else 1
-            m_info = compute.MapInfo(
-                emd_id=emdb_id, twist=twist, rise=rise, csym=csym, label=emdb_id
-            )
+            # Whatever a row holds, reading it must not end the session: the
+            # table is a merge of a deposited table and a curated one, and a
+            # cell can be blank, a string, or the literal "Cnan" that a merge
+            # with no curated value leaves behind.
+            try:
+                emdb_id = compute.extract_emdb_id(str(row["emdb_id"]))
+                m_info = compute.MapInfo(
+                    emd_id=emdb_id,
+                    twist=compute.as_number(row.get("twist")),
+                    rise=compute.as_number(row.get("rise")),
+                    csym=compute.as_csym(row.get("csym")),
+                    label=emdb_id,
+                )
+            except Exception as e:
+                logger.error("Could not read the EMDB table row %s: %s", dict(row), e)
+                unreadable.append(str(row.get("emdb_id", "?")))
+                continue
             maps_tmp.append(m_info)
+        if unreadable:
+            warn(
+                "Some rows could not be read",
+                "These entries were left out of the map list.",
+                unreadable,
+            )
         maps.set(maps_tmp)
+
+    def warn(title, what, items):
+        """Tell the user what did not work, without ending their session.
+
+        A map that cannot be downloaded, or one whose projection fails, is an
+        ordinary event in a search over dozens of EMDB entries -- the entry may
+        be withdrawn, the file may be too large, the connection may drop. It
+        should cost that map and nothing else, so every such failure ends up
+        here rather than in a traceback that disconnects the browser.
+        """
+        shown = [str(i) for i in items[:10]]
+        if len(items) > len(shown):
+            shown.append("... and %d more" % (len(items) - len(shown)))
+        ui.modal_show(
+            ui.modal(
+                ui.p(what),
+                ui.tags.ul(*[ui.tags.li(s) for s in shown]),
+                title=title,
+                easy_close=True,
+                footer=None,
+            )
+        )
 
     # -- Map XYZ projections --
 
     @reactive.effect
-    @reactive.event(maps, input.length_z, input.map_projection_xyz_choices)
+    @reactive.event(maps)
+    def _clear_map_xyz_projections():
+        # what is on screen belongs to the previous selection
+        map_xyz_projections.set([])
+        map_xyz_projection_labels.set([])
+
+    @reactive.effect
+    @reactive.event(input.generate_xyz_projections)
     def _get_map_xyz_projections():
         req(len(maps()))
+        if len(maps()) > MAPS_NEEDING_CONFIRMATION:
+            ui.modal_show(
+                ui.modal(
+                    ui.p(
+                        "This downloads %d maps, one after another, and each "
+                        "is tens to hundreds of megabytes. The previews are "
+                        "not needed to run a search." % len(maps())
+                    ),
+                    title="Generate projections for %d maps?" % len(maps()),
+                    easy_close=True,
+                    footer=ui.TagList(
+                        ui.input_action_button(
+                            "confirm_xyz_projections", "Generate", class_="btn-primary"
+                        ),
+                        ui.modal_button("Cancel"),
+                    ),
+                )
+            )
+            return
+        make_map_xyz_projections()
+
+    @reactive.effect
+    @reactive.event(input.confirm_xyz_projections)
+    def _get_map_xyz_projections_confirmed():
+        ui.modal_remove()
+        make_map_xyz_projections()
+
+    def make_map_xyz_projections():
         map_xyz_projections.set([])
         images = []
         image_labels = []
+        failures = []
         xyz_tag = "".join([s.upper() for s in input.map_projection_xyz_choices()])
         map_xyz_projection_title.set("Map %s projections:" % xyz_tag)
         with ui.Progress(min=0, max=len(maps())) as p:
@@ -1206,6 +1410,14 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                     map_xyz_projections.set(images)
                 except Exception as e:
                     logger.error("Failed to get XYZ projections for %s: %s", m.label, e)
+                    failures.append("%s: %s" % (m.label, e))
+        if failures:
+            warn(
+                "Some maps could not be projected",
+                "These maps were skipped. The others are unaffected, and the "
+                "search can still be run.",
+                failures,
+            )
 
     # -- Compare projections --
 
@@ -1222,7 +1434,18 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         match_sf = input.match_sf()
         projection_method = input.projection_method()
         scale_range = input.scale_range() / 100.0
-        active_maps = [m for m in maps() if abs(m.twist) > 1e-3]
+        active_maps = [m for m in maps() if compute.has_twist(m)]
+        no_twist = [m.label for m in maps() if not compute.has_twist(m)]
+        if not active_maps:
+            warn(
+                "Nothing to search",
+                "None of the selected maps has a helical twist, so no side "
+                "projection can be made. Set a twist, or select maps whose "
+                "helical parameters are known.",
+                no_twist,
+            )
+            return
+        errors = {}
 
         # In gaussian mode the queries become gaussians too, once for the whole
         # search: every map is then matched by an integral over mixtures rather
@@ -1266,7 +1489,16 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                     for m in active_maps
                 }
                 for f in as_completed(futures):
-                    m_info, res = f.result()
+                    # f.result() re-raises whatever the worker raised, and an
+                    # exception escaping a reactive effect disconnects the
+                    # browser. A map that fails is one map missing from the
+                    # results, which is what the warning below reports.
+                    try:
+                        m_info, res = f.result()
+                    except Exception as e:
+                        m_info, res = futures[f], None
+                        logger.error("Failed to search %s: %s", m_info.label, e)
+                        errors[m_info.label] = str(e)
                     t1 = time()
                     results.append((m_info, res))
                     n_done = len(results)
@@ -1277,35 +1509,41 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                         % (n_done, len(active_maps), m_info.label),
                         detail="%s remaining" % helicon.timedelta2string(remaining),
                     )
-        twist_zeros = [m.label for m in maps() if abs(m.twist) < 1e-3]
         failed = [m_info.label for m_info, res in results if res is None]
         good = [res for _, res in results if res is not None]
-        if twist_zeros:
-            ui.modal_show(
-                ui.modal(
-                    "WARNING: twist=0. Please set twist to a correct value for %s"
-                    % " ".join(twist_zeros),
-                    title="Twist value error",
-                    easy_close=True,
-                    footer=None,
-                )
+        if no_twist:
+            # Skipped quietly: a toast that fades, not a dialog to dismiss --
+            # and shown now rather than when the search began, so it is on
+            # screen when the user turns to the results instead of during a
+            # minute of progress bar.
+            ui.notification_show(
+                "Skipped %d map%s with no helical twist"
+                % (len(no_twist), "" if len(no_twist) == 1 else "s"),
+                duration=15,
+                type="warning",
             )
         if failed:
-            ui.modal_show(
-                ui.modal(
-                    "WARNING: failed to generate side projection of %s"
-                    % " ".join(failed),
-                    title="Projection error",
-                    easy_close=True,
-                    footer=None,
-                )
+            warn(
+                "Some maps could not be searched",
+                "No side projection could be made for these maps, so they are "
+                "not in the results below.",
+                [
+                    "%s: %s" % (label, errors[label]) if label in errors else label
+                    for label in failed
+                ],
             )
         # The gaussian search finds the right map as often as the pixel route
-        # and much faster, but the placement it settles on is the best one for
-        # mixtures. The matches a user actually looks at are re-placed by the
-        # pixel aligner, which also recovers the scale; the scores keep their
-        # ranking so the list stays internally comparable.
-        if query_fits is not None and len(good) > 1:
+        # and much faster, but it does not vary scale, and sometimes the pixel
+        # aligner's placement fits the projection visibly better. Sometimes it
+        # fits far worse. So the matches a user actually looks at are offered
+        # the pixel placement and keep whichever sits better on the projection
+        # -- see refine_placement_for_display. The scores keep their ranking so
+        # the list stays internally comparable.
+        #
+        # Including a single result: one map selected is precisely when the
+        # placement is studied rather than the ranking, and requiring more
+        # than one left that case showing the unscaled placement.
+        if query_fits is not None and len(good):
             n_polish = max(1, POLISHED_PAIRS_FOR_DISPLAY // max(1, len(query_imgs)))
             order = sorted(range(len(good)), key=lambda i: -good[i][4])
             order = order[: min(n_polish, len(order))]

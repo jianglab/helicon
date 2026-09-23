@@ -255,6 +255,87 @@ def auto_transform(
     )
 
 
+@dataclass
+class ImageTransform:
+    """One selected image's transform, held by the server rather than a control.
+
+    Attributes
+    ----------
+    rotation : float
+        In-plane rotation, degrees.
+    shift_y : float
+        Vertical shift, pixels.
+    crop_size : int
+        Vertical crop, pixels.
+    threshold : float
+        Density floor; the image minimum means no thresholding.
+    generation : int
+        Part of the ids of the controls that edit this image. It changes
+        whenever the values are replaced from outside those controls -- the
+        image newly added, re-added, auto-transformed or reset -- because a
+        control that is removed keeps its last value on the server, and a new
+        control reusing its id would read that stale value until the browser
+        caught up.
+    """
+
+    rotation: float
+    shift_y: float
+    crop_size: int
+    threshold: float
+    generation: int
+
+
+def reconcile_transforms(previous, keys, current, fresh, previous_active=None):
+    """Carry per-image transforms across a change of selection.
+
+    The rule is the one a user expects: images that were already selected keep
+    exactly what they had, manual edits included; only images that are new to
+    the selection are auto-transformed; and the card shown afterwards is the
+    one for the image just added. Re-deriving every image's transform on each
+    change is what lost manual edits, and keying transforms by position is
+    what let one image's values land on another when the order shifted.
+
+    Parameters
+    ----------
+    previous : dict
+        ``key -> ImageTransform`` before the change, in selection order.
+    keys : list
+        The new selection's keys, in the order its images are shown. A key is
+        whatever identifies an image stably -- its label, not its position.
+    current : dict
+        ``key -> ImageTransform`` as the controls hold them now, for keys that
+        were already selected. Missing keys fall back to ``previous``.
+    fresh : callable
+        ``fresh(new_keys) -> {key: ImageTransform}``: the auto-transform, called
+        once and only with the keys that are new.
+    previous_active : hashable, optional
+        The key whose card was shown before the change.
+
+    Returns
+    -------
+    state : dict
+        ``key -> ImageTransform`` for the new selection, in its order.
+    added : list
+        The keys that were new.
+    active : int
+        Index into ``keys`` of the card to show: the last image added, else the
+        image that was shown if it is still selected, else the first.
+    """
+    keys = list(keys)
+    added = [k for k in keys if k not in previous]
+    made = fresh(added) if added else {}
+    state = {}
+    for k in keys:
+        state[k] = current.get(k, previous[k]) if k in previous else made[k]
+    if added:
+        active = keys.index(added[-1])
+    elif previous_active in state:
+        active = keys.index(previous_active)
+    else:
+        active = 0
+    return state, added, active
+
+
 def card_switching_script(galleries):
     """Script that shows only the transform card of the clicked image.
 

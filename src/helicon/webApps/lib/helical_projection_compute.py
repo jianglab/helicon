@@ -4,7 +4,9 @@ from __future__ import annotations
 
 
 import os
+import math
 import pathlib
+import re
 import numpy as np
 
 import helicon
@@ -160,18 +162,106 @@ def get_amyloid_n_sub_1_symmetry(twist: float, rise: float, max_n: int = 10) -> 
     return ret
 
 
+def as_number(value, default=0.0) -> float:
+    """A helical parameter as a number, whatever the table holds.
+
+    The EMDB table is assembled from a deposited table and a curated one, and
+    what survives a merge is not always a number: an empty cell, the string
+    ``"nan"``, a value the curators left blank. Anything that will not convert
+    -- and a NaN, which converts but compares false against everything -- comes
+    back as the default.
+
+    Parameters
+    ----------
+    value : object
+        The cell's contents.
+    default : float, optional
+        What to return when there is no usable number. Defaults to 0.
+
+    Returns
+    -------
+    float
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if math.isnan(number) else number
+
+
+def as_csym(value, default=1) -> int:
+    """A cyclic symmetry as an integer, from ``"C2"``, ``2``, ``"2"`` or junk.
+
+    The column is usually ``"C<n>"``, but a merge that found no curated value
+    writes ``"Cnan"``, and ``int("nan")`` raises -- which in a web app ends the
+    session rather than the parse. Anything without digits in it is taken as
+    unknown and returns the default.
+
+    Parameters
+    ----------
+    value : object
+        The cell's contents.
+    default : int, optional
+        What to return when there is no usable symmetry. Defaults to 1.
+
+    Returns
+    -------
+    int
+    """
+    digits = re.sub(r"[^0-9]", "", str(value))
+    if not digits:
+        return default
+    try:
+        number = int(digits)
+    except ValueError:
+        return default
+    return number if number > 0 else default
+
+
+def has_twist(map_info) -> bool:
+    """Whether a map can be searched at all.
+
+    A map with no twist, or a twist of zero, is not a helix: there is nothing
+    to symmetrize along and no side projection to make. EMDB entries often
+    carry no helical parameters -- and a filtered table can hand over hundreds
+    of maps at once -- so callers use this to pass them by rather than fail.
+
+    ``float(None)`` raises and ``float("nan")`` compares false, which is why
+    this is a function rather than an inline comparison: in a web app an
+    exception here ends the session.
+
+    Parameters
+    ----------
+    map_info : MapInfo
+        The map to test.
+
+    Returns
+    -------
+    bool
+        True when the twist is a number distinguishable from zero.
+    """
+    try:
+        return abs(float(map_info.twist)) > 1e-3
+    except (TypeError, ValueError):
+        return False
+
+
 @helicon.cache(expires_after=7, cache_dir=helicon.cache_dir / "helical_lab", verbose=0)
 def get_one_map_xyz_projects(map_info, length_z, map_projection_xyz_choices):
     label = map_info.label
     try:
         data, apix = map_info.get_data()
     except Exception as e:
+        # what went wrong, not which map: the caller knows which map it asked
+        # about and says so, and repeating it reads as "EMD-38069: Failed to
+        # download the map from EMDB for EMD-38069". A URL or a file name is
+        # not the label, so those stay.
         if map_info.filename:
-            msg = f"Failed to obtain uploaded map {label}"
+            msg = f"Failed to read the uploaded map {map_info.filename}"
         elif map_info.url:
             msg = f"Failed to download the map from {map_info.url}"
-        elif map_info.emd_id:
-            msg = f"Failed to download the map from EMDB for {map_info.emd_id}"
+        else:
+            msg = "Failed to download the map from EMDB"
         raise ValueError(msg) from e
 
     images = []
@@ -280,14 +370,10 @@ def symmetrize_project_align_one_map(
         # volume route's own projections it looked clearly worse -- 60% top-1
         # against 73% over 60 maps -- but that benchmark rewards whatever
         # resembles a volume projection, and a fit is not one. Against REAL
-        # class averages, EMPIAR-10940 searched over 61 maps with EMD-14046
-        # as the truth, the two routes are equal: each put the right map first
-        # in 7 of 8 searches, agreeing on every query including the one both
-        # missed. Over all 42 class averages of that set it ranks the true
-        # map first 32 times against the volume route's 33, and ranks it
-        # better on average -- 5.1 against 7.2 -- once the fit is thresholded
-        # at the depositors' contour level. That is why this route is the
-        # default, at 1.6 to 2 times the speed.
+        # class averages, all 42 of EMPIAR-10940 searched over 61 maps with
+        # EMD-14046 as the truth, it ranks the true map first 35 times
+        # against the volume route's 33, and far better on average -- mean
+        # rank 4.4 against 7.2. That is why this route is the default.
 
         from . import map_gauss_fit
 
@@ -336,6 +422,11 @@ def symmetrize_project_align_one_map(
                 mixture = None
     else:
         mixture = None
+        # Referenced to its solvent first, as the gaussian fit is: the
+        # symmetrisation finds the structure along z from slice sums, which
+        # only means something when zero is solvent. On EMD-19855, whose
+        # solvent sits below zero, this route scored 0.000.
+        data = (data - helicon.helical_background(data).mean).astype(np.float32)
         if rescale_apix:
             data_work = helicon.low_high_pass_filter(
                 data, low_pass_fraction=apix / new_apix
@@ -528,17 +619,60 @@ def _align_in_gaussian_space(
     )
 
 
-def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
-    """Re-place the queries on one map with the pixel aligner, for the picture.
+def placement_agreement(placed, proj) -> float:
+    """How well a placed query sits on a projection: NCC over its footprint.
 
-    The gaussian route ranks as well as the pixel route and far faster, but the
-    placement it settles on is the best one for mixtures rather than for
-    pixels, and a user looking at a top match is looking at pixels. So the
-    matches that get looked at are re-placed here, by the same
-    ``align_images`` the volume route uses -- which also recovers the scale the
-    gaussian search does not vary. The score is left alone: it came from the
-    search, and a handful of maps rescored by a different measure could not be
-    compared with the rest.
+    The measure a user applies by eye -- does the class average line up with
+    the projection under it -- and, importantly, one that neither aligner
+    optimises, so it can arbitrate between them. ``align_images`` scores its
+    own placements higher than the gaussian route's, which is how the pixel
+    aligner came to be trusted for the display in the first place; judged by
+    this instead, it is sometimes far worse.
+
+    Parameters
+    ----------
+    placed : np.ndarray
+        The query already placed in the projection's frame, zero outside it.
+    proj : np.ndarray
+        The projection, of the same shape.
+
+    Returns
+    -------
+    float
+        Normalised cross-correlation over the non-zero pixels of ``placed``,
+        or -1.0 when there is nothing to compare.
+    """
+    mask = placed != 0
+    if mask.sum() < 2:
+        return -1.0
+    a = placed[mask].astype(np.float64)
+    b = proj[mask].astype(np.float64)
+    a -= a.mean()
+    b -= b.mean()
+    denom = np.sqrt((a * a).sum() * (b * b).sum())
+    return float((a * b).sum() / denom) if denom > 0 else -1.0
+
+
+def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
+    """Offer the pixel aligner's placement for the picture, and keep the better.
+
+    The gaussian route ranks as well as the pixel route and far faster, but it
+    never varies scale, and on the default query against EMD-14046 the pixel
+    aligner's placement fits visibly better: NCC 0.778 over the query's
+    footprint against 0.676. So the matches that get looked at are re-placed
+    by the same ``align_images`` the volume route uses.
+
+    But not unconditionally. On a class average against EMD-60539 the pixel
+    aligner lands on a poor optimum -- NCC 0.740 where the gaussian placement
+    has 0.907 -- and the display showed the query visibly off the crossover
+    it belongs on. Neither placement is reliably better, so both are judged by
+    :func:`placement_agreement`, which neither aligner optimises, and the
+    better one is shown. The comparison is of the composite when several
+    images were searched together.
+
+    The score is left alone either way: it came from the search, and a
+    handful of maps rescored by a different measure could not be compared
+    with the rest.
 
     Parameters
     ----------
@@ -552,9 +686,10 @@ def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
     Returns
     -------
     tuple
-        The same entry with its placement, flip, scale and rotation replaced.
+        The entry with the better placement, and the flip, scale and rotation
+        that go with it.
     """
-    _, _, _, _, score, _, query_label, proj, label = result
+    _, _, _, _, score, current, query_label, proj, label = result
     scores = []
     placed = []
     best = None
@@ -583,6 +718,8 @@ def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
     refined = _compose_result(
         scores, placed, best, [query_label], proj, 1.0, False, label
     )
+    if placement_agreement(refined[5], proj) <= placement_agreement(current, proj):
+        return result
     return refined[:4] + (score,) + refined[5:6] + (query_label, proj, label)
 
 

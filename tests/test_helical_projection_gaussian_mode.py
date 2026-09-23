@@ -190,3 +190,108 @@ class TestTheTabReachesIt:
         source, tab = self._source()
         assert tab.BOOKMARK_DEFAULTS["projection_method"][1] == "gaussian"
         assert 'selected="gaussian"' in source
+
+
+class TestTheDisplayedPlacementIsScaleCorrected:
+    """The analytic search never varies scale, so the picture must be re-placed.
+
+    On the default query against EMD-14046 the gaussian route reports a scale
+    of exactly 1.0000 while the pixel aligner finds 0.9886 -- the query really
+    does sit about 1% larger than the projection it is drawn against. The
+    re-placement is what puts them at one scale.
+    """
+
+    def test_one_result_is_re_placed_too(self):
+        """A single selected map is when the placement is studied, not ranked."""
+        import inspect
+
+        from helicon.webApps.tabs import helical_projection_tab as tab
+
+        body = inspect.getsource(tab)
+        body = body[body.index("def _compare_projections") :]
+        assert "if query_fits is not None and len(good):" in body
+        assert "len(good) > 1" not in body
+
+    def test_the_analytic_route_reports_no_scale_of_its_own(self, setup):
+        map_info, queries, apix = setup
+        fits = mgf.fit_queries(queries, apix)
+        result = _run(map_info, [queries[0]], apix, [fits[0]])
+        assert result[1] == 1.0
+
+    def test_the_re_placement_can_change_the_scale(self, setup):
+        map_info, queries, apix = setup
+        fits = mgf.fit_queries(queries, apix)
+        result = _run(map_info, [queries[0]], apix, [fits[0]])
+        refined = compute.refine_placement_for_display(result, [queries[0]], 0.05)
+        # it may or may not move on synthetic data, but it must be free to
+        assert 0.95 <= refined[1] <= 1.05
+        assert refined[4] == result[4]
+
+
+class TestTheDisplayKeepsTheBetterPlacement:
+    """Neither aligner's placement is reliably the better one to show.
+
+    On the default query against EMD-14046 the pixel aligner's placement fits
+    the projection far better (NCC 0.930 against 0.738 over the query's
+    footprint); on a class average against EMD-60539 it lands on a poor
+    optimum (0.740 against the gaussian placement's 0.907) and the query was
+    drawn visibly off its crossover. So both are judged by a measure neither
+    optimises, and the better is kept.
+    """
+
+    def _result(self, placed, proj):
+        return (False, 1.0, 0.0, (0.0, 0.0), 0.5, placed, "q", proj, "map")
+
+    def _scene(self):
+        rng = np.random.default_rng(0)
+        proj = rng.normal(0, 1, (32, 96)).astype(np.float32)
+        good = np.zeros_like(proj)
+        good[:, 30:60] = proj[:, 30:60]
+        bad = np.zeros_like(proj)
+        bad[:, 30:60] = proj[:, 50:80]
+        return proj, good, bad
+
+    def test_the_agreement_measure(self):
+        proj, good, bad = self._scene()
+        assert compute.placement_agreement(good, proj) == pytest.approx(1.0)
+        assert compute.placement_agreement(bad, proj) < 0.5
+        assert compute.placement_agreement(np.zeros_like(proj), proj) == -1.0
+
+    def test_a_worse_pixel_placement_is_not_shown(self, monkeypatch):
+        proj, good, bad = self._scene()
+        monkeypatch.setattr(
+            compute,
+            "align_images",
+            lambda **k: (True, 1.02, 180.0, (0.0, 20.0), 0.99, bad),
+        )
+        result = self._result(good, proj)
+        shown = compute.refine_placement_for_display(result, [good], 0.05)
+        assert shown is result
+
+    def test_a_better_pixel_placement_is_shown(self, monkeypatch):
+        proj, good, bad = self._scene()
+        monkeypatch.setattr(
+            compute,
+            "align_images",
+            lambda **k: (True, 1.02, 180.0, (0.0, 20.0), 0.10, good),
+        )
+        result = self._result(bad, proj)
+        shown = compute.refine_placement_for_display(result, [good], 0.05)
+        assert np.array_equal(shown[5], good)
+        # and it carries the transform that produced it
+        assert shown[1] == pytest.approx(1.02)
+        assert shown[2] == pytest.approx(180.0)
+        # while the score is still the search's
+        assert shown[4] == result[4]
+
+    def test_the_aligner_s_own_score_does_not_decide(self, monkeypatch):
+        # align_images rates its own placement 0.99 here; the footprint NCC
+        # says otherwise, and that is what is trusted
+        proj, good, bad = self._scene()
+        monkeypatch.setattr(
+            compute,
+            "align_images",
+            lambda **k: (False, 1.0, 0.0, (0.0, 0.0), 0.99, bad),
+        )
+        result = self._result(good, proj)
+        assert compute.refine_placement_for_display(result, [good], 0.05) is result
