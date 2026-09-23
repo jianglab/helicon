@@ -123,8 +123,28 @@ def _apply_helical_symmetry_jit(
     profile_z = np.sum(np.sum(data, axis=-1), axis=-1)
     threshold = 0.01 * np.max(profile_z)
     non_zero_indices = np.where(profile_z > threshold)[0]
-    z0 = non_zero_indices[0]
-    z1 = non_zero_indices[-1]
+    if non_zero_indices.size == 0:
+        # Finding the structure's extent from slice sums assumes the solvent is
+        # zero, as it is in a masked map. An unmasked map normalised to a
+        # slightly negative background breaks that: every slice of EMD-19855
+        # sums to between -10.1 and -5.95, the threshold is then -0.0595, and
+        # no slice exceeds it. The index array came back empty, and compiled
+        # code does not bounds-check, so reading its first element returned
+        # whatever memory followed -- a nonsense window, every voxel skipped,
+        # and an output of exact zeros that both search modes then trusted.
+        # Weighing slices by the magnitude of their density instead finds the
+        # structure in either kind of map. Only this case is changed: a map
+        # that passed the original test takes the original path.
+        profile_z = np.sum(np.sum(np.abs(data), axis=-1), axis=-1)
+        threshold = 0.01 * np.max(profile_z)
+        non_zero_indices = np.where(profile_z > threshold)[0]
+    if non_zero_indices.size == 0:
+        # an entirely zero map: there is nothing to place, but no garbage either
+        z0 = 0
+        z1 = nz0 - 1
+    else:
+        z0 = non_zero_indices[0]
+        z1 = non_zero_indices[-1]
     zmid = (z0 + z1) // 2 + (z0 + z1) % 2
     z0 = max(z0, zmid - int(nz0 * fraction + 0.5) // 2)
     z1 = min(z1, zmid + int(nz0 * fraction + 0.5) // 2)
