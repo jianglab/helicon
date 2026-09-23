@@ -1,6 +1,6 @@
 """HelicalPitch tab — determine helical pitch/twist using 2D Classification info.
 
-Faithfully ported from /Users/wjiang/software/helical-index/HelicalPitch.git/app.py
+Faithfully ported from the standalone HelicalPitch app's app.py
 with minimal adaptation for the Shiny module pattern.
 Uses pio.to_html() + @render.ui to avoid shinywidgets comm issues.
 """

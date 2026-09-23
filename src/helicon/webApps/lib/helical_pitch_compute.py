@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Compute functions for the HelicalPitch tab.
 
-Ported from /Users/wjiang/software/helical-index/HelicalPitch.git/compute.py
+Ported from the standalone HelicalPitch app's compute.py
 and adapted to use helicon library utilities where available.
 """
 
