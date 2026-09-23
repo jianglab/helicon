@@ -1580,13 +1580,12 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                 ],
             )
         # The gaussian search finds the right map as often as the pixel route
-        # and much faster, but the placement it settles on is the best one for
-        # mixtures, and it does not vary scale at all -- it reports 1.0000
-        # where the pixel aligner finds 0.9886, which is the query sitting
-        # about 1% larger than the projection it is drawn against. So the
-        # matches a user actually looks at are re-placed by the pixel aligner,
-        # which recovers that scale; the scores keep their ranking so the list
-        # stays internally comparable.
+        # and much faster, but it does not vary scale, and sometimes the pixel
+        # aligner's placement fits the projection visibly better. Sometimes it
+        # fits far worse. So the matches a user actually looks at are offered
+        # the pixel placement and keep whichever sits better on the projection
+        # -- see refine_placement_for_display. The scores keep their ranking so
+        # the list stays internally comparable.
         #
         # Including a single result: one map selected is precisely when the
         # placement is studied rather than the ranking, and requiring more

@@ -619,17 +619,60 @@ def _align_in_gaussian_space(
     )
 
 
-def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
-    """Re-place the queries on one map with the pixel aligner, for the picture.
+def placement_agreement(placed, proj) -> float:
+    """How well a placed query sits on a projection: NCC over its footprint.
 
-    The gaussian route ranks as well as the pixel route and far faster, but the
-    placement it settles on is the best one for mixtures rather than for
-    pixels, and a user looking at a top match is looking at pixels. So the
-    matches that get looked at are re-placed here, by the same
-    ``align_images`` the volume route uses -- which also recovers the scale the
-    gaussian search does not vary. The score is left alone: it came from the
-    search, and a handful of maps rescored by a different measure could not be
-    compared with the rest.
+    The measure a user applies by eye -- does the class average line up with
+    the projection under it -- and, importantly, one that neither aligner
+    optimises, so it can arbitrate between them. ``align_images`` scores its
+    own placements higher than the gaussian route's, which is how the pixel
+    aligner came to be trusted for the display in the first place; judged by
+    this instead, it is sometimes far worse.
+
+    Parameters
+    ----------
+    placed : np.ndarray
+        The query already placed in the projection's frame, zero outside it.
+    proj : np.ndarray
+        The projection, of the same shape.
+
+    Returns
+    -------
+    float
+        Normalised cross-correlation over the non-zero pixels of ``placed``,
+        or -1.0 when there is nothing to compare.
+    """
+    mask = placed != 0
+    if mask.sum() < 2:
+        return -1.0
+    a = placed[mask].astype(np.float64)
+    b = proj[mask].astype(np.float64)
+    a -= a.mean()
+    b -= b.mean()
+    denom = np.sqrt((a * a).sum() * (b * b).sum())
+    return float((a * b).sum() / denom) if denom > 0 else -1.0
+
+
+def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
+    """Offer the pixel aligner's placement for the picture, and keep the better.
+
+    The gaussian route ranks as well as the pixel route and far faster, but it
+    never varies scale, and on the default query against EMD-14046 the pixel
+    aligner's placement fits visibly better: NCC 0.778 over the query's
+    footprint against 0.676. So the matches that get looked at are re-placed
+    by the same ``align_images`` the volume route uses.
+
+    But not unconditionally. On a class average against EMD-60539 the pixel
+    aligner lands on a poor optimum -- NCC 0.740 where the gaussian placement
+    has 0.907 -- and the display showed the query visibly off the crossover
+    it belongs on. Neither placement is reliably better, so both are judged by
+    :func:`placement_agreement`, which neither aligner optimises, and the
+    better one is shown. The comparison is of the composite when several
+    images were searched together.
+
+    The score is left alone either way: it came from the search, and a
+    handful of maps rescored by a different measure could not be compared
+    with the rest.
 
     Parameters
     ----------
@@ -643,9 +686,10 @@ def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
     Returns
     -------
     tuple
-        The same entry with its placement, flip, scale and rotation replaced.
+        The entry with the better placement, and the flip, scale and rotation
+        that go with it.
     """
-    _, _, _, _, score, _, query_label, proj, label = result
+    _, _, _, _, score, current, query_label, proj, label = result
     scores = []
     placed = []
     best = None
@@ -674,6 +718,8 @@ def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
     refined = _compose_result(
         scores, placed, best, [query_label], proj, 1.0, False, label
     )
+    if placement_agreement(refined[5], proj) <= placement_agreement(current, proj):
+        return result
     return refined[:4] + (score,) + refined[5:6] + (query_label, proj, label)
 
 
