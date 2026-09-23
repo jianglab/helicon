@@ -77,3 +77,178 @@ class TestEMDBMirror(object):
         xml_file = emdb.get_emdb_xml_file("29999")
         assert mock_download.call_count == 0
         assert xml_file == xml_cache
+
+
+import pytest
+import requests
+
+import helicon
+
+
+class _FakeResponse:
+    """A streamed download that can be told to break part-way through."""
+
+    def __init__(self, chunks, fail_after=None):
+        self.chunks, self.fail_after = chunks, fail_after
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size=None):
+        for i, chunk in enumerate(self.chunks):
+            if self.fail_after is not None and i == self.fail_after:
+                raise requests.exceptions.ChunkedEncodingError("connection dropped")
+            yield chunk
+
+
+class TestDownloadsAreAtomic:
+    """The final name only ever refers to a complete file.
+
+    It used to be opened first and filled in place, so another user of a
+    shared mirror -- or another thread fetching the same entry -- could read a
+    half-written .map.gz, and an interrupted download left a truncated file
+    that every later call trusted.
+    """
+
+    def test_a_complete_download_lands_under_its_name(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            requests, "get", lambda *a, **k: _FakeResponse([b"ab", b"cd"])
+        )
+        target = tmp_path / "emd_1.map.gz"
+        got = helicon.download_file_from_url(
+            "https://example.invalid/emd_1.map.gz",
+            target_file_name=str(target),
+            return_filename=True,
+        )
+        assert got == str(target)
+        assert target.read_bytes() == b"abcd"
+        assert list(tmp_path.iterdir()) == [target]
+
+    def test_an_interrupted_download_leaves_nothing_behind(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            requests, "get", lambda *a, **k: _FakeResponse([b"ab", b"cd"], fail_after=1)
+        )
+        target = tmp_path / "emd_1.map.gz"
+        with pytest.raises(IOError):
+            helicon.download_file_from_url(
+                "https://example.invalid/emd_1.map.gz", target_file_name=str(target)
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_failed_refresh_keeps_the_complete_file(self, tmp_path, monkeypatch):
+        target = tmp_path / "emd_1.map.gz"
+        target.write_bytes(b"complete")
+        monkeypatch.setattr(
+            requests, "get", lambda *a, **k: _FakeResponse([b"xx", b"yy"], fail_after=1)
+        )
+        with pytest.raises(IOError):
+            helicon.download_file_from_url(
+                "https://example.invalid/emd_1.map.gz", target_file_name=str(target)
+            )
+        assert target.read_bytes() == b"complete"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="permission checks do not apply to root",
+)
+class TestASharedMirror:
+    """EMDB_MIRROR_DIR is used ahead of each user's own cache.
+
+    An entry missing from it is added to it when this user can write there --
+    at every level of the path, not just the root -- and cached for this user
+    alone when they cannot.
+    """
+
+    RELPATH = "structures/EMD-29999/map/emd_29999.map.gz"
+
+    def _emdb(self, tmp_path):
+        emdb = object.__new__(EMDB)  # bypass the singleton and its network setup
+        emdb.emd_ids = ["29999"]
+        emdb.cache_dir = tmp_path / "cache"
+        emdb.cache_dir.mkdir()
+        emdb.local_emdb_mirror = tmp_path / "mirror"
+        emdb.local_emdb_mirror.mkdir()
+        return emdb
+
+    def _fetch(self, emdb):
+        return emdb._get_emdb_file(
+            "29999",
+            cache_filename="emd_29999.map.gz",
+            mirror_relpath=self.RELPATH,
+            url_method=lambda e: "https://example.invalid/emd_%s.map.gz" % e,
+        )
+
+    def _fake_download(self, calls):
+        def download(url, target_file_name=None, return_filename=False):
+            calls.append(target_file_name)
+            Path(target_file_name).write_bytes(b"map")
+            return target_file_name
+
+        return download
+
+    def test_a_missing_entry_is_added_to_the_mirror(self, tmp_path, monkeypatch):
+        emdb, calls = self._emdb(tmp_path), []
+        monkeypatch.setattr(
+            helicon, "download_file_from_url", self._fake_download(calls)
+        )
+        got = self._fetch(emdb)
+        mirrored = emdb.local_emdb_mirror / self.RELPATH
+        assert calls == [str(mirrored)]
+        assert got.is_symlink() and got.resolve() == mirrored.resolve()
+
+    def test_an_entry_already_there_is_read_in_place(self, tmp_path, monkeypatch):
+        emdb, calls = self._emdb(tmp_path), []
+        mirrored = emdb.local_emdb_mirror / self.RELPATH
+        mirrored.parent.mkdir(parents=True)
+        mirrored.write_bytes(b"map")
+        os.chmod(emdb.local_emdb_mirror, 0o555)
+        monkeypatch.setattr(
+            helicon, "download_file_from_url", self._fake_download(calls)
+        )
+        try:
+            got = self._fetch(emdb)
+        finally:
+            os.chmod(emdb.local_emdb_mirror, 0o755)
+        assert calls == []
+        assert got.resolve() == mirrored.resolve()
+
+    def test_a_subdirectory_another_user_made_read_only_falls_back(
+        self, tmp_path, monkeypatch
+    ):
+        # the root is writable, but structures/ was created by someone whose
+        # umask left it read-only to everyone else
+        emdb, calls = self._emdb(tmp_path), []
+        structures = emdb.local_emdb_mirror / "structures"
+        structures.mkdir()
+        os.chmod(structures, 0o555)
+        monkeypatch.setattr(
+            helicon, "download_file_from_url", self._fake_download(calls)
+        )
+        try:
+            got = self._fetch(emdb)
+        finally:
+            os.chmod(structures, 0o755)
+        assert got == emdb.cache_dir / "emd_29999.map.gz"
+        assert not got.is_symlink()
+        assert got.read_bytes() == b"map"
+
+    def test_a_read_only_mirror_without_the_entry_falls_back(
+        self, tmp_path, monkeypatch
+    ):
+        emdb, calls = self._emdb(tmp_path), []
+        os.chmod(emdb.local_emdb_mirror, 0o555)
+        monkeypatch.setattr(
+            helicon, "download_file_from_url", self._fake_download(calls)
+        )
+        try:
+            got = self._fetch(emdb)
+        finally:
+            os.chmod(emdb.local_emdb_mirror, 0o755)
+        assert calls == [str(emdb.cache_dir / "emd_29999.map.gz")]

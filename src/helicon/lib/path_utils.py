@@ -198,13 +198,40 @@ def download_file_from_url(
 
     if Path(url).is_file():
         return open(url, "rb")
+    if target_file_name:
+        # Written under a temporary name in the same directory and renamed
+        # into place only when complete. The final name used to be opened
+        # first and filled in place, so a reader -- another user of a shared
+        # EMDB mirror, or another thread of the web app fetching the same
+        # entry -- could find a half-written .map.gz and take it for a whole
+        # one, and an interrupted download left a truncated file that every
+        # later call trusted. A rename within one directory is atomic, so the
+        # final name only ever refers to a complete file.
+        import uuid
+
+        target = Path(target_file_name)
+        partial = target.with_name(
+            ".%s.%d.%s.part" % (target.name, os.getpid(), uuid.uuid4().hex[:8])
+        )
+        try:
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()
+                with open(partial, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+            os.replace(partial, target)
+        except requests.exceptions.RequestException:
+            partial.unlink(missing_ok=True)
+            logger.error("Failed to download %s", url, exc_info=True)
+            raise IOError(f"ERROR: failed to download {url}")
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
+        return str(target) if return_filename else open(target, "rb")
     try:
-        if target_file_name:
-            fileobj = open(target_file_name, mode="wb")
-        else:
-            local_filename = url.split("/")[-1]
-            suffix = "." + local_filename
-            fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
+        local_filename = url.split("/")[-1]
+        suffix = "." + local_filename
+        fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
         with requests.get(url) as r:
             r.raise_for_status()  # Check for request success
             fileobj.write(r.content)

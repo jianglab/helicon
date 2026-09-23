@@ -23,6 +23,26 @@ class EMDB:
 
     Provides methods to download, cache, and read EMDB map files and XML metadata,
     with support for a local mirror directory.
+
+    Maps are large, and a lab that searches EMDB would otherwise keep one copy
+    per user. Set ``EMDB_MIRROR_DIR`` to a directory every user can reach and
+    it is used ahead of each user's own cache: an entry found there is read in
+    place, and an entry missing from it is downloaded into it, in EMDB's own
+    layout (``structures/EMD-xxxx/map/emd_xxxx.map.gz``), so the next user finds
+    it too. A user who cannot write there -- anywhere along the path -- still
+    reads what is there, and caches what is not in their own cache instead.
+
+    For every user to be able to add entries, new subdirectories must come out
+    group-writable whoever creates them, which needs a *default* ACL; a plain
+    ``chmod`` or ``setfacl`` on the root covers only the root. For example::
+
+        mkdir -p /shared/emdb
+        chgrp <group> /shared/emdb
+        chmod 2775 /shared/emdb
+        setfacl -R -m g:<group>:rwX /shared/emdb
+        setfacl -R -d -m g:<group>:rwX /shared/emdb
+
+    Every directory above it must also be traversable (``x``) by those users.
     """
 
     _instance = None
@@ -191,11 +211,25 @@ class EMDB:
         if self.local_emdb_mirror:
             mirror_file = self.local_emdb_mirror / mirror_relpath
             if not (mirror_file.exists() and mirror_file.stat().st_size):
-                if os.access(self.local_emdb_mirror, os.W_OK):
-                    url = url_method(emd_id)
+                # Adding to a shared mirror can fail at any level, not just the
+                # root: another user may have created structures/ or the entry's
+                # own directory without group write permission. Checking the
+                # root alone let that PermissionError escape instead of falling
+                # back to this user's own cache, which is what happens now for
+                # any failure to write here.
+                try:
                     mirror_file.parent.mkdir(parents=True, exist_ok=True)
-                    helicon.download_file_from_url(
-                        url, target_file_name=str(mirror_file)
+                    if os.access(mirror_file.parent, os.W_OK):
+                        helicon.download_file_from_url(
+                            url_method(emd_id), target_file_name=str(mirror_file)
+                        )
+                except OSError as e:
+                    logger.info(
+                        "Could not add %s to the EMDB mirror %s (%s); caching it "
+                        "for this user instead",
+                        mirror_relpath,
+                        self.local_emdb_mirror,
+                        e,
                     )
 
             if mirror_file.exists() and mirror_file.stat().st_size:
