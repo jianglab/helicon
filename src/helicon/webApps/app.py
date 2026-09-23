@@ -1,7 +1,8 @@
 """Helicon Lab — unified Shiny web app for helical structure analysis.
 
 Integrates seven tools into a single tabbed interface with shared
-project state for cross-tab data flow:
+project state for cross-tab data flow, behind a Home tab that places each
+tool on a helical data processing workflow diagram:
 
     HelicalLattice   — 2D lattice ⇔ helical lattice interconversion
     HelicalPitch     — derive twist from 2D class pair-distance histograms
@@ -127,6 +128,7 @@ from helicon.webApps.tabs.where_is_my_class_tab import (
     where_is_my_class_tab_ui,
     where_is_my_class_tab_server,
 )
+from helicon.webApps.tabs.home_tab import HOME_APPS, HOME_TAB, home_tab_ui
 
 from helicon.webApps.tabs import (
     hill_tab,
@@ -155,23 +157,12 @@ _TAB_MODULE_MAP: dict[str, tuple[str, object]] = {
 }
 
 
-# ── Lazy tab loading ────────────────────────────────────────────
-# Tab order as it appears in the navbar; the first entry is the fallback
-# when neither the URL nor the last-open cookie names a tab.
-_TAB_ORDER: tuple[str, ...] = (
-    "WhereIsMyClass",
-    "HelicalProjection",
-    "HILL",
-    "HelicalPitch",
-    "Denovo3D",
-    "HelicalLattice",
-    "HI3D",
+assert {a.tab for a in HOME_APPS} == set(_TAB_MODULE_MAP), (
+    "HOME_APPS must name exactly the tabs in _TAB_MODULE_MAP; a renamed or "
+    "added tab would otherwise be missing from, or unreachable from, Home"
 )
 
-assert set(_TAB_ORDER) == set(_TAB_MODULE_MAP), (
-    "_TAB_ORDER must name exactly the tabs in _TAB_MODULE_MAP; a renamed or "
-    "added tab would otherwise break the fallback and lazy-start lookup"
-)
+# ── Lazy tab loading ────────────────────────────────────────────
 
 # Cookie written by the client on every tab change, so the tab a user was
 # last on is known at page-request time and needs no extra round trip.
@@ -179,7 +170,7 @@ _LAST_TAB_COOKIE = "helicon_last_tab"
 
 
 def _resolve_active_tab(request: Request) -> str:
-    """Which tab to open, in the order: URL, last-open cookie, first tab.
+    """Which tab to open, in the order: URL, last-open cookie, Home.
 
     Only the resolved tab's server function runs at session start. Every tab's
     UI is still built (that measured 0.01 s for all seven), so navigation works
@@ -191,12 +182,12 @@ def _resolve_active_tab(request: Request) -> str:
     if tab:
         # Arrives JSON-quoted from the bookmark URL, e.g. helicon_tab="Denovo3D"
         tab = tab.strip().strip('"')
-        if tab in _TAB_MODULE_MAP:
+        if tab in _TAB_MODULE_MAP or tab == HOME_TAB:
             return tab
     tab = request.cookies.get(_LAST_TAB_COOKIE)
-    if tab and tab.strip('"') in _TAB_MODULE_MAP:
+    if tab and (tab.strip('"') in _TAB_MODULE_MAP or tab.strip('"') == HOME_TAB):
         return tab.strip('"')
-    return _TAB_ORDER[0]
+    return HOME_TAB
 
 
 # ── Display → tab navigation control ─────────────────────────────
@@ -355,6 +346,8 @@ def app_ui(request: Request):
             ui.tags.script(
                 """
                 var _BOOKMARK_TABS = {
+                    // No inputs; listed so the URL still tracks the tab.
+                    "Home": {},
                     "HILL": {
                         "input_mode": "hill-hill_input_mode",
                         "twist": "hill-hill_twist",
@@ -739,6 +732,7 @@ def app_ui(request: Request):
         """
         ),
         ui.navset_bar(
+            ui.nav_panel(HOME_TAB, home_tab_ui()),
             ui.nav_panel(
                 "WhereIsMyClass", where_is_my_class_tab_ui("where_is_my_class")
             ),
