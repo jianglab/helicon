@@ -190,3 +190,39 @@ class TestTheTabReachesIt:
         source, tab = self._source()
         assert tab.BOOKMARK_DEFAULTS["projection_method"][1] == "gaussian"
         assert 'selected="gaussian"' in source
+
+
+class TestTheDisplayedPlacementIsScaleCorrected:
+    """The analytic search never varies scale, so the picture must be re-placed.
+
+    On the default query against EMD-14046 the gaussian route reports a scale
+    of exactly 1.0000 while the pixel aligner finds 0.9886 -- the query really
+    does sit about 1% larger than the projection it is drawn against. The
+    re-placement is what puts them at one scale.
+    """
+
+    def test_one_result_is_re_placed_too(self):
+        """A single selected map is when the placement is studied, not ranked."""
+        import inspect
+
+        from helicon.webApps.tabs import helical_projection_tab as tab
+
+        body = inspect.getsource(tab)
+        body = body[body.index("def _compare_projections") :]
+        assert "if query_fits is not None and len(good):" in body
+        assert "len(good) > 1" not in body
+
+    def test_the_analytic_route_reports_no_scale_of_its_own(self, setup):
+        map_info, queries, apix = setup
+        fits = mgf.fit_queries(queries, apix)
+        result = _run(map_info, [queries[0]], apix, [fits[0]])
+        assert result[1] == 1.0
+
+    def test_the_re_placement_can_change_the_scale(self, setup):
+        map_info, queries, apix = setup
+        fits = mgf.fit_queries(queries, apix)
+        result = _run(map_info, [queries[0]], apix, [fits[0]])
+        refined = compute.refine_placement_for_display(result, [queries[0]], 0.05)
+        # it may or may not move on synthetic data, but it must be free to
+        assert 0.95 <= refined[1] <= 1.05
+        assert refined[4] == result[4]
