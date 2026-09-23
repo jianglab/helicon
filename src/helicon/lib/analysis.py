@@ -132,6 +132,7 @@ def _fsc_from_rfft(F1, F2, shell_flat, n):
 
 __all__ = [
     "calc_fsc",
+    "compute_radial_profile",
     "calc_fsc_from_fft",
     "calc_fsc_per_shell",
     "calc_frc_2d",
@@ -761,6 +762,41 @@ def r_factor_score(img1: np.ndarray, img2: np.ndarray) -> float:
         return 0.0
     r = np.sum(np.abs(img1 - img2)) / denom
     return float(1.0 / (1.0 + r))
+
+
+def compute_radial_profile(data: np.ndarray) -> np.ndarray:
+    """Compute the radial (azimuthally-averaged) density profile of a 3D map.
+
+    Shared by the HI3D tab, which reads a filament's radial range from it, and
+    by :func:`helicon.helical_background`, which reads the map's solvent level
+    from its outer bins.
+
+    Parameters
+    ----------
+    data : (nz, ny, nx) array
+        The map is averaged along Z, then a polar transform is performed.
+
+    Returns
+    -------
+    rad_profile : (rmax,) array
+        Radial profile in pixel units.
+    """
+    proj = data.mean(axis=0)
+    ny, nx = proj.shape
+    rmax = min(nx // 2, ny // 2)
+
+    r = np.arange(0, rmax, 1, dtype=np.float32)
+    theta = np.arange(0, 360, 1, dtype=np.float32) * np.pi / 180.0
+    n_theta = len(theta)
+
+    theta_grid, r_grid = np.meshgrid(theta, r, indexing="ij", copy=False)
+    y_grid = ny // 2 + r_grid * np.sin(theta_grid)
+    x_grid = nx // 2 + r_grid * np.cos(theta_grid)
+    coords = np.vstack((y_grid.flatten(), x_grid.flatten()))
+    from scipy.ndimage import map_coordinates
+
+    polar = map_coordinates(proj, coords, order=1).reshape(r_grid.shape)
+    return polar.mean(axis=0)
 
 
 def estimate_helix_rotation_center_diameter(

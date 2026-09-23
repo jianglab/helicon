@@ -18,6 +18,7 @@ from .lib.alignment import (
 )
 from .lib.analysis import (
     calc_fsc,
+    compute_radial_profile,
     calc_fsc_from_fft,
     calc_fsc_per_shell,
     calc_frc_2d,
@@ -65,6 +66,8 @@ from .lib.filters import (
     down_scale,
     generate_tapering_filter,
     background_offset,
+    HelicalBackground,
+    helical_background,
     low_high_pass_filter,
     match_structural_factors,
     normalize_mean_std,

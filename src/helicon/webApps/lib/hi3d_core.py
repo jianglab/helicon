@@ -13,6 +13,9 @@ from typing import Any
 import numpy as np
 from scipy.ndimage import map_coordinates
 
+# shared with helicon.helical_background, which reads a map's solvent from it
+from helicon.lib.analysis import compute_radial_profile  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -944,35 +947,6 @@ def fit_helical_lattice(
 
 
 # ── Radial profile ─────────────────────────────────────────────────────
-
-
-def compute_radial_profile(data: np.ndarray) -> np.ndarray:
-    """Compute the radial (azimuthally-averaged) density profile of a 3D map.
-
-    Parameters
-    ----------
-    data : (nz, ny, nx) array
-        The map is averaged along Z, then a polar transform is performed.
-
-    Returns
-    -------
-    rad_profile : (rmax,) array
-        Radial profile in pixel units.
-    """
-    proj = data.mean(axis=0)
-    ny, nx = proj.shape
-    rmax = min(nx // 2, ny // 2)
-
-    r = np.arange(0, rmax, 1, dtype=np.float32)
-    theta = np.arange(0, 360, 1, dtype=np.float32) * np.pi / 180.0
-    n_theta = len(theta)
-
-    theta_grid, r_grid = np.meshgrid(theta, r, indexing="ij", copy=False)
-    y_grid = ny // 2 + r_grid * np.sin(theta_grid)
-    x_grid = nx // 2 + r_grid * np.cos(theta_grid)
-    coords = np.vstack((y_grid.flatten(), x_grid.flatten()))
-    polar = map_coordinates(proj, coords, order=1).reshape(r_grid.shape)
-    return polar.mean(axis=0)
 
 
 def estimate_radial_range(

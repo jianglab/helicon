@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 
+import helicon
+
 from helicon.lib import filters
 
 
@@ -93,3 +95,74 @@ class TestBackgroundOffset:
 
     def test_an_empty_array_is_not_an_error(self):
         assert filters.background_offset(np.zeros(0, dtype=np.float32)) == 0.0
+
+
+class TestHelicalBackground:
+    """The solvent level of a helical map, read from its axial radial profile.
+
+    Projected along the helical axis and averaged about it, the filament sits
+    in the middle and the box edge is solvent -- at whatever level the writing
+    software chose. The level is read as HI3D reads it, from the last bins of
+    the same profile; what is added is the check that the edge really is
+    solvent, and a refusal to guess when it is not.
+    """
+
+    def _tube(self, n=64, radius=8.0, width=2.5, offset=0.0, noise=0.0, seed=0):
+        rng = np.random.default_rng(seed)
+        yy, xx = np.indices((n, n)) - n // 2
+        r = np.hypot(yy, xx)
+        slab = np.exp(-((r - radius) ** 2) / (2 * width**2))
+        vol = np.repeat(slab[None, :, :], 32, axis=0).astype(np.float32)
+        vol += rng.normal(0, noise, vol.shape).astype(np.float32) if noise else 0
+        return vol + np.float32(offset), r
+
+    def test_it_recovers_a_shifted_solvent(self):
+        vol, _ = self._tube(offset=-0.37, noise=0.02)
+        bg = filters.helical_background(vol)
+        assert bg.method == "edge"
+        assert bg.mean == pytest.approx(-0.37, abs=0.01)
+        assert bg.sigma == pytest.approx(0.02, rel=0.25)
+
+    def test_it_is_indifferent_to_the_sign_of_the_offset(self):
+        for offset in (-5.0, 0.0, 3.0):
+            vol, _ = self._tube(offset=offset, noise=0.01)
+            assert filters.helical_background(vol).mean == pytest.approx(
+                offset, abs=0.01
+            )
+
+    def test_outside_a_mask_the_solvent_is_exactly_zero(self):
+        vol, r = self._tube(offset=0.4, noise=0.02)
+        vol[:, r > 20] = 0.0
+        bg = filters.helical_background(vol)
+        assert bg.method == "constant"
+        assert bg.mean == 0.0
+
+    def test_a_filament_that_fills_the_box_gives_no_level(self):
+        # the profile is still changing at the box edge; there is no solvent
+        # in view, so no number is better than a wrong one
+        vol, _ = self._tube(n=40, radius=16.0, width=6.0, offset=1.0)
+        bg = filters.helical_background(vol)
+        assert bg.method == "undetermined"
+        assert bg.mean == 0.0
+
+    def test_a_negative_halo_still_recovering_gives_no_level(self):
+        vol, r = self._tube(offset=0.0)
+        halo = -0.3 * np.exp(-((r - 18.0) ** 2) / (2 * 8.0**2))
+        vol = vol + halo[None].astype(np.float32)
+        assert filters.helical_background(vol).method == "undetermined"
+
+    def test_subtracting_it_is_always_safe(self):
+        vol, _ = self._tube(n=40, radius=16.0, width=6.0, offset=1.0)
+        bg = filters.helical_background(vol)
+        assert np.array_equal(vol - bg.mean, vol)
+
+    def test_it_shares_hi3d_s_profile_rather_than_copying_it(self):
+        from helicon.webApps.lib import hi3d_core
+
+        assert hi3d_core.compute_radial_profile is helicon.compute_radial_profile
+
+    def test_the_level_is_hi3d_s_last_three_bins(self):
+        vol, _ = self._tube(offset=0.25, noise=0.02)
+        profile = helicon.compute_radial_profile(vol)
+        bg = filters.helical_background(vol)
+        assert bg.mean == pytest.approx(float(np.mean(profile[-3:])))

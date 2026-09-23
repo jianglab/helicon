@@ -1,11 +1,15 @@
 import logging
+from dataclasses import dataclass
+
 import numpy as np
 import helicon
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "HelicalBackground",
     "background_offset",
+    "helical_background",
     "calculate_structural_factor",
     "down_scale",
     "generate_tapering_filter",
@@ -294,7 +298,10 @@ def background_offset(
     everything below zero throws away the interior and keeps the solvent.
 
     Estimated by sigma clipping, which converges on the solvent because
-    structure is the minority of a box.
+    structure is the minority of a box. For a helical map prefer
+    :func:`helical_background`, which reads the solvent from the geometry and
+    reports when it cannot: on EMD-15538 sigma clipping gives -0.166 where
+    the axial radial profile never falls below -0.09.
 
     Returns 0.0 for a map that has been masked, where the solvent has
     already been set to exactly zero and there is nothing left to measure:
@@ -341,6 +348,120 @@ def background_offset(
             break
         keep = updated
     return mean
+
+
+@dataclass
+class HelicalBackground:
+    """The solvent level of a helical map, and how it was found.
+
+    Attributes
+    ----------
+    mean : float
+        The background level, in the map's own units. Zero when it could not
+        be determined, so subtracting it is always safe.
+    sigma : float
+        Standard deviation of the solvent voxels, or 0.0 when there are none
+        to measure (a masked map, or an undetermined background).
+    radius : int or None
+        Innermost bin of the solvent region that was checked, in pixels from
+        the axis; None when the level did not come from the profile.
+    method : str
+        ``"edge"`` (the outer bins of the radial profile are flat, so the box
+        edge is solvent), ``"constant"`` (they are exactly constant, as outside
+        a mask), ``"masked"`` (most of the box is exactly zero), or
+        ``"undetermined"``.
+    """
+
+    mean: float
+    sigma: float
+    radius: int | None
+    method: str
+
+
+def helical_background(
+    data: np.ndarray,
+    tolerance: float = 0.03,
+    min_bins: int = 6,
+    min_fraction: float = 0.08,
+) -> HelicalBackground:
+    """The solvent level of a helical map, from its axial radial profile.
+
+    Cryo-EM maps are normalised by whatever software wrote them, so zero means
+    something different in every file, and anything that treats zero as "no
+    density" -- a threshold, a mask, the z-extent search inside the helical
+    symmetrisation -- inherits that chaos. EMD-19855 is an unmasked map whose
+    solvent sits just below zero; every one of its slices sums negative, and
+    that alone emptied the symmetrised map.
+
+    The level is read exactly as the HI3D tab reads it before estimating a
+    filament's radial range: :func:`helicon.compute_radial_profile` projects
+    the map along the helical axis and averages it about the axis, and the
+    background is the mean of the last three bins. Where the box edge is
+    solvent that agrees with fitting the whole outer plateau -- -1.64e-4
+    against -1.50e-4 on EMD-19855, -0.0045 against -0.0048 on EMD-4426.
+
+    What this adds is a check that the edge *is* solvent. The outer bins must
+    be flat: a straight line through them may change by at most
+    ``tolerance`` of the filament's contrast, and no bin may stray from it by
+    more. Otherwise no level is reported rather than a wrong one. Two kinds of
+    map fail it: a box too small to reach the solvent -- EMD-1427's tube is
+    wider than its box, and its edge bins sit on the tube's skirt at +2.37 --
+    and a filament whose negative halo is still recovering at the box edge,
+    as on EMD-1444 and EMD-15538.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        The map, ``(nz, ny, nx)`` with the helical axis along z and through
+        the centre of the box.
+    tolerance : float, optional
+        Allowed drift and scatter of the outer bins, as a fraction of the
+        filament's contrast. Defaults to 0.03.
+    min_bins, min_fraction : int, float, optional
+        How many outer bins must be flat: at least this many, and at least
+        this fraction of the radius. Defaults 6 and 0.08.
+
+    Returns
+    -------
+    HelicalBackground
+        ``mean`` is 0.0 whenever the level could not be determined, so
+        ``data - helical_background(data).mean`` is always safe.
+    """
+    from .analysis import compute_radial_profile
+
+    data = np.asarray(data)
+    profile = compute_radial_profile(data).astype(np.float64)
+    n = len(profile)
+    k = max(min_bins, int(np.ceil(min_fraction * n)))
+    if n < max(k, 3) + 2:
+        return HelicalBackground(0.0, 0.0, None, "undetermined")
+
+    level = float(np.mean(profile[-3:]))  # HI3D's background
+    contrast = float(np.max(np.abs(profile - level)))
+    tail = profile[-k:]
+
+    def solvent_sigma():
+        ny, nx = data.shape[1:]
+        yy, xx = np.indices((ny, nx))
+        r = np.hypot(yy - ny // 2, xx - nx // 2)
+        ring = (r >= n - k) & (r < n)
+        return float(data[:, ring].std())
+
+    # Outside a mask the outer bins are exactly constant -- nearly always
+    # zero -- and that constant is the solvent.
+    if contrast == 0 or float(np.ptp(tail)) <= 1e-9 * contrast:
+        return HelicalBackground(float(tail[-1]), 0.0, n - k, "constant")
+
+    r = np.arange(n - k, n, dtype=np.float64)
+    slope, intercept = np.polyfit(r, tail, 1)
+    drift = abs(slope) * (r[-1] - r[0])
+    scatter = float(np.max(np.abs(tail - (slope * r + intercept))))
+    if drift <= tolerance * contrast and scatter <= tolerance * contrast:
+        return HelicalBackground(level, solvent_sigma(), n - k, "edge")
+    if float((data != 0).mean()) < 0.5:
+        # a mask wider than the inscribed circle: the solvent is still zero
+        return HelicalBackground(0.0, 0.0, None, "masked")
+    return HelicalBackground(0.0, 0.0, None, "undetermined")
 
 
 def threshold_data(
