@@ -4,7 +4,9 @@ from __future__ import annotations
 
 
 import os
+import math
 import pathlib
+import re
 import numpy as np
 
 import helicon
@@ -160,18 +162,106 @@ def get_amyloid_n_sub_1_symmetry(twist: float, rise: float, max_n: int = 10) -> 
     return ret
 
 
+def as_number(value, default=0.0) -> float:
+    """A helical parameter as a number, whatever the table holds.
+
+    The EMDB table is assembled from a deposited table and a curated one, and
+    what survives a merge is not always a number: an empty cell, the string
+    ``"nan"``, a value the curators left blank. Anything that will not convert
+    -- and a NaN, which converts but compares false against everything -- comes
+    back as the default.
+
+    Parameters
+    ----------
+    value : object
+        The cell's contents.
+    default : float, optional
+        What to return when there is no usable number. Defaults to 0.
+
+    Returns
+    -------
+    float
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if math.isnan(number) else number
+
+
+def as_csym(value, default=1) -> int:
+    """A cyclic symmetry as an integer, from ``"C2"``, ``2``, ``"2"`` or junk.
+
+    The column is usually ``"C<n>"``, but a merge that found no curated value
+    writes ``"Cnan"``, and ``int("nan")`` raises -- which in a web app ends the
+    session rather than the parse. Anything without digits in it is taken as
+    unknown and returns the default.
+
+    Parameters
+    ----------
+    value : object
+        The cell's contents.
+    default : int, optional
+        What to return when there is no usable symmetry. Defaults to 1.
+
+    Returns
+    -------
+    int
+    """
+    digits = re.sub(r"[^0-9]", "", str(value))
+    if not digits:
+        return default
+    try:
+        number = int(digits)
+    except ValueError:
+        return default
+    return number if number > 0 else default
+
+
+def has_twist(map_info) -> bool:
+    """Whether a map can be searched at all.
+
+    A map with no twist, or a twist of zero, is not a helix: there is nothing
+    to symmetrize along and no side projection to make. EMDB entries often
+    carry no helical parameters -- and a filtered table can hand over hundreds
+    of maps at once -- so callers use this to pass them by rather than fail.
+
+    ``float(None)`` raises and ``float("nan")`` compares false, which is why
+    this is a function rather than an inline comparison: in a web app an
+    exception here ends the session.
+
+    Parameters
+    ----------
+    map_info : MapInfo
+        The map to test.
+
+    Returns
+    -------
+    bool
+        True when the twist is a number distinguishable from zero.
+    """
+    try:
+        return abs(float(map_info.twist)) > 1e-3
+    except (TypeError, ValueError):
+        return False
+
+
 @helicon.cache(expires_after=7, cache_dir=helicon.cache_dir / "helical_lab", verbose=0)
 def get_one_map_xyz_projects(map_info, length_z, map_projection_xyz_choices):
     label = map_info.label
     try:
         data, apix = map_info.get_data()
     except Exception as e:
+        # what went wrong, not which map: the caller knows which map it asked
+        # about and says so, and repeating it reads as "EMD-38069: Failed to
+        # download the map from EMDB for EMD-38069". A URL or a file name is
+        # not the label, so those stay.
         if map_info.filename:
-            msg = f"Failed to obtain uploaded map {label}"
+            msg = f"Failed to read the uploaded map {map_info.filename}"
         elif map_info.url:
             msg = f"Failed to download the map from {map_info.url}"
-        elif map_info.emd_id:
-            msg = f"Failed to download the map from EMDB for {map_info.emd_id}"
+        else:
+            msg = "Failed to download the map from EMDB"
         raise ValueError(msg) from e
 
     images = []
@@ -280,14 +370,10 @@ def symmetrize_project_align_one_map(
         # volume route's own projections it looked clearly worse -- 60% top-1
         # against 73% over 60 maps -- but that benchmark rewards whatever
         # resembles a volume projection, and a fit is not one. Against REAL
-        # class averages, EMPIAR-10940 searched over 61 maps with EMD-14046
-        # as the truth, the two routes are equal: each put the right map first
-        # in 7 of 8 searches, agreeing on every query including the one both
-        # missed. Over all 42 class averages of that set it ranks the true
-        # map first 32 times against the volume route's 33, and ranks it
-        # better on average -- 5.1 against 7.2 -- once the fit is thresholded
-        # at the depositors' contour level. That is why this route is the
-        # default, at 1.6 to 2 times the speed.
+        # class averages, all 42 of EMPIAR-10940 searched over 61 maps with
+        # EMD-14046 as the truth, it ranks the true map first 35 times
+        # against the volume route's 33, and far better on average -- mean
+        # rank 4.4 against 7.2. That is why this route is the default.
 
         from . import map_gauss_fit
 
