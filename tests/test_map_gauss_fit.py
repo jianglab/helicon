@@ -282,3 +282,48 @@ class TestFitQueries:
 
     def test_no_images_is_not_an_error(self):
         assert mgf.fit_queries([], apix=2.0) == []
+
+
+class TestTheFitIsReferencedToTheSolvent:
+    """Zero has to mean solvent before the fit's threshold can mean anything.
+
+    EMD-19855's solvent sits at -1.6e-4; every slice summed negative, the
+    symmetrised map came out empty, and the fit raised "no density above the
+    threshold". The same map shifted anywhere else must fit the same way.
+    """
+
+    def _offset_tube(self):
+        vol, apix, twist, rise = _tube()
+        # an unmasked-looking map: the whole box shifted until every slice
+        # sums negative, the condition EMD-19855 is in
+        offset = 2.0 * float(vol.sum(axis=(1, 2)).max()) / (vol.shape[1] * vol.shape[2])
+        return vol, vol - np.float32(offset), apix, twist, rise
+
+    def test_the_shifted_map_is_fitted(self):
+        vol, shifted, apix, twist, rise = self._offset_tube()
+        assert (shifted.sum(axis=(1, 2)) < 0).all()
+        fit = mgf.fit_map(
+            shifted, apix, twist, rise, 1, fit_apix=apix, n_components=200
+        )
+        assert len(fit) > 0
+
+    def test_it_is_the_same_fit_as_the_unshifted_map(self):
+        # not merely a similar picture: without the reference the fit still
+        # runs, but its threshold then sits in the wrong place and it covers
+        # the filament with 67 gaussians instead of 116
+        vol, shifted, apix, twist, rise = self._offset_tube()
+        kw = dict(fit_apix=apix, n_components=200)
+        plain = mgf.fit_map(vol, apix, twist, rise, 1, **kw)
+        moved = mgf.fit_map(shifted, apix, twist, rise, 1, **kw)
+        unreferenced = mgf.fit_map(
+            shifted, apix, twist, rise, 1, reference_to_background=False, **kw
+        )
+        assert len(moved) == len(plain)
+        assert np.allclose(moved.centers, plain.centers, atol=1e-3)
+        assert len(unreferenced) != len(plain)
+
+    def test_the_cache_key_distinguishes_referenced_fits(self):
+        import inspect
+
+        params = inspect.signature(mgf.gaussians_for_map).parameters
+        assert params["reference_to_background"].default is True

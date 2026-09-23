@@ -422,6 +422,11 @@ def symmetrize_project_align_one_map(
                 mixture = None
     else:
         mixture = None
+        # Referenced to its solvent first, as the gaussian fit is: the
+        # symmetrisation finds the structure along z from slice sums, which
+        # only means something when zero is solvent. On EMD-19855, whose
+        # solvent sits below zero, this route scored 0.000.
+        data = (data - helicon.helical_background(data).mean).astype(np.float32)
         if rescale_apix:
             data_work = helicon.low_high_pass_filter(
                 data, low_pass_fraction=apix / new_apix

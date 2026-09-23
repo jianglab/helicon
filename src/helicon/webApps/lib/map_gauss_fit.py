@@ -529,6 +529,7 @@ def fit_map(
     n_components=600,
     sigma_scale=0.45,
     contour_level=None,
+    reference_to_background=True,
 ):
     """Fit a helical map, symmetrising it first.
 
@@ -580,6 +581,10 @@ def fit_map(
         the class average both measure.
 
         Ignored when it would leave nothing to fit.
+    reference_to_background : bool, optional
+        Subtract the solvent level found by
+        :func:`helicon.helical_background` first, so that zero means solvent
+        whatever software wrote the map. Defaults to True.
     n_components, sigma_scale
         Passed to :func:`fit_gaussians`.
 
@@ -597,6 +602,15 @@ def fit_map(
         masked = np.where(data >= contour_level, data, 0).astype(np.float32)
         if float((masked != 0).mean()) > 0:
             data = masked
+
+    if reference_to_background:
+        # Zero has to mean solvent before a threshold, a symmetrisation or a
+        # fraction of the maximum can mean anything, and in a deposited map it
+        # means whatever the writing software chose. EMD-19855's solvent sits
+        # at -1.6e-4; left there, every slice summed negative and the
+        # symmetrised map came out empty. Masked maps come back unchanged --
+        # outside the mask the solvent already is zero.
+        data = (data - helicon.helical_background(data).mean).astype(np.float32)
 
     filtered = helicon.low_high_pass_filter(
         data, low_pass_fraction=min(1.0, apix / fit_apix)
@@ -636,6 +650,7 @@ def gaussians_for_map(
     n_components=600,
     sigma_scale=0.45,
     contour_level=None,
+    reference_to_background=True,
 ):
     """Fit a map from EMDB and cache the result by its identity, not its data.
 
@@ -650,8 +665,10 @@ def gaussians_for_map(
         Helical parameters, in degrees and Angstroms.
     csym : int
         Cyclic symmetry about the helical axis.
-    fit_apix, n_components, sigma_scale, contour_level
-        Passed to :func:`fit_map`.
+    fit_apix, n_components, sigma_scale, contour_level, reference_to_background
+        Passed to :func:`fit_map`. ``reference_to_background`` is part of the
+        cache key on purpose: fits cached before maps were referenced to their
+        solvent must not be served as if they had been.
 
     Returns
     -------
@@ -671,11 +688,17 @@ def gaussians_for_map(
         n_components=n_components,
         sigma_scale=sigma_scale,
         contour_level=contour_level,
+        reference_to_background=reference_to_background,
     )
 
 
 def gaussians_for_map_info(
-    map_info, fit_apix=2.0, n_components=600, sigma_scale=0.45, contour_level=None
+    map_info,
+    fit_apix=2.0,
+    n_components=600,
+    sigma_scale=0.45,
+    contour_level=None,
+    reference_to_background=True,
 ):
     """The fit for a :class:`MapInfo`, cached when the map has an identity.
 
@@ -698,7 +721,7 @@ def gaussians_for_map_info(
     ----------
     map_info : MapInfo
         The map to fit.
-    fit_apix, n_components, sigma_scale, contour_level
+    fit_apix, n_components, sigma_scale, contour_level, reference_to_background
         Passed to :func:`fit_map`.
 
     Returns
@@ -723,6 +746,7 @@ def gaussians_for_map_info(
             n_components=n_components,
             sigma_scale=sigma_scale,
             contour_level=level,
+            reference_to_background=reference_to_background,
         )
 
     data, apix = map_info.get_data()
@@ -736,6 +760,7 @@ def gaussians_for_map_info(
         n_components=n_components,
         sigma_scale=sigma_scale,
         contour_level=level,
+        reference_to_background=reference_to_background,
     )
 
 
