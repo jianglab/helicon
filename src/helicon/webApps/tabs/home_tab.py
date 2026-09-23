@@ -1,13 +1,14 @@
 """Home tab — helical data processing workflow with a launcher for each app.
 
 Draws the processing steps (micrographs → particle picking → 2D classes →
-initial model) as an SVG diagram and places every app next to the step it
-works on. Hovering an app shows its name and a brief introduction; clicking
-it switches the navbar to that app's tab.
+initial model) as an SVG diagram, with every app wired between the data it
+reads and the result it produces (twist, rise, an initial model, ...).
+Hovering an app shows its name and a brief introduction and highlights its
+arrows; clicking it switches the navbar to that app's tab.
 
 The tab is static: it has no server function, and switching tabs happens in
 the browser by clicking the matching navbar link, so the normal tab-change
-path (lazy tab start, last-tab cookie, bookmark URL) runs unchanged.
+path (lazy tab start, bookmark URL) runs unchanged.
 """
 
 from __future__ import annotations
@@ -24,44 +25,47 @@ HOME_TAB = "Home"
 class HomeApp:
     tab: str  # navbar value of the app's tab
     abbr: str  # placeholder icon text, used while ``icon`` is None
-    color: str  # placeholder icon background
+    color: str  # placeholder icon background and hover accent
     description: str
-    cx: int  # icon centre in diagram coordinates
+    cx: int  # chip centre in diagram coordinates
     cy: int
     icon: str | None = None  # image path under www/, e.g. "icons/hill.png"
 
 
+# Diagram layout: a centre column of data steps at x=555, apps in columns at
+# x=280 and x=830, and results at the outer edges. Rows are y = 50, 170,
+# 300 and 430; "Others" sits below at y=560.
 HOME_APPS: tuple[HomeApp, ...] = (
     HomeApp(
-        "HILL",
-        "HILL",
-        "#2563eb",
-        "Helical indexing of a 2D class average using the layer lines of "
-        "its Fourier power spectrum.",
-        130,
-        170,
-    ),
-    HomeApp(
         "HelicalProjection",
-        "Proj",
+        "HP",
         "#0891b2",
         "Compare 2D class averages with projections of helical 3D maps or "
         "models to find structures that match.",
-        130,
-        290,
+        280,
+        170,
+    ),
+    HomeApp(
+        "HILL",
+        "HL",
+        "#2563eb",
+        "Helical indexing of a 2D class average using the layer lines of "
+        "its Fourier power spectrum.",
+        280,
+        300,
     ),
     HomeApp(
         "Denovo3D",
         "3D",
         "#7c3aed",
         "Build a de novo 3D helical reconstruction from a single 2D class "
-        "average, as an initial model.",
-        130,
-        420,
+        "average, giving an initial model and its twist and rise.",
+        280,
+        430,
     ),
     HomeApp(
         "WhereIsMyClass",
-        "WIMC",
+        "WC",
         "#db2777",
         "Map 2D classes back onto the helical tubes/filaments in the "
         "micrographs, to see where each class came from.",
@@ -70,123 +74,191 @@ HOME_APPS: tuple[HomeApp, ...] = (
     ),
     HomeApp(
         "HelicalPitch",
-        "Pitch",
+        "Pi",
         "#ea580c",
         "Estimate the helical pitch/twist from the distances between "
         "segments of the same 2D class along each filament.",
         830,
-        290,
+        300,
     ),
     HomeApp(
         "HI3D",
-        "HI3D",
+        "H3",
         "#16a34a",
         "Helical indexing of a 3D map using its cylindrical projection, to "
         "check or refine the twist and rise.",
         830,
-        450,
+        430,
     ),
     HomeApp(
         "HelicalLattice",
-        "Lat",
+        "La",
         "#ca8a04",
         "Interconvert 2D lattices and helical lattices to explore helical "
         "symmetry.",
-        220,
+        280,
         560,
     ),
 )
 
-_TILE = 56  # app icon size in diagram units
+_CHIP_W, _CHIP_H = 176, 48
+_ICON = 34
 
-# Workflow steps: (x, y, width, height, lines of text)
+# Data steps: (x, y, width, height, lines of text)
 _STEPS = (
-    (390, 20, 180, 60, ("Micrographs",)),
-    (390, 130, 180, 60, ("Particle picking",)),
-    (300, 250, 180, 80, ("2D class", "average images")),
-    (480, 250, 180, 80, ("2D class", "metadata")),
-    (390, 420, 180, 60, ("Initial model",)),
+    (470, 25, 170, 50, ("Micrographs",)),
+    (470, 145, 170, 50, ("Particle picking",)),
+    (405, 260, 150, 80, ("2D class", "average images")),
+    (555, 260, 150, 80, ("2D class", "metadata")),
+    (470, 405, 170, 50, ("Initial model",)),
 )
 
-# Connectors between steps and apps. Arrows show data flowing into a step;
-# plain lines attach an app to the data it works on.
-_ARROWS = (
-    "M480,80 L480,128",  # micrographs → particle picking
-    "M480,190 L480,248",  # particle picking → 2D classes
-    "M480,330 L480,418",  # 2D classes → initial model
-    "M162,440 C230,475 300,462 388,452",  # Denovo3D → initial model
-    "M830,138 C830,70 700,45 572,50",  # WhereIsMyClass → micrographs
+# Results: (centre x, centre y, text)
+_RESULTS = (
+    (80, 365, "Twist & Rise"),
+    (1030, 300, "Twist"),
+    (1030, 430, "Twist & Rise"),
 )
-_LINES = (
-    "M162,178 L300,285",  # HILL
-    "M162,290 L300,290",  # HelicalProjection
-    "M162,412 L300,296",  # Denovo3D
-    "M660,285 L798,178",  # WhereIsMyClass
-    "M660,290 L798,290",  # HelicalPitch
-    "M570,450 L798,450",  # HI3D
+_RESULT_W, _RESULT_H = 120, 46
+
+# Arrows as polylines (drawn with rounded corners), each tagged with the app
+# it belongs to, if any, so hovering that app can highlight it.
+_ARROWS: tuple[tuple[str | None, tuple[tuple[int, int], ...]], ...] = (
+    (None, ((555, 75), (555, 143))),  # micrographs → particle picking
+    (None, ((555, 195), (555, 258))),  # particle picking → 2D classes
+    (None, ((555, 340), (555, 403))),  # 2D classes → initial model
+    ("HelicalProjection", ((445, 260), (445, 222), (280, 222), (280, 196))),
+    ("HILL", ((405, 300), (370, 300))),
+    ("HILL", ((192, 300), (80, 300), (80, 340))),
+    ("Denovo3D", ((445, 340), (445, 378), (280, 378), (280, 404))),
+    ("Denovo3D", ((368, 430), (468, 430))),
+    ("Denovo3D", ((192, 430), (80, 430), (80, 390))),
+    ("WhereIsMyClass", ((640, 170), (740, 170))),
+    ("WhereIsMyClass", ((665, 260), (665, 222), (830, 222), (830, 196))),
+    ("WhereIsMyClass", ((830, 146), (830, 50), (642, 50))),
+    ("HelicalPitch", ((705, 300), (740, 300))),
+    ("HelicalPitch", ((918, 300), (968, 300))),
+    ("HI3D", ((640, 430), (740, 430))),
+    ("HI3D", ((918, 430), (968, 430))),
 )
+
+
+def _rounded_path(points, r: float = 10) -> str:
+    """SVG path through ``points`` with each corner rounded by radius ``r``."""
+    (x0, y0), *rest = points
+    d = [f"M{x0},{y0}"]
+    for (xa, ya), (xb, yb), (xc, yc) in zip(points, points[1:], points[2:]):
+        # Stop short of the corner, then curve onto the next segment.
+        ra = min(r, (abs(xb - xa) + abs(yb - ya)) / 2)
+        rc = min(r, (abs(xc - xb) + abs(yc - yb)) / 2)
+        sx = (xb > xa) - (xb < xa)
+        sy = (yb > ya) - (yb < ya)
+        tx = (xc > xb) - (xc < xb)
+        ty = (yc > yb) - (yc < yb)
+        d.append(f"L{xb - sx * ra},{yb - sy * ra}")
+        d.append(f"Q{xb},{yb} {xb + tx * rc},{yb + ty * rc}")
+    xn, yn = rest[-1]
+    d.append(f"L{xn},{yn}")
+    return " ".join(d)
+
+
+def _text_lines(cx, cy, lines, cls) -> str:
+    line_h = 18
+    y0 = cy - line_h * (len(lines) - 1) / 2
+    tspans = "".join(
+        f'<tspan x="{cx}" y="{y0 + i * line_h}">{escape(t)}</tspan>'
+        for i, t in enumerate(lines)
+    )
+    return f'<text class="{cls}" dominant-baseline="central">{tspans}</text>'
 
 
 def _step_svg(x, y, w, h, lines) -> str:
-    line_h = 18
-    y0 = y + h / 2 - line_h * (len(lines) - 1) / 2
-    tspans = "".join(
-        f'<tspan x="{x + w / 2}" y="{y0 + i * line_h}">{escape(t)}</tspan>'
-        for i, t in enumerate(lines)
-    )
     return (
         f'<rect class="hh-step" x="{x}" y="{y}" width="{w}" height="{h}" rx="6"/>'
-        f'<text class="hh-step-text" dominant-baseline="central">{tspans}</text>'
+        + _text_lines(x + w / 2, y + h / 2, lines, "hh-step-text")
+    )
+
+
+def _result_svg(cx, cy, text) -> str:
+    return (
+        f'<rect class="hh-result" x="{cx - _RESULT_W / 2}" '
+        f'y="{cy - _RESULT_H / 2}" width="{_RESULT_W}" height="{_RESULT_H}" '
+        f'rx="{_RESULT_H / 2}"/>' + _text_lines(cx, cy, (text,), "hh-result-text")
     )
 
 
 def _app_svg(app: HomeApp) -> str:
-    x, y = app.cx - _TILE / 2, app.cy - _TILE / 2
+    x, y = app.cx - _CHIP_W / 2, app.cy - _CHIP_H / 2
+    ix, iy = x + 7, app.cy - _ICON / 2
     if app.icon:
         face = (
-            f'<image href="{escape(app.icon)}" x="{x}" y="{y}" '
-            f'width="{_TILE}" height="{_TILE}"/>'
+            f'<image href="{escape(app.icon)}" x="{ix}" y="{iy}" '
+            f'width="{_ICON}" height="{_ICON}"/>'
         )
     else:
         face = (
-            f'<text class="hh-abbr" x="{app.cx}" y="{app.cy}" '
+            f'<rect x="{ix}" y="{iy}" width="{_ICON}" height="{_ICON}" rx="8" '
+            f'style="fill: {app.color}"/>'
+            f'<text class="hh-abbr" x="{ix + _ICON / 2}" y="{app.cy}" '
             f'dominant-baseline="central">{escape(app.abbr)}</text>'
         )
     return (
         f'<g class="hh-app" tabindex="0" role="button" '
+        f'style="--hh-app: {app.color}" '
         f'aria-label="Open {escape(app.tab)}: {escape(app.description)}" '
         f'data-tab="{escape(app.tab)}" data-desc="{escape(app.description)}">'
-        f'<rect class="hh-tile" x="{x}" y="{y}" width="{_TILE}" '
-        f'height="{_TILE}" rx="12" style="fill: {app.color}"/>'
+        f'<rect class="hh-chip" x="{x}" y="{y}" width="{_CHIP_W}" '
+        f'height="{_CHIP_H}" rx="10"/>'
         f"{face}"
-        f'<text class="hh-app-name" x="{app.cx}" y="{app.cy + _TILE / 2 + 16}">'
-        f"{escape(app.tab)}</text>"
+        f'<text class="hh-app-name" x="{ix + _ICON + 9}" y="{app.cy}" '
+        f'dominant-baseline="central">{escape(app.tab)}</text>'
         f"</g>"
+    )
+
+
+def _legend_svg() -> str:
+    y = 560
+    return (
+        f'<rect class="hh-step" x="660" y="{y - 8}" width="22" height="16" rx="3"/>'
+        f'<text class="hh-legend" x="690" y="{y}" dominant-baseline="central">'
+        "Data</text>"
+        f'<rect class="hh-chip" x="750" y="{y - 8}" width="22" height="16" rx="4"/>'
+        f'<text class="hh-legend" x="780" y="{y}" dominant-baseline="central">'
+        "App (click to open)</text>"
+        f'<rect class="hh-result" x="920" y="{y - 8}" width="22" height="16" '
+        f'rx="8"/><text class="hh-legend" x="950" y="{y}" '
+        f'dominant-baseline="central">Result</text>'
     )
 
 
 def _workflow_svg() -> str:
     parts = [
-        '<svg class="hh-diagram" viewBox="0 0 960 620" '
+        '<svg class="hh-diagram" viewBox="0 0 1110 600" '
         'xmlns="http://www.w3.org/2000/svg" role="group" '
         'aria-label="Helical data processing workflow">',
-        "<defs>"
-        '<marker id="hh-arrowhead" viewBox="0 0 10 10" refX="9" refY="5" '
-        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-        '<path class="hh-arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>'
+        "<defs>",
+        *(
+            f'<marker id="{mid}" viewBox="0 0 10 10" refX="9" refY="5" '
+            'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+            f'<path class="{cls}" d="M0,0 L10,5 L0,10 z"/></marker>'
+            for mid, cls in (
+                ("hh-arrowhead", "hh-arrowhead"),
+                ("hh-arrowhead-hot", "hh-arrowhead hh-hot"),
+            )
+        ),
         "</defs>",
     ]
-    parts += [f'<path class="hh-link" d="{d}"/>' for d in _LINES]
-    parts += [
-        f'<path class="hh-link" d="{d}" marker-end="url(#hh-arrowhead)"/>'
-        for d in _ARROWS
-    ]
+    for app, points in _ARROWS:
+        data = f' data-app="{escape(app)}"' if app else ""
+        parts.append(f'<path class="hh-link"{data} d="{_rounded_path(points)}"/>')
     parts += [_step_svg(*s) for s in _STEPS]
+    parts += [_result_svg(*r) for r in _RESULTS]
     parts.append(
-        '<text class="hh-others" x="60" y="560" dominant-baseline="central">'
+        '<text class="hh-others" x="180" y="560" dominant-baseline="central">'
         "Others:</text>"
     )
     parts += [_app_svg(a) for a in HOME_APPS]
+    parts.append(_legend_svg())
     parts.append("</svg>")
     return "".join(parts)
 
@@ -195,10 +267,14 @@ _CSS = """
 .helicon-home {
     --hh-text: #212529;
     --hh-muted: #6c757d;
-    --hh-step-bg: #ffffff;
+    --hh-step-bg: #f1f3f5;
     --hh-step-border: #adb5bd;
-    --hh-line: #6c757d;
-    --hh-focus: #1f2937;
+    --hh-chip-bg: #ffffff;
+    --hh-chip-border: #ced4da;
+    --hh-result-bg: #ecfdf5;
+    --hh-result-border: #10b981;
+    --hh-result-text: #065f46;
+    --hh-line: #868e96;
     --hh-tip-bg: #ffffff;
     --hh-tip-border: #ced4da;
     position: relative;
@@ -212,8 +288,12 @@ _CSS = """
     --hh-muted: #a0a0a0;
     --hh-step-bg: #262626;
     --hh-step-border: #5a5a5a;
-    --hh-line: #8a8a8a;
-    --hh-focus: #ffffff;
+    --hh-chip-bg: #2b2b2b;
+    --hh-chip-border: #4a4a4a;
+    --hh-result-bg: #10302a;
+    --hh-result-border: #34d399;
+    --hh-result-text: #a7f3d0;
+    --hh-line: #7a7a7a;
     --hh-tip-bg: #2b2b2b;
     --hh-tip-border: #4a4a4a;
 }
@@ -224,7 +304,7 @@ _CSS = """
     color: var(--hh-muted); text-align: center; margin: 4px 0 8px !important;
 }
 .helicon-home .hh-diagram {
-    display: block; width: 100%; max-width: 960px; margin: 0 auto !important;
+    display: block; width: 100%; max-width: 1110px; margin: 0 auto !important;
 }
 .helicon-home .hh-step {
     fill: var(--hh-step-bg); stroke: var(--hh-step-border); stroke-width: 1.5;
@@ -232,21 +312,40 @@ _CSS = """
 .helicon-home .hh-step-text {
     fill: var(--hh-text); font-size: 15px; text-anchor: middle;
 }
+.helicon-home .hh-result {
+    fill: var(--hh-result-bg); stroke: var(--hh-result-border); stroke-width: 1.5;
+}
+.helicon-home .hh-result-text {
+    fill: var(--hh-result-text); font-size: 14px; font-weight: 600;
+    text-anchor: middle;
+}
 .helicon-home .hh-link {
     fill: none; stroke: var(--hh-line); stroke-width: 1.5;
+    marker-end: url(#hh-arrowhead);
+    transition: stroke 0.15s;
 }
 .helicon-home .hh-arrowhead { fill: var(--hh-line); }
-.helicon-home .hh-others { fill: var(--hh-text); font-size: 16px; }
+.helicon-home .hh-link.hh-hot {
+    stroke: var(--hh-hot); stroke-width: 2.5; marker-end: url(#hh-arrowhead-hot);
+}
+.helicon-home .hh-arrowhead.hh-hot { fill: var(--hh-hot); }
+.helicon-home .hh-others { fill: var(--hh-text); font-size: 15px; text-anchor: end; }
+.helicon-home .hh-legend { fill: var(--hh-muted); font-size: 12px; }
 .helicon-home .hh-app { cursor: pointer; outline: none; }
-.helicon-home .hh-tile { stroke: transparent; stroke-width: 3; }
-.helicon-home .hh-app:hover .hh-tile,
-.helicon-home .hh-app:focus-visible .hh-tile { stroke: var(--hh-focus); }
+.helicon-home .hh-chip {
+    fill: var(--hh-chip-bg); stroke: var(--hh-chip-border); stroke-width: 1.5;
+    transition: stroke 0.15s;
+}
+.helicon-home .hh-app:hover .hh-chip,
+.helicon-home .hh-app:focus-visible .hh-chip {
+    stroke: var(--hh-app); stroke-width: 2.5;
+}
 .helicon-home .hh-abbr {
-    fill: #ffffff; font-size: 14px; font-weight: 700; text-anchor: middle;
+    fill: #ffffff; font-size: 13px; font-weight: 700; text-anchor: middle;
     pointer-events: none;
 }
 .helicon-home .hh-app-name {
-    fill: var(--hh-text); font-size: 13px; text-anchor: middle;
+    fill: var(--hh-text); font-size: 13px; font-weight: 600;
 }
 .helicon-home .hh-tooltip {
     position: absolute; z-index: 10; max-width: 260px; pointer-events: none;
@@ -270,23 +369,34 @@ _JS = """
             '.navbar a.nav-link[data-value="' + name + '"]');
         if (link) link.click();
     }
+    function setHot(app, on) {
+        var home = app.closest('.helicon-home');
+        home.style.setProperty('--hh-hot', app.style.getPropertyValue('--hh-app'));
+        home.querySelectorAll('.hh-link[data-app="' + app.dataset.tab + '"]')
+            .forEach(function(p) { p.classList.toggle('hh-hot', on); });
+    }
     function showTip(app) {
         var home = app.closest('.helicon-home');
         var tip = home.querySelector('.hh-tooltip');
         tip.querySelector('strong').textContent = app.dataset.tab;
         tip.querySelector('.hh-tip-desc').textContent = app.dataset.desc;
         tip.hidden = false;
+        setHot(app, true);
         var box = home.getBoundingClientRect();
-        var r = app.querySelector('.hh-tile').getBoundingClientRect();
+        var r = app.querySelector('.hh-chip').getBoundingClientRect();
         var left = r.left - box.left + home.scrollLeft + r.width / 2 - tip.offsetWidth / 2;
         left = Math.max(4, Math.min(left, home.clientWidth - tip.offsetWidth - 4));
+        // Open away from the diagram's middle, where most arrows run.
+        var svg = home.querySelector('.hh-diagram').getBoundingClientRect();
+        var below = r.top + r.height / 2 > svg.top + svg.height / 2;
         var top = r.top - box.top + home.scrollTop - tip.offsetHeight - 8;
-        if (top < home.scrollTop) top = r.bottom - box.top + home.scrollTop + 8;
+        if (below || top < home.scrollTop) top = r.bottom - box.top + home.scrollTop + 8;
         tip.style.left = left + 'px';
         tip.style.top = top + 'px';
     }
     function hideTip(app) {
         app.closest('.helicon-home').querySelector('.hh-tooltip').hidden = true;
+        setHot(app, false);
     }
     document.addEventListener('mouseover', function(e) {
         var app = appOf(e.target);

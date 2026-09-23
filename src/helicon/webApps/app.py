@@ -164,13 +164,9 @@ assert {a.tab for a in HOME_APPS} == set(_TAB_MODULE_MAP), (
 
 # ── Lazy tab loading ────────────────────────────────────────────
 
-# Cookie written by the client on every tab change, so the tab a user was
-# last on is known at page-request time and needs no extra round trip.
-_LAST_TAB_COOKIE = "helicon_last_tab"
-
 
 def _resolve_active_tab(request: Request) -> str:
-    """Which tab to open, in the order: URL, last-open cookie, Home.
+    """Which tab to open: the one the URL names, otherwise Home.
 
     Only the resolved tab's server function runs at session start. Every tab's
     UI is still built (that measured 0.01 s for all seven), so navigation works
@@ -182,11 +178,8 @@ def _resolve_active_tab(request: Request) -> str:
     if tab:
         # Arrives JSON-quoted from the bookmark URL, e.g. helicon_tab="Denovo3D"
         tab = tab.strip().strip('"')
-        if tab in _TAB_MODULE_MAP or tab == HOME_TAB:
+        if tab in _TAB_MODULE_MAP:
             return tab
-    tab = request.cookies.get(_LAST_TAB_COOKIE)
-    if tab and (tab.strip('"') in _TAB_MODULE_MAP or tab.strip('"') == HOME_TAB):
-        return tab.strip('"')
     return HOME_TAB
 
 
@@ -535,28 +528,7 @@ def app_ui(request: Request):
                     if (_DEBUG_BOOKMARK) console.log('[bookmark] _initialCaptureDone = true. initialValues:', JSON.stringify(_initialValues));
                 }, 2000);
 
-                // Remember the last-open tab in a cookie rather than
-                // localStorage: a cookie is sent with the page request, so the
-                // server knows which tab to open (and which tab's server code
-                // to run) before the websocket exists, with no extra round trip.
-                function _rememberTab(name) {
-                    if (!name) return;
-                    document.cookie = 'helicon_last_tab=' +
-                        encodeURIComponent(name) +
-                        '; path=/; max-age=31536000; SameSite=Lax';
-                }
-                // Also record on connect, not just on change: an explicit
-                // ?helicon_tab= deep link opens that tab via `selected=`, which
-                // fires no change event, so without this a tab the user never
-                // switched away from would not be remembered.
-                $(document).on('shiny:connected', function() {
-                    var active = document.querySelector(
-                        '.navbar .nav-link.active, .navbar-nav .nav-link.active');
-                    if (active) _rememberTab(active.textContent.trim());
-                });
-
                 $(document).on('shiny:inputchanged', function(event) {
-                    if (event.name === 'helicon_tab') _rememberTab(event.value);
                     if (_DEBUG_BOOKMARK) console.log('[bookmark] shiny:inputchanged:', event.name, '=', JSON.stringify(event.value));
                     _captureInitialValues();
 
