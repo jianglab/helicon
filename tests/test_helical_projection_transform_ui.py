@@ -1,4 +1,11 @@
-"""The manual transform controls, for one selected image and for several."""
+"""The manual transform controls in helicalProjection.
+
+Every selected image has its own transform, held by the server and keyed by
+the image's label, and its own card of four sliders -- one card for a single
+image, one per image for several. The pure rule for carrying transforms across
+a change of selection lives in helix_transform.reconcile_transforms and is
+tested there; these pin how the tab uses it.
+"""
 
 import inspect
 
@@ -9,55 +16,69 @@ def _source():
     return inspect.getsource(tab)
 
 
-class TestThePerImageTransformCard:
-    """Editing one of several images should feel like editing one.
+def _body(name, until):
+    source = _source()
+    body = source[source.index("def %s" % name) :]
+    return body[: body.index(until)]
 
-    The single-image card has four sliders; the per-image card used numeric
-    boxes, so switching from one selected image to several changed how the
-    same four parameters are set. They are sliders in both now, with the
-    ranges taken from the image the card belongs to.
-    """
 
-    def _card(self):
-        body = _source()
-        body = body[body.index("def hp_per_image_transform_ui") :]
-        return body[: body.index("def _apply_auto_transform")]
-
+class TestOneKindOfCard:
     def test_every_control_is_a_slider(self):
-        card = self._card()
+        card = _body("hp_per_image_transform_ui", "def _auto_transform")
         assert "ui.input_numeric" not in card
-        for kind in ("rot", "threshold", "vcrop", "dy"):
-            assert '_pi_id("%s", i)' % kind in card
         assert card.count("ui.input_slider") == 4
+        for kind in ("rot", "threshold", "vcrop", "dy"):
+            assert '_pi_id("%s", key, t.generation)' % kind in card
 
-    def test_the_four_match_the_single_image_card(self):
-        shared = _source()
-        shared = shared[shared.index("def hp_shared_transform_ui") :]
-        shared = shared[: shared.index("def hp_per_image_transform_ui")]
-        card = self._card()
-        for label in (
-            '"Rotation (°)"',
-            '"Threshold"',
-            '"Vertical crop size (px)"',
-            '"Vertical shift (px)"',
-        ):
-            assert label in shared and label in card
+    def test_there_are_no_separate_single_image_sliders(self):
+        # the shared sliders were hidden in multi-image mode, yet a removed
+        # control keeps its last value on the server, and they were still
+        # added on top of every image as a "nudge": the first image's rotation
+        # was silently copied onto each image selected after it
+        source = _source()
+        assert "hp_shared_transform_ui" not in source
+        drawing = _body("_transform_crop_images", "# -- Map loading --")
+        for shared in ('"pre_rotation"', '"shift_y"', '"vertical_crop_size"'):
+            assert shared not in drawing
 
     def test_the_ranges_come_from_that_image(self):
-        card = self._card()
-        # the crop cannot exceed the image's own height, and a threshold
-        # outside its own range of values means nothing
+        card = _body("hp_per_image_transform_ui", "def _auto_transform")
         assert "ny_i = int(img.shape[0])" in card
         assert "v_min = float(np.min(img))" in card
         assert "max=ny_i" in card
         assert "min=round(v_min, 3)" in card
 
-    def test_the_effects_update_sliders_not_boxes(self):
-        source = _source()
-        for effect in ("_apply_auto_transform", "_reset_transform"):
-            body = source[source.index("def %s" % effect) :][:1400]
-            assert "update_numeric" not in body
-            assert "ui.update_slider(_pi_id(" in body
+
+class TestTransformsFollowTheImageNotItsPosition:
+    def test_controls_are_keyed_by_label_and_generation(self):
+        body = _body("_pi_id", "def _input_or")
+        assert "generation" in body
+        # the key is the image's label; a position would let one image's
+        # values land on another whenever the order shifted
+        selected = _body("_selected_by_key", "def _auto_transforms")
+        assert "selected_images_labels()" in selected
+
+    def test_a_selection_change_goes_through_the_reconciliation(self):
+        body = _body("_reconcile_transforms_with_selection", "@render.ui")
+        assert "helix_transform.reconcile_transforms(" in body
+        # existing images are carried over as their controls hold them now,
+        # manual edits included
+        assert "_as_controls_hold(previous)" in body
+        # and the card shown is the one the rule picks: the image just added
+        assert "active_selected_image.set(active)" in body
+
+    def test_only_new_images_are_measured(self):
+        body = _body("_reconcile_transforms_with_selection", "@render.ui")
+        assert "lambda new_keys: _auto_transforms(new_keys, images_by_key)" in body
+
+    def test_auto_and_reset_replace_values_with_fresh_generations(self):
+        # values replaced from outside the controls must not be read back
+        # from a control that still holds the old ones
+        auto = _body("_auto_transforms", "def _as_controls_hold")
+        assert "generation=_next_generation()" in auto
+        reset = _body("_reset_transform", "# A plain effect")
+        assert "generation=_next_generation()" in reset
+        assert "update_numeric" not in auto + reset
 
 
 class TestTheCardStaysOnTheImageBeingEdited:
@@ -65,34 +86,31 @@ class TestTheCardStaysOnTheImageBeingEdited:
 
     The selected-images gallery shows the *transformed* images, so every
     slider move re-renders it -- and a gallery re-render performs a real click
-    on its initial selection, which drove the card switcher back to image 1 in
-    the middle of editing image 5.
+    on its initial selection.
     """
 
     def test_the_gallery_reselects_the_active_image(self):
-        source = _source()
-        body = source[source.index("def display_selected_image_gallery") :][:1400]
+        body = _source()
+        body = body[body.index("def display_selected_image_gallery") :][:1600]
         assert "initial_selected_indices=reactive.value([active_selected_image()])" in (
             body
         )
 
     def test_clicking_an_image_is_remembered(self):
-        source = _source()
-        body = source[source.index("def _remember_active_selected_image") :][:700]
+        body = _body("_remember_active_selected_image", "@reactive.effect")
         assert "input.display_selected_image()" in body
         assert "active_selected_image.set(index)" in body
-        # an out-of-range or unparseable value must not be stored
         assert "except (TypeError, ValueError)" in body
         assert "0 <= index < len(selected_images_original())" in body
 
-    def test_a_new_selection_starts_at_the_first_image(self):
-        source = _source()
-        body = source[source.index("def _reset_active_selected_image") :][:400]
-        assert "active_selected_image.set(0)" in body
+    def test_the_active_card_is_drawn_visible(self):
+        card = _body("hp_per_image_transform_ui", "def _auto_transform")
+        assert "shown = active_selected_image()" in card
+        assert '"" if i == shown else " display: none;"' in card
 
     def test_switching_cards_does_not_re_render_them(self):
-        # the cards are switched with CSS precisely so that each image keeps
-        # what was typed into it; re-rendering on switch would reset them all
+        # the cards are switched with CSS precisely so each image keeps what
+        # was set on it; re-rendering on a switch would reset them all
         source = _source()
         decorator = source[: source.index("def hp_per_image_transform_ui")]
         decorator = decorator[decorator.rindex("@render.ui") :]

@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from helicon.webApps.lib import helix_transform
+from helicon.webApps.lib import helix_transform as ht
 
 
 def _filament(ny=64, nx=128, rotation=0.0, shift=0.0, width=6.0):
@@ -174,3 +175,99 @@ class TestApplyTransform:
     def test_no_arguments_returns_an_equivalent_image(self):
         image = _filament(ny=64, nx=128)
         assert np.array_equal(helix_transform.apply_transform(image), image)
+
+
+class TestReconcileTransforms:
+    """Carrying per-image transforms across a change of selection.
+
+    Images already selected keep what they had, manual edits included; only
+    new images are auto-transformed; the card shown afterwards is the new
+    image's. Re-deriving everything on each change lost manual edits, and a
+    shared control hidden in multi-image mode leaked one image's rotation onto
+    every image added after it.
+    """
+
+    def _t(self, rotation, generation=0):
+        return ht.ImageTransform(rotation, 0.0, 64, 0.0, generation)
+
+    def _fresh(self, calls):
+        def fresh(keys):
+            calls.append(list(keys))
+            return {
+                k: self._t(100.0 + i, generation=50 + i) for i, k in enumerate(keys)
+            }
+
+        return fresh
+
+    def test_a_first_selection_is_all_new(self):
+        calls = []
+        state, added, active = ht.reconcile_transforms(
+            {}, ["3", "7"], {}, self._fresh(calls)
+        )
+        assert added == ["3", "7"]
+        assert calls == [["3", "7"]]
+        assert active == 1  # the last one added
+
+    def test_adding_an_image_transforms_that_image_only(self):
+        calls = []
+        previous = {"3": self._t(5.0)}
+        state, added, active = ht.reconcile_transforms(
+            previous, ["3", "7"], {"3": self._t(5.0)}, self._fresh(calls)
+        )
+        assert calls == [["7"]]
+        assert state["3"].rotation == 5.0
+        assert state["7"].rotation == 100.0
+        assert added == ["7"]
+
+    def test_the_new_image_does_not_inherit_the_old_one_s_transform(self):
+        previous = {"3": self._t(9.9)}
+        state, _, _ = ht.reconcile_transforms(
+            previous, ["3", "7"], {"3": self._t(9.9)}, self._fresh([])
+        )
+        assert state["7"].rotation != 9.9
+
+    def test_manual_edits_on_existing_images_survive(self):
+        previous = {"3": self._t(5.0), "7": self._t(6.0)}
+        edited = {"3": self._t(-12.5), "7": self._t(6.0)}
+        state, _, _ = ht.reconcile_transforms(
+            previous, ["3", "7", "9"], edited, self._fresh([])
+        )
+        assert state["3"].rotation == -12.5
+
+    def test_the_card_shown_is_the_image_just_added(self):
+        previous = {"3": self._t(5.0), "7": self._t(6.0)}
+        _, _, active = ht.reconcile_transforms(
+            previous, ["3", "7", "9"], {}, self._fresh([])
+        )
+        assert active == 2
+
+    def test_removing_an_image_keeps_the_card_on_the_image_shown(self):
+        previous = {"3": self._t(5.0), "7": self._t(6.0), "9": self._t(7.0)}
+        state, added, active = ht.reconcile_transforms(
+            previous, ["7", "9"], {}, self._fresh([]), previous_active="9"
+        )
+        assert added == []
+        assert active == 1
+        assert [state[k].rotation for k in ("7", "9")] == [6.0, 7.0]
+
+    def test_removing_the_image_shown_falls_back_to_the_first(self):
+        previous = {"3": self._t(5.0), "7": self._t(6.0)}
+        _, _, active = ht.reconcile_transforms(
+            previous, ["7"], {}, self._fresh([]), previous_active="3"
+        )
+        assert active == 0
+
+    def test_a_re_added_image_is_transformed_afresh(self):
+        # its old controls still hold their last values on the server; a new
+        # generation keeps the new card from reading them
+        calls = []
+        state, added, _ = ht.reconcile_transforms(
+            {"7": self._t(6.0, generation=1)}, ["7", "3"], {}, self._fresh(calls)
+        )
+        assert added == ["3"]
+        assert state["3"].generation == 50
+
+    def test_order_follows_the_new_selection(self):
+        previous = {"3": self._t(5.0), "7": self._t(6.0)}
+        state, _, _ = ht.reconcile_transforms(previous, ["7", "3"], {}, self._fresh([]))
+        assert list(state) == ["7", "3"]

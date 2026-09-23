@@ -8,6 +8,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -343,7 +344,6 @@ def helical_projection_tab_ui():
                 ),
                 ui.div(
                     ui.output_ui("hp_per_image_transform_ui"),
-                    ui.output_ui("hp_shared_transform_ui"),
                     ui.div(
                         ui.input_action_button(
                             "auto_transform", "Auto Transform", class_="btn-primary"
@@ -396,15 +396,14 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     initial_selected_image_indices = reactive.value([0])
     selected_images_original = reactive.value([])
     selected_images_labels = reactive.value([])
-    selected_image_diameter = reactive.value(0)
     selected_images_thresholded_rotated_shifted_cropped = reactive.value([])
-    # per-image (rotation degrees, vertical shift pixels), set by Auto Transform
-    per_image_transforms = reactive.value([])
-    # the crop Auto Transform worked out, so per-image cards can start from it
-    auto_crop_size = reactive.value(0)
-    # measurements already made, keyed by image content: the transform runs on
-    # every change to the selection, and without this each change re-measures
-    # every image that was already selected
+    # key -> helix_transform.ImageTransform for every selected image, keyed by
+    # the image's label rather than its position in the selection
+    transform_state = reactive.value({})
+    # the next generation number for controls, see ImageTransform.generation
+    transform_generation = [0]
+    # measurements already made, keyed by image content, so adding an image to
+    # the selection measures that image and nothing else
     auto_transform_cache = {}
 
     emdb_df_original = reactive.value(None)
@@ -580,48 +579,6 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             class_="hp-top-n",
             style="display: flex; flex-direction: row; align-items: center;"
             " gap: 8px; margin-bottom: 8px;",
-        )
-
-    # -- Auto-rotation/shift/diameter estimation --
-
-    @reactive.effect
-    @reactive.event(selected_images_original)
-    def _auto_estimate_rotation_shift_diameter():
-        req(len(selected_images_original()))
-        imgs = selected_images_original()
-        ny = int(np.max([img.shape[0] for img in imgs]))
-        tmp = np.array(
-            [
-                helicon.estimate_helix_rotation_center_diameter(
-                    img, threshold=np.max(img) * 0.2
-                )
-                for img in imgs
-            ]
-        )
-        rotation = float(np.mean(tmp[:, 0]))
-        shift_y = float(np.mean(tmp[:, 1]))
-        diameter = float(np.max(tmp[:, 2]))
-        crop_size = int(diameter * 3) // 4 * 4
-        min_val = float(np.min([np.min(img) for img in imgs]))
-        max_val = float(np.max([np.max(img) for img in imgs]))
-        step_val = (max_val - min_val) / 100
-        selected_image_diameter.set(diameter)
-        ui.update_slider("pre_rotation", value=round(rotation, 1))
-        ui.update_slider(
-            "shift_y", value=shift_y, min=-crop_size // 2, max=crop_size // 2
-        )
-        ui.update_slider(
-            "vertical_crop_size",
-            value=max(32, crop_size),
-            min=max(32, min(int(diameter) // 2 * 2, ny // 2)),
-            max=ny,
-        )
-        ui.update_slider(
-            "threshold",
-            value=min_val,
-            min=round(min_val, 3),
-            max=round(max_val, 3),
-            step=round(step_val, 3),
         )
 
     # -- Dynamic input UI --
@@ -937,20 +894,20 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     # ── Per-image transforms ────────────────────────────────────────
     # Several class averages can be searched jointly, and each sits at its own
     # angle and height: on ten good EMPIAR-10940 classes the rotations span
-    # -20.1 to +10.2 degrees. One shared rotation cannot straighten them all,
-    # so each image gets its own card and the shared sliders act as a nudge on
-    # top. This is the pattern denovo3D uses, and both tabs now drive it from
-    # helix_transform.
+    # -20.1 to +10.2 degrees. So every selected image has its own transform,
+    # held here keyed by the image's label, and its own card of four sliders --
+    # one card for a single image, one per image for several, and no other
+    # controls.
+    #
+    # There used to be a second set, shared sliders for a single image that
+    # also acted as a "nudge" on every image once several were selected. Those
+    # sliders were hidden in that mode, but a removed control keeps its last
+    # value on the server, so the first image's rotation was silently added to
+    # every image selected after it -- the new image appeared to copy the old
+    # one's transform.
 
-    def _pi_id(kind, i):
-        return f"hp_pi_{kind}_{i}"
-
-    _PI_SHARED_ID = {
-        "rot": "pre_rotation",
-        "dy": "shift_y",
-        "vcrop": "vertical_crop_size",
-        "threshold": "threshold",
-    }
+    def _pi_id(kind, key, generation):
+        return "hp_pi_%s_%s_%d" % (kind, re.sub(r"\W", "_", str(key)), generation)
 
     def _input_or(name, default=0.0):
         """Read a dynamically created input, or a default before it exists.
@@ -965,117 +922,146 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             return default
         return default if value is None else value
 
-    def _per_image_active():
-        """True when each selected image carries its own transform."""
-        return len(selected_images_original()) > 1
+    def _next_generation():
+        transform_generation[0] += 1
+        return transform_generation[0]
 
-    def _param(kind, i, default=0.0):
-        """Effective value of one setting for image ``i``."""
-        if _per_image_active():
-            return _input_or(_pi_id(kind, i), default)
-        return _input_or(_PI_SHARED_ID[kind], default)
+    def _selected_by_key():
+        """The selected images keyed by label, in selection order."""
+        labels = list(selected_images_labels())
+        images = list(selected_images_original())
+        if len(labels) != len(images):
+            labels = [str(i + 1) for i in range(len(images))]
+        return dict(zip(labels, images))
 
-    @render.ui
-    def hp_shared_transform_ui():
-        """The shared sliders, shown only when one image is selected.
+    def _auto_transforms(keys, images_by_key):
+        """The automatic transform for these images, each measured on its own."""
+        made = {}
+        for key in keys:
+            image = images_by_key[key]
+            auto = helix_transform.auto_transform([image], cache=auto_transform_cache)
+            rotation, shift = auto.per_image[0]
+            made[key] = helix_transform.ImageTransform(
+                rotation=float(rotation),
+                shift_y=float(shift),
+                crop_size=max(32, min(auto.crop_size, int(image.shape[0]) // 2 * 2)),
+                threshold=float(np.min(image)),
+                generation=_next_generation(),
+            )
+        return made
 
-        With several selected the per-image card is the manual transform UI --
-        it is the one that says which image it edits -- and showing both
-        invites edits to a control that image is not reading.
+    def _as_controls_hold(state):
+        """The transforms as the user has left them, read from their controls."""
+        held = {}
+        for key, t in state.items():
+            held[key] = helix_transform.ImageTransform(
+                rotation=float(_input_or(_pi_id("rot", key, t.generation), t.rotation)),
+                shift_y=float(_input_or(_pi_id("dy", key, t.generation), t.shift_y)),
+                crop_size=int(
+                    _input_or(_pi_id("vcrop", key, t.generation), t.crop_size)
+                ),
+                threshold=float(
+                    _input_or(_pi_id("threshold", key, t.generation), t.threshold)
+                ),
+                generation=t.generation,
+            )
+        return held
+
+    @reactive.effect
+    @reactive.event(selected_images_original)
+    def _reconcile_transforms_with_selection():
+        """Adding an image transforms that image; nothing else changes.
+
+        Images already selected keep what they had, manual edits included, and
+        the card shown is the one for the image just added. Re-running the
+        automatic transform over the whole selection on every change is what
+        used to throw those edits away.
         """
-        if _per_image_active():
-            return ui.div()
-        return ui.layout_columns(
-            ui.input_slider(
-                "pre_rotation", "Rotation (°)", min=-90, max=90, value=0, step=0.1
-            ),
-            ui.input_slider(
-                "threshold", "Threshold", min=0.0, max=1.0, value=0.0, step=0.01
-            ),
-            ui.input_slider(
-                "vertical_crop_size",
-                "Vertical crop size (px)",
-                min=32,
-                max=512,
-                value=128,
-                step=2,
-            ),
-            ui.input_slider(
-                "shift_y", "Vertical shift (px)", min=-64, max=64, value=0, step=1
-            ),
-            col_widths=6,
+        images_by_key = _selected_by_key()
+        previous = transform_state()
+        previous_keys = list(previous)
+        index = active_selected_image()
+        previous_active = (
+            previous_keys[index] if 0 <= index < len(previous_keys) else None
         )
+        state, _added, active = helix_transform.reconcile_transforms(
+            previous,
+            list(images_by_key),
+            _as_controls_hold(previous),
+            lambda new_keys: _auto_transforms(new_keys, images_by_key),
+            previous_active=previous_active,
+        )
+        active_selected_image.set(active)
+        transform_state.set(state)
 
     @render.ui
-    @reactive.event(selected_images_original, per_image_transforms, auto_crop_size)
+    @reactive.event(transform_state)
     def hp_per_image_transform_ui():
-        """One transform card per selected image, only the clicked one shown.
+        """One transform card per selected image, only the active one shown.
 
         All the cards stay in the DOM and are hidden with CSS, so each image
-        keeps whatever was typed into it while you click between them, and no
+        keeps whatever was set on it while you click between them, and no
         effect can read an input that does not exist.
         """
-        if not _per_image_active():
+        state = transform_state()
+        images_by_key = _selected_by_key()
+        if not state or any(key not in images_by_key for key in state):
             return ui.div()
-        labels = list(selected_images_labels())
-        images = selected_images_original()
-        per = per_image_transforms()
-        ny = int(max(img.shape[0] for img in images))
+        shown = active_selected_image()
         cards = []
-        for i, img in enumerate(images):
-            label = labels[i] if i < len(labels) else str(i)
-            rot, shift = per[i] if i < len(per) else (0.0, 0.0)
-            # Sliders, the same four the single-image card has, so that editing
-            # one of several images feels like editing one. Their ranges come
-            # from this image rather than from a shared estimate: the crop
-            # cannot exceed its own height, and a threshold means nothing
-            # outside its own range of values.
+        for i, (key, t) in enumerate(state.items()):
+            img = images_by_key[key]
+            # The four sliders, with ranges from this image: the crop cannot
+            # exceed its own height, a threshold means nothing outside its own
+            # range of values, and a shift beyond half the image moves the
+            # filament out of it.
             ny_i = int(img.shape[0])
             v_min = float(np.min(img))
             v_max = float(np.max(img))
             v_step = max((v_max - v_min) / 100.0, 1e-3)
-            crop = int(auto_crop_size() or _input_or("vertical_crop_size", ny_i))
-            crop = max(32, min(crop, ny_i // 2 * 2))
-            shift_limit = max(1, crop // 2)
-            threshold = min(max(float(_input_or("threshold", 0.0)), v_min), v_max)
+            shift_limit = max(1, ny_i // 2)
             cards.append(
                 ui.div(
                     ui.card(
                         ui.div(
-                            f"Image {label}",
+                            f"Image {key}",
                             style="font-weight: bold; margin-bottom: 4px;",
                         ),
                         ui.layout_columns(
                             ui.input_slider(
-                                _pi_id("rot", i),
+                                _pi_id("rot", key, t.generation),
                                 "Rotation (°)",
                                 min=-90,
                                 max=90,
-                                value=round(float(rot), 1),
+                                value=round(min(max(t.rotation, -90.0), 90.0), 1),
                                 step=0.1,
                             ),
                             ui.input_slider(
-                                _pi_id("threshold", i),
+                                _pi_id("threshold", key, t.generation),
                                 "Threshold",
                                 min=round(v_min, 3),
                                 max=round(v_max, 3),
-                                value=round(threshold, 3),
+                                value=round(min(max(t.threshold, v_min), v_max), 3),
                                 step=round(v_step, 3),
                             ),
                             ui.input_slider(
-                                _pi_id("vcrop", i),
+                                _pi_id("vcrop", key, t.generation),
                                 "Vertical crop size (px)",
                                 min=32,
                                 max=ny_i,
-                                value=crop,
+                                value=int(min(max(t.crop_size, 32), ny_i)),
                                 step=2,
                             ),
                             ui.input_slider(
-                                _pi_id("dy", i),
+                                _pi_id("dy", key, t.generation),
                                 "Vertical shift (px)",
                                 min=-shift_limit,
                                 max=shift_limit,
-                                value=int(round(float(shift))),
+                                value=int(
+                                    round(
+                                        min(max(t.shift_y, -shift_limit), shift_limit)
+                                    )
+                                ),
                                 step=1,
                             ),
                             col_widths=6,
@@ -1083,47 +1069,31 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                     ),
                     class_="hp-pi-card",
                     **{"data-pi": str(i)},
-                    style="min-width: 360px;" + ("" if i == 0 else " display: none;"),
+                    style="min-width: 360px;"
+                    + ("" if i == shown else " display: none;"),
                 )
             )
+        heading = []
+        if len(cards) > 1:
+            heading = [
+                ui.div(
+                    "Per-image transform (click an image to edit it):",
+                    style="font-weight: bold; margin-bottom: 4px;",
+                )
+            ]
         return ui.div(
-            ui.div(
-                "Per-image transform (click an image to edit it):",
-                style="font-weight: bold; margin-bottom: 4px;",
-            ),
+            *heading,
             *cards,
             style="display: flex; flex-direction: column; gap: 4px;",
         )
 
-    def _apply_auto_transform():
-        """Straighten and centre every selected image, as denovo3D does."""
-        images = selected_images_original()
-        if not len(images):
-            return
-        auto = helix_transform.auto_transform(images, cache=auto_transform_cache)
-        selected_image_diameter.set(auto.diameter)
-        crop = max(32, min(auto.crop_size, auto.ny // 2 * 2))
-        auto_crop_size.set(crop)
-        if len(images) > 1:
-            per_image_transforms.set(auto.per_image)
-            for i, (rot, shift) in enumerate(auto.per_image):
-                ui.update_slider(_pi_id("rot", i), value=round(float(rot), 1))
-                ui.update_slider(_pi_id("dy", i), value=int(round(float(shift))))
-                ui.update_slider(_pi_id("vcrop", i), value=crop)
-            # the shared boxes stay at zero, where they nudge every image alike
-            ui.update_slider("pre_rotation", value=0.0)
-            ui.update_slider("shift_y", value=0)
-        else:
-            per_image_transforms.set([])
-            rot, shift = auto.per_image[0]
-            ui.update_slider("pre_rotation", value=round(float(rot), 1))
-            ui.update_slider("shift_y", value=int(round(float(shift))))
-        ui.update_slider("vertical_crop_size", value=crop)
-
     @reactive.effect
     @reactive.event(input.auto_transform)
     def _auto_transform():
-        _apply_auto_transform()
+        """Straighten and centre every selected image again, on request."""
+        images_by_key = _selected_by_key()
+        req(len(images_by_key))
+        transform_state.set(_auto_transforms(list(images_by_key), images_by_key))
 
     @reactive.effect
     @reactive.event(input.display_selected_image)
@@ -1140,67 +1110,50 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
             active_selected_image.set(index)
 
     @reactive.effect
-    @reactive.event(selected_images_original)
-    def _reset_active_selected_image():
-        # a different set of images starts again at the first
-        active_selected_image.set(0)
-
-    @reactive.effect
-    @reactive.event(selected_images_original)
-    def _auto_transform_on_selection():
-        """Selecting images transforms them, without waiting to be asked.
-
-        Every route out of this tab needs the filaments horizontal and centred,
-        and doing it by hand first was a step with no decision in it. The button
-        stays, for re-running it after the selection is changed by other means.
-        """
-        _apply_auto_transform()
-
-    @reactive.effect
     @reactive.event(input.reset_transform)
     def _reset_transform():
-        images = selected_images_original()
-        req(len(images))
-        ny = int(max(img.shape[0] for img in images))
-        per_image_transforms.set([])
-        for i in range(len(images)):
-            ui.update_slider(_pi_id("rot", i), value=0.0)
-            ui.update_slider(_pi_id("dy", i), value=0)
-            ui.update_slider(_pi_id("vcrop", i), value=ny // 2 * 2)
-            ui.update_slider(_pi_id("threshold", i), value=0.0)
-        ui.update_slider("pre_rotation", value=0.0)
-        ui.update_slider("shift_y", value=0)
-        ui.update_slider("threshold", value=0.0)
-        ui.update_slider("vertical_crop_size", value=ny // 2 * 2)
+        images_by_key = _selected_by_key()
+        req(len(images_by_key))
+        transform_state.set(
+            {
+                key: helix_transform.ImageTransform(
+                    rotation=0.0,
+                    shift_y=0.0,
+                    crop_size=int(img.shape[0]) // 2 * 2,
+                    threshold=float(np.min(img)),
+                    generation=_next_generation(),
+                )
+                for key, img in images_by_key.items()
+            }
+        )
 
     # A plain effect, deliberately not reactive.event: the per-image inputs are
     # created dynamically, and reactive.event reads every dependency up front,
     # which would raise on inputs that do not exist yet.
     @reactive.effect
     def _transform_crop_images():
-        orig = selected_images_original()
-        if not orig:
+        images_by_key = _selected_by_key()
+        state = transform_state()
+        # the state catches up with a new selection one step later; until it
+        # has, there is nothing consistent to draw
+        if not images_by_key or list(state) != list(images_by_key):
             return
-        shared_rot = _input_or("pre_rotation", 0.0)
-        shared_shift = _input_or("shift_y", 0.0)
         transformed = []
-        for i, img in enumerate(orig):
-            thresh_val = _param("threshold", i, 0.0)
-            rot_val = _param("rot", i, 0.0)
-            shift_val = _param("dy", i, 0.0)
-            crop_sz = _param("vcrop", i, img.shape[0])
-            if _per_image_active():
-                # the shared boxes are a common nudge on top of each image's own
-                rot_val += shared_rot
-                shift_val += shared_shift
-            t_img = helix_transform.apply_transform(
-                img,
-                rotation=rot_val,
-                shift_y=shift_val,
-                crop_size=crop_sz,
-                threshold=thresh_val,
+        for key, img in images_by_key.items():
+            t = state[key]
+            transformed.append(
+                helix_transform.apply_transform(
+                    img,
+                    rotation=_input_or(_pi_id("rot", key, t.generation), t.rotation),
+                    shift_y=_input_or(_pi_id("dy", key, t.generation), t.shift_y),
+                    crop_size=_input_or(
+                        _pi_id("vcrop", key, t.generation), t.crop_size
+                    ),
+                    threshold=_input_or(
+                        _pi_id("threshold", key, t.generation), t.threshold
+                    ),
+                )
             )
-            transformed.append(t_img)
         selected_images_thresholded_rotated_shifted_cropped.set(transformed)
 
     # -- Map loading --
