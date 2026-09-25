@@ -12,6 +12,10 @@ arrows. Clicking it opens the app in one of three ways:
 - an app with a helicon subcommand (``helicon procart``) is started by the
   server as a detached process and opens in a new browser window;
 - an app with only a hosted site opens that site in a new browser tab.
+
+A button above the diagram starts the helicon file browser (``helicon
+display``) the same detached way; it is shown only when the server is on the
+user's machine, since its window opens on the server's desktop.
 """
 
 from __future__ import annotations
@@ -399,6 +403,8 @@ _CSS = """
 .helicon-home .hh-subtitle {
     color: var(--hh-muted); text-align: center; margin: 4px 0 8px !important;
 }
+.helicon-home .hh-toolbar { text-align: center; margin-bottom: 8px !important; }
+.helicon-home .hh-toolbar[hidden] { display: none; }
 .helicon-home .hh-diagram {
     display: block; width: 100%; max-width: 1110px; margin: 0 auto !important;
 }
@@ -471,11 +477,18 @@ _CSS = """
 # subcommand it starts opens its window in front of that user.
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 
+# Started by the "Open file browser" button rather than by a diagram app.
+_DISPLAY_COMMAND = "display"
+
 # Delegated on document so it does not depend on when the tab is rendered.
 _JS = (
     "var _HH_LOCAL_HOSTS = %s;\n" % list(_LOCAL_HOSTS)
     + """
 (function() {
+    var local = _HH_LOCAL_HOSTS.indexOf(location.hostname) >= 0;
+    // The file browser opens on the server's desktop, so only offer it there.
+    document.querySelectorAll('.helicon-home .hh-toolbar')
+        .forEach(function(bar) { bar.hidden = !local; });
     function appOf(el) { return el && el.closest ? el.closest('.helicon-home .hh-app') : null; }
     function launch(app) {
         var d = app.dataset;
@@ -483,7 +496,7 @@ _JS = (
             var link = document.querySelector(
                 '.navbar a.nav-link[data-value="' + d.tab + '"]');
             if (link) link.click();
-        } else if (d.command && _HH_LOCAL_HOSTS.indexOf(location.hostname) >= 0) {
+        } else if (d.command && local) {
             Shiny.setInputValue('home_launch', d.command, {priority: 'event'});
         } else if (d.url) {
             // Opened here, inside the click, so popup blockers allow it.
@@ -537,6 +550,11 @@ _JS = (
         if (app) hideTip(app);
     });
     document.addEventListener('click', function(e) {
+        var display = e.target.closest && e.target.closest('.helicon-home .hh-display');
+        if (display && local) {
+            Shiny.setInputValue('home_launch', display.dataset.command, {priority: 'event'});
+            return;
+        }
         var app = appOf(e.target);
         if (app) { hideTip(app); launch(app); }
     });
@@ -561,6 +579,19 @@ def home_tab_ui():
             "Hover over an app to see what it does; click it to open the app.",
             class_="hh-subtitle",
         ),
+        ui.div(
+            ui.tags.button(
+                "Open file browser",
+                type="button",
+                class_="btn btn-sm btn-outline-secondary hh-display",
+                title="Browse a folder and view its images, maps, STAR files and "
+                f"more in a new window (helicon {_DISPLAY_COMMAND})",
+                data_command=_DISPLAY_COMMAND,
+            ),
+            class_="hh-toolbar",
+            # Shown by the script once it knows the server is on this machine.
+            hidden=True,
+        ),
         ui.HTML(_workflow_svg()),
         ui.div(
             ui.tags.strong(),
@@ -576,11 +607,15 @@ def home_tab_ui():
 
 
 _COMMAND_APPS = {a.command: a for a in HOME_APPS if a.command}
+# Every command Home may start, by the name its notifications use.
+_COMMAND_NAMES = {c: a.name for c, a in _COMMAND_APPS.items()}
+_COMMAND_NAMES[_DISPLAY_COMMAND] = "the file browser"
 _RELAUNCH_SECS = 5.0  # ignore a repeat click (e.g. a double click) this soon
 
 
 def home_tab_server(input, session) -> None:
-    """Start the subcommand of a Home app that is not integrated here."""
+    """Start the subcommand of a Home app that is not integrated here, or the
+    file browser."""
     last_launch: dict[str, float] = {}
 
     @reactive.effect
@@ -588,8 +623,8 @@ def home_tab_server(input, session) -> None:
     def _launch_command():
         command = input.home_launch()
         # Only commands listed on Home, never an arbitrary client string.
-        app = _COMMAND_APPS.get(command)
-        if app is None:
+        name = _COMMAND_NAMES.get(command)
+        if name is None:
             return
         # The browser only asks when it is on this machine, but it is the
         # server that must not start processes for a remote visitor.
@@ -604,9 +639,18 @@ def home_tab_server(input, session) -> None:
         from helicon.helicon import streamlit_commands
         from helicon.lib.terminal import _spawn_detached
 
-        # helicon hides Streamlit subcommands when Streamlit is missing, so the
-        # spawned process would exit at once without any window.
+        # helicon hides a subcommand whose GUI stack is missing, so the spawned
+        # process would exit at once without any window.
+        if command == _DISPLAY_COMMAND and not helicon.has_napari():
+            ui.notification_show(
+                "The file browser needs napari and PySide6 "
+                '(pip install "helicon[gui]").',
+                type="warning",
+                duration=15,
+            )
+            return
         if command in streamlit_commands and not helicon.has_streamlit():
+            app = _COMMAND_APPS[command]
             ui.notification_show(
                 ui.span(
                     f"{app.name} needs Streamlit (pip install streamlit). "
@@ -629,15 +673,16 @@ def home_tab_server(input, session) -> None:
             ]
         )
         if started:
+            where = "window" if command == _DISPLAY_COMMAND else "browser window"
             ui.notification_show(
-                f"Starting {app.name} (helicon {command}); it will open in a "
-                "new browser window.",
+                f"Starting {name} (helicon {command}); it will open in a "
+                f"new {where}.",
                 duration=8,
             )
         else:
             logger.error("failed to launch helicon %s", command)
             ui.notification_show(
-                f"Failed to start {app.name}. Try running `helicon {command}` "
+                f"Failed to start {name}. Try running `helicon {command}` "
                 "in a terminal.",
                 type="error",
                 duration=10,
