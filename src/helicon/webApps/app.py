@@ -2,7 +2,8 @@
 
 Integrates seven tools into a single tabbed interface with shared
 project state for cross-tab data flow, behind a Home tab that places each
-tool on a helical data processing workflow diagram:
+tool on a helical data processing workflow diagram (alongside launchers for
+related apps that run outside this one, such as ``helicon procart``):
 
     HelicalLattice   — 2D lattice ⇔ helical lattice interconversion
     HelicalPitch     — derive twist from 2D class pair-distance histograms
@@ -128,7 +129,12 @@ from helicon.webApps.tabs.where_is_my_class_tab import (
     where_is_my_class_tab_ui,
     where_is_my_class_tab_server,
 )
-from helicon.webApps.tabs.home_tab import HOME_APPS, HOME_TAB, home_tab_ui
+from helicon.webApps.tabs.home_tab import (
+    HOME_APPS,
+    HOME_TAB,
+    home_tab_server,
+    home_tab_ui,
+)
 
 from helicon.webApps.tabs import (
     hill_tab,
@@ -157,7 +163,7 @@ _TAB_MODULE_MAP: dict[str, tuple[str, object]] = {
 }
 
 
-assert {a.tab for a in HOME_APPS} == set(_TAB_MODULE_MAP), (
+assert {a.name for a in HOME_APPS if a.is_tab} == set(_TAB_MODULE_MAP), (
     "HOME_APPS must name exactly the tabs in _TAB_MODULE_MAP; a renamed or "
     "added tab would otherwise be missing from, or unreachable from, Home"
 )
@@ -779,6 +785,10 @@ def server(input, output, session):
         await _orig_unhandled(e)
 
     type(session)._unhandled_error = lambda self, e: _show_error_modal(e)
+
+    # Home has no reactive work besides starting non-integrated apps, and it
+    # is the default tab, so it is wired up eagerly rather than lazily.
+    home_tab_server(input, session)
 
     # ── Lazy tab initialisation ───────────────────────────────
     # Each tab's server function is started the first time that tab is
