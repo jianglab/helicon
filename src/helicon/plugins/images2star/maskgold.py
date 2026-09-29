@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import helicon
+from helicon.lib.exceptions import HeliconError
 import numpy as np
 import pandas as pd
 from pathlib import Path

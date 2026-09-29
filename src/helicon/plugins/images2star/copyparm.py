@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import helicon
+from helicon.lib.exceptions import HeliconError
 import numpy as np
 from pathlib import Path
 

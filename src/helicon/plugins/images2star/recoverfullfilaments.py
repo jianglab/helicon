@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import helicon
+from helicon.lib.exceptions import HeliconError
 import numpy as np
 from pathlib import Path
 
@@ -180,7 +181,7 @@ def handle(data, args, index_d, param):
 
         if len(data) > len(data2):
             raise HeliconError(
-                "\\tERROR: --recoverFullFilament option requires that {fullStarFile} ({len(data2)}) has the same number or more particles (>={len(data)})"
+                f"ERROR: --recoverFullFilament option requires that {fullStarFile} ({len(data2)}) has the same number or more particles (>={len(data)})"
             )
 
         folders = [
@@ -223,7 +224,7 @@ def handle(data, args, index_d, param):
                     )
                 )
                 raise HeliconError(
-                    "\\tERROR: --recoverFullFilament option requires that {fullStarFile} contains identical set or a superset of micrographs. These micrographs are not in {fullStarFile}:\\t{missing_micrographs}"
+                    f"ERROR: --recoverFullFilament option requires that {fullStarFile} contains identical set or a superset of micrographs. These micrographs are not in {fullStarFile}: {missing_micrographs}"
                 )
             sortby = [
                 "rlnMicrographName_abs",
@@ -311,7 +312,7 @@ def handle(data, args, index_d, param):
         else:
             if not (set(data[["rlnImageName"]]).issubset(set(data2[["rlnImageName"]]))):
                 raise HeliconError(
-                    "\\tERROR: --recoverFullFilament option requires that {fullStarFile} contains identical set or a superset of particles"
+                    f"ERROR: --recoverFullFilament option requires that {fullStarFile} contains identical set or a superset of particles"
                 )
 
             data.loc[:, "rlnImageName_abs"] = (
@@ -348,7 +349,7 @@ def handle(data, args, index_d, param):
                     s,
                 )
                 raise HeliconError(
-                    "\\tMake sure that the input star file {' '.join(args.input_imageFiles)} and the fullStarFile {fullStarFile} are from the same Extract job"
+                    f"Make sure that the input star file {' '.join(args.input_imageFiles)} and the fullStarFile {fullStarFile} are from the same Extract job"
                 )
 
             for group_name in groups_dict:
