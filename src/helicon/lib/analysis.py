@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import helicon
+
+logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - depends on optional numba install
     from numba import njit
@@ -152,6 +156,9 @@ __all__ = [
     "twist2pitch",
     "estimate_inter_segment_distance",
     "estimate_helicalTube_length",
+    "estimate_inter_box_distance",
+    "filament_pieces_overlap",
+    "join_collinear_filaments",
     "reset_inter_segment_distance",
 ]
 
@@ -1289,6 +1296,293 @@ def estimate_helicalTube_length(
 
     data.drop(["ehl_filename", "ehl_pid"], inplace=True, axis=1)
     return data
+
+
+def _points_on_segments(
+    p: np.ndarray, a: np.ndarray, b: np.ndarray, epsilon: float = 1.0
+) -> np.ndarray:
+    """Test if points lie on line segments via ``|ab| - |pa| - |pb| < epsilon``.
+
+    All arguments broadcast; the last axis holds the (x, y) coordinates.
+    """
+    d1 = np.linalg.norm(p - a, axis=-1)
+    d2 = np.linalg.norm(p - b, axis=-1)
+    d = np.linalg.norm(b - a, axis=-1)
+    return np.abs(d - d1 - d2) < epsilon
+
+
+def filament_pieces_overlap(
+    a0: np.ndarray,
+    a1: np.ndarray,
+    b0: np.ndarray,
+    b1: np.ndarray,
+    epsilon: float = 1.0,
+) -> bool:
+    """Check if two straight filament pieces are collinear and overlap.
+
+    The pieces overlap if an end point of one piece lies on the other piece,
+    and they are collinear if all four end points lie on the segment spanned
+    by the two most distant end points.
+
+    Parameters
+    ----------
+    a0, a1 : np.ndarray
+        (x, y) end points of the first piece.
+    b0, b1 : np.ndarray
+        (x, y) end points of the second piece.
+    epsilon : float, optional
+        Tolerance (pixels) of the ``|ab| - |pa| - |pb|`` on-segment test.
+
+    Returns
+    -------
+    bool
+        True if the two pieces belong to the same filament.
+    """
+    pts = np.array([a0, a1, b0, b1], dtype=float)
+    touch = _points_on_segments(pts[:2], pts[2], pts[3], epsilon).any() or (
+        _points_on_segments(pts[2:], pts[0], pts[1], epsilon).any()
+    )
+    if not touch:
+        return False
+    dists = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
+    i, j = np.unravel_index(np.argmax(dists), dists.shape)
+    return bool(_points_on_segments(pts, pts[i], pts[j], epsilon).all())
+
+
+def _principal_axis(pts: np.ndarray) -> np.ndarray:
+    """Unit vector along the principal axis of (N, 2) points."""
+    centered = pts - pts.mean(axis=0)
+    if len(pts) < 2 or not np.any(centered):
+        return np.array([1.0, 0.0])
+    return np.linalg.svd(centered, full_matrices=False)[2][0]
+
+
+def estimate_inter_box_distance(
+    data: pd.DataFrame, filament_attrs: list[str]
+) -> float | None:
+    """Estimate the inter-box distance (pixels) of helical segments from their coordinates.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data with ``rlnCoordinateX``, ``rlnCoordinateY`` and
+        ``filament_attrs`` columns.
+    filament_attrs : list of str
+        Columns that identify a filament, e.g.
+        ``["rlnMicrographName", "rlnHelicalTubeID"]``.
+
+    Returns
+    -------
+    float or None
+        Median distance between neighboring particles along the filaments,
+        or None if no filament has two or more particles.
+    """
+    dists = []
+    for _, particles in data.groupby(filament_attrs, sort=False):
+        if len(particles) < 2:
+            continue
+        pts = particles[["rlnCoordinateX", "rlnCoordinateY"]].astype(float).values
+        dists.append(np.diff(np.sort(pts @ _principal_axis(pts))))
+    if not dists:
+        return None
+    dists = np.concatenate(dists)
+    dists = dists[dists > 0]
+    if not len(dists):
+        return None
+    return float(np.median(dists))
+
+
+def join_collinear_filaments(
+    data: pd.DataFrame,
+    piece_attrs: list[str],
+    micrograph_attr: str = "rlnMicrographName",
+    epsilon: float = 1.0,
+    apix_micrograph: float | None = None,
+    inter_box_distance: float | None = None,
+) -> pd.DataFrame:
+    """Join filament pieces on the same micrograph that lie on overlapping straight lines.
+
+    Assumes the particles were picked with RELION's start-end convention so
+    that all particles of a filament piece are on the same straight line.
+    Pieces are merged transitively. ``rlnHelicalTubeID`` is renumbered
+    1..N per micrograph. In each merged filament, duplicated particles are
+    removed by coordinate proximity: the pieces are visited from the largest
+    to the smallest, and a particle is dropped if it is closer than half of
+    ``inter_box_distance`` to a particle kept from another piece.
+    Then ``rlnHelicalTrackLengthAngst`` (and ``rlnHelicalTrackLength`` if
+    present) of the remaining particles is recomputed as the distance from the
+    start end of the merged filament.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data with ``rlnCoordinateX``, ``rlnCoordinateY``,
+        ``micrograph_attr`` and ``piece_attrs`` columns.
+    piece_attrs : list of str
+        Columns that identify a filament piece within a micrograph, e.g.
+        ``[<input file index>, "rlnHelicalTubeID"]``.
+    micrograph_attr : str, optional
+        Column identifying the micrograph. Defaults to ``rlnMicrographName``.
+    epsilon : float, optional
+        Tolerance (pixels) of the on-segment test. Defaults to 1.0.
+    apix_micrograph : float, optional
+        Micrograph pixel size (Å/pixel), only used for
+        ``rlnHelicalTrackLengthAngst`` if its scale cannot be estimated from
+        the data.
+    inter_box_distance : float, optional
+        Inter-box distance (pixels); half of it is the threshold to remove
+        duplicated particles in the merged filaments. Estimated with :func:`estimate_inter_box_distance`
+        if None. Duplicates are not removed if <= 0.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``data`` with joined filaments.
+    """
+    import pandas as pd
+
+    data = data.copy()
+    xy = data[["rlnCoordinateX", "rlnCoordinateY"]].astype(float).values
+    keys = [micrograph_attr] + list(piece_attrs)
+    piece_code = data.groupby(keys, sort=False).ngroup().values
+    n_pieces = piece_code.max() + 1
+    piece_rows = [[] for _ in range(n_pieces)]
+    for ri, pc in enumerate(piece_code):
+        piece_rows[pc].append(ri)
+    piece_rows = [np.array(r) for r in piece_rows]
+    micrographs = data[micrograph_attr].values
+    piece_mgraph = np.array([micrographs[r[0]] for r in piece_rows])
+
+    # end points of each piece: the extreme particles along its principal axis
+    ends = np.zeros((n_pieces, 2, 2))
+    for pc, rows in enumerate(piece_rows):
+        pts = xy[rows]
+        proj = pts @ _principal_axis(pts)
+        ends[pc] = pts[np.argmin(proj)], pts[np.argmax(proj)]
+
+    # union-find over the pieces
+    parent = np.arange(n_pieces)
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    mgraph_pieces = pd.Series(np.arange(n_pieces)).groupby(piece_mgraph, sort=False)
+    for _, pcs in mgraph_pieces:
+        pcs = pcs.values
+        if len(pcs) < 2:
+            continue
+        e0, e1 = ends[pcs, 0], ends[pcs, 1]
+        # touch[i, j]: an end point of piece i lies on piece j
+        touch = _points_on_segments(
+            e0[:, None, :], e0[None, :, :], e1[None, :, :], epsilon
+        ) | _points_on_segments(e1[:, None, :], e0[None, :, :], e1[None, :, :], epsilon)
+        touch = touch | touch.T
+        for i, j in zip(*np.nonzero(np.triu(touch, k=1))):
+            pi, pj = pcs[i], pcs[j]
+            ri, rj = find(pi), find(pj)
+            if ri == rj:
+                continue
+            if filament_pieces_overlap(ends[pi, 0], ends[pi, 1], ends[pj, 0], ends[pj, 1], epsilon):
+                parent[max(ri, rj)] = min(ri, rj)
+
+    roots = np.array([find(i) for i in range(n_pieces)])
+    filament_code = roots[piece_code]
+    data["rlnHelicalTubeID"] = (
+        pd.Series(filament_code, index=data.index)
+        .groupby(data[micrograph_attr].values, sort=False)
+        .transform(lambda s: pd.factorize(s)[0] + 1)
+        .astype(int)
+    )
+
+    pieces_of_root = {}
+    for pc, root in enumerate(roots):
+        pieces_of_root.setdefault(root, []).append(pc)
+    # pieces of each merged filament, from the largest to the smallest
+    merged = {
+        r: sorted(pcs, key=lambda pc: -len(piece_rows[pc]))
+        for r, pcs in pieces_of_root.items()
+        if len(pcs) > 1
+    }
+    if not merged:
+        return data
+
+    # remove duplicated particles of the merged filaments by coordinate proximity
+    if inter_box_distance is None:
+        inter_box_distance = estimate_inter_box_distance(data, keys)
+        if inter_box_distance is None:
+            logger.warning(
+                "cannot estimate the inter-box distance. "
+                "Duplicated particles are not removed from the joined filaments"
+            )
+    keep = np.ones(len(data), dtype=bool)
+    merged_rows = {}
+    for root, pcs in merged.items():
+        kept = [piece_rows[pcs[0]]]
+        for pc in pcs[1:]:
+            rows = piece_rows[pc]
+            if inter_box_distance is not None and inter_box_distance > 0:
+                kept_xy = xy[np.concatenate(kept)]
+                dists = np.linalg.norm(
+                    xy[rows][:, None, :] - kept_xy[None, :, :], axis=-1
+                ).min(axis=1)
+                duplicated = dists < inter_box_distance / 2
+                keep[rows[duplicated]] = False
+                rows = rows[~duplicated]
+            kept.append(rows)
+        merged_rows[root] = np.concatenate(kept)
+
+    # recompute the helical track lengths of the merged filaments
+    track_attrs = [
+        a for a in ["rlnHelicalTrackLengthAngst", "rlnHelicalTrackLength"] if a in data
+    ]
+    if not track_attrs:
+        return data[keep].reset_index(drop=True)
+
+    tracks = {a: data[a].astype(float).values for a in track_attrs}
+    # track length units per coordinate pixel, estimated from the unmerged pieces
+    scales = {}
+    for a in track_attrs:
+        ratios = []
+        for rows in piece_rows:
+            if len(rows) < 2:
+                continue
+            pts = xy[rows]
+            proj = pts @ _principal_axis(pts)
+            span = proj.max() - proj.min()
+            t = tracks[a][rows]
+            if span > 1 and np.ptp(t) > 0:
+                ratios.append(np.ptp(t) / span)
+        if ratios:
+            scales[a] = float(np.median(ratios))
+        elif a == "rlnHelicalTrackLengthAngst" and apix_micrograph:
+            scales[a] = apix_micrograph
+        elif a == "rlnHelicalTrackLength":
+            scales[a] = 1.0
+    for a in track_attrs:
+        if a not in scales:
+            logger.warning(
+                "cannot determine the scale of %s. It is not updated for the joined filaments",
+                a,
+            )
+
+    for root, pcs in merged.items():
+        rows = merged_rows[root]
+        pts = xy[rows]
+        axis = _principal_axis(pts)
+        # orient the axis along the start->end direction of the largest piece
+        ref_rows = piece_rows[pcs[0]]
+        ref_t = tracks[track_attrs[0]][ref_rows]
+        ref_proj = xy[ref_rows] @ axis
+        if len(ref_rows) > 1 and np.dot(ref_proj - ref_proj.mean(), ref_t - ref_t.mean()) < 0:
+            axis = -axis
+        proj = pts @ axis
+        proj -= proj.min()
+        for a, s in scales.items():
+            data.iloc[rows, data.columns.get_loc(a)] = proj * s
+    return data[keep].reset_index(drop=True)
 
 
 from .alignment import align_images  # noqa: F401

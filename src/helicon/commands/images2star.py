@@ -60,6 +60,9 @@ def main(args: argparse.Namespace) -> None:
     if args.cpu < 1:
         args.cpu = helicon.available_cpu()
 
+    source_index_attr = None
+    if len(args.input_imageFiles) > 1:
+        source_index_attr = "images2star_source_file_index"
     data = helicon.images2dataframe(
         args.input_imageFiles,
         csparc_passthrough_files=args.csparcPassthroughFiles,
@@ -68,6 +71,7 @@ def main(args: argparse.Namespace) -> None:
         ignore_bad_micrograph_path=args.ignoreBadMicrographPath,
         warn_missing_ctf=1,
         target_convention="relion",
+        source_index_attr=source_index_attr,
     )
 
     try:
@@ -206,6 +210,10 @@ def main(args: argparse.Namespace) -> None:
 
         data["rlnMicrographName"] = data["rlnMicrographName"].apply(_map_path)
 
+    if source_index_attr is not None:
+        data = join_filaments_from_multiple_files(data, source_index_attr, args)
+        data.drop(source_index_attr, inplace=True, axis=1)
+
     if len(data) == 0:
         raise HeliconError("nothing to do with 0 particles. I am going to quit")
 
@@ -315,6 +323,107 @@ def main(args: argparse.Namespace) -> None:
                     )
             else:
                 logger.info("%d images saved to %s", len(data), args.output_starFile)
+
+
+def join_filaments_from_multiple_files(
+    data: pd.DataFrame, source_index_attr: str, args: argparse.Namespace
+) -> pd.DataFrame:
+    """Join helical filaments split across multiple input files.
+
+    Only applies if all input files have helical particles. Duplicate
+    particles (same ``rlnImageName``) are dropped, and on each micrograph the
+    filament pieces from all input files that lie on overlapping straight
+    lines are joined into one helical tube. In a joined tube, particles
+    closer than half of the inter-box distance to a particle of another piece are
+    removed as duplicates.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particles from all input files, with ``source_index_attr`` holding
+        the index of the input file of each particle.
+    source_index_attr : str
+        Column with the input file index.
+    args : argparse.Namespace
+        CLI arguments.
+
+    Returns
+    -------
+    pd.DataFrame
+        The particles with joined filaments.
+    """
+    name, param_dict = helicon.parse_param_str(str(args.joinFilaments))
+    if name is not None and name.strip() == "0":
+        return data
+    if "rlnHelicalTubeID" not in data:
+        return data
+    helical = data.groupby(source_index_attr)["rlnHelicalTubeID"].apply(
+        lambda s: s.notna().all()
+    )
+    if len(helical) < len(args.input_imageFiles) or not helical.all():
+        return data
+    required_attrs = "rlnMicrographName rlnCoordinateX rlnCoordinateY".split()
+    missing_attrs = [a for a in required_attrs if a not in data]
+    if missing_attrs:
+        logger.warning(
+            "cannot join the helical filaments from the %d input files: %s not available",
+            len(args.input_imageFiles),
+            " ".join(missing_attrs),
+        )
+        return data
+    epsilon = float(param_dict.get("epsilon", 1.0))
+
+    from helicon import convert_dataframe_file_path
+
+    attrs = data.attrs
+    n0 = len(data)
+    if "rlnImageName" in data:
+        image_abs = convert_dataframe_file_path(data, "rlnImageName", to="abs")
+        data = data[~image_abs.duplicated(keep="first")].reset_index(drop=True)
+    n_duplicates = n0 - len(data)
+
+    mgraph_attr = helicon.unique_attr_name(data, attr_prefix="rlnMicrographName_abs")
+    data[mgraph_attr] = convert_dataframe_file_path(data, "rlnMicrographName", to="abs")
+    piece_attrs = [mgraph_attr, source_index_attr, "rlnHelicalTubeID"]
+    n_pieces = data.groupby(piece_attrs, sort=False).ngroups
+    apix = getPixelSize(
+        data, attrs=["rlnMicrographPixelSize", "rlnMicrographOriginalPixelSize"]
+    )
+    inter_box_distance = helicon.estimate_inter_box_distance(data, piece_attrs)
+    if args.verbose and inter_box_distance is not None:
+        if apix:
+            logger.info(
+                "Inter-box distance: %.1f pixels (%.2fÅ)",
+                inter_box_distance,
+                inter_box_distance * apix,
+            )
+        else:
+            logger.info("Inter-box distance: %.1f pixels", inter_box_distance)
+    n1 = len(data)
+    data = helicon.join_collinear_filaments(
+        data,
+        piece_attrs=piece_attrs[1:],
+        micrograph_attr=mgraph_attr,
+        epsilon=epsilon,
+        apix_micrograph=apix,
+        inter_box_distance=inter_box_distance,
+    )
+    n_overlapping = n1 - len(data)
+    n_filaments = data.groupby([mgraph_attr, "rlnHelicalTubeID"], sort=False).ngroups
+    data.drop(mgraph_attr, inplace=True, axis=1)
+    data.attrs = attrs
+    if args.verbose:
+        logger.info(
+            "Joined %d helical filaments from %d input files into %d filaments. "
+            "Removed %d duplicate particles (same rlnImageName) and %d overlapping particles "
+            "(closer than half of the inter-box distance) in the joined filaments",
+            n_pieces,
+            len(args.input_imageFiles),
+            n_filaments,
+            n_duplicates,
+            n_overlapping,
+        )
+    return data
 
 
 def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -448,6 +557,21 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--joinFilaments",
+        metavar="<0|1>[:epsilon=<1.0>]",
+        type=str,
+        help=(
+            "if multiple input files all have helical particles, join the filaments "
+            "on the same micrograph that lie on overlapping straight lines "
+            "(RELION start-end picking) into one helical tube, removing the particles "
+            "that are closer than half of the inter-box distance to particles kept from a "
+            "larger piece of the same tube. epsilon (pixels) is the "
+            "tolerance of the |ab|-|pa|-|pb|<epsilon test of point p on line segment ab. "
+            "default to %(default)s"
+        ),
+        default="1",
+    )
+    parser.add_argument(
         "--force",
         type=int,
         metavar="<0|1>",
@@ -502,7 +626,7 @@ def check_args(
         o
         for o in all_options
         if o
-        not in "cpu first force ignoreBadParticlePath ignoreBadMicrographPath last folder splitNumSets splitMode micrographStar tag verbose".split()
+        not in "cpu first force ignoreBadParticlePath ignoreBadMicrographPath joinFilaments last folder splitNumSets splitMode micrographStar tag verbose".split()
     ]
 
     if Path(args.output_starFile).suffix not in ".star .cs .csv".split():

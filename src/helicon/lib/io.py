@@ -370,6 +370,7 @@ def images2dataframe(
     ignore_bad_micrograph_path: int = 1,
     warn_missing_ctf: int = 1,
     target_convention: str | None = None,
+    source_index_attr: str | None = None,
 ) -> pd.DataFrame:
     """Read one or more image metadata files into a single DataFrame.
 
@@ -389,6 +390,9 @@ def images2dataframe(
         If True, warn when CTF parameters are missing.
     target_convention : str, optional
         Target Euler angle convention (``"relion"`` or ``"cryosparc"``).
+    source_index_attr : str, optional
+        If given, add a column with this name holding the 0-based index of the
+        input file each row was read from.
 
     Returns
     -------
@@ -407,6 +411,8 @@ def images2dataframe(
         )
         if target_convention:
             data = dataframe_convert(data, target=target_convention)
+        if source_index_attr:
+            data[source_index_attr] = 0
         return data
 
     datalist = []
@@ -447,6 +453,12 @@ def images2dataframe(
         for pi, p in enumerate(datalist):
             p = dataframe_convert(p, target=target_convention)
             datalist[pi] = p
+    for pi, p in enumerate(datalist):
+        if source_index_attr:
+            p[source_index_attr] = pi
+        # attrs (e.g. optics DataFrames) are rebuilt below; comparing them in
+        # pd.concat raises an ambiguous truth value error
+        p.attrs = {}
 
     data = pd.concat(datalist, sort=False)
     if len(opticslist):
