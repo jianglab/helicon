@@ -1,6 +1,6 @@
 """Helicon Lab — unified Shiny web app for helical structure analysis.
 
-Integrates seven tools into a single tabbed interface with shared
+Integrates eight tools into a single tabbed interface with shared
 project state for cross-tab data flow, behind a Home tab that places each
 tool on a helical data processing workflow diagram (alongside launchers for
 related apps that run outside this one, such as ``helicon procart``):
@@ -10,6 +10,7 @@ related apps that run outside this one, such as ``helicon procart``):
     HILL             — helical indexing via Fourier layer lines
     HI3D             — helical indexing via cylindrical projection of 3D map
     denovo3D         — de novo 3D reconstruction from a single 2D image
+    abinitio3D       — ab initio 3D map from the 2D classes of one helical type
     HelicalProjection— compare 2D images with helical structure projections
     whereIsMyClass   — map 2D classes to helical tube/filament images
 
@@ -121,6 +122,10 @@ from helicon.webApps.tabs.helical_pitch_tab import (
 from helicon.webApps.tabs.hill_tab import hill_tab_ui, hill_tab_server
 from helicon.webApps.tabs.hi3d_tab import hi3d_tab_ui, hi3d_tab_server
 from helicon.webApps.tabs.denovo3d_tab import denovo3d_tab_ui, denovo3d_tab_server
+from helicon.webApps.tabs.abinitio3d_tab import (
+    abinitio3d_tab_ui,
+    abinitio3d_tab_server,
+)
 from helicon.webApps.tabs.helical_projection_tab import (
     helical_projection_tab_ui,
     helical_projection_tab_server,
@@ -129,6 +134,7 @@ from helicon.webApps.tabs.where_is_my_class_tab import (
     where_is_my_class_tab_ui,
     where_is_my_class_tab_server,
 )
+from helicon.webApps import bookmark
 from helicon.webApps.tabs.home_tab import (
     HOME_APPS,
     HOME_TAB,
@@ -140,6 +146,7 @@ from helicon.webApps.tabs import (
     hill_tab,
     hi3d_tab,
     denovo3d_tab,
+    abinitio3d_tab,
     helical_projection_tab,
 )
 from helicon.webApps.tabs import (
@@ -156,6 +163,7 @@ _TAB_MODULE_MAP: dict[str, tuple[str, object]] = {
     "HILL": ("hill", hill_tab),
     "HI3D": ("hi3d", hi3d_tab),
     "Denovo3D": ("denovo3d", denovo3d_tab),
+    "AbInitio3D": ("abinitio3d", abinitio3d_tab),
     "HelicalProjection": ("helical_projection", helical_projection_tab),
     "HelicalPitch": ("helical_pitch", helical_pitch_tab),
     "WhereIsMyClass": ("where_is_my_class", where_is_my_class_tab),
@@ -180,13 +188,8 @@ def _resolve_active_tab(request: Request) -> str:
     is each tab module's eager reactive effects, which is where session-start
     time actually went.
     """
-    tab = request.query_params.get("helicon_tab")
-    if tab:
-        # Arrives JSON-quoted from the bookmark URL, e.g. helicon_tab="Denovo3D"
-        tab = tab.strip().strip('"')
-        if tab in _TAB_MODULE_MAP:
-            return tab
-    return HOME_TAB
+    tab, _ = bookmark.parse(request.url.query, _TAB_MODULE_MAP)
+    return tab or HOME_TAB
 
 
 # ── Display → tab navigation control ─────────────────────────────
@@ -303,6 +306,119 @@ async def _helicon_navigate(request: Request):
     )
 
 
+# ── Bookmark URL (page side) ────────────────────────────────────
+# Keeps the address bar a bookmark of the current tab: only the parameters that
+# differ from their defaults (see webApps/bookmark.py, which also restores
+# them). _BOOKMARK_TABS, generated from the tabs' BOOKMARK_DEFAULTS, maps
+# tab -> short key -> [full input id, default, derived].
+_BOOKMARK_JS = r"""
+(function() {
+    var HOME = "Home";
+    var KEEP = ["helicon_token", "helicon_theme"];
+
+    // The form values take in the URL; the same as bookmark.encode_value.
+    function encode(v) {
+        if (v === true) return "1";
+        if (v === false) return "0";
+        if (Array.isArray(v)) return v.map(encode).join(",");
+        return String(v);
+    }
+    // Commas, slashes and colons are left as they are: lists and file paths
+    // stay readable, and the URL shorter.
+    function q(text) {
+        return encodeURIComponent(text)
+            .replace(/%2C/g, ",").replace(/%2F/g, "/").replace(/%3A/g, ":");
+    }
+
+    // The values the bookmark being viewed set, by short key: kept in the URL,
+    // until changed, even while the input is still to be built.
+    var start = new URLSearchParams(window.location.search);
+    var restoredTab = start.get("tab");
+    var restored = {};
+    if (start.has("helicon_tab")) {  // the earlier form, with a JSON blob
+        try { restoredTab = JSON.parse(start.get("helicon_tab")); } catch (e) {}
+        try {
+            var p = JSON.parse(start.get("p") || "{}");
+            for (var k in p) restored[k] = encode(p[k]);
+        } catch (e) {}
+    } else {
+        start.forEach(function(v, k) {
+            if (k !== "tab" && KEEP.indexOf(k) < 0) restored[k] = v;
+        });
+    }
+
+    // For derived parameters: the value the app itself last gave each input
+    // (when built, or updated by the server), and whether the user has
+    // changed it since.
+    var baseline = {}, setByApp = {}, touched = {};
+    function bare(name) { return String(name).split(":")[0]; }
+    function idOf(el) { return el && el.id ? el.id : null; }
+    $(document).on("shiny:bound shiny:updateinput", function(e) {
+        var id = idOf(e.target);
+        if (id) setByApp[id] = Date.now();
+    });
+
+    // The latest value of each input, as Shiny reports the change: its own
+    // store is updated only after the change event, so reading it there gives
+    // the value before the change.
+    var latest = {};
+
+    function value(vals, id) {
+        if (id in latest) return latest[id];
+        if (id in vals) return vals[id];
+        for (var k in vals) if (bare(k) === id) return vals[k];
+        return undefined;
+    }
+
+    function build() {
+        var vals = window.Shiny && Shiny.shinyapp && Shiny.shinyapp.$inputValues;
+        if (!vals) return;
+        var tab = value(vals, "helicon_tab");
+        if (!tab) return;
+        var parts = [];
+        if (tab !== HOME) parts.push("tab=" + q(tab));
+        var entries = _BOOKMARK_TABS[tab] || {};  // Home has none
+        for (var key in entries) {
+            var id = entries[key][0], def = entries[key][1], derived = entries[key][2];
+            var was = tab === restoredTab ? restored[key] : undefined;
+            var v = value(vals, id);
+            var text;
+            if (v === undefined || v === null) {
+                text = was;
+            } else {
+                text = encode(v);
+                if (derived) {
+                    if (!touched[id] && text !== was) text = undefined;
+                } else if (text === encode(def)) {
+                    text = undefined;
+                }
+            }
+            if (text !== undefined) parts.push(key + "=" + q(text));
+        }
+        var now = new URLSearchParams(window.location.search);
+        KEEP.forEach(function(k) {
+            if (now.has(k)) parts.push(k + "=" + q(now.get(k)));
+        });
+        var url = parts.length ? "?" + parts.join("&") : window.location.pathname;
+        if (url !== window.location.search) window.history.replaceState(null, "", url);
+    }
+
+    var timer = null;
+    $(document).on("shiny:inputchanged", function(e) {
+        var id = bare(e.name), text = encode(e.value);
+        latest[id] = e.value;
+        if (!(id in baseline) || Date.now() - (setByApp[id] || 0) < 1500) {
+            baseline[id] = text;
+        } else if (text !== baseline[id]) {
+            touched[id] = true;
+        }
+        clearTimeout(timer);
+        timer = setTimeout(build, 300);
+    });
+})();
+"""
+
+
 # ── Main app UI ────────────────────────────────────────────────────
 
 
@@ -310,6 +426,13 @@ def app_ui(request: Request):
     theme = _web_theme(request)
     initial_theme = "dark" if theme in {"Dark", "System"} else "light"
     active_tab = _resolve_active_tab(request)
+    _, restored = bookmark.parse(request.url.query, _TAB_MODULE_MAP)
+    with bookmark.ui_restore_context(restored):
+        return _page(theme, initial_theme, active_tab)
+
+
+def _page(theme: str, initial_theme: str, active_tab: str):
+    """The page, with every tab's UI; see app_ui."""
     return ui.page_fillable(
         ui.head_content(
             ui.tags.title("Helicon"),
@@ -343,269 +466,10 @@ def app_ui(request: Request):
                 """
             ),
             ui.tags.script(
-                """
-                var _BOOKMARK_TABS = {
-                    // No inputs; listed so the URL still tracks the tab.
-                    "Home": {},
-                    "HILL": {
-                        "input_mode": "hill-hill_input_mode",
-                        "twist": "hill-hill_twist",
-                        "rise": "hill-hill_rise",
-                        "csym": "hill-hill_csym",
-                        "apix": "hill-hill_apix",
-                        "diameter": "hill-hill_diameter",
-                        "cutoff_res_x": "hill-hill_cutoff_res_x",
-                        "cutoff_res_y": "hill-hill_cutoff_res_y",
-                        "log_amp": "hill-hill_log_amp",
-                        "pnx": "hill-hill_pnx",
-                        "pny": "hill-hill_pny",
-                        "hp_fraction": "hill-hill_hp_fraction",
-                        "lp_fraction": "hill-hill_lp_fraction",
-                        "m_max": "hill-hill_m_max",
-                        "const_image_color": "hill-hill_const_image_color",
-                        "ll_colors": "hill-hill_ll_colors",
-                        "fft_top_only": "hill-hill_fft_top_only",
-                        "use_twist_pitch": "hill-hill_use_twist_pitch",
-                        "out_of_plane_tilt": "hill-hill_out_of_plane_tilt",
-                        "input_type": "hill-hill_input_type",
-                        "angle": "hill-hill_angle",
-                        "dx": "hill-hill_dx",
-                        "dy": "hill-hill_dy"
-                    },
-                    "HI3D": {
-                        "input_mode": "hi3d-hi3d_input_mode",
-                        "apix": "hi3d-hi3d_apix",
-                        "rmin": "hi3d-hi3d_rmin",
-                        "rmax": "hi3d-hi3d_rmax",
-                        "axial_step": "hi3d-hi3d_axial_step",
-                        "npeaks": "hi3d-hi3d_npeaks",
-                        "peak_width": "hi3d-hi3d_peak_width",
-                        "peak_height": "hi3d-hi3d_peak_height"
-                    },
-                    "Denovo3D": {
-                        "input_mode_images": "denovo3d-dn_input_mode_images",
-                        "url_images": "denovo3d-dn_url_images",
-                        "show_emdb": "denovo3d-dn_show_emdb_input_mode",
-                        "is_3d": "denovo3d-dn_is_3d",
-                        "ignore_blank": "denovo3d-dn_ignore_blank",
-                        "plot_scores": "denovo3d-dn_plot_scores",
-                        "show_download": "denovo3d-dn_show_download_buttons",
-                        "match_input_box": "denovo3d-dn_match_input_box",
-                        "display_size": "denovo3d-dn_selected_image_display_size",
-                        "rec_length": "denovo3d-dn_reconstruct_length_rise",
-                        "target_apix2d": "denovo3d-dn_target_apix2d",
-                        "target_apix3d": "denovo3d-dn_target_apix3d",
-                        "sym_oversample": "denovo3d-dn_sym_oversample",
-                        "lr_alpha": "denovo3d-dn_lr_alpha",
-                        "lr_l1_ratio": "denovo3d-dn_lr_l1_ratio",
-                        "top_n": "denovo3d-dn_top_n_results",
-                        "lr_algorithm": "denovo3d-dn_lr_algorithm",
-                        "positive": "denovo3d-dn_positive_constraint",
-                        "interpolation": "denovo3d-dn_interpolation",
-                        "score_metric": "denovo3d-dn_score_metric",
-                        "input_ui_type": "denovo3d-dn_input_ui_type"
-                    },
-                    "HelicalProjection": {
-                        "mode_images": "helical_projection-input_mode_images",
-                        "url_images": "helical_projection-url_images",
-                        "mode_maps": "helical_projection-input_mode_maps",
-                        "ignore_blank": "helical_projection-ignore_blank",
-                        "show_pdb": "helical_projection-show_pdb",
-                        "use_curated": "helical_projection-use_curated_helical_parameters",
-                        "show_twist_star": "helical_projection-show_twist_star",
-                        "proj_xyz": "helical_projection-map_projection_xyz_choices",
-                        "xyz_size": "helical_projection-map_xyz_projection_display_size",
-                        "side_size": "helical_projection-map_side_projection_vertical_display_size",
-                        "length_z": "helical_projection-length_z",
-                        "length_xy": "helical_projection-length_xy",
-                        "scale_range": "helical_projection-scale_range",
-                        "rescale_apix": "helical_projection-rescale_apix",
-                        "match_sf": "helical_projection-match_sf",
-                        "plot_scores": "helical_projection-plot_scores",
-                        "hide_query": "helical_projection-hide_query_image"
-                    },
-                    "HelicalPitch": {
-                        "mode_params": "helical_pitch-input_mode_params",
-                        "url_params": "helical_pitch-url_params",
-                        "mode_classes": "helical_pitch-input_mode_classes",
-                        "url_classes": "helical_pitch-url_classes",
-                        "ignore_blank": "helical_pitch-ignore_blank",
-                        "sort_abundance": "helical_pitch-sort_abundance",
-                        "auto_min_len": "helical_pitch-auto_min_len",
-                        "max_len": "helical_pitch-max_len",
-                        "max_pair_dist": "helical_pitch-max_pair_dist",
-                        "bins": "helical_pitch-bins",
-                        "min_len": "helical_pitch-min_len",
-                        "rise": "helical_pitch-rise"
-                    },
-                    "WhereIsMyClass": {
-                        "input_mode": "where_is_my_class-wimc_input_mode",
-                        "url_star": "where_is_my_class-wimc_url_star",
-                        "ignore_blank": "where_is_my_class-wimc_ignore_blank",
-                        "sort_abundance": "where_is_my_class-wimc_sort_abundance",
-                        "show_sharable": "where_is_my_class-wimc_show_sharable_url",
-                        "rise": "where_is_my_class-wimc_rise",
-                        "target_apix": "where_is_my_class-wimc_target_apix",
-                        "low_pass": "where_is_my_class-wimc_low_pass_angstrom",
-                        "high_pass": "where_is_my_class-wimc_high_pass_angstrom",
-                        "max_len": "where_is_my_class-wimc_max_len",
-                        "max_pair_dist": "where_is_my_class-wimc_max_pair_dist",
-                        "bins": "where_is_my_class-wimc_bins",
-                        "plot_height": "where_is_my_class-wimc_plot_height"
-                    },
-                    "HelicalLattice": {
-                        "mode": "helical_lattice-radio",
-                        "twist": "helical_lattice-twist",
-                        "rise": "helical_lattice-rise",
-                        "csym": "helical_lattice-csym",
-                        "diameter": "helical_lattice-diameter",
-                        "length": "helical_lattice-length",
-                        "primitive_unitcell": "helical_lattice-primitive_unitcell",
-                        "horizontal": "helical_lattice-horizontal",
-                        "lattice_size_factor": "helical_lattice-lattice_size_factor",
-                        "marker_size": "helical_lattice-marker_size",
-                        "figure_height": "helical_lattice-figure_height",
-                        "ax": "helical_lattice-ax",
-                        "ay": "helical_lattice-ay",
-                        "bx": "helical_lattice-bx",
-                        "by": "helical_lattice-by",
-                        "na": "helical_lattice-na",
-                        "nb": "helical_lattice-nb"
-                    }
-                };
-
-                var _initialValues = {};
-                var _bookmarkTimer = null;
-                var _initialCaptureDone = false;
-                // Keep this off: the handlers below run on every shiny:inputchanged,
-                // and startup fires one per input plus one per output visibility
-                // change -- hundreds of them. Each log line JSON.stringify()s the
-                // whole multi-tab state blob, and the argument is evaluated even
-                // though the flag gates the call, so a session start produced
-                // ~9,300 console messages and stalled the browser's message loop
-                // long enough to delay the first images. Set to true only while
-                // debugging bookmark URLs.
-                var _DEBUG_BOOKMARK = false;
-
-                // Shiny appends a type suffix like :shiny.number to certain input
-                // keys in $inputValues.  Look up both bare and typed versions.
-                function _getVal(vals, fullId) {
-                    if (fullId in vals) return vals[fullId];
-                    // Try with common Shiny input type suffixes
-                    var types = ['shiny.number', 'shiny.text', 'shiny.integer',
-                                 'shiny.password', 'shiny.select', 'shiny.textarea'];
-                    for (var i = 0; i < types.length; i++) {
-                        var key = fullId + ':' + types[i];
-                        if (key in vals) return vals[key];
-                    }
-                    return undefined;
-                }
-
-                function _captureInitialValues() {
-                    var vals = Shiny.shinyapp.$inputValues;
-                    if (!vals) {
-                        if (_DEBUG_BOOKMARK) console.log('[bookmark] _captureInitialValues: $inputValues is null');
-                        return;
-                    }
-                    for (var tabName in _BOOKMARK_TABS) {
-                        var inputs = _BOOKMARK_TABS[tabName];
-                        if (!_initialValues[tabName]) _initialValues[tabName] = {};
-                        for (var shortKey in inputs) {
-                            if (shortKey in _initialValues[tabName]) continue;
-                            var val = _getVal(vals, inputs[shortKey]);
-                            if (val !== undefined) {
-                                _initialValues[tabName][shortKey] = val;
-                            }
-                        }
-                    }
-                    if (_DEBUG_BOOKMARK) console.log('[bookmark] _captureInitialValues: captured', JSON.stringify(_initialValues));
-                }
-
-                // Capture initial values after Shiny has fully initialized
-                // and all dynamic (render.ui) inputs are in the DOM.
-                $(document).on('shiny:connected', function() {
-                    if (_DEBUG_BOOKMARK) console.log('[bookmark] shiny:connected');
-                    _captureInitialValues();
-                });
-                setTimeout(function() {
-                    if (_DEBUG_BOOKMARK) console.log('[bookmark] 2000ms timeout — capturing initial values');
-                    _captureInitialValues();
-                    _initialCaptureDone = true;
-                    if (_DEBUG_BOOKMARK) console.log('[bookmark] _initialCaptureDone = true. initialValues:', JSON.stringify(_initialValues));
-                }, 2000);
-
-                $(document).on('shiny:inputchanged', function(event) {
-                    if (_DEBUG_BOOKMARK) console.log('[bookmark] shiny:inputchanged:', event.name, '=', JSON.stringify(event.value));
-                    _captureInitialValues();
-
-                    clearTimeout(_bookmarkTimer);
-                    _bookmarkTimer = setTimeout(function() {
-                        if (_DEBUG_BOOKMARK) console.log('[bookmark] debounce fired, _initialCaptureDone=', _initialCaptureDone);
-                        if (_initialCaptureDone) _buildBookmarkUrl();
-                    }, 800);
-                });
-
-                function _buildBookmarkUrl() {
-                    var vals = Shiny.shinyapp.$inputValues;
-                    if (!vals) {
-                        if (_DEBUG_BOOKMARK) console.log('[bookmark] _buildBookmarkUrl: $inputValues is null');
-                        return;
-                    }
-                    var tab = vals['helicon_tab'];
-                    if (!tab) {
-                        if (_DEBUG_BOOKMARK) console.log('[bookmark] _buildBookmarkUrl: helicon_tab is undefined. Known keys:', Object.keys(vals).filter(function(k){ return k.indexOf('helicon') >= 0 || k.indexOf('tab') >= 0; }).join(','));
-                        return;
-                    }
-                    var inputs = _BOOKMARK_TABS[tab];
-                    if (!inputs) {
-                        if (_DEBUG_BOOKMARK) console.log('[bookmark] _buildBookmarkUrl: tab', tab, 'not in _BOOKMARK_TABS');
-                        return;
-                    }
-
-                    var parts = ['_inputs_',
-                        'helicon_tab=' + encodeURIComponent(JSON.stringify(tab))];
-                    var params = {};
-                    var defaults = _initialValues[tab] || {};
-                    var debug_excluded = [];
-                    var debug_included = [];
-                    for (var shortKey in inputs) {
-                        var fullId = inputs[shortKey];
-                        var val = _getVal(vals, fullId);
-                        if (val === undefined || val === null) continue;
-                        if (shortKey in defaults && JSON.stringify(val) === JSON.stringify(defaults[shortKey])) {
-                            debug_excluded.push(shortKey);
-                            continue;
-                        }
-                        params[shortKey] = val;
-                        debug_included.push(shortKey + '=' + JSON.stringify(val) + ' (default=' + JSON.stringify(defaults[shortKey]) + ')');
-                    }
-                    if (_DEBUG_BOOKMARK) {
-                        console.log('[bookmark] _buildBookmarkUrl: tab=', tab);
-                        console.log('[bookmark]   excluded (matches default):', debug_excluded.join(', '));
-                        console.log('[bookmark]   included:', debug_included.join(', '));
-                    }
-                    if (Object.keys(params).length > 0) {
-                        parts.push('_values_');
-                        parts.push('p=' + encodeURIComponent(JSON.stringify(params)));
-                    }
-                    var tok = new URLSearchParams(window.location.search).get('helicon_token');
-                    if (tok) {
-                        if (Object.keys(params).length === 0) parts.push('_values_');
-                        parts.push('helicon_token=' + encodeURIComponent(tok));
-                    }
-                    var currentTheme = new URLSearchParams(window.location.search).get('helicon_theme');
-                    if (currentTheme) {
-                        parts.push('helicon_theme=' + encodeURIComponent(currentTheme));
-                    }
-                    var url = '?' + parts.join('&');
-                    if (_DEBUG_BOOKMARK) console.log('[bookmark] final URL:', url);
-                    window.history.replaceState(null, '', url);
-                }
-
-                Shiny.addCustomMessageHandler('triggerUrlSync', function(msg) {
-                    if (_initialCaptureDone) _buildBookmarkUrl();
-                });
-            """
+                "var _BOOKMARK_TABS = "
+                + bookmark.js_table(_TAB_MODULE_MAP)
+                + ";\n"
+                + _BOOKMARK_JS
             ),
             ui.tags.script(
                 """
@@ -720,6 +584,7 @@ def app_ui(request: Request):
             ui.nav_panel("HILL", hill_tab_ui("hill")),
             ui.nav_panel("HelicalPitch", helical_pitch_tab_ui("helical_pitch")),
             ui.nav_panel("Denovo3D", denovo3d_tab_ui("denovo3d")),
+            ui.nav_panel("AbInitio3D", abinitio3d_tab_ui("abinitio3d")),
             ui.nav_panel("HelicalLattice", helical_lattice_tab_ui("helical_lattice")),
             ui.nav_panel("HI3D", hi3d_tab_ui("hi3d")),
             title=ui.tags.a(
@@ -749,6 +614,14 @@ def server(input, output, session):
 
     _control.start_session()
     _control.start_watchdog()
+
+    # Inputs the tabs build later (when their data arrives, or when a tab is
+    # first opened) start from the bookmark's values too.
+    with reactive.isolate():
+        _, restored = bookmark.parse(
+            session.clientdata.url_search() or "", _TAB_MODULE_MAP
+        )
+    bookmark.restore_in_session(session, restored)
 
     @session.on_ended
     async def _on_webapp_session_ended():
@@ -821,6 +694,7 @@ def server(input, output, session):
         "HILL": lambda: hill_tab_server("hill", project),
         "HelicalPitch": lambda: helical_pitch_tab_server("helical_pitch", project),
         "Denovo3D": lambda: denovo3d_tab_server("denovo3d", project),
+        "AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d", project),
         "HelicalLattice": lambda: helical_lattice_tab_server(
             "helical_lattice", project
         ),
@@ -846,70 +720,6 @@ def server(input, output, session):
         if tab:
             _start_tab(tab)
             project.active_tab.set(tab)
-
-    @session.bookmark.on_bookmark
-    async def _(state):
-        tab = input.helicon_tab()
-        if not tab or tab not in _TAB_MODULE_MAP:
-            return
-        prefix, tab_mod = _TAB_MODULE_MAP[tab]
-        params = {}
-        for short_key, (local_id, _default) in tab_mod.BOOKMARK_DEFAULTS.items():
-            full_id = f"{prefix}-{local_id}"
-            try:
-                val = input[full_id]()
-                if val is not None:
-                    params[short_key] = val
-            except Exception:
-                pass
-        if params:
-            state.values["p"] = params
-
-    @session.bookmark.on_bookmarked
-    async def _(url: str):
-        if "?" not in url:
-            await session.bookmark.update_query_string(url)
-            return
-        base, query = url.split("?", 1)
-
-        segments = query.split("&")
-        kept = []
-        in_inputs = False
-        in_values = False
-        for seg in segments:
-            if seg == "_inputs_":
-                in_inputs = True
-                in_values = False
-                kept.append(seg)
-            elif seg == "_values_":
-                in_values = True
-                in_inputs = False
-                kept.append(seg)
-            elif in_inputs:
-                if seg.startswith("helicon_tab="):
-                    kept.append(seg)
-            elif in_values:
-                kept.append(seg)
-        await session.bookmark.update_query_string(f"{base}?{'&'.join(kept)}")
-
-    @session.bookmark.on_restore
-    def _(state):
-        params = state.values.get("p", {})
-        if not params:
-            return
-        tab = input.helicon_tab()
-        if not tab or tab not in _TAB_MODULE_MAP:
-            return
-        prefix, tab_mod = _TAB_MODULE_MAP[tab]
-        for short_key, val in params.items():
-            if short_key in tab_mod.BOOKMARK_DEFAULTS:
-                local_id, _ = tab_mod.BOOKMARK_DEFAULTS[short_key]
-                session.send_input_message(f"{prefix}-{local_id}", {"value": val})
-
-
-async def sync_bookmark_url(session) -> None:
-    """Trigger bookmark URL sync from a tab module."""
-    await session.send_custom_message("triggerUrlSync", {})
 
 
 # ── App object ────────────────────────────────────────────────────

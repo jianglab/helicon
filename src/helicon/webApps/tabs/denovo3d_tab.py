@@ -62,9 +62,17 @@ MODE_STITCH = "Stitch manually"
 MODE_AUTOSTITCH = "Stitch automatically"
 
 
+_urls = {
+    "empiar-10940_job010": (
+        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
+        "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-14046/map/emd_14046.map.gz",
+    ),
+}
+_url_key = "empiar-10940_job010"
+
 BOOKMARK_DEFAULTS = {
     "input_mode_images": ("dn_input_mode_images", "url"),
-    "url_images": ("dn_url_images", ""),
+    "url_images": ("dn_url_images", _urls[_url_key][0]),
     "show_emdb": ("dn_show_emdb_input_mode", False),
     "is_3d": ("dn_is_3d", False),
     "ignore_blank": ("dn_ignore_blank", True),
@@ -79,7 +87,7 @@ BOOKMARK_DEFAULTS = {
     "lr_alpha": ("dn_lr_alpha", -1),
     "lr_l1_ratio": ("dn_lr_l1_ratio", 0.5),
     "top_n": ("dn_top_n_results", 10),
-    "lr_algorithm": ("dn_lr_algorithm", "elasticnet"),
+    "lr_algorithm": ("dn_lr_algorithm", "gauss"),
     "rec_algorithm": ("dn_rec_algorithm", "elasticnet"),
     "positive": ("dn_positive_constraint", -1),
     "interpolation": ("dn_interpolation", "linear"),
@@ -90,14 +98,6 @@ BOOKMARK_DEFAULTS = {
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-_urls = {
-    "empiar-10940_job010": (
-        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
-        "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-14046/map/emd_14046.map.gz",
-    ),
-}
-_url_key = "empiar-10940_job010"
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +660,7 @@ def denovo3d_tab_ui():
             ui.output_ui("dn_csym_card"),
             ui.output_ui("dn_show_run_button"),
             ui.panel_conditional(
-                "input['dn_twist_min']!==input['dn_twist_max'] || input['dn_rise_min']!==input['dn_rise_max']",
+                "(input['dn_twist_range'] || [0, 0])[0] !== (input['dn_twist_range'] || [0, 0])[1] || (input['dn_rise_range'] || [0, 0])[0] !== (input['dn_rise_range'] || [0, 0])[1]",
                 ui.input_action_button(
                     "dn_stop_denovo3D",
                     label="Stop",
@@ -844,7 +844,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         """The full transform card for one image, with per-image input ids."""
         d = _pi_defaults(i)
         slider = input.dn_input_ui_type() == "Slider"
-        num = ui.input_slider if slider else ui.input_numeric
+        num = helicon.shiny.slider if slider else ui.input_numeric
         extra = {} if slider else {"update_on": "blur"}
         return ui.div(
             ui.card(
@@ -950,7 +950,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         []
                         if shared_only
                         else [
-                            ui.input_slider(
+                            helicon.shiny.slider(
                                 "dn_pre_rotation",
                                 "Rotation (deg)",
                                 min=-20,
@@ -960,7 +960,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                             )
                         ]
                     ),
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         "dn_threshold",
                         "Threshold",
                         min=threshold_rv() - 1,
@@ -968,7 +968,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         value=threshold_rv(),
                         step=0.001,
                     ),
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         "dn_apix",
                         "Pixel size (A)",
                         min=0.0,
@@ -980,7 +980,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         []
                         if shared_only
                         else [
-                            ui.input_slider(
+                            helicon.shiny.slider(
                                 "dn_shift_y",
                                 "Vertical shift (A)",
                                 min=-100,
@@ -990,7 +990,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                             )
                         ]
                     ),
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         "dn_vertical_crop_size",
                         "Vertical crop (pixel)",
                         min=32,
@@ -998,7 +998,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         value=vertical_crop_size_rv(),
                         step=2,
                     ),
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         "dn_horizontal_crop_size",
                         "Horizontal crop (pixel)",
                         min=32,
@@ -1161,7 +1161,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     style="font-weight: bold; margin-bottom: 4px;",
                 ),
                 ui.layout_columns(
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         prefix + "_pre_rotation",
                         "Rotation (deg)",
                         min=-45,
@@ -1169,7 +1169,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         value=round(float(d.get("rotation", 0.0)), 2),
                         step=0.1,
                     ),
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         prefix + "_shift_x",
                         "Horizontal shift (pixel)",
                         min=-shift_scale,
@@ -1177,7 +1177,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                         value=int(round(float(d.get("shift_x", 0.0)))),
                         step=1,
                     ),
-                    ui.input_slider(
+                    helicon.shiny.slider(
                         prefix + "_shift_y",
                         "Vertical shift (pixel)",
                         min=-100,
@@ -2017,21 +2017,14 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         return ui.card(
             ui.card_header("Twist (deg)"),
             ui.div(
-                ui.input_numeric(
-                    "dn_twist_min",
-                    "min",
-                    value=0.1,
-                    step=0.1,
-                    width="70px",
-                    update_on="blur",
-                ),
-                ui.input_numeric(
-                    "dn_twist_max",
-                    "max",
-                    value=2.0,
-                    step=0.1,
-                    width="70px",
-                    update_on="blur",
+                helicon.shiny.range_slider(
+                    "dn_twist_range",
+                    "min \u2013 max",
+                    min=0,
+                    max=180,
+                    value=(0.1, 2.0),
+                    step=0.01,
+                    width="230px",
                 ),
                 ui.input_numeric(
                     "dn_twist_step",
@@ -2042,7 +2035,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     update_on="blur",
                 ),
                 ui.panel_conditional(
-                    "input['dn_twist_min']===input['dn_twist_max'] && input['dn_rise_min']===input['dn_rise_max']",
+                    "(input['dn_twist_range'] || [0, 1])[0] === (input['dn_twist_range'] || [0, 1])[1] && (input['dn_rise_range'] || [0, 1])[0] === (input['dn_rise_range'] || [0, 1])[1]",
                     ui.input_radio_buttons(
                         "dn_twisting_handedness",
                         "Reconstruct with:",
@@ -2062,21 +2055,14 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         return ui.card(
             ui.card_header("Rise (A)"),
             ui.div(
-                ui.input_numeric(
-                    "dn_rise_min",
-                    "min",
-                    value=4.75,
-                    step=0.1,
-                    width="70px",
-                    update_on="blur",
-                ),
-                ui.input_numeric(
-                    "dn_rise_max",
-                    "max",
-                    value=4.75,
-                    step=0.1,
-                    width="70px",
-                    update_on="blur",
+                helicon.shiny.range_slider(
+                    "dn_rise_range",
+                    "min \u2013 max",
+                    min=0,
+                    max=100,
+                    value=(4.75, 4.75),
+                    step=0.01,
+                    width="230px",
                 ),
                 ui.input_numeric(
                     "dn_rise_step",
@@ -3204,17 +3190,14 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
     @reactive.effect
     @reactive.event(
-        input.dn_twist_min,
-        input.dn_twist_max,
-        input.dn_rise_min,
-        input.dn_rise_max,
+        input.dn_twist_range,
+        input.dn_rise_range,
         input.dn_select_image,
     )
     def _update_run_button_label():
-        if (
-            input.dn_twist_min() != input.dn_twist_max()
-            or input.dn_rise_min() != input.dn_rise_max()
-        ):
+        tw_lo, tw_hi = input.dn_twist_range()
+        rs_lo, rs_hi = input.dn_rise_range()
+        if tw_lo != tw_hi or rs_lo != rs_hi:
             run_button_text.set("Search Parameters")
         else:
             run_button_text.set("Reconstruct 3D map")
@@ -3241,36 +3224,38 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         log = _denovo3d_logger()
 
         # Build twist/rise parameter grid
+        twist_min, twist_max = input.dn_twist_range()
+        rise_min, rise_max = input.dn_rise_range()
         if (
             input.dn_twisting_handedness()
             == "Left-handed twisting (force negative twist)"
-            and input.dn_twist_max() == input.dn_twist_min()
+            and twist_max == twist_min
         ):
-            twists = [np.negative(np.abs(input.dn_twist_max()))]
+            twists = [np.negative(np.abs(twist_max))]
         elif (
             input.dn_twisting_handedness()
             == "Right-handed twisting (force positive twist)"
-            and input.dn_twist_max() == input.dn_twist_min()
+            and twist_max == twist_min
         ):
-            twists = [np.abs(input.dn_twist_max())]
+            twists = [np.abs(twist_max)]
         else:
-            if input.dn_twist_min() < input.dn_twist_max():
+            if twist_min < twist_max:
                 twists = np.arange(
-                    input.dn_twist_min(),
-                    input.dn_twist_max() + input.dn_twist_step() / 2,
+                    twist_min,
+                    twist_max + input.dn_twist_step() / 2,
                     input.dn_twist_step(),
                 )
             else:
-                twists = [input.dn_twist_min()]
+                twists = [twist_min]
 
-        if input.dn_rise_min() < input.dn_rise_max():
+        if rise_min < rise_max:
             rises = np.arange(
-                input.dn_rise_min(),
-                input.dn_rise_max() + input.dn_rise_step() / 2,
+                rise_min,
+                rise_max + input.dn_rise_step() / 2,
                 input.dn_rise_step(),
             )
         else:
-            rises = [input.dn_rise_min()]
+            rises = [rise_min]
 
         tr_pairs = list(itertools.product(twists, rises))
         n_pairs = len(tr_pairs)

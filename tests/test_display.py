@@ -3540,6 +3540,7 @@ class TestFolderBrowser(object):
             "images2star",
             "whereIsMyClass",
             "helicalPitch",
+            "abInitio3D",
         ]
 
     def test_display_modes_class3d_optimiser_star(self, tmp_path, qapp):

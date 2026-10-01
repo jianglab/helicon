@@ -2,9 +2,9 @@
 
 These tests exercise the real launch flow used by the "Show in WhereIsMyClass"
 command (``helicon.commands.display._launch_whereismyclass``): the app is
-served as a module (``helicon.webApps.app:app``) and a bookmark-format URL
-(``_inputs_``/``_values_``/``p``) restores the "url" input mode pointing at a
-local star file. Clicking Run loads the class data into the helix table and
+served as a module (``helicon.webApps.app:app``) and a bookmark URL
+(``?tab=WhereIsMyClass&input_mode=url&url_star=...``) restores the "url" input
+mode pointing at a local star file. Clicking Run loads the class data into the helix table and
 class gallery; selecting a helix row renders its micrograph with the class
 checkboxes populated.
 """

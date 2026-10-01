@@ -181,19 +181,25 @@ def _launch_or_reuse_web_app(
 
 
 def _make_bookmark_query(tab_name: str, params: dict) -> dict:
-    """Build a query_params dict that produces a Shiny bookmark URL.
+    """Build the query params of a bookmark URL that opens a tab.
 
-    Returns a dict suitable for ``launch_shiny_app(query_params=...)`` that
-    produces: ``?_inputs_&helicon_tab="TabName"&_values_&p=...``
+    Parameters
+    ----------
+    tab_name : str
+        The tab's name in the navbar.
+    params : dict
+        The tab's parameters, by the short keys of its ``BOOKMARK_DEFAULTS``.
+
+    Returns
+    -------
+    dict
+        Query key -> value for ``launch_shiny_app(query_params=...)``, e.g.
+        ``?tab=HelicalPitch&url_params=/path/run_it020_data.star``; see
+        ``helicon.webApps.bookmark``.
     """
-    import json
+    from helicon.webApps import bookmark
 
-    return {
-        "_inputs_": "",
-        "helicon_tab": f'"{tab_name}"',
-        "_values_": "",
-        "p": json.dumps(params),
-    }
+    return bookmark.query(tab_name, params)
 
 
 def _launch_denovo3d(path: str, *, new_window: bool = False) -> None:
@@ -274,46 +280,69 @@ def _launch_helicalprojection(path: str, *, new_window: bool = False) -> None:
         )
 
 
+def _class2d_bookmark(path: str) -> dict:
+    """Bookmark inputs of a Class2D job for HelicalPitch and AbInitio3D.
+
+    Both tabs take the Class2D parameters and the class averages. The
+    companion of the given file is filled in when it exists on disk: the
+    RELION ``run_itNNN_data.star`` and ``run_itNNN_classes.mrcs`` of the same
+    iteration, or the particles dataset of a cryoSPARC class-average .mrc.
+
+    Parameters
+    ----------
+    path : str
+        A Class2D parameter file (.star, .cs) or class-average stack.
+
+    Returns
+    -------
+    dict
+        The tab's bookmark values, with ``url_params`` and ``url_classes``
+        set for the files that were found.
+    """
+    import re
+    from pathlib import Path
+
+    file_path = Path(path).resolve()
+    suffix = file_path.suffix.lower()
+
+    bookmark = {
+        "mode_params": "url",
+        "mode_classes": "url",
+    }
+    iter_match = re.search(r"run_it(\d+)", file_path.name)
+    if suffix in (".star", ".cs"):
+        bookmark["url_params"] = str(file_path)
+        if iter_match:
+            mrcs_file = file_path.parent / f"run_it{iter_match.group(1)}_classes.mrcs"
+            if mrcs_file.exists():
+                bookmark["url_classes"] = str(mrcs_file)
+    else:
+        bookmark["url_classes"] = str(file_path)
+        if iter_match:
+            star_file = file_path.parent / f"run_it{iter_match.group(1)}_data.star"
+            if star_file.exists():
+                bookmark["url_params"] = str(star_file)
+        else:
+            from helicon.lib import cryosparc_project
+
+            particles = cryosparc_project.particles_dataset(file_path)
+            if particles is not None:
+                bookmark["url_params"] = str(Path(particles).resolve())
+    return bookmark
+
+
 def _launch_helicalpitch(path: str, *, new_window: bool = False) -> None:
     """Open a file in the HelicalPitch tab via bookmark URL.
 
     Derives the companion file (star↔mrcs) from the given path when it
     exists on disk, so both params and class images are loaded together.
     """
-    import re
-    from pathlib import Path
-
     from PySide6.QtWidgets import QMessageBox
 
     try:
-        file_path = Path(path).resolve()
-        suffix = file_path.suffix.lower()
-
-        bookmark = {
-            "mode_params": "url",
-            "mode_classes": "url",
-        }
-
-        if suffix in (".star", ".cs"):
-            bookmark["url_params"] = str(file_path)
-            iter_match = re.search(r"run_it(\d+)", file_path.name)
-            if iter_match:
-                mrcs_file = (
-                    file_path.parent / f"run_it{iter_match.group(1)}_classes.mrcs"
-                )
-                if mrcs_file.exists():
-                    bookmark["url_classes"] = str(mrcs_file)
-        else:
-            bookmark["url_classes"] = str(file_path)
-            iter_match = re.search(r"run_it(\d+)", file_path.name)
-            if iter_match:
-                star_file = file_path.parent / f"run_it{iter_match.group(1)}_data.star"
-                if star_file.exists():
-                    bookmark["url_params"] = str(star_file)
-
         _launch_or_reuse_web_app(
             "HelicalPitch",
-            _make_bookmark_query("HelicalPitch", bookmark),
+            _make_bookmark_query("HelicalPitch", _class2d_bookmark(path)),
             new_window=new_window,
         )
     except Exception as exc:
@@ -321,6 +350,29 @@ def _launch_helicalpitch(path: str, *, new_window: bool = False) -> None:
             None,
             "HelicalPitch Launch Error",
             f"Failed to launch HelicalPitch:\n{exc}",
+        )
+
+
+def _launch_abinitio3d(path: str, *, new_window: bool = False) -> None:
+    """Open a Class2D job in the AbInitio3D tab via bookmark URL.
+
+    The companion file (star↔mrcs, or a cryoSPARC class-average .mrc's
+    particles dataset) is found the way HelicalPitch finds it, so both the
+    parameters and the class averages are loaded together.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    try:
+        _launch_or_reuse_web_app(
+            "AbInitio3D",
+            _make_bookmark_query("AbInitio3D", _class2d_bookmark(path)),
+            new_window=new_window,
+        )
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "AbInitio3D Launch Error",
+            f"Failed to launch AbInitio3D:\n{exc}",
         )
 
 
@@ -332,9 +384,11 @@ def _launch_hill(path: str, *, new_window: bool = False) -> None:
     from PySide6.QtWidgets import QMessageBox
 
     try:
-        params = _make_bookmark_query("HILL", {})
-        params["input_mode"] = "2"
-        params["img_file_url"] = path
+        from pathlib import Path
+
+        params = _make_bookmark_query(
+            "HILL", {"input_mode": "2", "url": str(Path(path).resolve())}
+        )
         _launch_or_reuse_web_app("HILL", params, new_window=new_window)
     except Exception as exc:
         QMessageBox.critical(
@@ -352,8 +406,11 @@ def _launch_hi3d(path: str, *, new_window: bool = False) -> None:
     from PySide6.QtWidgets import QMessageBox
 
     try:
-        params = _make_bookmark_query("HI3D", {})
-        params["img_file_url"] = path
+        from pathlib import Path
+
+        params = _make_bookmark_query(
+            "HI3D", {"input_mode": "url", "url": str(Path(path).resolve())}
+        )
         _launch_or_reuse_web_app("HI3D", params, new_window=new_window)
     except Exception as exc:
         QMessageBox.critical(

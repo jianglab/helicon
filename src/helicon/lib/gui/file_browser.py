@@ -76,6 +76,7 @@ _APP_LAUNCH_TABLE = [
     ("HILL", "HILL", None, None),
     ("HelicalPitch", "HelicalPitch", None, None),
     ("Denovo3D", "Denovo3D", None, None),
+    ("AbInitio3D", "AbInitio3D", None, None),
     ("HelicalLattice", "HelicalLattice", None, None),
     ("HI3D", "HI3D", None, None),
     ("TrueFSC", None, None, "two_maps"),
@@ -1235,6 +1236,7 @@ class FolderBrowserWidget(QMainWindow):
         ("_btn_fsc", "fsc"),
         ("_btn_html", "html"),
         ("_btn_denovo3d", "denovo3D"),
+        ("_btn_abinitio3d", "abInitio3D"),
         ("_btn_whereismyclass", "whereIsMyClass"),
         ("_btn_helicalprojection", "helicalProjection"),
         ("_btn_helicalpitch", "helicalPitch"),
@@ -1587,6 +1589,11 @@ class FolderBrowserWidget(QMainWindow):
         self._btn_denovo3d.setToolTip(
             "Open this file in the denovo3D web app for de novo helical indexing"
         )
+        self._btn_abinitio3d = QPushButton("AbInitio3D")
+        self._btn_abinitio3d.setToolTip(
+            "Open this Class2D job in the AbInitio3D web app for an ab initio "
+            "3D map from the 2D classes"
+        )
         self._btn_whereismyclass = QPushButton("WhereIsMyClass")
         self._btn_whereismyclass.setToolTip(
             "Open this file in the WhereIsMyClass web app for mapping 2D classes"
@@ -1732,11 +1739,11 @@ class FolderBrowserWidget(QMainWindow):
             if name.endswith("data.star"):
                 _is_class2d = any(p.startswith("Class2D") for p in Path(path).parts)
                 if _is_class2d:
-                    # WhereIsMyClass and HelicalPitch are helical web apps and
-                    # only make sense for helical 2D class averages.
+                    # WhereIsMyClass, HelicalPitch and AbInitio3D are helical
+                    # web apps and only make sense for helical 2D class averages.
                     modes = ["slice", "gallery", "text", "images2star"]
                     if _folder_is_helical(str(Path(path).parent)):
-                        modes.extend(["whereIsMyClass", "helicalPitch"])
+                        modes.extend(["whereIsMyClass", "helicalPitch", "abInitio3D"])
                     return modes
                 _is_class3d_or_refine3d = any(
                     p.startswith("Class3D") or p.startswith("Refine3D")
@@ -1796,6 +1803,9 @@ class FolderBrowserWidget(QMainWindow):
                         modes.append("2dclasses")
                     if cryosparc_project.is_helical(path):
                         modes.extend(["helicalProjection", "hill", "denovo3D"])
+                        # it needs the particles dataset as well as the averages
+                        if cryosparc_project.has_class_abundance(path):
+                            modes.append("abInitio3D")
             if _has_volume:
                 _is_class3d_or_refine3d = any(
                     p.startswith("Class3D") or p.startswith("Refine3D")

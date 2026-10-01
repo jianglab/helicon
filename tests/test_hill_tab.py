@@ -55,10 +55,20 @@ def test_invalid_pixel_size_does_not_update_inputs(monkeypatch):
 def _controls(prefix="other-hill"):
     sliders = [Slider(start=1, end=100, value=v) for v in (30, 240, 20)]
     spinners = [Spinner(value=v) for v in (30, 240, 20)]
-    state = ColumnDataSource(dict(twist=[30.], pitch=[240.], rise=[20.],
-                                 keep=["Twist"], tilt=[0.], revision=[0]))
-    ids = {k: f"{prefix}_{k}" for k in (
-        "twist", "pitch", "rise", "use_twist_pitch", "helix_revision")}
+    state = ColumnDataSource(
+        dict(
+            twist=[30.0],
+            pitch=[240.0],
+            rise=[20.0],
+            keep=["Twist"],
+            tilt=[0.0],
+            revision=[0],
+        )
+    )
+    ids = {
+        k: f"{prefix}_{k}"
+        for k in ("twist", "pitch", "rise", "use_twist_pitch", "helix_revision")
+    }
     callbacks = hill_tab._setup_helix_control_js(*sliders, *spinners, [], ids, state)
     return sliders, spinners, state, callbacks
 
@@ -72,20 +82,46 @@ class _Effects:
 
     def __init__(self, mode="PS", **overrides):
         values = dict(
-            hill_select_image=[0], hill_input_type=mode, hill_is_3d=False,
-            hill_inhibit_update=False, hill_apix=1., hill_angle=0., hill_dx=0.,
-            hill_dy=0., hill_mask_radius=0., hill_mask_len=90., hill_negate=False,
-            hill_cutoff_res_x=3., hill_cutoff_res_y=2., hill_pnx=8, hill_pny=8,
-            hill_log_amp=False, hill_lp_fraction=0., hill_hp_fraction=0.,
-            hill_m_max=1, hill_diameter=100., hill_csym=1, hill_out_of_plane_tilt=0.,
-            hill_fft_top_only=False, hill_ll_colors="lime cyan", hill_LL=True,
-            hill_LLText=True, hill_twist=30., hill_rise=20., hill_ms=["0"],
+            hill_select_image=[0],
+            hill_input_type=mode,
+            hill_is_3d=False,
+            hill_inhibit_update=False,
+            hill_apix=1.0,
+            hill_angle=0.0,
+            hill_dx=0.0,
+            hill_dy=0.0,
+            hill_mask_radius=0.0,
+            hill_mask_len=90.0,
+            hill_negate=False,
+            hill_cutoff_res_x=3.0,
+            hill_cutoff_res_y=2.0,
+            hill_pnx=8,
+            hill_pny=8,
+            hill_log_amp=False,
+            hill_lp_fraction=0.0,
+            hill_hp_fraction=0.0,
+            hill_m_max=1,
+            hill_diameter=100.0,
+            hill_csym=1,
+            hill_out_of_plane_tilt=0.0,
+            hill_fft_top_only=False,
+            hill_ll_colors="lime cyan",
+            hill_LL=True,
+            hill_LLText=True,
+            hill_twist=30.0,
+            hill_rise=20.0,
+            hill_ms=["0"],
             hill_use_twist_pitch="Twist",
             hill_helix_revision=0,
         )
         values.update(overrides)
-        self.input = SimpleNamespace(**{k: reactive.Value(v) for k, v in values.items()})
-        self.images = [np.arange(64.).reshape(8, 8), np.arange(64.).reshape(8, 8)[::-1].copy()]
+        self.input = SimpleNamespace(
+            **{k: reactive.Value(v) for k, v in values.items()}
+        )
+        self.images = [
+            np.arange(64.0).reshape(8, 8),
+            np.arange(64.0).reshape(8, 8)[::-1].copy(),
+        ]
         self.transforms = []
         self.computations = []
         self.updates = []
@@ -101,7 +137,7 @@ class _Effects:
         # Use real layerline calculations and figures: their coordinates matter.
         compute = SimpleNamespace(
             transform_2d_image=transform,
-            mask_2d_filament=lambda data, *args: data * .5,
+            mask_2d_filament=lambda data, *args: data * 0.5,
             update_image_figure=lambda *args, **kwargs: None,
             compute_power_spectra=lambda data, **kw: (spectrum(data), data * 0),
             compute_phase_difference_across_meridian=lambda phase: phase,
@@ -114,30 +150,56 @@ class _Effects:
         figs = [figure(), figure(), figure()]
         self.ns = dict(vars(hill_tab))
         self.ns.update(
-            input=self.input, hill=compute,
-            ui=SimpleNamespace(update_numeric=lambda *a, **kw: self.updates.append((a, kw))),
-            selected_images=reactive.Value([]), selected_image_labels=reactive.Value([]),
-            data_all_2d=reactive.Value(self.images), data_all_2d_labels=reactive.Value(["1", "2"]),
-            prev_data_from=reactive.Value("main"), data_2d_transformed=reactive.Value(None),
-            ps_data=reactive.Value(None), pd_data=reactive.Value(None), phase_data=reactive.Value(None),
-            _last_ps_pd_selection=[None], _last_transform_key=[None],
-            ny_curr_img=reactive.Value(8), nx_curr_img=reactive.Value(8),
-            fig_transformed_img=None, source_transformed_img=None,
-            fig_ellipses=[], figs=figs, figs_image=[figs[0], figs[2]],
+            input=self.input,
+            hill=compute,
+            ui=SimpleNamespace(
+                update_numeric=lambda *a, **kw: self.updates.append((a, kw)),
+                update_slider=lambda *a, **kw: self.updates.append((a, kw)),
+            ),
+            selected_images=reactive.Value([]),
+            selected_image_labels=reactive.Value([]),
+            data_all_2d=reactive.Value(self.images),
+            data_all_2d_labels=reactive.Value(["1", "2"]),
+            prev_data_from=reactive.Value("main"),
+            data_2d_transformed=reactive.Value(None),
+            ps_data=reactive.Value(None),
+            pd_data=reactive.Value(None),
+            phase_data=reactive.Value(None),
+            _last_ps_pd_selection=[None],
+            _last_transform_key=[None],
+            ny_curr_img=reactive.Value(8),
+            nx_curr_img=reactive.Value(8),
+            fig_transformed_img=None,
+            source_transformed_img=None,
+            fig_ellipses=[],
+            figs=figs,
+            figs_image=[figs[0], figs[2]],
             data_source_ps=ColumnDataSource(dict(image=[self.images[0]])),
             data_source_pd=ColumnDataSource(dict(image=[self.images[0]])),
-            slider_callbacks=callbacks, helix_controls=controls,
+            slider_callbacks=callbacks,
+            helix_controls=controls,
         )
         self.effects = []
         tree = ast.parse(Path(hill_tab.__file__).read_text(encoding="utf-8"))
-        self.server = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                           and n.name == "hill_tab_server")
+        self.server = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == "hill_tab_server"
+        )
 
     def add(self, *names):
         for name in names:
-            node = next(n for n in self.server.body if isinstance(n, ast.FunctionDef)
-                        and n.name == name)
-            exec(compile(ast.Module(body=[node], type_ignores=[]), hill_tab.__file__, "exec"), self.ns)
+            node = next(
+                n
+                for n in self.server.body
+                if isinstance(n, ast.FunctionDef) and n.name == name
+            )
+            exec(
+                compile(
+                    ast.Module(body=[node], type_ignores=[]), hill_tab.__file__, "exec"
+                ),
+                self.ns,
+            )
             self.effects.append(self.ns[name])
 
     def get(self, name):
@@ -160,7 +222,9 @@ def test_spectrum_selection_updates_without_control_changes(mode):
             h.input.hill_select_image.set([1])
             await reactive.flush()
             np.testing.assert_array_equal(h.get("data_2d_transformed"), h.images[1])
-            np.testing.assert_array_equal(h.get("ps_data" if mode == "PS" else "pd_data"), h.images[1])
+            np.testing.assert_array_equal(
+                h.get("ps_data" if mode == "PS" else "pd_data"), h.images[1]
+            )
             assert len(h.computations) == 2
             # Multiple selection still waits for explicit averaging/use-current.
             h.input.hill_select_image.set([0, 1])
@@ -168,6 +232,7 @@ def test_spectrum_selection_updates_without_control_changes(mode):
             assert len(h.computations) == 2
         finally:
             h.close()
+
     asyncio.run(run())
 
 
@@ -175,43 +240,58 @@ def test_spectrum_selection_updates_without_control_changes(mode):
 @pytest.mark.parametrize("inhibit", [False, True])
 def test_spectrum_transforms_reset_locally_or_preserve_when_inhibited(mode, inhibit):
     async def run():
-        h = _Effects(mode, hill_inhibit_update=inhibit, hill_angle=10., hill_dx=2., hill_dy=3.,
-                     hill_mask_radius=4., hill_negate=True)
+        h = _Effects(
+            mode,
+            hill_inhibit_update=inhibit,
+            hill_angle=10.0,
+            hill_dx=2.0,
+            hill_dy=3.0,
+            hill_mask_radius=4.0,
+            hill_negate=True,
+        )
         h.add("_update_selected_images", "_apply_2d_transform_ps_pd", "_compute_ps_pd")
         try:
             await reactive.flush()
-            assert h.transforms[-1] == ((10., 2., 3., False, 1.) if inhibit else (0., 0., 0., False, 1.))
+            assert h.transforms[-1] == (
+                (10.0, 2.0, 3.0, False, 1.0) if inhibit else (0.0, 0.0, 0.0, False, 1.0)
+            )
             # No UI echo is simulated: reset must already apply on the server.
-            np.testing.assert_array_equal(h.get("data_2d_transformed"), h.images[0] + (15 if inhibit else 0))
-            h.input.hill_angle.set(20.)
+            np.testing.assert_array_equal(
+                h.get("data_2d_transformed"), h.images[0] + (15 if inhibit else 0)
+            )
+            h.input.hill_angle.set(20.0)
             await reactive.flush()
-            assert h.transforms[-1] == (20., 2., 3., False, 1.)
+            assert h.transforms[-1] == (20.0, 2.0, 3.0, False, 1.0)
             h.input.hill_select_image.set([1])
             await reactive.flush()
-            assert h.transforms[-1] == ((20., 2., 3., False, 1.) if inhibit else (0., 0., 0., False, 1.))
+            assert h.transforms[-1] == (
+                (20.0, 2.0, 3.0, False, 1.0) if inhibit else (0.0, 0.0, 0.0, False, 1.0)
+            )
         finally:
             h.close()
+
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("mode", ["PS", "PD"])
 def test_mode_switch_recomputes_before_spectrum(mode):
     async def run():
-        h = _Effects("Image", hill_negate=True, hill_mask_radius=4.)
+        h = _Effects("Image", hill_negate=True, hill_mask_radius=4.0)
         h.ns["selected_images"].set([h.images[0]])
         h.add("_apply_2d_transform", "_apply_2d_transform_ps_pd", "_compute_ps_pd")
         try:
             await reactive.flush()
-            np.testing.assert_array_equal(h.computations[-1], -h.images[0] * .5)
+            np.testing.assert_array_equal(h.computations[-1], -h.images[0] * 0.5)
             h.input.hill_input_type.set(mode)
             await reactive.flush()
             np.testing.assert_array_equal(h.computations[-1], h.images[0])
             h.input.hill_input_type.set("Image")
             await reactive.flush()
-            np.testing.assert_array_equal(h.computations[-1], -h.images[0] * .5)
+            np.testing.assert_array_equal(h.computations[-1], -h.images[0] * 0.5)
             assert len(h.computations) == 3
         finally:
             h.close()
+
     asyncio.run(run())
 
 
@@ -225,33 +305,39 @@ def test_image_transform_cache_distinguishes_source_images():
             h.ns["selected_images"].set([h.images[1]])
             # A round trip invalidates the effect but leaves numerical settings
             # unchanged, as can happen when dynamic image controls are rebound.
-            h.input.hill_angle.set(1.)
-            h.input.hill_angle.set(0.)
+            h.input.hill_angle.set(1.0)
+            h.input.hill_angle.set(0.0)
             await reactive.flush()
             np.testing.assert_array_equal(h.get("data_2d_transformed"), h.images[1])
         finally:
             h.close()
+
     asyncio.run(run())
 
 
 def test_url_mode_keeps_restored_parameters_until_leaving_emdb():
     async def run():
-        h = _Effects(hill_input_mode_params="2", hill_twist=60., hill_rise=30.)
+        h = _Effects(hill_input_mode_params="2", hill_twist=60.0, hill_rise=30.0)
         h.ns["_previous_input_mode"] = [None]
         h.add("_reset_helix_after_emdb", "_sync_helix_controls")
         try:
             await reactive.flush()
             assert not h.updates
-            assert h.ns["helix_controls"].data["twist"] == [60.]
-            assert h.ns["helix_controls"].data["pitch"] == [180.]
+            assert h.ns["helix_controls"].data["twist"] == [60.0]
+            assert h.ns["helix_controls"].data["pitch"] == [180.0]
             h.input.hill_input_mode_params.set("3")
             await reactive.flush()
             assert not h.updates
             h.input.hill_input_mode_params.set("2")
             await reactive.flush()
-            assert [args[0] for args, _ in h.updates] == ["hill_twist", "hill_rise", "hill_csym"]
+            assert [args[0] for args, _ in h.updates] == [
+                "hill_twist",
+                "hill_rise",
+                "hill_csym",
+            ]
         finally:
             h.close()
+
     asyncio.run(run())
 
 
@@ -266,32 +352,39 @@ def test_layerlines_follow_selection_and_current_parameters(mode):
             h.ns["selected_images"].set([h.images[0]])
             await reactive.flush()
             assert h.ns["fig_ellipses"]
-            h.input.hill_twist.set(40.)
-            h.input.hill_rise.set(25.)
+            h.input.hill_twist.set(40.0)
+            h.input.hill_rise.set(25.0)
             await reactive.flush()
-            assert h.ns["helix_controls"].data["pitch"] == [225.]
+            assert h.ns["helix_controls"].data["pitch"] == [225.0]
             for i in range(4):
                 old = list(h.ns["fig_ellipses"])
                 h.ns["selected_images"].set([h.images[i % 2]])
-                h.input.hill_diameter.set(110. + i)
+                h.input.hill_diameter.set(110.0 + i)
                 h.input.hill_LLText.set(i % 2 == 0)
                 await reactive.flush()
                 for renderer in h.ns["fig_ellipses"]:
                     m, orders = renderer.tags
-                    np.testing.assert_allclose(renderer.data_source.data["y"],
-                                               m / 25. + np.asarray(orders) / 225.)
+                    np.testing.assert_allclose(
+                        renderer.data_source.data["y"],
+                        m / 25.0 + np.asarray(orders) / 225.0,
+                    )
                 for callback in h.ns["slider_callbacks"]:
                     assert callback.args["fig_ellipses"] == h.ns["fig_ellipses"]
                     assert not any(r in old for r in callback.args["fig_ellipses"])
-                assert all(len(s.js_property_callbacks["change:value"]) == 1 for s in h.sliders)
-                assert all(len(s.js_property_callbacks["change:value_throttled"]) == 1
-                           for s in h.sliders)
+                assert all(
+                    len(s.js_property_callbacks["change:value"]) == 1 for s in h.sliders
+                )
+                assert all(
+                    len(s.js_property_callbacks["change:value_throttled"]) == 1
+                    for s in h.sliders
+                )
             h.ns["selected_images"].set([])
             await reactive.flush()
             assert not h.ns["fig_ellipses"]
             assert all(not c.args["fig_ellipses"] for c in h.ns["slider_callbacks"])
         finally:
             h.close()
+
     asyncio.run(run())
 
 
@@ -453,6 +546,7 @@ run(p.commit,spinner_pitch,{origin:1,control:spinner_pitch});
 drain();
 assert.equal(sent.length,0);
 """
-    result = subprocess.run([node, "-e", script], input=json.dumps(payload),
-                            text=True, capture_output=True)
+    result = subprocess.run(
+        [node, "-e", script], input=json.dumps(payload), text=True, capture_output=True
+    )
     assert result.returncode == 0, result.stderr

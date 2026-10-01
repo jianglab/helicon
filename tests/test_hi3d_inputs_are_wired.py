@@ -2,7 +2,7 @@
 
 A Shiny input that nothing reads is inert: it renders, it accepts typing, and
 it changes nothing. That is how the radial range broke -- rmin/rmax were
-declared, seeded from the map, and drawn as markers, but ``input.hi3d_rmin``
+declared, seeded from the map, and drawn as markers, but ``input.hi3d_radius``
 appeared nowhere, so editing them moved neither the markers nor the cylindrical
 projection computed from them.
 
@@ -61,7 +61,7 @@ def test_the_radial_range_reaches_the_computation():
     than one particular spelling of it.
     """
     src = TAB.read_text()
-    for name in ("hi3d_rmin", "hi3d_rmax"):
+    for name in ("hi3d_radius",):
         assert f"input.{name}" in src, f"{name} is declared but never read"
 
     cut = src.index("def _run_computation")
@@ -78,7 +78,7 @@ def test_the_radial_range_reaches_the_computation():
             f"{name} is missing from _run_computation's reactive.event list, so"
             " a change to the radial range cannot re-trigger the projection"
         )
-    for name in ("input.hi3d_rmin", "input.hi3d_rmax"):
+    for name in ("input.hi3d_radius",):
         assert name not in run, (
             f"{name} is named in _run_computation's reactive.event list; that"
             " input does not exist until its panel renders, and naming a missing"

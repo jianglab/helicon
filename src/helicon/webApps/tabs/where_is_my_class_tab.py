@@ -27,7 +27,6 @@ BOOKMARK_DEFAULTS = {
     "url_star": ("wimc_url_star", ""),
     "ignore_blank": ("wimc_ignore_blank", True),
     "sort_abundance": ("wimc_sort_abundance", True),
-    "show_sharable": ("wimc_show_sharable_url", False),
     "rise": ("wimc_rise", 4.75),
     "target_apix": ("wimc_target_apix", 5),
     "low_pass": ("wimc_low_pass_angstrom", 20),
@@ -91,9 +90,6 @@ def where_is_my_class_tab_ui():
                             "wimc_sort_abundance",
                             "Sort the classes by abundance",
                             value=True,
-                        ),
-                        ui.input_checkbox(
-                            "wimc_show_sharable_url", "Show sharable URL", value=False
                         ),
                         col_widths=6,
                         style="align-items: flex-start;",

@@ -2,7 +2,7 @@
 
 Draws the processing steps (micrographs → particle picking → 2D classes →
 3D models) as an SVG diagram, with every app wired between the data it reads
-and the result it produces (pixel size, twist, rise, an initial 3D model, ...).
+and the result it produces (pixel size, twist, rise, a 3D map, ...).
 Hovering an app shows its name and a brief introduction and highlights its
 arrows. Clicking it opens the app in one of three ways:
 
@@ -55,7 +55,8 @@ class HomeApp:
 
 # Diagram layout: a centre column of data at x=555, apps in columns at x=280
 # and x=830, and results at the outer edges (x=80 and x=1030). Rows are
-# y = 50, 160, 280, 400, 510 and 610; the Learning group fills the bottom left.
+# y = 50, 160, 280, 400, 510 and 610 (HelicalPitch and AbInitio3D split the
+# 280 row at 250 and 320); the Learning group fills the bottom left.
 HOME_APPS: tuple[HomeApp, ...] = (
     HomeApp(
         "WebCalEM",
@@ -90,7 +91,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "3D",
         "#7c3aed",
         "Build a de novo 3D helical reconstruction from a single 2D class "
-        "average, giving an initial 3D model and its twist and rise.",
+        "average, giving a 3D map and its twist and rise.",
         280,
         400,
     ),
@@ -110,7 +111,17 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "Estimate the helical pitch/twist from the distances between "
         "segments of the same 2D class along each filament.",
         830,
-        280,
+        250,
+    ),
+    HomeApp(
+        "AbInitio3D",
+        "AI",
+        "#9333ea",
+        "Build an ab initio 3D map from the 2D classes of one helical type: "
+        "the class azimuths and the repeat from the segments the filaments "
+        "share, then a map from the class averages or the segments.",
+        830,
+        320,
     ),
     HomeApp(
         "HI3D",
@@ -148,8 +159,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "HelicalLattice",
         "La",
         "#ca8a04",
-        "Interconvert 2D lattices and helical lattices to explore helical "
-        "symmetry.",
+        "Interconvert 2D lattices and helical lattices to explore helical " "symmetry.",
         280,
         510,
     ),
@@ -182,8 +192,9 @@ _STEPS = (
 _RESULTS = (
     (1030, 50, 120, "Pixel size"),
     (80, 340, 120, "Twist & Rise"),
-    (1030, 280, 120, "Twist"),
-    (555, 400, 170, "Initial 3D model"),
+    (1030, 250, 120, "Twist"),
+    (1030, 320, 120, "Twist"),
+    (555, 400, 170, "3D map"),
     (1030, 400, 120, "Twist & Rise"),
     (1030, 510, 120, "Validation"),
     (1030, 610, 120, "Visualization"),
@@ -207,8 +218,11 @@ _ARROWS: tuple[tuple, ...] = (
     ("WhereIsMyClass", ((640, 160), (740, 160))),
     ("WhereIsMyClass", ((665, 240), (665, 212), (830, 212), (830, 186))),
     ("WhereIsMyClass", ((800, 136), (800, 105), (610, 105), (610, 77))),
-    ("HelicalPitch", ((705, 280), (740, 280))),
-    ("HelicalPitch", ((918, 280), (968, 280))),
+    ("HelicalPitch", ((705, 250), (740, 250))),
+    ("HelicalPitch", ((918, 250), (968, 250))),
+    ("AbInitio3D", ((705, 310), (740, 310))),
+    ("AbInitio3D", ((918, 320), (968, 320))),
+    ("AbInitio3D", ((800, 344), (800, 360), (600, 360), (600, 377))),
     ("HI3D", ((640, 400), (740, 400))),
     ("HI3D", ((918, 400), (968, 400))),
     ("Map2seq", ((620, 423), (620, 455), (800, 455), (800, 484))),

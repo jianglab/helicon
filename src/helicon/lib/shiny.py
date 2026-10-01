@@ -18,8 +18,264 @@ __all__ = [
     "image_gallery",
     "image_select",
     "launch_shiny_app",
+    "range_slider",
     "set_client_url_query_params",
+    "slider",
 ]
+
+
+# The script every editable slider carries (it does its work once per page):
+#
+# * Double-click a number of a slider -- for a range slider the lower or the
+#   upper one, and for either kind the smallest or the largest value at its ends
+#   -- to type it in place; Enter applies it, Escape (or clicking away) leaves
+#   the slider as it was.
+# * A slider sends its value to the server only when the drag ends, not all along
+#   the way, unless its wrapper says ``data-emit-while-sliding``. Shiny's own
+#   slider sends on every move (a quarter of a second apart at most), which is a
+#   lot of reactive work for an app that redraws on each. The numbers shown on the
+#   slider still follow the drag. Clicks on the bar, the keyboard, typed values
+#   and updates from the server are not drags and send at once.
+_SLIDER_EDIT_JS = """
+(function () {
+  if (window.__heliconRangeEdit) { return; }
+  window.__heliconRangeEdit = true;
+
+  var LABELS = '.helicon-editable-slider .irs-from, .helicon-editable-slider .irs-to, ' +
+               '.helicon-editable-slider .irs-single, .helicon-editable-slider .irs-min, ' +
+               '.helicon-editable-slider .irs-max';
+
+  $(document).on('dblclick', LABELS, function (event) {
+    var irs = $(this).closest('.irs');
+    var input = irs.closest('.shiny-input-container').find('input.js-range-slider').first();
+    var slider = input.data('ionRangeSlider');
+    if (!slider) { return; }
+    var rect = this.getBoundingClientRect();
+    var single = slider.options.type === 'single';
+    var bound = $(this).hasClass('irs-min') ? 'min' : ($(this).hasClass('irs-max') ? 'max' : null);
+    // close together, or equal, the two numbers of a range are shown as one
+    // label: its left half is the lower number and its right half the upper
+    var merged = !single && (slider.result.from === slider.result.to ||
+      $(this).hasClass('irs-single'));
+    var isFrom = single || (merged ? event.clientX < rect.left + rect.width / 2
+                                   : $(this).hasClass('irs-from'));
+    var current = bound ? slider.options[bound] : (isFrom ? slider.result.from : slider.result.to);
+    var box = $('<input type="text" inputmode="decimal">')
+      .val(current)
+      .css({position: 'fixed', left: rect.left - 8, top: rect.top - 3,
+            width: Math.max(rect.width + 16, 64), height: rect.height + 6,
+            zIndex: 10000, fontSize: '12px', textAlign: 'center',
+            border: '1px solid #0d6efd', borderRadius: '3px', padding: '0 2px'});
+    $('body').append(box);
+    box.focus().select();
+    var done = function () { if (box[0].isConnected) { box.remove(); } };
+    box.on('keydown', function (ev) {
+      if (ev.key === 'Enter') {
+        var v = parseFloat(String(box.val()).replace(/[ ,]/g, ''));
+        done();
+        if (isNaN(v)) { return; }
+        if (bound === 'min') {
+          if (v >= slider.options.max) { return; }
+          slider.update({min: v});
+        } else if (bound === 'max') {
+          if (v <= slider.options.min) { return; }
+          slider.update({max: v});
+        } else if (single) {
+          slider.update({from: v});
+        } else {
+          var from = slider.result.from, to = slider.result.to;
+          if (isFrom) { from = v; to = Math.max(to, v); } else { to = v; from = Math.min(from, v); }
+          slider.update({from: from, to: to});
+        }
+        input.trigger('change');
+      } else if (ev.key === 'Escape') {
+        done();
+      }
+    });
+    box.on('blur', done);
+  });
+
+  // send on release: hold back the change events of a drag and send one when it ends
+  function gate(wrapper) {
+    if (wrapper.hasAttribute('data-emit-while-sliding')) { return true; }
+    var input = $(wrapper).find('input.js-range-slider').first();
+    if (!input.length) { return false; }
+    var slider = input.data('ionRangeSlider');
+    var events = $._data(input[0], 'events');
+    if (!slider || !events || !events.change) { return false; }
+    if (input.data('heliconGated')) { return true; }
+    input.data('heliconGated', true);
+    events.change.forEach(function (h) {
+      var original = h.handler;
+      h.handler = function () {
+        if (slider.dragging && !input.data('heliconFlush')) { return; }
+        return original.apply(this, arguments);
+      };
+    });
+    var onFinish = slider.options.onFinish;
+    slider.update({
+      onFinish: function (data) {
+        input.data('heliconFlush', true);
+        input.trigger('change');
+        input.data('heliconFlush', false);
+        if (onFinish) { onFinish(data); }
+      }
+    });
+    return true;
+  }
+
+  function scan() {
+    document.querySelectorAll('.helicon-editable-slider').forEach(function (w) {
+      if (!w.__heliconGateTried || w.__heliconGateTried < 40) {
+        w.__heliconGateTried = (w.__heliconGateTried || 0) + 1;
+        if (gate(w)) { w.__heliconGateTried = 1000; }
+      }
+    });
+  }
+  new MutationObserver(scan).observe(document.documentElement, {childList: true, subtree: true});
+  $(document).on('shiny:connected shiny:value shiny:idle', scan);
+  setInterval(scan, 500);
+  scan();
+})();
+"""
+
+
+def range_slider(
+    id,
+    label,
+    min,
+    max,
+    value,
+    step=None,
+    width="100%",
+    emit_while_sliding=False,
+    **kwargs,
+):
+    """A two-handle slider whose numbers can also be typed in place.
+
+    Everything a Shiny range slider does is unchanged: drag a handle, or click
+    the bar, and ``input.<id>()`` is the ``(low, high)`` pair, and
+    ``ui.update_slider`` works on it. In addition, double-clicking the lower or
+    the upper number opens an editor on that number; Enter applies what was
+    typed and Escape, or clicking away, leaves the slider as it was. Where the
+    two numbers are close enough to be shown as one label, its left half is the
+    lower number and its right half the upper one (likewise when the two are equal). A lower number typed above
+    the upper one carries the upper one with it, and the other way round; both
+    are limited to the slider's ends. Double-clicking the smallest or the largest
+    value at the ends of the slider edits the end itself.
+
+    Parameters
+    ----------
+    id : str
+        Input id, as for ``shiny.ui.input_slider``.
+    label : str
+        The label shown above the slider.
+    min, max : float
+        The ends of the slider.
+    value : tuple of float
+        The initial ``(low, high)``.
+    step : float, optional
+        The step of the slider.
+    width : str, optional
+        CSS width. Defaults to ``"100%"``.
+    emit_while_sliding : bool, optional
+        By default the value is sent to the server when a drag ends, not all
+        along the way, so an app that redraws on each change is not asked to
+        while the handle is still moving; the numbers on the slider follow the
+        drag either way. True sends as Shiny's own slider does. Clicking the
+        bar, the keyboard, typed values and ``ui.update_slider`` always send at
+        once. Defaults to False.
+    **kwargs
+        Passed to ``shiny.ui.input_slider``.
+
+    Returns
+    -------
+    shiny.ui.Tag
+        A ``div`` holding the slider and the editor's script (which does its
+        work once per page however many sliders there are).
+    """
+    return _editable_slider(
+        id, label, min, max, value, step, width, emit_while_sliding, kwargs
+    )
+
+
+def slider(
+    id,
+    label,
+    min,
+    max,
+    value,
+    step=None,
+    width="100%",
+    emit_while_sliding=False,
+    **kwargs,
+):
+    """A single-value slider whose number can also be typed in place.
+
+    Like ``shiny.ui.input_slider`` with one handle: drag it, or click the bar,
+    and ``input.<id>()`` is the value; ``ui.update_slider`` works on it. In
+    addition, double-clicking the number opens an editor on it; Enter applies
+    what was typed and Escape, or clicking away, leaves the slider as it was. A
+    number beyond either end is limited to it, and double-clicking the smallest
+    or the largest value at the ends of the slider edits the end itself.
+
+    Parameters
+    ----------
+    id : str
+        Input id, as for ``shiny.ui.input_slider``.
+    label : str
+        The label shown above the slider.
+    min, max : float
+        The ends of the slider.
+    value : float
+        The initial value.
+    step : float, optional
+        The step of the slider.
+    width : str, optional
+        CSS width. Defaults to ``"100%"``.
+    emit_while_sliding : bool, optional
+        By default the value is sent to the server when a drag ends, not all
+        along the way, so an app that redraws on each change is not asked to
+        while the handle is still moving; the numbers on the slider follow the
+        drag either way. True sends as Shiny's own slider does. Clicking the
+        bar, the keyboard, typed values and ``ui.update_slider`` always send at
+        once. Defaults to False.
+    **kwargs
+        Passed to ``shiny.ui.input_slider``.
+
+    Returns
+    -------
+    shiny.ui.Tag
+        A ``div`` holding the slider and the editor's script (which does its
+        work once per page however many sliders there are).
+    """
+    return _editable_slider(
+        id, label, min, max, value, step, width, emit_while_sliding, kwargs
+    )
+
+
+def _editable_slider(
+    id, label, min, max, value, step, width, emit_while_sliding, kwargs
+):
+    from shiny import ui as core_ui
+
+    # one element, the script inside it, so that a layout that arranges its
+    # children (a grid of columns, say) sees one child per slider
+    return core_ui.div(
+        core_ui.input_slider(
+            id,
+            label,
+            min=min,
+            max=max,
+            value=value,
+            step=step,
+            width=width,
+            **kwargs,
+        ),
+        core_ui.tags.script(_SLIDER_EDIT_JS),
+        class_="helicon-editable-slider",
+        **({"data-emit-while-sliding": "true"} if emit_while_sliding else {}),
+    )
 
 
 def image_gallery(
@@ -615,11 +871,12 @@ def set_client_url_query_params(query_params):
 def encode_query_params(query_params):
     """Encode a query_params dict into a URL query string (no leading ``?``).
 
-    Keys with an empty string value are emitted bare (e.g. ``_inputs_``);
-    everything else is ``key=urlencoded_value``.  This is the encoding the
-    Shiny bookmark URL format expects, and it is shared by the browser URL
-    builder here and the ``/helicon/navigate`` endpoint of the web app so
-    that a display re-click reproduces the exact launch URL.
+    Keys with an empty string value are emitted bare; everything else is
+    ``key=urlencoded_value``, with commas, slashes and colons left as they are
+    (lists and file paths stay readable, the URL shorter). It is shared by the
+    browser URL builder here and the ``/helicon/navigate`` endpoint of the web
+    app so that a display re-click reproduces the exact launch URL, and it
+    matches how the page writes its bookmark URL (``helicon.webApps.bookmark``).
 
     Parameters
     ----------
@@ -629,7 +886,7 @@ def encode_query_params(query_params):
     Returns
     -------
     str
-        The encoded query string, e.g. ``_inputs_&helicon_tab=%22X%22``.
+        The encoded query string, e.g. ``tab=HILL&url=/data/classes.mrcs``.
     """
     import urllib.parse
 
@@ -638,7 +895,7 @@ def encode_query_params(query_params):
         if v == "":
             parts.append(k)
         else:
-            parts.append(f"{k}={urllib.parse.quote(str(v), safe='')}")
+            parts.append(f"{k}={urllib.parse.quote(str(v), safe=',/:')}")
     return "&".join(parts)
 
 

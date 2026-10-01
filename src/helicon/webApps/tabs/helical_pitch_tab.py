@@ -15,24 +15,34 @@ import plotly.io as pio
 import helicon
 from shiny import reactive, ui, module, req, render
 
+from .. import bookmark
 from ..lib.shared_state import ProjectState
 
 from ..lib import helical_pitch_compute as compute
 
 logger = logging.getLogger(__name__)
 
+_urls = {
+    "empiar-10940_job010": (
+        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_data.star",
+        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
+    )
+}
+_url_key = "empiar-10940_job010"
+
 BOOKMARK_DEFAULTS = {
     "mode_params": ("input_mode_params", "url"),
-    "url_params": ("url_params", ""),
+    "url_params": ("url_params", _urls[_url_key][0]),
     "mode_classes": ("input_mode_classes", "url"),
-    "url_classes": ("url_classes", ""),
+    "url_classes": ("url_classes", _urls[_url_key][1]),
     "ignore_blank": ("ignore_blank", True),
     "sort_abundance": ("sort_abundance", True),
     "auto_min_len": ("auto_min_len", True),
     "max_len": ("max_len", -1),
     "max_pair_dist": ("max_pair_dist", -1),
     "bins": ("bins", 150),
-    "min_len": ("min_len", 0),
+    # set from the data while "Auto-set minimal filament length" is on
+    "min_len": ("min_len", 0, bookmark.DERIVED),
     "rise": ("rise", 4.75),
 }
 
@@ -51,13 +61,12 @@ def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
     return ui.HTML(html)
 
 
-_url_key = "empiar-10940_job010"
-_urls = {
-    "empiar-10940_job010": (
-        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_data.star",
-        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
-    )
-}
+# The plots size themselves to their container, which has no height of its
+# own inside a layout column, so each is given one.
+_PLOT_BOX = "height: 340px; min-height: 340px; flex-shrink: 0; overflow: hidden;"
+
+
+_MIN_LEN_BOX = "hp_min_len_box"
 
 
 @module.ui
@@ -138,6 +147,15 @@ def helical_pitch_tab_ui():
                         "auto_min_len", "Auto-set minimal filament length", value=True
                     ),
                     ui.input_numeric(
+                        "rise",
+                        "Helical rise (\u00c5)",
+                        min=0.01,
+                        max=1000.0,
+                        value=4.75,
+                        step=0.01,
+                        update_on="blur",
+                    ),
+                    ui.input_numeric(
                         "max_len",
                         "Maximal length (\u00c5)",
                         min=-1,
@@ -170,18 +188,21 @@ def helical_pitch_tab_ui():
             "HelicalPitch: determine helical pitch/twist using 2D Classification info",
             style="font-weight: bold;",
         ),
-        ui.layout_columns(
-            ui.card(
+        ui.div(
+            ui.layout_columns(
                 ui.div(
-                    ui.output_ui("display_selected_images"),
-                    style="max-height: 40vh; overflow-y: auto; margin-bottom: 0; padding-bottom: 0;",
-                ),
-                ui.layout_columns(
                     ui.div(
-                        ui.output_ui("lengths_histogram"),
-                        style="margin-top: 0; padding-top: 0;",
+                        ui.output_ui("display_selected_images"),
+                        style="max-height: 40vh; overflow-y: auto; margin-bottom: 0; padding-bottom: 0;",
                     ),
-                    ui.layout_columns(
+                    ui.div(ui.output_ui("lengths_histogram"), style=_PLOT_BOX),
+                    # takes no room, and is never hidden itself, so that it
+                    # keeps running: it shows or hides the length box below
+                    ui.div(
+                        ui.output_ui("min_len_visibility"),
+                        style="height: 0; margin: 0; padding: 0;",
+                    ),
+                    ui.div(
                         ui.input_numeric(
                             "min_len",
                             "Minimal length (\u00c5)",
@@ -190,44 +211,36 @@ def helical_pitch_tab_ui():
                             step=1.0,
                             update_on="blur",
                         ),
-                        ui.input_numeric(
-                            "rise",
-                            "Helical rise (\u00c5)",
-                            min=0.01,
-                            max=1000.0,
-                            value=4.75,
-                            step=0.01,
-                            update_on="blur",
-                        ),
-                        col_widths=[6, 6],
-                        style="align-items: flex-end;",
+                        id=_MIN_LEN_BOX,
                     ),
-                    col_widths=[12, 12],
-                    style="align-items: flex-end;",
+                    ui.output_data_frame("helices_table"),
                 ),
-                ui.output_data_frame("helices_table"),
-            ),
-            ui.card(
-                ui.output_ui("pair_distances_histogram"),
-                ui.markdown(
-                    "**How to interpret the histogram:** An informative histogram "
-                    "should have clear peaks with equal spacing. If so, hover your "
-                    "mouse pointer over the first major peak off the origin to align "
-                    "the vertical lines well with the peaks. Once you have decided "
-                    "on the line position, read the hover text, which shows the twist "
-                    "values assuming the pair distance is the helical pitch (adjusted "
-                    "for the cyclic symmetries around the helical axis). You need to "
-                    "decide which cyclic symmetry and the corresponding twist should "
-                    "be used.\n\n"
-                    "If the histogram does not show clear peaks, it indicates that the "
-                    "Class2D quality is bad. You might consider changing the "
-                    "'Minimal length (\u00c5)' from 0 to a larger value (for example, "
-                    "1000 \u00c5) to improve the peaks in the histogram."
+                ui.div(
+                    ui.div(
+                        ui.output_ui("pair_distances_histogram"),
+                        style=_PLOT_BOX,
+                    ),
+                    ui.markdown(
+                        "**How to interpret the histogram:** An informative histogram "
+                        "should have clear peaks with equal spacing. If so, hover your "
+                        "mouse pointer over the first major peak off the origin to align "
+                        "the vertical lines well with the peaks. Once you have decided "
+                        "on the line position, read the hover text, which shows the twist "
+                        "values assuming the pair distance is the helical pitch (adjusted "
+                        "for the cyclic symmetries around the helical axis). You need to "
+                        "decide which cyclic symmetry and the corresponding twist should "
+                        "be used.\n\n"
+                        "If the histogram does not show clear peaks, it indicates that the "
+                        "Class2D quality is bad. You might consider changing the "
+                        "'Minimal length (\u00c5)' from 0 to a larger value (for example, "
+                        "1000 \u00c5) to improve the peaks in the histogram."
+                    ),
+                    ui.output_ui("download_section"),
+                    ui.output_ui("pair_distances_histogram_selected"),
                 ),
-                ui.output_ui("download_section"),
-                ui.output_ui("pair_distances_histogram_selected"),
+                col_widths=(5, 7),
             ),
-            col_widths=(5, 7),
+            style="overflow-y: auto; height: 100%;",
         ),
         ui.HTML(
             """
@@ -289,6 +302,11 @@ def helical_pitch_tab_ui():
 def helical_pitch_tab_server(input, output, session, project: ProjectState):
     params = reactive.value(None)
     data_all = reactive.value(None)
+
+    # Run is pressed for the user, when the tab starts, if both inputs are URLs;
+    # an upload needs a file the user has yet to choose, so nothing runs for it.
+    auto_run = reactive.value(0)
+
     abundance = reactive.value([])
     image_size = reactive.value(0)
 
@@ -298,6 +316,9 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     displayed_class_labels = reactive.value([])
 
     initial_selected_image_indices = reactive.value([0])
+    # bumped whenever the code, not the user, changes the selection, so that the
+    # gallery is redrawn even when the new selection equals the previous one
+    min_len_ready = reactive.value(False)
     selected_images = reactive.value([])
     selected_image_labels = reactive.value([])
 
@@ -312,7 +333,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     # ── Data loading ──
 
     @reactive.effect
-    @reactive.event(input.run)
+    @reactive.event(input.run, auto_run, ignore_none=False, ignore_init=True)
     def get_class2d_from_upload():
         req(input.input_mode_classes() == "upload")
         fileinfo = input.upload_classes()
@@ -335,7 +356,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         image_size.set(nx)
 
     @reactive.effect
-    @reactive.event(input.run)
+    @reactive.event(input.run, auto_run, ignore_none=False, ignore_init=True)
     def get_class2d_from_url():
         req(input.input_mode_classes() == "url")
         req(len(input.url_classes()) > 0)
@@ -358,7 +379,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         image_size.set(nx)
 
     @reactive.effect
-    @reactive.event(input.run)
+    @reactive.event(input.run, auto_run, ignore_none=False, ignore_init=True)
     def get_params_from_upload():
         req(input.input_mode_params() == "upload")
         fileinfo = input.upload_params()
@@ -383,7 +404,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             )
 
     @reactive.effect
-    @reactive.event(input.run)
+    @reactive.event(input.run, auto_run, ignore_none=False, ignore_init=True)
     def get_params_from_url():
         req(input.input_mode_params() == "url")
         url = input.url_params()
@@ -407,6 +428,27 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             )
 
     # ── Build class gallery ──
+
+    # created after the Run handlers, so that they see it change rather than
+    # its first value
+    auto_started = []
+
+    @reactive.effect
+    def _auto_run_at_start():
+        # the reads wait for the inputs to reach the server, and the effect
+        # goes again until they have; once is all it is for
+        if auto_started:
+            return
+        both_urls = (
+            input.input_mode_params() == "url"
+            and input.input_mode_classes() == "url"
+            and bool(input.url_params())
+            and bool(input.url_classes())
+        )
+        auto_started.append(True)
+        if both_urls:
+            with reactive.isolate():
+                auto_run.set(1)
 
     @reactive.effect
     @reactive.event(params, data_all, input.ignore_blank, input.sort_abundance)
@@ -448,23 +490,70 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         displayed_class_ids.set(included)
         displayed_class_images.set(images)
         displayed_class_title.set(
-            f"{len(included)}/{n} classes | {images[0].shape[1]}x{images[0].shape[0]} pixels | {apix} \u00c5/pixel"
+            f"{len(included)}/{n} classes | {_counts_text(int(i) + 1 for i in included)}"
+            f" | {images[0].shape[1]}x{images[0].shape[0]} pixels | {apix} \u00c5/pixel"
         )
         displayed_class_labels.set(image_labels)
 
     # ── Sidebar class selection ──
 
+    @reactive.calc
+    def _segment_filament():
+        """Filament number of every row of the Class2D parameters."""
+        p = params()
+        req(p is not None)
+        return (
+            p.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False)
+            .ngroup()
+            .values
+        )
+
+    def _counts_text(class_numbers):
+        """'N filaments | M segments' for the segments of these classes."""
+        p = params()
+        if p is None:
+            return ""
+        mask = p["rlnClassNumber"].astype(int).isin(list(class_numbers)).values
+        n_fil = len(np.unique(_segment_filament()[mask]))
+        return f"{n_fil:,} filaments | {int(mask.sum()):,} segments"
+
+    def _gallery(gallery_id, images, labels, label="", selection=False, initial=None):
+        """An image gallery, with the value of its input cleared on each draw."""
+        parts = helicon.shiny.image_gallery(
+            id=session.ns(gallery_id),
+            label=reactive.value(label),
+            images=reactive.value(images),
+            image_labels=reactive.value(labels),
+            image_size=reactive.value(128),
+            initial_selected_indices=reactive.value(initial or []),
+            enable_selection=selection,
+            allow_multiple_selection=selection,
+        )
+        if parts is None:
+            parts = ui.div()
+        elif isinstance(parts, tuple):
+            parts = ui.TagList(parts[0], *parts[1])
+        if selection and not initial:
+            # a redrawn gallery has nothing picked; the browser still holds the
+            # old value of its input until told otherwise
+            parts = ui.TagList(
+                parts,
+                ui.tags.script(
+                    f"Shiny.setInputValue('{session.ns(gallery_id)}', [], "
+                    "{priority: 'event'});"
+                ),
+            )
+        return parts
+
     @render.ui
     def select_classes_gallery():
-        return helicon.shiny.image_gallery(
-            id=session.ns("select_classes_inner"),
-            label=displayed_class_title,
-            images=displayed_class_images,
-            image_labels=displayed_class_labels,
-            image_size=reactive.value(128),
-            initial_selected_indices=initial_selected_image_indices,
-            enable_selection=True,
-            allow_multiple_selection=True,
+        return _gallery(
+            "select_classes_inner",
+            displayed_class_images(),
+            displayed_class_labels(),
+            label=displayed_class_title(),
+            selection=True,
+            initial=initial_selected_image_indices(),
         )
 
     @reactive.effect
@@ -485,7 +574,10 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     def display_selected_images():
         return helicon.shiny.image_gallery(
             id=session.ns("display_selected_image"),
-            label=reactive.value("Selected classe(s):"),
+            label=reactive.value(
+                f"{len(selected_images())} selected class(es) | "
+                + _counts_text(_selected_class_numbers())
+            ),
             images=selected_images,
             image_labels=selected_image_labels,
         )
@@ -495,6 +587,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(input.select_classes_inner, params)
     def get_selected_helices():
+        min_len_ready.set(False)
         req(params() is not None)
         req(image_size())
         req(len(abundance()))
@@ -509,6 +602,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         selected_helices.set((helices, filement_lengths, segments_count))
         if not input.auto_min_len():
             selected_helices_min_len.set((selected_helices(), input.min_len()))
+            min_len_ready.set(len(helices) > 0)
 
     @reactive.effect
     @reactive.event(selected_helices)
@@ -521,6 +615,13 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         min_len_tmp = int(min_len_tmp)
         ui.update_numeric("min_len", value=min_len_tmp)
         selected_helices_min_len.set((selected_helices(), min_len_tmp))
+        min_len_ready.set(len(helices) > 0)
+
+    @render.ui
+    def min_len_visibility():
+        if min_len_ready():
+            return None
+        return ui.tags.style(f"#{_MIN_LEN_BOX} {{ display: none; }}")
 
     @reactive.effect
     @reactive.event(input.min_len)
@@ -722,6 +823,10 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             )
 
         return download_ui
+
+    def _selected_class_numbers():
+        sel = input.select_classes_inner() or []
+        return [int(displayed_class_ids()[i]) + 1 for i in sel]
 
     # ── Pair distances for selected helices ──
 

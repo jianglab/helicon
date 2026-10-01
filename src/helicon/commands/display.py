@@ -173,6 +173,7 @@ from helicon.lib.gui.webapps import (  # noqa: E402
     _WEB_APP_INSTANCES,
     _WebAppState,
     _launch_denovo3d,
+    _launch_abinitio3d,
     _launch_helicalpitch,
     _launch_helicalprojection,
     _launch_hi3d,
@@ -2354,6 +2355,9 @@ def main(args: argparse.Namespace) -> None:
             return
         if mode == "denovo3D":
             _launch_denovo3d(path, new_window=new_window)
+            return
+        if mode == "abInitio3D":
+            _launch_abinitio3d(path, new_window=new_window)
             return
         if mode == "whereIsMyClass":
             _launch_whereismyclass(path, new_window=new_window)

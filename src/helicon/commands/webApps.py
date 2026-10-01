@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""A Helicon Web app with seven analytical tools as tabs: whereIsMyClass, helicalProjection, HILL, helicalPitch, denovo3D, helicalLattice, and HI3D"""
+"""A Helicon Web app with eight analytical tools as tabs: whereIsMyClass, helicalProjection, HILL, helicalPitch, denovo3D, abinitio3D, helicalLattice, and HI3D"""
 
 import argparse
 import logging

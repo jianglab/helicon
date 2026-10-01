@@ -97,9 +97,18 @@ def _emdb_link_script():
     )
 
 
+_urls = {
+    "empiar-10940_job010": (
+        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
+        "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-14046/map/emd_14046.map.gz",
+    )
+}
+_url_key = "empiar-10940_job010"
+
 BOOKMARK_DEFAULTS = {
     "mode_images": ("input_mode_images", "url"),
-    "url_images": ("url_images", ""),
+    "url_images": ("url_images", _urls[_url_key][0]),
+    "url_map": ("url_map", _urls[_url_key][1]),
     "mode_maps": ("input_mode_maps", "url"),
     "ignore_blank": ("ignore_blank", True),
     "show_pdb": ("show_pdb", False),
@@ -117,14 +126,6 @@ BOOKMARK_DEFAULTS = {
     "plot_scores": ("plot_scores", True),
     "hide_query": ("hide_query_image", False),
 }
-
-_urls = {
-    "empiar-10940_job010": (
-        "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_classes.mrcs",
-        "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-14046/map/emd_14046.map.gz",
-    )
-}
-_url_key = "empiar-10940_job010"
 
 
 @module.ui
@@ -1028,7 +1029,7 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                             style="font-weight: bold; margin-bottom: 4px;",
                         ),
                         ui.layout_columns(
-                            ui.input_slider(
+                            helicon.shiny.slider(
                                 _pi_id("rot", key, t.generation),
                                 "Rotation (°)",
                                 min=-90,
@@ -1036,7 +1037,7 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                                 value=round(min(max(t.rotation, -90.0), 90.0), 1),
                                 step=0.1,
                             ),
-                            ui.input_slider(
+                            helicon.shiny.slider(
                                 _pi_id("threshold", key, t.generation),
                                 "Threshold",
                                 min=round(v_min, 3),
@@ -1044,7 +1045,7 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                                 value=round(min(max(t.threshold, v_min), v_max), 3),
                                 step=round(v_step, 3),
                             ),
-                            ui.input_slider(
+                            helicon.shiny.slider(
                                 _pi_id("vcrop", key, t.generation),
                                 "Vertical crop size (px)",
                                 min=32,
@@ -1052,7 +1053,7 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                                 value=int(min(max(t.crop_size, 32), ny_i)),
                                 step=2,
                             ),
-                            ui.input_slider(
+                            helicon.shiny.slider(
                                 _pi_id("dy", key, t.generation),
                                 "Vertical shift (px)",
                                 min=-shift_limit,

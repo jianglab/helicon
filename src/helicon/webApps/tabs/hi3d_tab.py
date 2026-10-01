@@ -17,6 +17,7 @@ import numpy as np
 import helicon
 from shiny import reactive, render, ui, module, req
 
+from .. import bookmark
 from ..lib.shared_state import ProjectState
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,21 @@ _DEFAULT_URL = (
     "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/"
     "EMD-10499/map/emd_10499.map.gz"
 )
+
+# Read from the loaded map, rather than chosen: in a bookmark only once edited.
+_DERIVED = bookmark.DERIVED
+
+BOOKMARK_DEFAULTS = {
+    "input_mode": ("hi3d_input_mode", "emd-xxxxx"),
+    "url": ("hi3d_url_map", _DEFAULT_URL),
+    "emd_id": ("hi3d_emd_id", "emd-10499"),
+    "da": ("hi3d_da", 1.0),
+    "dz": ("hi3d_dz", 1.0),
+    "peak_width": ("hi3d_peak_width", 9.0),
+    "peak_height": ("hi3d_peak_height", 9.0),
+    "radius": ("hi3d_radius", (0.0, 0.0), _DERIVED),
+    "npeaks": ("hi3d_npeaks", 0, _DERIVED),
+}
 
 
 def lattice_line_segments(twist, phase_degree, rise, y_min, y_max):
@@ -174,7 +190,7 @@ def hi3d_tab_ui():
                                     selected="0",
                                     inline=True,
                                 ),
-                                ui.input_slider(
+                                helicon.shiny.slider(
                                     "hi3d_section_index",
                                     "Choose a section to display:",
                                     min=-1,
@@ -202,11 +218,8 @@ def hi3d_tab_ui():
                         # ── Inbox 3: Radial profile + range ──
                         ui.div(
                             ui.output_ui("hi3d_radial_profile"),
+                            ui.output_ui("hi3d_radial_range"),
                             ui.accordion(
-                                ui.accordion_panel(
-                                    "Select radial range",
-                                    ui.output_ui("hi3d_radial_range"),
-                                ),
                                 ui.accordion_panel(
                                     "Download data",
                                     ui.download_button(
@@ -365,86 +378,22 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     section_axis = reactive.value(0)  # 0=X/Y, 1=X, 2=Y, 3=Z
     section_index = reactive.value(0)
     apix_from_file = reactive.value(1.0)
-    # ── URL query parameter init ─────────────────────────────
-    # Set by _init_from_query_once so _auto_load_default_map can
-    # skip the default map when a display button provides a file.
-    skip_default_map = reactive.value(False)
 
-    # ── URL query parameter init ─────────────────────────────
-    # Set by _init_from_query_once so _auto_load_default_map can
-    # skip the default map when a display button provides a file.
-    skip_default_map = reactive.value(False)
-
-    @reactive.effect(priority=10)
-    async def _init_from_query_once():
-        qs = session.clientdata.url_search()
-        from urllib.parse import parse_qs
-
-        qp = {
-            k: v[0] if len(v) == 1 else v for k, v in parse_qs(qs.lstrip("?")).items()
-        }
-        url_img = qp.get("img_file_url")
-        if url_img:
-            skip_default_map.set(True)
-            import asyncio
-
-            try:
-                ui.update_radio_buttons("hi3d_input_mode", selected="url")
-                ui.update_text("hi3d_url_map", value=url_img)
-            except Exception:
-                pass
-            try:
-                result = await asyncio.to_thread(_download_url, url_img)
-                _set_map(*result)
-            except Exception as e:
-                ui.modal_show(
-                    ui.modal(
-                        str(e),
-                        title="Download failed",
-                        easy_close=True,
-                        footer=None,
-                    )
-                )
-
-    @reactive.effect(priority=10)
-    async def _init_from_query_once():
-        qs = session.clientdata.url_search()
-        from urllib.parse import parse_qs
-
-        qp = {
-            k: v[0] if len(v) == 1 else v for k, v in parse_qs(qs.lstrip("?")).items()
-        }
-        url_img = qp.get("img_file_url")
-        if url_img:
-            skip_default_map.set(True)
-            import asyncio
-
-            try:
-                ui.update_radio_buttons("hi3d_input_mode", selected="url")
-                ui.update_text("hi3d_url_map", value=url_img)
-            except Exception:
-                pass
-            try:
-                result = await asyncio.to_thread(_download_url, url_img)
-                _set_map(*result)
-            except Exception as e:
-                ui.modal_show(
-                    ui.modal(
-                        str(e),
-                        title="Download failed",
-                        easy_close=True,
-                        footer=None,
-                    )
-                )
-
-    # ── Auto-load default map on startup ─────────────────────
     @reactive.effect
     async def _auto_load_default_map():
-        if map_data() is not None or skip_default_map():
+        # The EMDB entry the input names, emd-10499 unless a bookmark names
+        # another; a map from a URL or an upload is loaded by its own effect.
+        if map_data() is not None:
             return
-        logger.debug("[HI3D] Auto-loading default map emd-10499")
+        with reactive.isolate():
+            if input.hi3d_input_mode() != "emd-xxxxx":
+                return
+            emd_id = (input.hi3d_emd_id() or "").lower().replace("emd-", "").strip()
+        if not emd_id:
+            return
+        logger.debug("[HI3D] Auto-loading map emd-%s", emd_id)
         try:
-            result = await asyncio.to_thread(_download_emd, "10499")
+            result = await asyncio.to_thread(_download_emd, emd_id)
             _set_map(*result)
         except Exception:
             pass  # silent failure on startup
@@ -880,12 +829,12 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         return ui.HTML(script + div)
 
     @reactive.effect
-    @reactive.event(input.hi3d_rmin, input.hi3d_rmax)
+    @reactive.event(input.hi3d_radius)
     def _sync_radial_range():
         """Carry the typed radial range into the values everything else reads.
 
-        Without this the rmin/rmax inputs were inert: nothing read
-        ``input.hi3d_rmin`` anywhere, so the markers on the radial profile and
+        Without this the radius range was inert: nothing read
+        ``input.hi3d_radius`` anywhere, so the markers on the radial profile and
         the cylindrical projection that follows kept the defaults computed when
         the map loaded.
 
@@ -896,8 +845,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         the user's entry vanishes as they watch.
         """
         try:
-            lo = float(input.hi3d_rmin())
-            hi = float(input.hi3d_rmax())
+            lo, hi = (float(v) for v in input.hi3d_radius())
         except (SilentException, TypeError, ValueError):
             return
         if lo != rmin_val():
@@ -963,20 +911,15 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         apix = map_apix()
         rmax_half = min(data.shape[1], data.shape[2]) / 2 * apix
         return ui.div(
-            ui.input_numeric(
-                "hi3d_rmin",
-                "Inner radius (Å)",
-                value=rmin_val(),
+            helicon.shiny.range_slider(
+                "hi3d_radius",
+                "Radial range: inner \u2013 outer radius (\u00c5)",
                 min=0.0,
                 max=rmax_half,
-                step=1.0,
-            ),
-            ui.input_numeric(
-                "hi3d_rmax",
-                "Outer radius (Å)",
-                value=rmax_val(),
-                min=0.0,
-                max=rmax_half,
+                value=(
+                    min(max(rmin_val(), 0.0), rmax_half),
+                    min(max(rmax_val(), 0.0), rmax_half),
+                ),
                 step=1.0,
             ),
         )
@@ -1014,24 +957,22 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         nz_cp = cp.shape[0]
         z_half = round(nz_cp // 2 * dz, 1)
         return ui.div(
-            ui.input_numeric(
-                "hi3d_ang_min",
-                "Minimal angle (°)",
-                value=-180.0,
+            helicon.shiny.range_slider(
+                "hi3d_angle",
+                "Angular range: minimal \u2013 maximal angle (\u00b0)",
                 min=-180.0,
                 max=180.0,
+                value=(-180.0, 180.0),
                 step=1.0,
             ),
-            ui.input_numeric(
-                "hi3d_ang_max",
-                "Maximal angle (°)",
-                value=180.0,
-                min=-180.0,
-                max=180.0,
+            helicon.shiny.range_slider(
+                "hi3d_z",
+                "Axial range: minimal \u2013 maximal z (\u00c5)",
+                min=-z_half,
+                max=z_half,
+                value=(-z_half, z_half),
                 step=1.0,
             ),
-            ui.input_numeric("hi3d_z_min", "Minimal z (Å)", value=-z_half, step=1.0),
-            ui.input_numeric("hi3d_z_max", "Maximal z (Å)", value=z_half, step=1.0),
         )
 
     # ── Npeaks UI ───────────────────────────────────────────
@@ -1056,7 +997,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         input.hi3d_dz,
         input.hi3d_peak_width,
         input.hi3d_peak_height,
-        # The reactive values, NOT input.hi3d_rmin/rmax. Those inputs live in a
+        # The reactive values, NOT input.hi3d_radius. Those inputs live in a
         # panel that renders only once a map and its radial profile exist, so at
         # first load they do not exist at all -- and naming a missing input here
         # silences the whole effect, which meant the indexing never ran and the
@@ -1101,10 +1042,8 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
             z_min = -nz_cp // 2 * dz
             z_max = nz_cp // 2 * dz
             try:
-                ang_min = input.hi3d_ang_min()
-                ang_max = input.hi3d_ang_max()
-                z_min = input.hi3d_z_min()
-                z_max = input.hi3d_z_max()
+                ang_min, ang_max = input.hi3d_angle()
+                z_min, z_max = input.hi3d_z()
             except Exception:
                 ang_min = -180.0
                 ang_max = 180.0
@@ -1246,10 +1185,8 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         fig.sizing_mode = "stretch_width"
         # Draw ROI box if needed
         try:
-            ang_min = input.hi3d_ang_min()
-            ang_max = input.hi3d_ang_max()
-            z_min = input.hi3d_z_min()
-            z_max = input.hi3d_z_max()
+            ang_min, ang_max = input.hi3d_angle()
+            z_min, z_max = input.hi3d_z()
             draw = not (ang_min == -180 and ang_max == 180)
             if draw:
                 if ang_min < ang_max:

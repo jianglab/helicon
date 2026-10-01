@@ -38,6 +38,7 @@ except Exception:
     hill = None
 
 # helicon.get_images_from_url does not exist; use the shared webApps lib.
+from .. import bookmark
 from ..lib import denovo3d_pipeline
 
 logger = logging.getLogger(__name__)
@@ -46,15 +47,22 @@ logger = logging.getLogger(__name__)
 
 MODULE_PREFIX = "hill"
 
+# Worked out from the loaded image (its pixel size, the filament's diameter,
+# the rotation and shift that straighten and centre it) rather than chosen:
+# in a bookmark only once edited.
+_DERIVED = bookmark.DERIVED
+
 BOOKMARK_DEFAULTS = {
-    "input_mode": ("hill_input_mode", "url"),
+    "input_mode": ("hill_input_mode_params", "2"),
+    "url": ("hill_img_file_url", "https://tinyurl.com/y5tq9fqa"),
+    "is_3d": ("hill_is_3d", False),
     "twist": ("hill_twist", 29.40),
     "rise": ("hill_rise", 21.92),
     "csym": ("hill_csym", 6),
-    "diameter": ("hill_diameter", 155.2),
-    "apix": ("hill_apix", 2.3438),
-    "cutoff_res_x": ("hill_cutoff_res_x", 7.03),
-    "cutoff_res_y": ("hill_cutoff_res_y", 4.69),
+    "diameter": ("hill_diameter", 155.2, _DERIVED),
+    "apix": ("hill_apix", 2.3438, _DERIVED),
+    "cutoff_res_x": ("hill_cutoff_res_x", 7.03, _DERIVED),
+    "cutoff_res_y": ("hill_cutoff_res_y", 4.69, _DERIVED),
     "log_amp": ("hill_log_amp", True),
     "pnx": ("hill_pnx", 512),
     "pny": ("hill_pny", 1024),
@@ -67,9 +75,9 @@ BOOKMARK_DEFAULTS = {
     "use_twist_pitch": ("hill_use_twist_pitch", "Twist"),
     "out_of_plane_tilt": ("hill_out_of_plane_tilt", 0.0),
     "input_type": ("hill_input_type", "Image"),
-    "angle": ("hill_angle", 0.0),
-    "dx": ("hill_dx", 0.0),
-    "dy": ("hill_dy", 0.0),
+    "angle": ("hill_angle", 0.0, _DERIVED),
+    "dx": ("hill_dx", 0.0, _DERIVED),
+    "dy": ("hill_dy", 0.0, _DERIVED),
 }
 
 _INIT_TWIST = 29.40
@@ -100,19 +108,13 @@ def _update_with_apix_from_file(apix: float) -> None:
     cutoff_res_x, cutoff_res_y = _resolution_limits_from_apix(apix)
     nyquist_res = cutoff_res_y
     ui.update_numeric("hill_apix", value=round(apix, 4))
-    ui.update_numeric(
-        "hill_cutoff_res_x", value=cutoff_res_x, min=nyquist_res
-    )
-    ui.update_numeric(
-        "hill_cutoff_res_y", value=cutoff_res_y, min=nyquist_res
-    )
+    ui.update_numeric("hill_cutoff_res_x", value=cutoff_res_x, min=nyquist_res)
+    ui.update_numeric("hill_cutoff_res_y", value=cutoff_res_y, min=nyquist_res)
 
 
 # Default 2D image stack pre-filled in the URL input so the field is not
 # blank on launch.
-_DEFAULT_URL = (
-    "https://tinyurl.com/y5tq9fqa"
-)
+_DEFAULT_URL = BOOKMARK_DEFAULTS["url"][1]
 
 
 # ── UI ────────────────────────────────────────────────────────────
@@ -122,7 +124,8 @@ _DEFAULT_URL = (
 def hill_tab_ui():
     return ui.page_fillable(
         bokeh_dependency(),
-        ui.tags.style("""
+        ui.tags.style(
+            """
         .hill-scrollable-sidebar {
             height: 100%; max-height: 100%; overflow-y: auto;
             border: 1px solid #ccc; padding: 10px;
@@ -132,7 +135,8 @@ def hill_tab_ui():
         .hill-inline-box input { width: 4em; margin-left: 1em; }
         .hill-inline-box .form-group { display: table-row; }
         #hill-hill_main_plots { overflow-y: auto; }
-        """),
+        """
+        ),
         ui.layout_sidebar(
             ui.sidebar(
                 ui.navset_pill(
@@ -599,8 +603,6 @@ def hill_tab_server(input, output, session, project: ProjectState):
     # Error display state
     error_msg = reactive.value("")
 
-    init_done = reactive.value(False)
-
     # ── Bokeh plot objects ──────────────────────────────────────
     init_img = np.ones((_INIT_NY, _INIT_NX))
     pwr_init = np.zeros((_INIT_PNY, _INIT_PNX))
@@ -1024,138 +1026,6 @@ def hill_tab_server(input, output, session, project: ProjectState):
     fig_acf.js_on_event(DoubleTap, _toggle_legend_acf)
 
     # ── Reactive effects ────────────────────────────────────────
-
-    @reactive.effect(priority=1000)
-    def _init_from_query_once():
-        if init_done():
-            return
-        init_done.set(True)
-        qs = session.clientdata.url_search()
-        from urllib.parse import parse_qs
-
-        qp = {
-            k: v[0] if len(v) == 1 else v for k, v in parse_qs(qs.lstrip("?")).items()
-        }
-
-        url_twist = qp.get("twist")
-        url_rise = qp.get("rise")
-        if url_twist and url_rise:
-            try:
-                ui.update_numeric("hill_twist", value=float(url_twist))
-                ui.update_numeric("hill_rise", value=float(url_rise))
-            except ValueError:
-                pass
-        url_csym = qp.get("csym")
-        if url_csym:
-            try:
-                ui.update_numeric("hill_csym", value=int(url_csym))
-            except ValueError:
-                pass
-        url_diameter = qp.get("filament_diameter")
-        if url_diameter:
-            try:
-                ui.update_numeric("hill_diameter", value=float(url_diameter))
-            except ValueError:
-                pass
-        url_input_mode = qp.get("input_mode")
-        if url_input_mode:
-            try:
-                ui.update_radio_buttons(
-                    "hill_input_mode_params", selected=url_input_mode
-                )
-            except Exception:
-                pass
-        url_input_type = qp.get("input_type")
-        if url_input_type:
-            try:
-                ui.update_radio_buttons("hill_input_type", selected=url_input_type)
-            except Exception:
-                pass
-        url_apix = qp.get("apix")
-        if url_apix:
-            try:
-                apix = float(url_apix)
-                apix_from_file.set(apix)
-                _update_with_apix_from_file(apix)
-            except ValueError:
-                pass
-        url_rot = qp.get("rotate")
-        if url_rot:
-            try:
-                ui.update_numeric("hill_angle", value=float(url_rot))
-            except ValueError:
-                pass
-        url_dx = qp.get("dx")
-        if url_dx:
-            try:
-                ui.update_numeric("hill_dx", value=float(url_dx))
-            except ValueError:
-                pass
-        url_log = qp.get("log_amp")
-        if url_log:
-            try:
-                ui.update_checkbox("hill_log_amp", value=bool(int(url_log)))
-            except ValueError:
-                pass
-        # Load a file path provided via the display button query string.
-        url_img = qp.get("img_file_url")
-        if url_img:
-            ui.update_text("hill_img_file_url", value=url_img)
-            try:
-                from ..lib import denovo3d_pipeline
-
-                data, apix = denovo3d_pipeline.get_images_from_url(url_img)
-                input_data.set(data)
-                apix_from_file.set(apix)
-                _update_with_apix_from_file(apix)
-                _update_image_dims_from_input_data()
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).error(
-                    "Failed to load image from query path %s: %s",
-                    url_img,
-                    e,
-                    exc_info=True,
-                )
-                ui.modal_show(
-                    ui.modal(
-                        f"Failed to load: {e}",
-                        title="Error",
-                        easy_close=True,
-                        footer=None,
-                    )
-                )
-        # Replace the default URL with a file path passed from the display
-        # button via the query string, then send it as a server-side input
-        # message so _load_input_data_from_url picks it up (ignore_init
-        # suppresses the initial ui.update_text value).
-        url_img = qp.get("img_file_url")
-        if url_img:
-            ui.update_text("hill_img_file_url", value=url_img)
-            # Load the file immediately instead of waiting for the reactive
-            # event (which has ignore_init=True and would skip this).
-            try:
-                data, apix = denovo3d_pipeline.get_images_from_url(url_img)
-                input_data.set(data)
-                apix_from_file.set(apix)
-                _update_with_apix_from_file(apix)
-                _update_image_dims_from_input_data()
-            except Exception as e:
-                logger.error(
-                    "Failed to load image from query path %s: %s",
-                    url_img,
-                    e,
-                    exc_info=True,
-                )
-                ui.modal_show(
-                    ui.modal(
-                        f"Failed to load: {e}",
-                        title="Error",
-                        easy_close=True,
-                        footer=None,
-                    )
-                )
 
     # ── Re-sizer ─────────────────────────────────────────────────
     # Resize only when plot dimension inputs or visibility change.
@@ -1773,11 +1643,11 @@ def hill_tab_server(input, output, session, project: ProjectState):
     @reactive.event(input.hill_is_3d)
     def _clear_display_for_3d():
         if input.hill_is_3d():
-            ui.update_numeric("hill_angle", value=0.0)
-            ui.update_numeric("hill_dx", value=0.0)
-            ui.update_numeric("hill_dy", value=0.0)
-            ui.update_numeric("hill_mask_radius", value=0.0)
-            ui.update_numeric("hill_mask_len", value=100.0)
+            ui.update_slider("hill_angle", value=0.0)
+            ui.update_slider("hill_dx", value=0.0)
+            ui.update_slider("hill_dy", value=0.0)
+            ui.update_slider("hill_mask_radius", value=0.0)
+            ui.update_slider("hill_mask_len", value=100.0)
 
     @reactive.effect
     @reactive.event(input_data, input.hill_is_3d)
@@ -1818,11 +1688,11 @@ def hill_tab_server(input, output, session, project: ProjectState):
                     dy_val = round(dy_auto * input.hill_apix(), 2)
                     mr = round(diameter_auto / 2 * input.hill_apix(), 2)
                     ml = 90.0
-                    ui.update_numeric("hill_angle", value=angle)
-                    ui.update_numeric("hill_dx", value=dx_val)
-                    ui.update_numeric("hill_dy", value=dy_val)
-                    ui.update_numeric("hill_mask_radius", value=mr)
-                    ui.update_numeric("hill_mask_len", value=ml)
+                    ui.update_slider("hill_angle", value=angle)
+                    ui.update_slider("hill_dx", value=dx_val)
+                    ui.update_slider("hill_dy", value=dy_val)
+                    ui.update_slider("hill_mask_radius", value=mr)
+                    ui.update_slider("hill_mask_len", value=ml)
                     if angle or dx_val or dy_val or input.hill_negate():
                         img0 = hill.transform_2d_image(
                             img0,
@@ -1867,12 +1737,12 @@ def hill_tab_server(input, output, session, project: ProjectState):
         mode = input.hill_input_type()
         if mode in ("PS", "PD") or input.hill_is_3d():
             if not input.hill_inhibit_update():
-                ui.update_numeric("hill_angle", value=0.0)
-                ui.update_numeric("hill_dx", value=0.0)
-                ui.update_numeric("hill_dy", value=0.0)
+                ui.update_slider("hill_angle", value=0.0)
+                ui.update_slider("hill_dx", value=0.0)
+                ui.update_slider("hill_dy", value=0.0)
         else:
             if input.hill_inhibit_update():
-                ui.update_numeric("hill_mask_len", value=90.0)
+                ui.update_slider("hill_mask_len", value=90.0)
                 ui.update_checkbox("hill_inhibit_update", value=False)
             else:
                 valid_indices = [i for i in indices if i < len(all_imgs)]
@@ -1892,15 +1762,15 @@ def hill_tab_server(input, output, session, project: ProjectState):
                             dy_val = round(dy_auto * input.hill_apix(), 2)
                             mr = round(diameter_auto / 2 * input.hill_apix(), 2)
                             ml = 90.0
-                            ui.update_numeric("hill_angle", value=angle)
+                            ui.update_slider("hill_angle", value=angle)
 
-                            ui.update_numeric("hill_dx", value=dx_val)
+                            ui.update_slider("hill_dx", value=dx_val)
 
-                            ui.update_numeric("hill_dy", value=dy_val)
+                            ui.update_slider("hill_dy", value=dy_val)
 
-                            ui.update_numeric("hill_mask_radius", value=mr)
+                            ui.update_slider("hill_mask_radius", value=mr)
 
-                            ui.update_numeric("hill_mask_len", value=ml)
+                            ui.update_slider("hill_mask_len", value=ml)
 
                         else:
                             saved = avg_ps_pd_main_in_df()[sel_idx]
@@ -1909,15 +1779,15 @@ def hill_tab_server(input, output, session, project: ProjectState):
                             dy_val = saved["dy"]
                             mr = saved["mask_radius"]
                             ml = saved["mask_len"]
-                            ui.update_numeric("hill_angle", value=angle)
+                            ui.update_slider("hill_angle", value=angle)
 
-                            ui.update_numeric("hill_dx", value=dx_val)
+                            ui.update_slider("hill_dx", value=dx_val)
 
-                            ui.update_numeric("hill_dy", value=dy_val)
+                            ui.update_slider("hill_dy", value=dy_val)
 
-                            ui.update_numeric("hill_mask_radius", value=mr)
+                            ui.update_slider("hill_mask_radius", value=mr)
 
-                            ui.update_numeric("hill_mask_len", value=ml)
+                            ui.update_slider("hill_mask_len", value=ml)
 
                         # apply transform with local params
                         temp = chosen[0].astype(np.float64)
@@ -1986,11 +1856,11 @@ def hill_tab_server(input, output, session, project: ProjectState):
         if record is None:
             return
         ui.update_numeric("hill_apix", value=record["apix"])
-        ui.update_numeric("hill_angle", value=record["angle"])
-        ui.update_numeric("hill_dx", value=record["dx"])
-        ui.update_numeric("hill_dy", value=record["dy"])
-        ui.update_numeric("hill_mask_radius", value=record["mask_radius"])
-        ui.update_numeric("hill_mask_len", value=record["mask_len"])
+        ui.update_slider("hill_angle", value=record["angle"])
+        ui.update_slider("hill_dx", value=record["dx"])
+        ui.update_slider("hill_dy", value=record["dy"])
+        ui.update_slider("hill_mask_radius", value=record["mask_radius"])
+        ui.update_slider("hill_mask_len", value=record["mask_len"])
         ui.update_checkbox("hill_negate", value=bool(record.get("negate")))
         img = data_all_2d()[valid[curr_idx]]
         hill.update_image_figure(
@@ -2353,50 +2223,48 @@ def hill_tab_server(input, output, session, project: ProjectState):
                         step=0.01,
                         update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_angle",
                         "Rotate (°)",
-                        value=0.0,
                         min=-180.0,
                         max=180.0,
+                        value=0.0,
                         step=1.0,
-                        update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_dx",
                         "Shift X (Å)",
+                        min=-max(1.0, nx_curr_img() * apix_from_file()),
+                        max=max(1.0, nx_curr_img() * apix_from_file()),
                         value=0.0,
-                        min=-nx_curr_img() * apix_from_file(),
-                        max=nx_curr_img() * apix_from_file(),
                         step=1.0,
-                        update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_dy",
                         "Shift Y (Å)",
+                        min=-max(1.0, ny_curr_img() * apix_from_file()),
+                        max=max(1.0, ny_curr_img() * apix_from_file()),
                         value=0.0,
-                        min=-ny_curr_img() * apix_from_file(),
-                        max=ny_curr_img() * apix_from_file(),
                         step=1.0,
-                        update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_mask_radius",
-                        "Mask radius (Å)",
-                        value=mask_radius_auto(),
-                        min=1.0,
-                        max=nx_curr_img() / 2 * apix_from_file(),
+                        "Mask radius (Å, 0: no mask)",
+                        min=0.0,
+                        max=max(1.0, nx_curr_img() / 2 * apix_from_file()),
+                        value=min(
+                            max(mask_radius_auto(), 0.0),
+                            max(1.0, nx_curr_img() / 2 * apix_from_file()),
+                        ),
                         step=1.0,
-                        update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_mask_len",
-                        "Mask length (%)",
-                        value=mask_len_percent_auto(),
-                        min=10.0,
+                        "Mask length (%, 0: no mask)",
+                        min=0.0,
                         max=100.0,
+                        value=min(max(mask_len_percent_auto(), 0.0), 100.0),
                         step=1.0,
-                        update_on="blur",
                     ),
                     col_widths=6,
                     style="align-items: flex-end;",
@@ -2414,32 +2282,29 @@ def hill_tab_server(input, output, session, project: ProjectState):
                         step=0.01,
                         update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_angle",
                         "Rotate (°)",
-                        value=0.0,
                         min=-180.0,
                         max=180.0,
+                        value=0.0,
                         step=1.0,
-                        update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_dx",
                         "Shift X (Å)",
+                        min=-max(1.0, nx_curr_img() * apix_from_file()),
+                        max=max(1.0, nx_curr_img() * apix_from_file()),
                         value=0.0,
-                        min=-nx_curr_img() * apix_from_file(),
-                        max=nx_curr_img() * apix_from_file(),
                         step=1.0,
-                        update_on="blur",
                     ),
-                    ui.input_numeric(
+                    helicon.shiny.slider(
                         "hill_dy",
                         "Shift Y (Å)",
+                        min=-max(1.0, ny_curr_img() * apix_from_file()),
+                        max=max(1.0, ny_curr_img() * apix_from_file()),
                         value=0.0,
-                        min=-ny_curr_img() * apix_from_file(),
-                        max=ny_curr_img() * apix_from_file(),
                         step=1.0,
-                        update_on="blur",
                     ),
                     col_widths=6,
                     style="align-items: flex-end;",
@@ -3431,7 +3296,8 @@ def _setup_helix_control_js(
     )
     restore_callback = CustomJS(
         args=args,
-        code=_HELIX_CONTROL_JS + """
+        code=_HELIX_CONTROL_JS
+        + """
         ensure_state();
         const d = controls.data;
         const revision = d.revision == null ? 0 : d.revision[0];
@@ -3460,13 +3326,15 @@ def _setup_helix_control_js(
         for control in pair:
             preview_callback = CustomJS(
                 args={**args, "origin": origin, "control": control},
-                code=_HELIX_CONTROL_JS + """
+                code=_HELIX_CONTROL_JS
+                + """
                 preview_value(origin, control.value);
             """,
             )
             commit_callback = CustomJS(
                 args={**args, "origin": origin, "control": control},
-                code=_HELIX_CONTROL_JS + """
+                code=_HELIX_CONTROL_JS
+                + """
                 // Compilation or event scheduling can occasionally let the final
                 // callback run before the last preview callback.
                 if (!preview_value(origin, control.value)) return;

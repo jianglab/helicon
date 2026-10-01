@@ -26,7 +26,7 @@ class TestOneKindOfCard:
     def test_every_control_is_a_slider(self):
         card = _body("hp_per_image_transform_ui", "def _auto_transform")
         assert "ui.input_numeric" not in card
-        assert card.count("ui.input_slider") == 4
+        assert card.count("helicon.shiny.slider") == 4
         for kind in ("rot", "threshold", "vcrop", "dy"):
             assert '_pi_id("%s", key, t.generation)' % kind in card
 
