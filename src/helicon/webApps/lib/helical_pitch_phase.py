@@ -711,6 +711,65 @@ def synthetic_labels(pairs, period, n_classes, noise=0.3, rng=None):
     return labels
 
 
+# The pairs handed to the processes of _estimate_periods; they inherit it when
+# forked rather than receiving a copy.
+_POOL_PAIRS = []
+
+
+def _estimate_one(task):
+    """:func:`estimate_period` of ``_POOL_PAIRS[0]``, one BLAS thread."""
+    from threadpoolctl import threadpool_limits
+
+    pairs = _POOL_PAIRS[0]
+    task = dict(task)
+    counts = task.pop("filament_counts", None)
+    if counts is not None:
+        task["pair_weights"] = counts[pairs.pair_filament].astype(float)
+    with threadpool_limits(limits=1, user_api="blas"):
+        return estimate_period(pairs, **task)["period"]
+
+
+def _pool_workers(pairs, n_tasks):
+    """Processes for ``n_tasks`` period fits: the free CPUs, as memory allows.
+
+    Each fit bins every pair on its own, which takes about 40 bytes a pair.
+    """
+    try:
+        import helicon
+
+        gb = max(0.1, 40.0 * len(pairs.D) / 1024**3)
+        cpu = min(int(helicon.available_cpu()), int(helicon.available_cpu(gb)))
+    except Exception:
+        cpu = 1
+    return max(1, min(cpu, int(n_tasks)))
+
+
+def _estimate_periods(pairs, tasks):
+    """The period of each of ``tasks`` (keyword arguments of estimate_period).
+
+    ``filament_counts`` in a task, one count per filament, stands for the pair
+    weights of a resampling. The fits are independent and run in parallel;
+    the random draws are made by the caller, so the result does not depend on
+    the number of processes.
+    """
+    workers = _pool_workers(pairs, len(tasks))
+    if workers == 1:
+        _POOL_PAIRS[:] = [pairs]
+        try:
+            return [_estimate_one(t) for t in tasks]
+        finally:
+            _POOL_PAIRS.clear()
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+
+    _POOL_PAIRS[:] = [pairs]
+    try:
+        with ProcessPoolExecutor(workers, mp_context=mp.get_context("fork")) as pool:
+            return list(pool.map(_estimate_one, tasks))
+    finally:
+        _POOL_PAIRS.clear()
+
+
 def calibrate_period(
     pairs,
     period_raw,
@@ -736,16 +795,14 @@ def calibrate_period(
     """
     rng = np.random.default_rng(rng)
     grid = np.arange(period_raw * 0.85, period_raw * 1.15, 1.0)
-    truth, est = [], []
+    truth, tasks = [], []
     for f in factors:
         for _ in range(seeds):
             p_true = period_raw * f
             lab = synthetic_labels(pairs, p_true, pairs.n_classes, noise, rng)
-            r = estimate_period(
-                pairs, labels=lab, periods=grid, length_scale=length_scale
-            )
             truth.append(p_true)
-            est.append(r["period"])
+            tasks.append(dict(labels=lab, periods=grid, length_scale=length_scale))
+    est = _estimate_periods(pairs, tasks)
     slope, intercept = np.polyfit(truth, est, 1)
     period = (period_raw - intercept) / slope if slope > 0 else period_raw
     return dict(
@@ -760,21 +817,20 @@ def bootstrap_period(pairs, period_raw, n_boot=20, length_scale=800.0, rng=0):
     """Raw period estimates from filaments resampled with replacement."""
     rng = np.random.default_rng(rng)
     grid = np.arange(period_raw * 0.9, period_raw * 1.1, 1.0)
-    pf = pairs.pair_filament
-    out = []
+    tasks = []
     for _ in range(n_boot):
         counts = rng.multinomial(
             pairs.n_filaments, np.full(pairs.n_filaments, 1.0 / pairs.n_filaments)
         )
-        r = estimate_period(
-            pairs,
-            pair_weights=counts[pf].astype(float),
-            periods=grid,
-            length_scale=length_scale,
-            refine_fraction=0.01,
+        tasks.append(
+            dict(
+                filament_counts=counts,
+                periods=grid,
+                length_scale=length_scale,
+                refine_fraction=0.01,
+            )
         )
-        out.append(r["period"])
-    return np.asarray(out)
+    return np.asarray(_estimate_periods(pairs, tasks))
 
 
 def filament_periods(
@@ -836,11 +892,7 @@ def filament_periods(
     remap = np.full(pairs.n_filaments, -1)
     remap[long_fil] = np.arange(len(long_fil))
     fi = remap[f]
-    curves = np.zeros((len(grid), len(long_fil)))
-    for g, p in enumerate(grid):
-        curves[g] = np.bincount(
-            fi, weights=w * np.cos(2 * np.pi * d / p - dphi), minlength=len(long_fil)
-        )
+    curves = _filament_curves(fi, len(long_fil), d, w, dphi, grid)
     best = np.full(len(long_fil), np.nan)
     for i in range(len(long_fil)):
         k = int(np.argmax(curves[:, i]))
@@ -852,6 +904,39 @@ def filament_periods(
         span=pairs.filament_span[long_fil],
         n_pairs=n_pairs[long_fil],
     )
+
+
+def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
+    """``sum w cos(2 pi d / p - dphi)`` over each filament's pairs, at each ``p``.
+
+    The pairs are first binned by separation, each carrying ``w exp(-i dphi)``,
+    so that the sum over pairs becomes one matrix product per batch of
+    filaments: ``(filaments, bins) x (bins, periods)``. Binning to
+    ``bin_width`` moves a pair by at most a quarter of an Angstrom, a phase
+    error of 2 pi 0.25 / P (0.002 rad at a 700 A repeat). Evaluating every pair
+    at every period took 24 of the 83 s of a fit of EMPIAR-10940.
+    """
+    curves = np.zeros((len(grid), n_fil))
+    if not n_fil or not len(d):
+        return curves
+    lo = float(d.min())
+    nb = int((float(d.max()) - lo) / bin_width) + 1
+    b = np.round((d - lo) / bin_width).astype(np.int64)
+    c = w * np.exp(-1j * dphi)
+    centres = lo + np.arange(nb) * bin_width
+    E = np.exp(2j * np.pi * centres[:, None] / np.asarray(grid)[None, :])
+    # filaments in batches, so that the binned array stays small
+    batch = max(1, int(2e7 // max(nb, 1)))
+    for s0 in range(0, n_fil, batch):
+        s1 = min(n_fil, s0 + batch)
+        m = (fi >= s0) & (fi < s1)
+        flat = (fi[m] - s0) * nb + b[m]
+        size = (s1 - s0) * nb
+        h = np.bincount(flat, weights=c[m].real, minlength=size) + 1j * np.bincount(
+            flat, weights=c[m].imag, minlength=size
+        )
+        curves[:, s0:s1] = (h.reshape(s1 - s0, nb) @ E).real.T
+    return curves
 
 
 def _smooth_angle(t, angle, span=None):
@@ -1123,32 +1208,126 @@ def select_segments(
     return out
 
 
-def class_fit(pairs, phases, period):
-    """How well each class sits on the ring: its pairs' mean phase agreement.
+def class_fit(pairs, phases, period, min_separation=0.25, prior=0.05):
+    """How well each class sits on the ring, as evidence that it is a real view.
 
     For every pair that involves class k, the agreement is
     ``cos(2 pi d / P - (phi_a - phi_b))`` -- 1 when the pair is exactly where
     the ring puts it, 0 on average for a class whose segments have nothing to
-    do with the ring. A junk class, or one of another helical type, therefore
-    scores well below the others, which is what makes it worth showing next to
-    a selection the user made by eye.
+    do with the ring. Two choices keep a junk class from looking good:
+
+    * Only pairs at least ``min_separation`` of a period apart count. Close
+      neighbours are at nearly the same azimuth whatever their classes, so
+      they agree with any phase a class is given: on EMPIAR-10940 an ice blob
+      (class 35) scored 0.53 with them and -0.16 without.
+    * The mean is shrunk towards 0 in proportion to how little evidence the
+      class has: by ``n / (n + n0)``, ``n`` its number of such pairs and ``n0``
+      ``prior`` times the median class's (:func:`class_evidence`). A class of 1
+      or 3 particles is not taken to fit; a large class is barely affected. The
+      count, not the pair weights, measures the evidence: the weights only say
+      how much each pair counts within the class's mean, and on EMPIAR-10940
+      the tilted views have low weights (their centres sit off the filament
+      path) with as many pairs as any.
 
     Returns
     -------
     np.ndarray
-        Weighted mean agreement per class; NaN for a class with no pairs.
+        Shrunk mean agreement per class; NaN for a class with no such pairs.
     """
     a, b = pairs.seg_class[pairs.I], pairs.seg_class[pairs.J]
-    r = pairs.W * np.cos(2 * np.pi * pairs.D / period - (phases[a] - phases[b]))
+    far = np.abs(pairs.D) >= min_separation * period
+    w = pairs.W * far
+    r = w * np.cos(2 * np.pi * pairs.D / period - (phases[a] - phases[b]))
     K = pairs.n_classes
     num = np.bincount(a, weights=r, minlength=K) + np.bincount(
         b, weights=r, minlength=K
     )
-    den = np.bincount(a, weights=pairs.W, minlength=K) + np.bincount(
-        b, weights=pairs.W, minlength=K
+    den = np.bincount(a, weights=w, minlength=K) + np.bincount(
+        b, weights=w, minlength=K
     )
+    n = class_evidence(pairs, period, min_separation)
+    n0 = prior * float(np.median(n[n > 0])) if np.any(n > 0) else 0.0
     with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(den > 0, num / den, np.nan)
+        return np.where(den > 0, num / den * (n / (n + n0)), np.nan)
+
+
+def class_evidence(pairs, period, min_separation=0.25):
+    """Each class's number of pairs ``min_separation`` periods or more apart.
+
+    The evidence :func:`class_fit` rests on: the informative pairs a class
+    takes part in, with another segment of the selection on the same filament.
+    """
+    a, b = pairs.seg_class[pairs.I], pairs.seg_class[pairs.J]
+    far = np.abs(pairs.D) >= min_separation * period
+    K = pairs.n_classes
+    return (np.bincount(a[far], minlength=K) + np.bincount(b[far], minlength=K)).astype(
+        float
+    )
+
+
+TOO_FEW = "too few informative segment pairs to judge"
+AT_CHANCE = "fits the ring no better than chance"
+
+
+def diagnose_classes(result, prior=0.05):
+    """The classes to take out of a fit, each with the reason.
+
+    * ``TOO_FEW``: a class with fewer informative pairs (:func:`class_evidence`)
+      than ``prior`` times the median class's -- too little to tell either
+      way, as for a class of a handful of segments, or one whose segments are
+      on filaments with few others of the selection;
+    * ``AT_CHANCE``: a class flagged by :func:`poorly_fitting` -- its segments do
+      not sit at one azimuth on the ring: junk, or another type;
+    * ``"180-degree copy of class N"``: a class merged into a flagged class as
+      its turned counterpart, which goes with it.
+
+    Only the segments are consulted, not the look of the averages: distinct
+    helical types can differ in morphology too subtly for that.
+
+    Parameters
+    ----------
+    result : PhasePitchResult
+
+    Returns
+    -------
+    dict
+        Class number -> reason, the merged copies last.
+    """
+    ids = [int(c) for c in result.class_ids]
+    out = {}
+    evidence = result.class_evidence
+    if evidence is not None and len(evidence):
+        ev = np.asarray(evidence, dtype=float)
+        typical = float(np.median(ev[ev > 0])) if np.any(ev > 0) else 0.0
+        for c, e in zip(ids, ev):
+            if e < prior * typical:
+                out[c] = TOO_FEW
+    for c in poorly_fitting(ids, result.class_fit):
+        out.setdefault(c, AT_CHANCE)
+    for gone, kept in (result.merged_into or {}).items():
+        if int(kept) in out and int(gone) not in out:
+            out[int(gone)] = f"180\u00b0 copy of class {int(kept)}"
+    return out
+
+
+def poorly_fitting(class_ids, fit, level=0.1, relative=0.25):
+    """The classes whose fit is close to chance: junk, or another type.
+
+    A class is flagged when its :func:`class_fit` is below ``level``, or below
+    ``relative`` times the median class's when the whole selection fits less
+    well (a poorer dataset). Needs three classes with a fit.
+
+    Returns
+    -------
+    list of int
+        Class numbers, as in ``class_ids``.
+    """
+    fit = np.asarray(fit, dtype=float)
+    ok = np.isfinite(fit)
+    if ok.sum() < 3:
+        return []
+    cut = min(level, relative * float(np.median(fit[ok])))
+    return [int(c) for c, f in zip(class_ids, fit) if not np.isfinite(f) or f < cut]
 
 
 def largest_phase_gap(phases, weight=None):
@@ -1528,6 +1707,19 @@ def merge_counterparts(params, pairs, image_apix, sign=1.0, class_of=None):
     return out, gone
 
 
+def _merged_into(counterparts, merged):
+    """Merged-away class -> the class it was merged into."""
+    gone = {int(c) for c in merged}
+    out = {}
+    for d in counterparts or []:
+        a, b = int(d["a"]), int(d["b"])
+        if a in gone:
+            out[a] = b
+        elif b in gone:
+            out[b] = a
+    return out
+
+
 def suggest_counterparts(
     images, selected, candidates, min_corr=0.85, max_width=128, progress=None
 ):
@@ -1719,6 +1911,8 @@ class PhasePitchResult:
     filament_keys: list = field(default_factory=list)
     params_used: object = None
     merged_classes: list = field(default_factory=list)
+    merged_into: dict = field(default_factory=dict)
+    class_evidence: np.ndarray = None
     class_zdir: np.ndarray = None
     class_tilt: np.ndarray = None
     class_across: np.ndarray = None
@@ -1860,6 +2054,7 @@ def analyze(
         class_ids=pairs.class_ids,
         class_weight=weight,
         class_fit=class_fit(pairs, est["phases"], est["period"]),
+        class_evidence=class_evidence(pairs, est["period"]),
         phase_gap=largest_phase_gap(est["phases"], weight),
         heterogeneity=het,
         filaments=filaments,
@@ -1884,6 +2079,7 @@ def analyze(
         filament_keys=pairs.filament_keys,
         params_used=used,
         merged_classes=[int(c) for c in merged],
+        merged_into=_merged_into(counterparts, merged),
         class_zdir=(-pairs.class_axis + np.where(pairs.class_sign < 0, 180.0, 0.0)),
         class_tilt=pairs.class_tilt,
         class_across=pairs.class_across,

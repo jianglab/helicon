@@ -477,3 +477,46 @@ class TestSuggestExpansion:
             == []
         )
         assert ph.suggest_expansion(df, selected=[9999]) == []
+
+
+class TestClassDiagnosis:
+    """Which classes to take out of a fit, from the segments alone."""
+
+    def _result(self, fit, evidence, merged_into=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            class_ids=np.arange(1, len(fit) + 1),
+            class_fit=np.asarray(fit, dtype=float),
+            class_evidence=np.asarray(evidence, dtype=float),
+            merged_into=merged_into or {},
+        )
+
+    def test_too_few_off_the_ring_and_their_copies(self):
+        fit = [0.8, 0.82, 0.79, 0.81, 0.02, 0.5, 0.78]
+        evidence = [100, 120, 90, 110, 80, 1, 100]
+        r = self._result(fit, evidence, merged_into={7: 5})
+        out = ph.diagnose_classes(r)
+        assert out == {
+            6: ph.TOO_FEW,
+            5: ph.AT_CHANCE,
+            7: "180° copy of class 5",
+        }
+
+    def test_good_classes_are_left_alone(self):
+        r = self._result([0.8, 0.7, 0.75, 0.9], [100, 50, 80, 120])
+        assert ph.diagnose_classes(r) == {}
+
+    def test_the_cut_follows_a_poorer_dataset(self):
+        # median 0.2: a class at 0.08 is still within reach of the rest
+        ids = [1, 2, 3, 4]
+        assert ph.poorly_fitting(ids, [0.2, 0.22, 0.18, 0.08]) == []
+        assert ph.poorly_fitting(ids, [0.2, 0.22, 0.18, 0.02]) == [4]
+
+    def test_near_neighbours_do_not_vouch_for_a_class(self, homogeneous):
+        # pairs closer than a quarter period agree with any phase; a class
+        # with only those has no evidence at all
+        pairs = ph.prepare_pairs(homogeneous)
+        r = ph.estimate_period(pairs)
+        fit = ph.class_fit(pairs, r["phases"], r["period"], min_separation=10.0)
+        assert np.all(np.isnan(fit))
