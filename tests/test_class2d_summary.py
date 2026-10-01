@@ -14,24 +14,33 @@ import starfile
 from helicon.commands import images2star
 from helicon.plugins.images2star import summary2d as summary
 from helicon.lib.exceptions import (
-    HeliconError, HeliconFileExistsError, HeliconValidationError,
+    HeliconError,
+    HeliconFileExistsError,
+    HeliconValidationError,
 )
 
 
 def make_stack(job, prefix="run_it025", classes=3, assignments=(1, 1, 3), legacy=False):
     job.mkdir(parents=True, exist_ok=True)
     y, x = np.mgrid[-1:1:32j, -1:1:32j]
-    pixels = np.stack([
-        np.exp(-((x - 0.2 * np.sin(i)) ** 2 + 2 * y ** 2) * (i + 2))
-        for i in range(classes)
-    ]).astype(np.float32)
+    pixels = np.stack(
+        [
+            np.exp(-((x - 0.2 * np.sin(i)) ** 2 + 2 * y**2) * (i + 2))
+            for i in range(classes)
+        ]
+    ).astype(np.float32)
     with mrcfile.new(job / f"{prefix}_classes.mrcs", overwrite=True) as mrc:
         mrc.set_data(pixels)
         mrc.set_image_stack()
     table = pd.DataFrame({"rlnClassNumber": list(assignments)})
-    tables = {"": table} if legacy else {
-        "optics": pd.DataFrame({"rlnOpticsGroup": [1]}), "particles": table,
-    }
+    tables = (
+        {"": table}
+        if legacy
+        else {
+            "optics": pd.DataFrame({"rlnOpticsGroup": [1]}),
+            "particles": table,
+        }
+    )
     starfile.write(tables, job / f"{prefix}_data.star", overwrite=True)
     return job
 
@@ -60,10 +69,17 @@ def symlink(link, target):
         pytest.skip(f"Directory links unavailable: {exc}")
 
 
-@pytest.mark.parametrize("selectors", [
-    None, ["job001", "job003", "job010"], ["1", "003", "10"],
-    ["1,3,10"], ["1-10"], ["job001", "3-10", "1"],
-])
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        None,
+        ["job001", "job003", "job010"],
+        ["1", "003", "10"],
+        ["1,3,10"],
+        ["1-10"],
+        ["job001", "3-10", "1"],
+    ],
+)
 def test_selection_and_natural_order(tmp_path, selectors):
     for number in (10, 3, 1):
         (tmp_path / f"job{number:03d}").mkdir()
@@ -91,7 +107,9 @@ def test_aliases_deduplicated_in_mixed_selection(tmp_path):
 
 def test_quoted_folder_name(tmp_path):
     make_job(tmp_path, "good classes")
-    assert summary.discover_jobs(tmp_path, ["good classes"])[0].path.name == "good classes"
+    assert (
+        summary.discover_jobs(tmp_path, ["good classes"])[0].path.name == "good classes"
+    )
 
 
 def test_alias_only_target(tmp_path):
@@ -109,9 +127,12 @@ def test_broken_link_is_reported(tmp_path, monkeypatch):
     missing = tmp_path / "job099"
     real_iterdir = Path.iterdir
     real_is_symlink = Path.is_symlink
-    monkeypatch.setattr(Path, "iterdir", lambda p: iter([missing]) if p == tmp_path
-                        else real_iterdir(p))
-    monkeypatch.setattr(Path, "is_symlink", lambda p: p == missing or real_is_symlink(p))
+    monkeypatch.setattr(
+        Path, "iterdir", lambda p: iter([missing]) if p == tmp_path else real_iterdir(p)
+    )
+    monkeypatch.setattr(
+        Path, "is_symlink", lambda p: p == missing or real_is_symlink(p)
+    )
     result = summary.collect_summary(tmp_path)
     assert len(result.skipped) == 1
     assert result.skipped[0][0] == "job099"
@@ -160,8 +181,11 @@ def test_invalid_class_assignments_skip_job(tmp_path, assignments):
 
 def test_missing_column_and_corrupt_stack_skip_jobs(tmp_path):
     job = make_job(tmp_path)
-    starfile.write({"particles": pd.DataFrame({"rlnOther": [1]})},
-                   job / "run_it025_data.star", overwrite=True)
+    starfile.write(
+        {"particles": pd.DataFrame({"rlnOther": [1]})},
+        job / "run_it025_data.star",
+        overwrite=True,
+    )
     bad = make_job(tmp_path, "job002")
     (bad / "run_it025_classes.mrcs").write_bytes(b"broken")
     result = summary.collect_summary(tmp_path)
@@ -185,13 +209,28 @@ def parse_args(monkeypatch, argv):
 
 def test_cli_summary_dispatch_bypasses_dataset_pipeline(tmp_path, monkeypatch):
     make_job(tmp_path)
-    args = parse_args(monkeypatch, [str(tmp_path), str(tmp_path / "summary.pdf"),
-                                   "--summary2D", "--jobs", "1-3", "--jobs", "job001"])
+    args = parse_args(
+        monkeypatch,
+        [
+            str(tmp_path),
+            str(tmp_path / "summary.pdf"),
+            "--summary2D",
+            "--jobs",
+            "1-3",
+            "--jobs",
+            "job001",
+        ],
+    )
     calls = []
-    monkeypatch.setattr(summary, "summarize_class2d", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr(
+        summary, "summarize_class2d", lambda *a, **kw: calls.append((a, kw))
+    )
     monkeypatch.setattr(images2star.helicon, "log_command_line", lambda: None)
-    monkeypatch.setattr(images2star.helicon, "images2dataframe",
-                        lambda *a, **kw: pytest.fail("Summary loaded a particle dataset"))
+    monkeypatch.setattr(
+        images2star.helicon,
+        "images2dataframe",
+        lambda *a, **kw: pytest.fail("Summary loaded a particle dataset"),
+    )
     images2star.main(args)
     assert calls[0][1]["jobs"] == ["1-3", "job001"]
     assert args.all_options == []
@@ -205,9 +244,12 @@ def test_summary_plugin_registration_and_handler(monkeypatch):
     assert operation_specs()["summary2D"]["option_string"] == "--summary2D"
     assert "summary2D" not in gui_operation_specs()
     calls = []
-    monkeypatch.setattr(summary, "summarize_class2d", lambda *a, **kw: calls.append((a, kw)))
-    args = argparse.Namespace(input_imageFiles=["Class2D"], output_starFile="out.pdf",
-                              jobs=["1-3"], force=1)
+    monkeypatch.setattr(
+        summary, "summarize_class2d", lambda *a, **kw: calls.append((a, kw))
+    )
+    args = argparse.Namespace(
+        input_imageFiles=["Class2D"], output_starFile="out.pdf", jobs=["1-3"], force=1
+    )
     index_d = {"summary2D": 0}
     assert dispatch("summary2D", None, args, index_d, False) == (None, index_d)
     assert not calls
@@ -217,8 +259,9 @@ def test_summary_plugin_registration_and_handler(monkeypatch):
     assert calls[0][1]["overwrite"] is True
 
 
-@pytest.mark.parametrize("extra", [["--sortby", "rlnClassNumber"], ["--first", "0"],
-                                   ["--splitNumSets", "2"]])
+@pytest.mark.parametrize(
+    "extra", [["--sortby", "rlnClassNumber"], ["--first", "0"], ["--splitNumSets", "2"]]
+)
 def test_summary_rejects_transform_options(tmp_path, monkeypatch, extra):
     with pytest.raises(HeliconValidationError, match="cannot be combined"):
         parse_args(monkeypatch, [str(tmp_path), "out.pdf", "--summary2D", *extra])
@@ -230,7 +273,9 @@ def test_cli_validation_and_conversion_compatibility(tmp_path, monkeypatch):
     with pytest.raises(HeliconValidationError, match=".pdf"):
         parse_args(monkeypatch, [str(tmp_path), "out.star", "--summary2D"])
     with pytest.raises(HeliconValidationError, match="one Class2D"):
-        parse_args(monkeypatch, [str(tmp_path), str(tmp_path), "out.pdf", "--summary2D"])
+        parse_args(
+            monkeypatch, [str(tmp_path), str(tmp_path), "out.pdf", "--summary2D"]
+        )
     args = parse_args(monkeypatch, ["input.star", str(tmp_path / "out.star")])
     assert not args.summary2D
 
@@ -253,8 +298,9 @@ def test_pdf_pages_labels_counts_and_skips(tmp_path, caplog):
     assert "3 / 3" in continuation
     # Matplotlib shares the image resource dictionary across PDF pages. Count
     # actual draw operations, not resources visible from each page.
-    assert [sum(op == b"Do" for _, op in p.get_contents().operations)
-            for p in reader.pages] == [0, 20, 1]
+    assert [
+        sum(op == b"Do" for _, op in p.get_contents().operations) for p in reader.pages
+    ] == [0, 20, 1]
     assert len(result.jobs) == 1
 
 
@@ -264,8 +310,10 @@ def test_overwrite_and_failed_render_preserve_existing_pdf(tmp_path, monkeypatch
     output.write_bytes(b"original")
     with pytest.raises(HeliconFileExistsError):
         summary.summarize_class2d(tmp_path, output)
+
     def fail(*args):
         raise OSError("render failed")
+
     monkeypatch.setattr(summary, "_render_pdf", fail)
     with pytest.raises(OSError, match="render failed"):
         summary.summarize_class2d(tmp_path, output, overwrite=True)

@@ -22,13 +22,28 @@ def relion_environment(environ: dict[str, str], *, isolated: bool) -> dict[str, 
     if not isolated:
         return dict(environ)
     keep = {
-        "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TZ", "TERM", "TMPDIR",
-        "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
-        "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-        "KRB5CCNAME", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TZ",
+        "TERM",
+        "TMPDIR",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
+        "KRB5CCNAME",
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
     }
     env = {
-        key: value for key, value in environ.items()
+        key: value
+        for key, value in environ.items()
         if key in keep or key.startswith("LC_")
     }
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
@@ -59,7 +74,9 @@ def launch_relion(folder: str | Path, launcher: str = "", *, startup: str = "cle
     if launcher:
         script = Path(launcher).expanduser()
         if not script.is_absolute() or not script.is_file():
-            raise ValueError("The RELION launcher must be an absolute path to a Bash script.")
+            raise ValueError(
+                "The RELION launcher must be an absolute path to a Bash script."
+            )
     if script is not None or startup == "user-shell":
         bash = shutil.which("bash", path=env.get("PATH", os.defpath))
         if not bash:
@@ -70,8 +87,13 @@ def launch_relion(folder: str | Path, launcher: str = "", *, startup: str = "cle
             # Sourcing keeps non-exported module/conda functions available.
             action = 'source "$2"' if script is not None else "exec relion"
             command = [
-                bash, "--login", "-i", "-c", f'cd -- "$1" && {action}',
-                "helicon-relion", str(folder),
+                bash,
+                "--login",
+                "-i",
+                "-c",
+                f'cd -- "$1" && {action}',
+                "helicon-relion",
+                str(folder),
             ]
             if script is not None:
                 command.append(str(script))
@@ -90,9 +112,14 @@ def launch_relion(folder: str | Path, launcher: str = "", *, startup: str = "cle
     try:
         with os.fdopen(fd, "wb") as output:
             process = subprocess.Popen(
-                command, cwd=folder, env=env, stdin=subprocess.DEVNULL,
-                stdout=output, stderr=subprocess.STDOUT,
-                start_new_session=True, close_fds=True,
+                command,
+                cwd=folder,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
             )
     except Exception:
         log.unlink(missing_ok=True)

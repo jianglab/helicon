@@ -24,11 +24,15 @@ option_name = "summary2D"
 
 def add_args(parser):
     parser.add_argument(
-        "--summary2D", action="store_true",
+        "--summary2D",
+        action="store_true",
         help="write a PDF gallery of the latest iteration of successful RELION Class2D jobs",
     )
     parser.add_argument(
-        "--jobs", nargs="+", action="extend", metavar="JOB",
+        "--jobs",
+        nargs="+",
+        action="extend",
+        metavar="JOB",
         help=(
             "jobs to summarize: folder names/aliases, numbers, or inclusive numeric "
             "ranges (e.g. --jobs job001 good_classes or --jobs 1,3,5-9). "
@@ -45,13 +49,21 @@ def check_args(args, parser, all_options):
         return
 
     allowed = {
-        "summary2D", "jobs", "force", "verbose", "cpu", "ppid",
-        "input_imageFiles", "output_starFile",
+        "summary2D",
+        "jobs",
+        "force",
+        "verbose",
+        "cpu",
+        "ppid",
+        "input_imageFiles",
+        "output_starFile",
     }
     # Also inspect parsed values so direct Python callers are validated.
     incompatible = {
-        action.dest for action in parser._actions
-        if action.option_strings and action.dest not in allowed
+        action.dest
+        for action in parser._actions
+        if action.option_strings
+        and action.dest not in allowed
         and action.dest != "help"
         and getattr(args, action.dest, action.default) != action.default
     }
@@ -106,8 +118,10 @@ class Class2DSummary:
 
 
 def _natural_key(value):
-    return [int(part) if part.isdigit() else part.casefold()
-            for part in re.split(r"(\d+)", str(value))]
+    return [
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", str(value))
+    ]
 
 
 def discover_jobs(folder: Path, selectors: list[str] | None = None) -> list[Class2DJob]:
@@ -143,7 +157,9 @@ def discover_jobs(folder: Path, selectors: list[str] | None = None) -> list[Clas
     names = {p.name for p in entries}
     for selector in selectors or []:
         # A quoted folder name may itself contain spaces or commas.
-        tokens = [selector] if selector in names else re.split(r"[,\s]+", selector.strip())
+        tokens = (
+            [selector] if selector in names else re.split(r"[,\s]+", selector.strip())
+        )
         for token in tokens:
             if not token:
                 continue
@@ -154,14 +170,19 @@ def discover_jobs(folder: Path, selectors: list[str] | None = None) -> list[Clas
                 first, last = map(int, interval.groups())
                 if first > last:
                     raise HeliconValidationError(f"Reversed job range: {token}")
-                matches = [p for p in entries
-                           if (n := job_number(p)) is not None and first <= n <= last]
+                matches = [
+                    p
+                    for p in entries
+                    if (n := job_number(p)) is not None and first <= n <= last
+                ]
             elif token.isdigit():
                 matches = [p for p in entries if job_number(p) == int(token)]
             else:
                 matches = [p for p in entries if p.name == token]
             if not matches:
-                raise HeliconValidationError(f"No Class2D jobs match {token!r} in {folder}")
+                raise HeliconValidationError(
+                    f"No Class2D jobs match {token!r} in {folder}"
+                )
             selected.extend(matches)
     if not selected:
         raise HeliconValidationError(f"No Class2D jobs selected in {folder}")
@@ -202,16 +223,27 @@ def _particle_counts(path: Path, class_count: int) -> np.ndarray:
     import starfile
 
     tables = starfile.read(path, always_dict=True)
-    candidates = [table for table in tables.values()
-                  if isinstance(table, pd.DataFrame) and "rlnClassNumber" in table]
+    candidates = [
+        table
+        for table in tables.values()
+        if isinstance(table, pd.DataFrame) and "rlnClassNumber" in table
+    ]
     if len(candidates) != 1:
-        raise ValueError(f"{path.name}: expected one particle table with rlnClassNumber")
+        raise ValueError(
+            f"{path.name}: expected one particle table with rlnClassNumber"
+        )
     numbers = pd.to_numeric(candidates[0]["rlnClassNumber"], errors="coerce").to_numpy(
         dtype=float
     )
-    if not np.all(np.isfinite(numbers) & (numbers == np.floor(numbers))
-                  & (numbers >= 1) & (numbers <= class_count)):
-        raise ValueError(f"{path.name}: invalid rlnClassNumber (expected 1-{class_count})")
+    if not np.all(
+        np.isfinite(numbers)
+        & (numbers == np.floor(numbers))
+        & (numbers >= 1)
+        & (numbers <= class_count)
+    ):
+        raise ValueError(
+            f"{path.name}: invalid rlnClassNumber (expected 1-{class_count})"
+        )
     return np.bincount(numbers.astype(np.int64), minlength=class_count + 1)[1:]
 
 
@@ -223,13 +255,21 @@ def collect_summary(folder: Path, selectors: list[str] | None = None) -> Class2D
     for job in discover_jobs(folder, selectors):
         try:
             if not (job.path / "RELION_JOB_EXIT_SUCCESS").is_file():
-                raise ValueError("missing RELION_JOB_EXIT_SUCCESS (failed or unfinished)")
+                raise ValueError(
+                    "missing RELION_JOB_EXIT_SUCCESS (failed or unfinished)"
+                )
             for stack in _latest_stacks(job.path):
                 with mrcfile.mmap(stack, mode="r") as mrc:
-                    if mrc.data is None or mrc.data.ndim not in (2, 3) or not mrc.data.size:
+                    if (
+                        mrc.data is None
+                        or mrc.data.ndim not in (2, 3)
+                        or not mrc.data.size
+                    ):
                         raise ValueError(f"{stack.name}: not a nonempty 2D image stack")
                     count = 1 if mrc.data.ndim == 2 else mrc.data.shape[0]
-                metadata = stack.with_name(stack.name.removesuffix("_classes.mrcs") + "_data.star")
+                metadata = stack.with_name(
+                    stack.name.removesuffix("_classes.mrcs") + "_data.star"
+                )
                 job.stacks.append(ClassStack(stack, _particle_counts(metadata, count)))
             summary.jobs.append(job)
         except (OSError, ValueError, RuntimeError, KeyError, IndexError) as exc:
@@ -241,23 +281,31 @@ def collect_summary(folder: Path, selectors: list[str] | None = None) -> Class2D
 
 
 def _overview_lines(summary: Class2DSummary, folder: Path) -> list[str]:
-    lines = [f"Source: {folder.resolve()}",
-             f"Included: {len(summary.jobs)} jobs. Skipped: {len(summary.skipped)} jobs.",
-             "Latest iteration only. Classes ordered by original class number.",
-             "Particle counts are assignments per job, not unique across jobs.", ""]
+    lines = [
+        f"Source: {folder.resolve()}",
+        f"Included: {len(summary.jobs)} jobs. Skipped: {len(summary.skipped)} jobs.",
+        "Latest iteration only. Classes ordered by original class number.",
+        "Particle counts are assignments per job, not unique across jobs.",
+        "",
+    ]
     for job in summary.jobs:
         lines.append(job.path.name)
         if job.aliases:
             lines.append("  Aliases: " + ", ".join(job.aliases))
         for stack in job.stacks:
-            lines.append(f"  {stack.path.name}: {len(stack.counts)} classes; "
-                         f"{int(stack.counts.sum()):,} particles")
+            lines.append(
+                f"  {stack.path.name}: {len(stack.counts)} classes; "
+                f"{int(stack.counts.sum()):,} particles"
+            )
     if summary.skipped:
         lines.extend(["", "Skipped jobs"])
         for name, reason in summary.skipped:
             lines.append(f"{name}: {reason}")
-    return [wrapped for line in lines
-            for wrapped in (textwrap.wrap(line, width=95, subsequent_indent="  ") or [""])]
+    return [
+        wrapped
+        for line in lines
+        for wrapped in (textwrap.wrap(line, width=95, subsequent_indent="  ") or [""])
+    ]
 
 
 def _class_limits(image):
@@ -278,13 +326,16 @@ def _render_pdf(summary: Class2DSummary, folder: Path, output: Path) -> None:
     from matplotlib.figure import Figure
 
     lines = _overview_lines(summary, folder)
-    overview_pages = [lines[i:i + 48] for i in range(0, len(lines), 48)]
+    overview_pages = [lines[i : i + 48] for i in range(0, len(lines), 48)]
     total_pages = len(overview_pages) + sum(
         (len(stack.counts) + 19) // 20 for job in summary.jobs for stack in job.stacks
     )
     page = 0
-    with PdfPages(output, metadata={"Title": "RELION Class2D summary",
-                                    "Creator": "Helicon images2star"}) as pdf:
+    with PdfPages(
+        output,
+        metadata={"Title": "RELION Class2D summary", "Creator": "Helicon images2star"},
+    ) as pdf:
+
         def save(figure):
             nonlocal page
             page += 1
@@ -294,9 +345,18 @@ def _render_pdf(summary: Class2DSummary, folder: Path, output: Path) -> None:
 
         for page_lines in overview_pages:
             figure = Figure(figsize=(8.27, 11.69))
-            figure.text(0.06, 0.95, "RELION Class2D summary", fontsize=18, weight="bold")
-            figure.text(0.06, 0.91, "\n".join(page_lines), fontsize=9,
-                        va="top", linespacing=1.45, parse_math=False)
+            figure.text(
+                0.06, 0.95, "RELION Class2D summary", fontsize=18, weight="bold"
+            )
+            figure.text(
+                0.06,
+                0.91,
+                "\n".join(page_lines),
+                fontsize=9,
+                va="top",
+                linespacing=1.45,
+                parse_math=False,
+            )
             save(figure)
 
         for job in summary.jobs:
@@ -304,14 +364,31 @@ def _render_pdf(summary: Class2DSummary, folder: Path, output: Path) -> None:
                 with mrcfile.mmap(stack.path, mode="r") as mrc:
                     for first in range(0, len(stack.counts), 20):
                         figure = Figure(figsize=(8.27, 11.69))
-                        figure.text(0.06, 0.965, textwrap.shorten(job.path.name, width=65),
-                                    fontsize=15, weight="bold", parse_math=False)
-                        figure.text(0.06, 0.94,
-                                    "\n".join(textwrap.wrap(stack.path.name, width=95)),
-                                    fontsize=9, va="top", parse_math=False)
+                        figure.text(
+                            0.06,
+                            0.965,
+                            textwrap.shorten(job.path.name, width=65),
+                            fontsize=15,
+                            weight="bold",
+                            parse_math=False,
+                        )
+                        figure.text(
+                            0.06,
+                            0.94,
+                            "\n".join(textwrap.wrap(stack.path.name, width=95)),
+                            fontsize=9,
+                            va="top",
+                            parse_math=False,
+                        )
                         axes = figure.subplots(5, 4, squeeze=False)
-                        figure.subplots_adjust(left=0.05, right=0.95, bottom=0.06,
-                                               top=0.89, wspace=0.18, hspace=0.40)
+                        figure.subplots_adjust(
+                            left=0.05,
+                            right=0.95,
+                            bottom=0.06,
+                            top=0.89,
+                            wspace=0.18,
+                            hspace=0.40,
+                        )
                         for offset, ax in enumerate(axes.flat):
                             ax.set_axis_off()
                             index = first + offset
@@ -319,14 +396,28 @@ def _render_pdf(summary: Class2DSummary, folder: Path, output: Path) -> None:
                                 continue
                             pixels = mrc.data if mrc.data.ndim == 2 else mrc.data[index]
                             low, high = _class_limits(pixels)
-                            ax.imshow(pixels, cmap="gray", origin="lower", vmin=low,
-                                      vmax=high, interpolation="nearest")
-                            label = textwrap.shorten(job.path.name, width=23, placeholder="...")
-                            ax.text(0.5, -0.04,
-                                    f"{label} / class {index + 1}\n"
-                                    f"{int(stack.counts[index]):,} particles",
-                                    transform=ax.transAxes, ha="center", va="top",
-                                    fontsize=7, parse_math=False)
+                            ax.imshow(
+                                pixels,
+                                cmap="gray",
+                                origin="lower",
+                                vmin=low,
+                                vmax=high,
+                                interpolation="nearest",
+                            )
+                            label = textwrap.shorten(
+                                job.path.name, width=23, placeholder="..."
+                            )
+                            ax.text(
+                                0.5,
+                                -0.04,
+                                f"{label} / class {index + 1}\n"
+                                f"{int(stack.counts[index]):,} particles",
+                                transform=ax.transAxes,
+                                ha="center",
+                                va="top",
+                                fontsize=7,
+                                parse_math=False,
+                            )
                         save(figure)
 
 
@@ -348,18 +439,28 @@ def summarize_class2d(
     for name, reason in summary.skipped:
         logger.warning("Skipping %s: %s", name, reason)
     if not summary.jobs:
-        raise HeliconError("No successful Class2D jobs with readable class stacks and particle metadata")
+        raise HeliconError(
+            "No successful Class2D jobs with readable class stacks and particle metadata"
+        )
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".pdf", delete=False) as temp:
+        with tempfile.NamedTemporaryFile(
+            dir=output.parent, suffix=".pdf", delete=False
+        ) as temp:
             temp_path = Path(temp.name)
         _render_pdf(summary, folder, temp_path)
         if output.exists() and not overwrite:
-            raise HeliconFileExistsError(f"{output} exists. Use --force=1 to overwrite it")
+            raise HeliconFileExistsError(
+                f"{output} exists. Use --force=1 to overwrite it"
+            )
         os.replace(temp_path, output)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-    logger.info("Summarized %d Class2D jobs in %s (%d skipped)",
-                len(summary.jobs), output, len(summary.skipped))
+    logger.info(
+        "Summarized %d Class2D jobs in %s (%d skipped)",
+        len(summary.jobs),
+        output,
+        len(summary.skipped),
+    )
     return summary

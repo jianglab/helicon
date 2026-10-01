@@ -84,9 +84,7 @@ class TestApplyOptions:
     def _apply(self, data, stack, apix=1.0):
         specs = operation_specs()
         args = stack_to_namespace(stack, specs)
-        return apply_options(
-            data, apix, [name for name, _ in stack], args
-        )
+        return apply_options(data, apix, [name for name, _ in stack], args)
 
     def test_apix_updates_pixel_size_only(self):
         data = _volume()

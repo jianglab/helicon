@@ -443,7 +443,8 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """
     # Infrastructure arguments
     parser.add_argument(
-        "input_imageFiles", nargs="+",
+        "input_imageFiles",
+        nargs="+",
         help="input image file(s), or a Class2D folder with --summary2D",
     )
     parser.add_argument(

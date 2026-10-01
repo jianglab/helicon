@@ -43,7 +43,9 @@ def _hist(ax, values, **kwargs) -> None:
     if values.size:
         ax.hist(values, **kwargs)
     else:
-        ax.text(0.5, 0.5, "No finite data", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No finite data", ha="center", va="center", transform=ax.transAxes
+        )
 
 
 def _hexbin(fig, ax, x, y, *, label: str) -> None:
@@ -62,7 +64,9 @@ def _hexbin(fig, ax, x, y, *, label: str) -> None:
         )
         fig.colorbar(artist, ax=ax, label=label)
     else:
-        ax.text(0.5, 0.5, "No finite data", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No finite data", ha="center", va="center", transform=ax.transAxes
+        )
 
 
 def _build_figure(data, metrics: dict) -> Figure:
@@ -507,7 +511,9 @@ def handle(data, args, index_d, param):
     )
     index_d[option_name] += 1
     if figure is not None:
-        plot_file = f"{Path(args.output_starFile).with_suffix('')}.tilt_psi_rot_sigma.pdf"
+        plot_file = (
+            f"{Path(args.output_starFile).with_suffix('')}.tilt_psi_rot_sigma.pdf"
+        )
         figure.savefig(plot_file)
         # Keep the CLI's historical interactive-show behavior.  The reusable
         # function itself remains backend-neutral for Qt embedding and tests.

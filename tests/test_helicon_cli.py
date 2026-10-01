@@ -4,6 +4,7 @@ Covers the bare-``helicon`` → ``helicon display`` default (Option A):
 a graphical display + napari launches display; headless or missing
 napari falls through to the standard subcommand help.
 """
+
 import argparse
 import os
 import sys
@@ -68,18 +69,14 @@ class TestMaybeLaunchDisplayDefault:
         assert helicon_mod._maybe_launch_display_default() is True
         assert "display" in sys.argv
 
-    def test_headless_does_not_launch(
-        self, monkeypatch, restore_argv, clean_env
-    ):
+    def test_headless_does_not_launch(self, monkeypatch, restore_argv, clean_env):
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr(helicon, "has_napari", lambda: True)
         sys.argv = ["helicon"]
         assert helicon_mod._maybe_launch_display_default() is False
         assert sys.argv == ["helicon"]
 
-    def test_no_napari_does_not_launch(
-        self, monkeypatch, restore_argv, clean_env
-    ):
+    def test_no_napari_does_not_launch(self, monkeypatch, restore_argv, clean_env):
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr(helicon, "has_napari", lambda: False)
         sys.argv = ["helicon"]
@@ -108,12 +105,8 @@ class TestMainDispatch:
 
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr(helicon, "has_napari", lambda: True)
-        monkeypatch.setattr(
-            "helicon.commands.display.main", fake_display_main
-        )
-        monkeypatch.setattr(
-            helicon_mod, "_maybe_reexec_macos_display", lambda: None
-        )
+        monkeypatch.setattr("helicon.commands.display.main", fake_display_main)
+        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
         sys.argv = ["helicon"]
         helicon_mod.main()
         assert called == {"main": True, "folder": None}
@@ -129,9 +122,7 @@ class TestMainDispatch:
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr(helicon, "has_napari", lambda: True)
         monkeypatch.setattr(helicon_mod, "_get_commands", fake_get_commands)
-        monkeypatch.setattr(
-            helicon_mod, "_maybe_reexec_macos_display", lambda: None
-        )
+        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
         sys.argv = ["helicon"]
         helicon_mod.main()
         assert get_commands_called == {"called": True}
@@ -147,9 +138,7 @@ class TestMainDispatch:
         monkeypatch.setattr(sys, "platform", "darwin")
         monkeypatch.setattr(helicon, "has_napari", lambda: False)
         monkeypatch.setattr(helicon_mod, "_get_commands", fake_get_commands)
-        monkeypatch.setattr(
-            helicon_mod, "_maybe_reexec_macos_display", lambda: None
-        )
+        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
         sys.argv = ["helicon"]
         helicon_mod.main()
         assert get_commands_called == {"called": True}

@@ -20,12 +20,14 @@ H, W = 200, 400
 BOX = 48
 APIX = 1.0
 
-CS_FRACS = np.array([
-    [0.15, 0.20],
-    [0.35, 0.45],
-    [0.65, 0.55],
-    [0.85, 0.80],
-])
+CS_FRACS = np.array(
+    [
+        [0.15, 0.20],
+        [0.35, 0.45],
+        [0.65, 0.55],
+        [0.85, 0.80],
+    ]
+)
 
 RELION_ENV = "relion-5.0"
 
@@ -34,7 +36,9 @@ def _relion_available():
     try:
         r = subprocess.run(
             ["conda", "run", "-n", RELION_ENV, "which", "relion_preprocess"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         return r.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -44,6 +48,7 @@ def _relion_available():
 def _cryosparc_tools_available():
     try:
         from cryosparc.dataset import Dataset  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -64,7 +69,7 @@ def _place_gaussians(img, centers, sigma=3.0, amp=200.0):
         cx = xf * W
         cy = yf * H
         yy, xx = np.mgrid[0:H, 0:W]
-        g = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma ** 2))
+        g = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma**2))
         img += amp * (i + 1) * g.astype(np.float32)
 
 
@@ -88,16 +93,25 @@ class TestRelion5Extraction:
         img = rng.normal(0, 1, (H, W)).astype(np.float32)
         _place_gaussians(img, CS_FRACS)
         import mrcfile
+
         mrcfile.new(mrc, overwrite=True).set_data(img)
 
         # --- Step 2: Create CryoSPARC .cs ---
         from cryosparc.dataset import Dataset as DS
+
         d = DS(N)
         d.add_fields(
-            ["blob/path", "blob/idx", "blob/psize_A",
-             "location/center_x_frac", "location/center_y_frac",
-             "location/micrograph_shape", "location/micrograph_path",
-             "ctf/accel_kv", "ctf/cs_mm"],
+            [
+                "blob/path",
+                "blob/idx",
+                "blob/psize_A",
+                "location/center_x_frac",
+                "location/center_y_frac",
+                "location/micrograph_shape",
+                "location/micrograph_path",
+                "ctf/accel_kv",
+                "ctf/cs_mm",
+            ],
             dtypes=["O", "i8", "f8", "f8", "f8", ("f8", (2,)), "O", "f8", "f8"],
         )
         p = str(mrc)
@@ -114,6 +128,7 @@ class TestRelion5Extraction:
 
         # --- Step 3: helicon conversion ---
         from helicon.lib.io import images2dataframe
+
         helicon_df = images2dataframe(str(cs), target_convention="relion")
         for i in range(N):
             xf, yf = CS_FRACS[i]
@@ -161,21 +176,35 @@ class TestRelion5Extraction:
         extract_star_rel = extract_star.relative_to(td)
         extract_dir_rel = extract_dir.name
         cmd = [
-            "conda", "run", "-n", RELION_ENV,
+            "conda",
+            "run",
+            "-n",
+            RELION_ENV,
             "relion_preprocess",
-            "--i", str(mics_star_rel),
-            "--coord_suffix", "_picked.star",
-            "--coord_dir", str(coord_dir_rel),
+            "--i",
+            str(mics_star_rel),
+            "--coord_suffix",
+            "_picked.star",
+            "--coord_dir",
+            str(coord_dir_rel),
             "--extract",
-            "--extract_size", str(BOX),
-            "--part_star", str(extract_star_rel),
-            "--part_dir", str(extract_dir_rel),
+            "--extract_size",
+            str(BOX),
+            "--part_star",
+            str(extract_star_rel),
+            "--part_dir",
+            str(extract_dir_rel),
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(td), timeout=120)
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(td), timeout=120
+        )
         if r.returncode:
-            pytest.fail(f"relion_preprocess failed:\n{r.stderr[-800:]}\n{r.stdout[-800:]}")
+            pytest.fail(
+                f"relion_preprocess failed:\n{r.stderr[-800:]}\n{r.stdout[-800:]}"
+            )
 
         import starfile
+
         sd = starfile.read(str(extract_star))
         if isinstance(sd, dict):
             for k in ("particles", "data_particles"):
@@ -196,7 +225,7 @@ class TestRelion5Extraction:
         for _, row in helicon_df.iterrows():
             rx = int(round(row["rlnCoordinateX"]))
             ry = int(round(row["rlnCoordinateY"]))
-            p = micro_img[ry - half:ry + half, rx - half:rx + half]
+            p = micro_img[ry - half : ry + half, rx - half : rx + half]
             assert p.shape == (BOX, BOX)
             py_patches.append(p)
 

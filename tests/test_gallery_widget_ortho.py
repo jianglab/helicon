@@ -127,14 +127,10 @@ class TestVoxelHoverTip:
 
         widget._on_hover(0, 5.2, 0.4)
         assert widget._xy_view._hover_text == (
-            "val=205\n"
-            "x,y,z=5,0,2\n"
-            "world=5,-5,0 Å"
+            "val=205\n" "x,y,z=5,0,2\n" "world=5,-5,0 Å"
         )
 
-    @pytest.mark.parametrize(
-        ("value", "rendered"), [(np.nan, "nan"), (np.inf, "inf")]
-    )
+    @pytest.mark.parametrize(("value", "rendered"), [(np.nan, "nan"), (np.inf, "inf")])
     def test_hover_formats_non_finite_raw_values(self, qapp, value, rendered):
         volume = _make_volume()
         volume[2, 1, 2] = value

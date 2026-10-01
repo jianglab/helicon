@@ -647,9 +647,11 @@ class _HistogramWidget(QWidget):
         """Identify a draggable handle or the active part of the curve."""
         for target in ("black", "white"):
             point = self._endpoint_screen_position(target)
-            if point is not None and math.hypot(
-                pos.x() - point.x(), pos.y() - point.y()
-            ) <= self.HIT_RADIUS:
+            if (
+                point is not None
+                and math.hypot(pos.x() - point.x(), pos.y() - point.y())
+                <= self.HIT_RADIUS
+            ):
                 return target
 
         rect = self._plot_rect()
@@ -674,9 +676,7 @@ class _HistogramWidget(QWidget):
     def _emit_endpoint_drag(self, target: str, screen_x: float) -> None:
         """Convert a dragged black/white point back to brightness/contrast."""
         rect = self._plot_rect()
-        dragged = float(
-            np.clip((screen_x - rect.left()) / rect.width(), 0.0, 1.0)
-        )
+        dragged = float(np.clip((screen_x - rect.left()) / rect.width(), 0.0, 1.0))
         black, white = self._endpoint_values()
         min_gap = 1.0 / self.MAX_CONTRAST
         if target == "black":
@@ -713,9 +713,7 @@ class _HistogramWidget(QWidget):
         if self._drag_target == "gamma":
             rect = self._plot_rect()
             x = float(
-                np.clip(
-                    (event.position().x() - rect.left()) / rect.width(), 0.0, 1.0
-                )
+                np.clip((event.position().x() - rect.left()) / rect.width(), 0.0, 1.0)
             )
             self._gamma_drag_base = float(
                 np.clip(self._linear_transfer(x), 1e-6, 1.0 - 1e-6)
