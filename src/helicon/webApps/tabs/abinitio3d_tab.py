@@ -19,6 +19,7 @@ import plotly.io as pio
 import helicon
 from shiny import reactive, ui, module, req, render
 
+from .. import class2d_files
 from ..lib.shared_state import ProjectState
 
 from ..lib import helical_pitch_compute as compute
@@ -49,6 +50,8 @@ BOOKMARK_DEFAULTS = {
     "hand": ("map_hand", "left"),
     "map_method": ("map_method", "joint"),
     "n_boot": ("phase_n_boot", 20),
+    "split": ("split_axis_distance", 50),
+    "two_rounds": ("map_refine", False),
 }
 
 
@@ -104,6 +107,12 @@ _SELECT_ALL_JS = """
 })();
 """
 
+
+# How the reasons for taking a class out are shown in a gallery label.
+_SHORT_REASON = {
+    phase.TOO_FEW: "too few pairs",
+    phase.AT_CHANCE: "off the ring",
+}
 
 # The pitch results, and everything that works from them, stay hidden until
 # there is a result to show.
@@ -224,6 +233,27 @@ def abinitio3d_tab_ui():
                         value=True,
                     ),
                     ui.input_numeric(
+                        "split_axis_distance",
+                        ui.span(
+                            "Split tube ids holding distinct filaments (\u00c5)",
+                            _info(
+                                "Segments of one tube id that lie farther than "
+                                "this from each other's helical axis are taken "
+                                "to be on different filaments -- as when "
+                                "particles merged from several extractions "
+                                "number their tubes alike -- and given ids of "
+                                "their own, also in the exported star file. "
+                                "Gaps along the axis never split a filament. "
+                                "0: off."
+                            ),
+                        ),
+                        min=0,
+                        max=10000,
+                        value=50,
+                        step=10,
+                        update_on="blur",
+                    ),
+                    ui.input_numeric(
                         "phase_n_boot",
                         ui.span(
                             "Bootstrap resamples",
@@ -260,7 +290,7 @@ def abinitio3d_tab_ui():
                                     "Align the averages to the first map and rebuild"
                                 ),
                             ),
-                            value=True,
+                            value=False,
                         ),
                     ),
                     ui.input_radio_buttons(
@@ -517,6 +547,9 @@ def abinitio3d_tab_ui():
 
 @module.server
 def abinitio3d_tab_server(input, output, session, project: ProjectState):
+    # the Class2D parameters as read, and as used: with tube ids that hold
+    # several filaments split (helicon.split_distinct_filaments)
+    params_raw = reactive.value(None)
     params = reactive.value(None)
     data_all = reactive.value(None)
 
@@ -599,8 +632,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         except Exception as e:
             msg = str(e).replace(param_file, fileinfo[0]["name"])
             tmp_params = None
-        params.set(tmp_params)
-        if params() is None:
+        params_raw.set(tmp_params)
+        if tmp_params is None:
             if msg is None:
                 msg = f"failed to parse the upload class2D parameters from {fileinfo[0]['name']}"
             msg_ui = ui.markdown(
@@ -623,8 +656,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         except Exception as e:
             msg = str(e)
             tmp_params = None
-        params.set(tmp_params)
-        if params() is None:
+        params_raw.set(tmp_params)
+        if tmp_params is None:
             if msg is None:
                 msg = f"failed to download class2D parameters from {input.url_params()}"
             msg_ui = ui.markdown(
@@ -635,6 +668,51 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                     msg_ui, title="File download error", easy_close=True, footer=None
                 )
             )
+
+    @reactive.effect
+    @reactive.event(params_raw, input.split_axis_distance)
+    def _split_distinct_filaments():
+        raw = params_raw()
+        if raw is None:
+            params.set(None)
+            return
+        distance = input.split_axis_distance() or 0
+        try:
+            fixed, n0, n1 = compute.split_distinct_filaments(raw, distance)
+        except (KeyError, ValueError) as e:
+            logger.warning("Tube ids were not checked for distinct filaments: %s", e)
+            fixed, n0, n1 = raw, 0, 0
+        if n1 > n0:
+            ui.notification_show(
+                f"{n1 - n0:,} tube ids held more than one filament (segments over "
+                f"{distance:g} \u00c5 from each other's axis) and were split: "
+                f"{n1:,} filaments. The exported star file has the new ids.",
+                duration=10,
+            )
+        params.set(fixed)
+
+    # A local file typed into one of the two fields brings the other file of
+    # the same 2D classification with it, when it is beside it.
+    def _fill_companion(given, other_id, other_value):
+        found = class2d_files.companion(given)
+        if (
+            found
+            and found != other_value
+            and class2d_files.needs_filling(other_value, given)
+        ):
+            ui.update_text(other_id, value=found)
+
+    @reactive.effect
+    @reactive.event(input.url_params)
+    def _fill_classes_from_params():
+        if input.input_mode_classes() == "url":
+            _fill_companion(input.url_params(), "url_classes", input.url_classes())
+
+    @reactive.effect
+    @reactive.event(input.url_classes)
+    def _fill_params_from_classes():
+        if input.input_mode_params() == "url":
+            _fill_companion(input.url_classes(), "url_params", input.url_params())
 
     # ── Build class gallery ──
 
@@ -890,7 +968,10 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         if len(pitches):
             lo_p = int(np.floor(float(pitches.min())))
             hi_p = int(np.ceil(float(pitches.max())))
-            low, high = np.percentile(pitches, [30, 70])
+            # centred on the pooled repeat (the green line), wide enough for
+            # the 40% of the filaments closest to it
+            half = float(np.percentile(np.abs(pitches - result.period), 40))
+            low, high = result.period - half, result.period + half
             ui.update_slider(
                 "pitch_band",
                 min=lo_p,
@@ -904,15 +985,20 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def accepted_gallery():
         numbers = _selected_class_numbers()
         r = phase_result()
-        # the classes that fit the ring badly come up picked, ready to remove
-        poor = set(_poorly_fitting(r)) if r is not None else set()
+        # the classes to take out come up picked, ready to remove, each
+        # labelled with the reason
+        poor = _poorly_fitting(r) if r is not None else {}
+        labels = [
+            f"{lab} \u2717 {_SHORT_REASON.get(poor[c], poor[c])}" if c in poor else lab
+            for lab, c in zip(selected_image_labels(), numbers)
+        ]
         return _gallery(
             "accepted_pick",
             selected_images(),
-            selected_image_labels(),
+            labels,
             label=f"{len(selected_images())} class(es) | "
             + _counts_text(numbers)
-            + (f" | {len(poor)} picked: poor fit" if poor else ""),
+            + (f" | {len(poor)} picked to remove" if poor else ""),
             selection=True,
             initial=[i for i, c in enumerate(numbers) if c in poor],
         )
@@ -1073,13 +1159,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         _add_suggested(input.suggested_pick() or [])
 
     def _poorly_fitting(r):
-        """Selected classes that sit far worse on the ring than the rest."""
-        fit = np.asarray(r.class_fit, dtype=float)
-        ok = np.isfinite(fit)
-        if ok.sum() < 3:
-            return []
-        cut = max(0.1, 0.5 * float(np.median(fit[ok])))
-        return [int(c) for c, f in zip(r.class_ids, fit) if np.isfinite(f) and f < cut]
+        """Selected classes to take out, with the reason for each."""
+        return phase.diagnose_classes(r)
 
     MIN_PHASE_CLASSES = 3
 
@@ -1221,13 +1302,26 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             )
         poor = _poorly_fitting(r)
         if poor:
+            by_reason = {}
+            for c, why in poor.items():
+                by_reason.setdefault(why, []).append(c)
             warnings.append(
                 (
-                    "Poor fit: class " + ", ".join(map(str, poor)),
-                    "These classes (numbers as before the colon in the labels) fit the "
-                    "ring much worse than the rest (dim on the ring plot): possibly "
-                    "junk or another type. They are picked in the Selected classes "
-                    "gallery; press Remove picked to drop them.",
+                    f"{len(poor)} class(es) to remove: "
+                    + "; ".join(
+                        f"{', '.join(map(str, cs))} ({why})"
+                        for why, cs in by_reason.items()
+                    ),
+                    "Judged from the segments alone, not the look of the averages "
+                    "(numbers as before the colon in the labels). 'No better than "
+                    "chance': set against segments a quarter repeat or more away, "
+                    "the class's segments do not sit at one azimuth on the ring "
+                    "(dim on the ring plot) -- junk, or another type. 'Too few "
+                    "informative segment pairs': fewer than 5% of a typical "
+                    "class's pairs a quarter repeat or more apart, too little to "
+                    "tell either way. A 180\u00b0 copy goes "
+                    "with the class it was merged into. They are picked in the "
+                    "Selected classes gallery; press Remove picked to drop them.",
                 )
             )
         if len(r.groups) > 1:
@@ -1565,7 +1659,13 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 ),
                 "Reconstruct the segments in the selected ranges with their angles "
                 "and origins: no helical symmetry, the C symmetry set below, and CTF "
-                "correction when the star file has it",
+                "correction when the star file has it. "
+                + (
+                    "Runs relion_reconstruct_mpi, with as many MPI processes as "
+                    "the free CPUs and memory allow."
+                    if relion.find_relion_reconstruct_mpi()
+                    else "Runs relion_reconstruct with threads (no MPI version found)."
+                ),
             ),
             col_widths=(7, 5),
             style="align-items: flex-end; margin-top: 8px;",
@@ -1655,7 +1755,9 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         fig.update_layout(
             template="plotly_white",
             title_text=(
-                f"relion_reconstruct \u00b7 {m['n_segments']:,} segments \u00b7 "
+                "relion_reconstruct"
+                + (f" (MPI \u00d7{m['mpi']})" if m.get("mpi") else "")
+                + f" \u00b7 {m['n_segments']:,} segments \u00b7 "
                 f"{volume.shape[-1]}\u00b3 at {m['apix']:.3f} \u00c5 \u00b7 C{m['csym']}"
             ),
             title_x=0.5,

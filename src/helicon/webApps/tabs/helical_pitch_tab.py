@@ -15,7 +15,7 @@ import plotly.io as pio
 import helicon
 from shiny import reactive, ui, module, req, render
 
-from .. import bookmark
+from .. import bookmark, class2d_files
 from ..lib.shared_state import ProjectState
 
 from ..lib import helical_pitch_compute as compute
@@ -44,6 +44,7 @@ BOOKMARK_DEFAULTS = {
     # set from the data while "Auto-set minimal filament length" is on
     "min_len": ("min_len", 0, bookmark.DERIVED),
     "rise": ("rise", 4.75),
+    "split": ("split_axis_distance", 50),
 }
 
 
@@ -67,6 +68,17 @@ _PLOT_BOX = "height: 340px; min-height: 340px; flex-shrink: 0; overflow: hidden;
 
 
 _MIN_LEN_BOX = "hp_min_len_box"
+
+
+def _info(text, placement="top"):
+    """A small (i) that shows ``text`` on hover, to put after a title or label."""
+    return ui.tooltip(
+        ui.tags.span(
+            " \u24d8", style="cursor: help; color: #6c757d; font-size: 0.9em;"
+        ),
+        text,
+        placement=placement,
+    )
 
 
 @module.ui
@@ -153,6 +165,27 @@ def helical_pitch_tab_ui():
                         max=1000.0,
                         value=4.75,
                         step=0.01,
+                        update_on="blur",
+                    ),
+                    ui.input_numeric(
+                        "split_axis_distance",
+                        ui.span(
+                            "Split tube ids holding distinct filaments (\u00c5)",
+                            _info(
+                                "Segments of one tube id that lie farther than "
+                                "this from each other's helical axis are taken "
+                                "to be on different filaments -- as when "
+                                "particles merged from several extractions "
+                                "number their tubes alike -- and given ids of "
+                                "their own, also in the exported star file. "
+                                "Gaps along the axis never split a filament. "
+                                "0: off."
+                            ),
+                        ),
+                        min=0,
+                        max=10000,
+                        value=50,
+                        step=10,
                         update_on="blur",
                     ),
                     ui.input_numeric(
@@ -300,6 +333,9 @@ def helical_pitch_tab_ui():
 
 @module.server
 def helical_pitch_tab_server(input, output, session, project: ProjectState):
+    # the Class2D parameters as read, and as used: with tube ids that hold
+    # several filaments split (helicon.split_distinct_filaments)
+    params_raw = reactive.value(None)
     params = reactive.value(None)
     data_all = reactive.value(None)
 
@@ -390,8 +426,8 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         except Exception as e:
             msg = str(e).replace(param_file, fileinfo[0]["name"])
             tmp_params = None
-        params.set(tmp_params)
-        if params() is None:
+        params_raw.set(tmp_params)
+        if tmp_params is None:
             if msg is None:
                 msg = f"failed to parse the upload class2D parameters from {fileinfo[0]['name']}"
             msg_ui = ui.markdown(
@@ -414,8 +450,8 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         except Exception as e:
             msg = str(e)
             tmp_params = None
-        params.set(tmp_params)
-        if params() is None:
+        params_raw.set(tmp_params)
+        if tmp_params is None:
             if msg is None:
                 msg = f"failed to download class2D parameters from {input.url_params()}"
             msg_ui = ui.markdown(
@@ -426,6 +462,51 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
                     msg_ui, title="File download error", easy_close=True, footer=None
                 )
             )
+
+    @reactive.effect
+    @reactive.event(params_raw, input.split_axis_distance)
+    def _split_distinct_filaments():
+        raw = params_raw()
+        if raw is None:
+            params.set(None)
+            return
+        distance = input.split_axis_distance() or 0
+        try:
+            fixed, n0, n1 = compute.split_distinct_filaments(raw, distance)
+        except (KeyError, ValueError) as e:
+            logger.warning("Tube ids were not checked for distinct filaments: %s", e)
+            fixed, n0, n1 = raw, 0, 0
+        if n1 > n0:
+            ui.notification_show(
+                f"{n1 - n0:,} tube ids held more than one filament (segments over "
+                f"{distance:g} \u00c5 from each other's axis) and were split: "
+                f"{n1:,} filaments. The exported star file has the new ids.",
+                duration=10,
+            )
+        params.set(fixed)
+
+    # A local file typed into one of the two fields brings the other file of
+    # the same 2D classification with it, when it is beside it.
+    def _fill_companion(given, other_id, other_value):
+        found = class2d_files.companion(given)
+        if (
+            found
+            and found != other_value
+            and class2d_files.needs_filling(other_value, given)
+        ):
+            ui.update_text(other_id, value=found)
+
+    @reactive.effect
+    @reactive.event(input.url_params)
+    def _fill_classes_from_params():
+        if input.input_mode_classes() == "url":
+            _fill_companion(input.url_params(), "url_classes", input.url_classes())
+
+    @reactive.effect
+    @reactive.event(input.url_classes)
+    def _fill_params_from_classes():
+        if input.input_mode_params() == "url":
+            _fill_companion(input.url_classes(), "url_params", input.url_params())
 
     # ── Build class gallery ──
 
