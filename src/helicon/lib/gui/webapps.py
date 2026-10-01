@@ -284,9 +284,10 @@ def _class2d_bookmark(path: str) -> dict:
     """Bookmark inputs of a Class2D job for HelicalPitch and AbInitio3D.
 
     Both tabs take the Class2D parameters and the class averages. The
-    companion of the given file is filled in when it exists on disk: the
-    RELION ``run_itNNN_data.star`` and ``run_itNNN_classes.mrcs`` of the same
-    iteration, or the particles dataset of a cryoSPARC class-average .mrc.
+    companion of the given file is filled in when it exists on disk (see
+    ``helicon.webApps.class2d_files.companion``): the RELION
+    ``run_itNNN_data.star`` and ``run_itNNN_classes.mrcs`` of the same
+    iteration, or a cryoSPARC job's particles and class averages.
 
     Parameters
     ----------
@@ -299,35 +300,21 @@ def _class2d_bookmark(path: str) -> dict:
         The tab's bookmark values, with ``url_params`` and ``url_classes``
         set for the files that were found.
     """
-    import re
     from pathlib import Path
 
-    file_path = Path(path).resolve()
-    suffix = file_path.suffix.lower()
+    from helicon.webApps import class2d_files
 
-    bookmark = {
-        "mode_params": "url",
-        "mode_classes": "url",
-    }
-    iter_match = re.search(r"run_it(\d+)", file_path.name)
-    if suffix in (".star", ".cs"):
-        bookmark["url_params"] = str(file_path)
-        if iter_match:
-            mrcs_file = file_path.parent / f"run_it{iter_match.group(1)}_classes.mrcs"
-            if mrcs_file.exists():
-                bookmark["url_classes"] = str(mrcs_file)
+    file_path = str(Path(path).absolute())
+    other = class2d_files.companion(file_path)
+    bookmark = {"mode_params": "url", "mode_classes": "url"}
+    if class2d_files.is_params_file(file_path):
+        bookmark["url_params"] = file_path
+        if other:
+            bookmark["url_classes"] = other
     else:
-        bookmark["url_classes"] = str(file_path)
-        if iter_match:
-            star_file = file_path.parent / f"run_it{iter_match.group(1)}_data.star"
-            if star_file.exists():
-                bookmark["url_params"] = str(star_file)
-        else:
-            from helicon.lib import cryosparc_project
-
-            particles = cryosparc_project.particles_dataset(file_path)
-            if particles is not None:
-                bookmark["url_params"] = str(Path(particles).resolve())
+        bookmark["url_classes"] = file_path
+        if other:
+            bookmark["url_params"] = other
     return bookmark
 
 

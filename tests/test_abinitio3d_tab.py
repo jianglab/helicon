@@ -160,18 +160,16 @@ class TestFileBrowserLaunch:
         star.write_text("dummy")
         assert "url_classes" not in _class2d_bookmark(str(star))
 
-    def test_cryosparc_class_averages_find_their_particles(self, tmp_path, monkeypatch):
-        from helicon.lib import cryosparc_project
+    def test_cryosparc_class_averages_find_their_particles(self, tmp_path):
         from helicon.lib.gui.webapps import _class2d_bookmark
 
         averages = tmp_path / "J63_020_class_averages.mrc"
         particles = tmp_path / "J63_020_particles.cs"
-        monkeypatch.setattr(
-            cryosparc_project, "particles_dataset", lambda path: particles
-        )
+        averages.write_text("x")
+        particles.write_text("x")
         bookmark = _class2d_bookmark(str(averages))
-        assert bookmark["url_classes"] == str(averages.resolve())
-        assert bookmark["url_params"] == str(particles.resolve())
+        assert bookmark["url_classes"] == str(averages)
+        assert bookmark["url_params"] == str(particles)
 
     def test_the_display_dispatches_the_mode(self):
         import helicon.commands.display as display

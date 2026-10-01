@@ -1,0 +1,89 @@
+"""Finding the other file of a 2D classification beside the one given."""
+
+import pytest
+
+from helicon.webApps import class2d_files as c2
+
+
+def _touch(folder, *names):
+    for n in names:
+        (folder / n).write_text("x")
+    return [str(folder / n) for n in names]
+
+
+class TestCompanion:
+    def test_relion_iterations_pair_up(self, tmp_path):
+        star, mrcs = _touch(tmp_path, "run_it025_data.star", "run_it025_classes.mrcs")
+        _touch(tmp_path, "run_it024_data.star", "run_it024_classes.mrcs")
+        assert c2.companion(star) == mrcs
+        assert c2.companion(mrcs) == star
+
+    def test_relion_without_iteration(self, tmp_path):
+        star, mrcs = _touch(tmp_path, "run_data.star", "run_classes.mrcs")
+        assert c2.companion(star) == mrcs
+
+    def test_cryosparc_outputs_pair_up(self, tmp_path):
+        cs, mrc = _touch(tmp_path, "J63_020_particles.cs", "J63_020_class_averages.mrc")
+        _touch(tmp_path, "J63_passthrough_particles.cs", "J63_020_class_averages.cs")
+        assert c2.companion(cs) == mrc
+        assert c2.companion(mrc) == cs
+
+    def test_nothing_for_urls_missing_files_or_other_names(self, tmp_path):
+        (other,) = _touch(tmp_path, "particles.star")
+        assert c2.companion("https://ftp.ebi.ac.uk/x/run_it020_data.star") is None
+        assert c2.companion(str(tmp_path / "run_it001_data.star")) is None
+        assert c2.companion(other) is None
+        assert c2.companion("") is None
+
+    def test_a_missing_partner_is_not_invented(self, tmp_path):
+        (star,) = _touch(tmp_path, "run_it025_data.star")
+        assert c2.companion(star) is None
+
+    def test_the_folder_is_kept_as_given(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        _touch(real, "run_it025_data.star", "run_it025_classes.mrcs")
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        out = c2.companion(str(link / "run_it025_data.star"))
+        assert out == str(link / "run_it025_classes.mrcs")
+
+
+class TestNeedsFilling:
+    def test_example_urls_and_empty_fields_are_replaced(self, tmp_path):
+        (star,) = _touch(tmp_path, "run_it025_data.star")
+        assert c2.needs_filling("https://ftp.ebi.ac.uk/x/run_it020_classes.mrcs", star)
+        assert c2.needs_filling("", star)
+
+    def test_a_file_chosen_in_the_same_folder_is_kept(self, tmp_path):
+        star, mrcs = _touch(tmp_path, "run_it025_data.star", "other_classes.mrcs")
+        assert not c2.needs_filling(mrcs, star)
+
+    def test_a_file_from_another_folder_is_replaced(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        (star,) = _touch(tmp_path / "a", "run_it025_data.star")
+        (mrcs,) = _touch(tmp_path / "b", "run_it025_classes.mrcs")
+        assert c2.needs_filling(mrcs, star)
+
+
+@pytest.mark.parametrize("tab", ["abinitio3d_tab", "helical_pitch_tab"])
+class TestTheTabsUseIt:
+    def test_both_fields_fill_each_other(self, tab):
+        import importlib
+        import inspect
+
+        src = inspect.getsource(importlib.import_module(f"helicon.webApps.tabs.{tab}"))
+        assert "@reactive.event(input.url_params)" in src
+        assert "@reactive.event(input.url_classes)" in src
+        assert "class2d_files.companion(" in src
+
+    def test_tube_ids_are_split_on_load(self, tab):
+        import importlib
+        import inspect
+
+        mod = importlib.import_module(f"helicon.webApps.tabs.{tab}")
+        src = inspect.getsource(mod)
+        assert "@reactive.event(params_raw, input.split_axis_distance)" in src
+        assert "compute.split_distinct_filaments(raw, distance)" in src
+        assert mod.BOOKMARK_DEFAULTS["split"] == ("split_axis_distance", 50)
