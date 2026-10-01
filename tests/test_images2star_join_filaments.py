@@ -8,6 +8,7 @@ import starfile
 
 import helicon
 from helicon.commands import images2star
+from helicon.lib.exceptions import HeliconValueError
 
 
 def _filament(mgraph, tube, start, end, step=50.0, stack="a.mrcs", first=1):
@@ -29,14 +30,14 @@ def _filament(mgraph, tube, start, end, step=50.0, stack="a.mrcs", first=1):
     )
 
 
-def _write_star(path, particles):
+def _write_star(path, particles, voltage=300.0):
     optics = pd.DataFrame(
         {
             "rlnOpticsGroup": [1],
             "rlnOpticsGroupName": ["opticsGroup1"],
             "rlnImagePixelSize": [1.0],
             "rlnImageSize": [64],
-            "rlnVoltage": [300.0],
+            "rlnVoltage": [voltage],
             "rlnSphericalAberration": [2.7],
             "rlnAmplitudeContrast": [0.1],
         }
@@ -195,7 +196,10 @@ class TestImages2starJoinFilaments:
                 "0",
             ],
         )
-        out = starfile.read(tmp_path / "out.star")["particles"]
+        star = starfile.read(tmp_path / "out.star")
+        # both inputs have the same optics group: it is written once
+        assert len(star["optics"]) == 1
+        out = star["particles"]
         # 1 duplicate rlnImageName, and file b particles at x=400-550 overlap file a tube 1
         assert len(out) == len(a) + len(b) - 1 - 4
         m1 = out[out["rlnMicrographName"] == "m1.mrc"]
@@ -243,3 +247,22 @@ class TestImages2starJoinFilaments:
         assert len(out) == len(a) + len(b)
         m1 = out[out["rlnMicrographName"] == "m1.mrc"]
         assert sorted(m1["rlnHelicalTubeID"].unique()) == [1, 2, 3]
+
+    def test_conflicting_optics_groups_are_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        a, b = self._inputs(tmp_path)
+        _write_star(tmp_path / "b.star", b, voltage=200.0)
+        with pytest.raises(HeliconValueError, match="optics group 1"):
+            _run(
+                monkeypatch,
+                [
+                    "a.star",
+                    "b.star",
+                    "out.star",
+                    "--ignoreBadParticlePath",
+                    "2",
+                    "--verbose",
+                    "0",
+                ],
+            )
+        assert not (tmp_path / "out.star").exists()

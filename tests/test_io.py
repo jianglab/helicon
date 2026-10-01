@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 import pandas as pd
 from helicon.lib import io
+from helicon.lib.exceptions import HeliconValueError
 from helicon.lib.euler import (
     euler_relion2eman,
     euler_eman2relion,
@@ -538,3 +539,61 @@ class TestCsFromRelionImport:
         cs_file = self._project(tmp_path, {"J1": [1, 1], "J2": [1]})
         (tmp_path / "CS-proj" / "J2" / "particles.star").unlink()
         assert io._detect_cs_import_origin(cs_file) == []
+
+
+class TestMergeOpticsGroups:
+    @staticmethod
+    def _optics(numbers, voltages, names=None):
+        return pd.DataFrame(
+            {
+                "rlnOpticsGroup": numbers,
+                "rlnOpticsGroupName": names or [f"opticsGroup{n}" for n in numbers],
+                "rlnVoltage": voltages,
+                "rlnImagePixelSize": [1.0] * len(numbers),
+            }
+        )
+
+    def test_shared_groups_are_kept_once(self):
+        optics = io.merge_optics_groups(
+            [
+                self._optics([1, 2], [300.0, 200.0]),
+                self._optics([2, 1], [200.0, 300.0]),
+                self._optics([3], [120.0]),
+            ]
+        )
+        assert optics["rlnOpticsGroup"].tolist() == [1, 2, 3]
+        assert optics["rlnVoltage"].tolist() == [300.0, 200.0, 120.0]
+
+    def test_same_number_with_different_parameters_is_an_error(self):
+        with pytest.raises(HeliconValueError, match="rlnVoltage"):
+            io.merge_optics_groups(
+                [self._optics([1], [300.0]), self._optics([1], [200.0])],
+                labels=["a.star", "b.star"],
+            )
+
+    def test_same_number_with_different_name_is_an_error(self):
+        with pytest.raises(HeliconValueError, match="rlnOpticsGroupName"):
+            io.merge_optics_groups(
+                [
+                    self._optics([1], [300.0], names=["krios"]),
+                    self._optics([1], [300.0], names=["glacios"]),
+                ]
+            )
+
+    def test_same_name_with_different_number_is_an_error(self):
+        with pytest.raises(HeliconValueError, match="rlnOpticsGroup "):
+            io.merge_optics_groups(
+                [
+                    self._optics([1], [300.0], names=["krios"]),
+                    self._optics([2], [300.0], names=["krios"]),
+                ]
+            )
+
+    def test_group_listed_twice_in_one_input_is_an_error(self):
+        with pytest.raises(HeliconValueError, match="more than once"):
+            io.merge_optics_groups([self._optics([1, 1], [300.0, 300.0])])
+
+    def test_inputs_without_optics(self):
+        assert io.merge_optics_groups([None, None]) is None
+        optics = io.merge_optics_groups([None, self._optics([1], [300.0])])
+        assert optics["rlnOpticsGroup"].tolist() == [1]
