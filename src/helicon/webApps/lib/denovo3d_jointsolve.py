@@ -185,6 +185,7 @@ def joint_reconstruct(
             target_apix2d=target_apix2d,
             algorithm=algorithm,
             verbose=verbose,
+            cpu=cpu,
         )
     tilts = [0.0] * n if tilts is None else tilts
     psis = [0.0] * n if psis is None else psis

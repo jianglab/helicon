@@ -981,6 +981,19 @@ def gauss_analytic_reconstruct(
     return (rec3d, None, None), score
 
 
+# Temporary arrays of one design_matrix call, at its default chunk size: the
+# exponentials, products and indices of 200,000 footprints (measured ~1 GB).
+_GB_PER_WORKER = 1.5
+
+
+def _workers(cpu, n_images):
+    """Threads for building ``n_images`` design matrices on ``cpu`` cores."""
+    import helicon
+
+    by_memory = helicon.available_cpu(mem_gb_per_cpu=_GB_PER_WORKER)
+    return max(1, min(int(cpu or 1), int(n_images), int(by_memory)))
+
+
 def gauss_joint_reconstruct(
     images,
     phis,
@@ -994,6 +1007,7 @@ def gauss_joint_reconstruct(
     target_apix2d=5.0,
     algorithm=None,
     verbose=0,
+    cpu=1,
     **_ignored,
 ):
     """One Gaussian basis fitted to several images, each at its own azimuth.
@@ -1013,6 +1027,11 @@ def gauss_joint_reconstruct(
     Images are scaled to unit variance before stacking, so that one image with
     a large dynamic range cannot dominate the shared fit -- the same hazard
     ``denovo3d_joint`` guards against when combining score curves.
+
+    The images' design matrices, almost all of the time, are built in parallel,
+    on up to ``cpu`` threads (fewer when memory is short: each one needs about
+    ``_GB_PER_WORKER`` of temporary arrays). The sums are taken in image order,
+    so the result does not depend on the number of threads.
 
     Returns ``(volume, info)`` with ``info`` carrying the joint ``score``, the
     ``per_image`` scores, and the fitted ``coefficients``.
@@ -1036,11 +1055,11 @@ def gauss_joint_reconstruct(
     )
     grid = setup["grid"]
 
-    mats, targets = [], []
-    M = u = None
-    for image, phi in zip(images, phis):
+    for image in images:
         if image.shape != (ny, nx):
             raise ValueError("all images must have the same shape")
+
+    def one_image(image, phi):
         sd = float(image.std())
         b = (image / sd if sd > 0 else image).ravel()
         A = design_matrix(
@@ -1054,11 +1073,28 @@ def gauss_joint_reconstruct(
             sigma_z=setup["sigma_z"],
             phi_degree=-float(phi),
         )
-        mats.append(A)
-        targets.append(b)
-        Mi, ui = A.T @ A, A.T @ b
+        return A, b, A.T @ A, A.T @ b
+
+    workers = _workers(cpu, len(images))
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from threadpoolctl import threadpool_limits
+
+        # the matrix products inside each worker share the cores out rather
+        # than each asking BLAS for all of them
+        with threadpool_limits(limits=max(1, int(cpu) // workers), user_api="blas"):
+            with ThreadPoolExecutor(workers) as pool:
+                systems = list(pool.map(one_image, images, phis))
+    else:
+        systems = [one_image(image, phi) for image, phi in zip(images, phis)]
+    mats = [A for A, _, _, _ in systems]
+    targets = [b for _, b, _, _ in systems]
+    M = u = None
+    for _, _, Mi, ui in systems:
         M = Mi if M is None else M + Mi
         u = ui if u is None else u + ui
+    del systems
 
     lam1, lam2 = _penalties(algorithm, M, u)
     coef = nn_elasticnet(M, u, lam1, lam2)
