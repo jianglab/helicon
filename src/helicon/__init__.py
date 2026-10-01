@@ -42,6 +42,7 @@ from .lib.analysis import (
     estimate_inter_box_distance,
     filament_pieces_overlap,
     join_collinear_filaments,
+    split_distinct_filaments,
 )
 from .lib.epu import (
     EPU_micrograph_path_2_movie_xml_path,

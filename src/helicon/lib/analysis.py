@@ -1592,11 +1592,238 @@ def join_collinear_filaments(
 
 from .alignment import align_images  # noqa: F401
 
+
 # AgglomerativeClusteringWithMinSize is re-exported here for callers that
 # expect it on this module, but importing it eagerly would drag in sklearn --
 # a second of import time, and a second bundled libomp in a process that may
 # already have finufft's.  PEP 562 lets the name resolve on first attribute
 # access instead, so only code that actually clusters pays for sklearn.
+def _micrograph_pixel_size(data: pd.DataFrame) -> float | None:
+    """The micrograph pixel size (Å/pixel) recorded in ``data`` or its optics."""
+    optics = data.attrs.get("optics") if hasattr(data, "attrs") else None
+    for col in ("rlnMicrographOriginalPixelSize", "rlnMicrographPixelSize"):
+        for table in (data, optics):
+            if table is not None and col in table:
+                value = float(table[col].astype(float).iloc[0])
+                if value > 0:
+                    return value
+    return None
+
+
+def _local_axes(xy: np.ndarray, radius: float) -> np.ndarray:
+    """Unit axis direction at each point, from the points within ``radius``.
+
+    NaN where fewer than three points (itself included) are that close.
+    """
+    d2 = ((xy[:, None, :] - xy[None, :, :]) ** 2).sum(-1)
+    out = np.full(xy.shape, np.nan)
+    for i in range(len(xy)):
+        near = xy[d2[i] <= radius**2]
+        if len(near) >= 3:
+            out[i] = _principal_axis(near)
+    return out
+
+
+def _psi_axes(psi_deg: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """Axis directions from in-plane angles, in the sign convention that agrees
+    with ``reference`` (directions measured from the coordinates)."""
+    r = np.deg2rad(psi_deg)
+    best, score = None, -1.0
+    for sy in (1.0, -1.0):
+        axes = np.stack([np.cos(r), sy * np.sin(r)], axis=1)
+        ok = np.isfinite(reference[:, 0])
+        agree = (
+            float(np.mean(np.abs((axes[ok] * reference[ok]).sum(1))))
+            if ok.any()
+            else 0.0
+        )
+        if agree > score:
+            best, score = axes, agree
+    return best
+
+
+def split_distinct_filaments(
+    data: pd.DataFrame,
+    filament_attrs: list[str] | None = None,
+    max_axis_distance: float = 50.0,
+    max_angle: float = 20.0,
+    apix_micrograph: float | None = None,
+) -> pd.DataFrame:
+    """Give separate ids to distinct physical filaments that share one.
+
+    Particles merged from several extractions, each numbering its tubes from 1,
+    put different filaments under one ``(rlnMicrographName, rlnHelicalTubeID)``
+    (measured on EMPIAR-10230: 1,065 of 3,601 ids, 34% of the particles, with
+    filaments micrometres apart). Within each id, two segments are linked when
+    each lies within ``max_axis_distance`` of the other's helical axis -- the
+    line through it along the filament -- and the two axes agree to within
+    ``max_angle``. The connected groups are the physical filaments.
+
+    Only the distance from the axis is tested, never the distance along it:
+    gaps within a filament, common since 2D/3D class selections ignore the
+    filament a segment belongs to, are left as they are (``images2star
+    --recoverFullFilaments`` fills them in). The angle test keeps two
+    filaments that cross apart at their crossing.
+
+    A segment's axis direction comes from the coordinates of its neighbours in
+    the same id (within five inter-box distances), or, for a segment with too
+    few, from ``rlnAnglePsiPrior`` (else ``rlnAnglePsi``). Without either it is
+    linked only to segments within ``max_axis_distance`` of it.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data with ``rlnCoordinateX``, ``rlnCoordinateY`` (micrograph
+        pixels) and ``filament_attrs``.
+    filament_attrs : list of str, optional
+        Columns that identify a filament. Defaults to
+        ``["rlnMicrographName", "rlnHelicalTubeID"]``.
+    max_axis_distance : float, optional
+        Largest distance (Å) of a segment from the axis of the filament it
+        belongs to. Defaults to 50.
+    max_angle : float, optional
+        Largest angle (degrees) between the axes of linked segments. Defaults
+        to 20.
+    apix_micrograph : float, optional
+        Micrograph pixel size (Å/pixel). Read from the data
+        (``rlnMicrographOriginalPixelSize``, ``rlnMicrographPixelSize``) when
+        not given, or else estimated from ``rlnHelicalTrackLengthAngst``.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``data``. In an id that held several filaments, the one with
+        the segment earliest in the table keeps the id (the earliest along the
+        track, when ``rlnHelicalTrackLengthAngst`` is present) and the others
+        get the next unused ids of their micrograph. Everything else is
+        unchanged.
+
+    Raises
+    ------
+    KeyError
+        When a required column is missing.
+    ValueError
+        When the micrograph pixel size is neither given, recorded nor
+        estimable.
+    """
+    import pandas as pd
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    filament_attrs = list(filament_attrs or ["rlnMicrographName", "rlnHelicalTubeID"])
+    missing = [
+        c
+        for c in ["rlnCoordinateX", "rlnCoordinateY"] + filament_attrs
+        if c not in data
+    ]
+    if missing:
+        raise KeyError(f"split_distinct_filaments needs {', '.join(missing)}")
+    data = data.copy()
+    if len(data) < 2:
+        return data
+    code = data.groupby(filament_attrs, sort=False).ngroup().values
+    xy_px = data[["rlnCoordinateX", "rlnCoordinateY"]].astype(float).values
+    has_track = "rlnHelicalTrackLengthAngst" in data
+    track = (
+        data["rlnHelicalTrackLengthAngst"].astype(float).values
+        if has_track
+        else np.arange(len(data), dtype=float)
+    )
+    order = np.lexsort((track, code))
+
+    c_sorted = code[order]
+    starts = np.flatnonzero(np.r_[True, c_sorted[1:] != c_sorted[:-1]])
+    ends = np.r_[starts[1:], len(c_sorted)]
+    # the segment spacing, from each segment's nearest neighbour in its id: the
+    # step between consecutive segments along the track would jump between
+    # the filaments of an id that holds several
+    nn_px, dt_all = [], []
+    for s0, e0 in zip(starts, ends):
+        if e0 - s0 < 2:
+            continue
+        pts = xy_px[order[s0:e0]]
+        d = np.hypot(*(pts[:, None, :] - pts[None, :, :]).transpose(2, 0, 1))
+        np.fill_diagonal(d, np.inf)
+        nn_px.append(d.min(1))
+        dt_all.append(np.diff(track[order[s0:e0]]))
+    nn_px = np.concatenate(nn_px) if nn_px else np.zeros(0)
+    nn_px = nn_px[nn_px > 0]
+    apix = apix_micrograph or _micrograph_pixel_size(data)
+    if not apix and has_track and len(nn_px):
+        dt = np.concatenate(dt_all)
+        dt = dt[dt > 0]
+        if len(dt):
+            apix = float(np.median(dt) / np.median(nn_px))
+    if not apix:
+        raise ValueError(
+            "split_distinct_filaments: the micrograph pixel size is not in the "
+            "data; pass apix_micrograph"
+        )
+    xy = xy_px * apix
+    box = float(np.median(nn_px)) * apix if len(nn_px) else max_axis_distance
+    psi_col = next((c for c in ("rlnAnglePsiPrior", "rlnAnglePsi") if c in data), None)
+    psi = data[psi_col].astype(float).values if psi_col else None
+    cos_max = np.cos(np.deg2rad(max_angle))
+
+    # only an id whose segments stray from one straight axis needs a closer look
+    piece = np.zeros(len(data), np.int64)
+    axes_ref, axes_rows = [], []
+    for s0, e0 in zip(starts, ends):
+        rows = order[s0:e0]
+        if len(rows) < 2:
+            continue
+        pts = xy[rows]
+        axis = _principal_axis(pts)
+        off = (pts - pts.mean(0)) @ np.array([-axis[1], axis[0]])
+        if np.abs(off).max() <= max_axis_distance:
+            continue
+        local = _local_axes(pts, 5.0 * box)
+        if psi is not None and np.isnan(local[:, 0]).any():
+            from_psi = _psi_axes(psi[rows], local)
+            gap = np.isnan(local[:, 0])
+            local[gap] = from_psi[gap]
+        known = np.isfinite(local[:, 0])
+        r = pts[None, :, :] - pts[:, None, :]  # r[i, j] = p_j - p_i
+        u = np.where(known[:, None], local, 0.0)
+        # distance of j from i's axis, and of i from j's
+        d_ij = np.abs(u[:, None, 0] * r[..., 1] - u[:, None, 1] * r[..., 0])
+        d_ji = d_ij.T
+        dist = np.hypot(r[..., 0], r[..., 1])
+        d_ij = np.where(known[:, None], d_ij, dist)
+        d_ji = np.where(known[None, :], d_ji, dist)
+        aligned = np.abs(u @ u.T) >= cos_max
+        aligned |= ~known[:, None] | ~known[None, :]
+        link = (d_ij <= max_axis_distance) & (d_ji <= max_axis_distance) & aligned
+        n_comp, label = connected_components(csr_matrix(link), directed=False)
+        if n_comp < 2:
+            continue
+        # the group reached first (along the track) keeps the id
+        first = {}
+        for k, lab in enumerate(label):
+            first.setdefault(lab, len(first))
+        piece[rows] = [first[lab] for lab in label]
+    if not piece.any():
+        return data
+
+    tube = pd.to_numeric(data["rlnHelicalTubeID"], errors="coerce").fillna(0)
+    tube = tube.astype(int).values
+    mgraph_attrs = [a for a in filament_attrs if a != "rlnHelicalTubeID"]
+    mgraph = (
+        data.groupby(mgraph_attrs, sort=False).ngroup().values
+        if mgraph_attrs
+        else np.zeros(len(data), np.int64)
+    )
+    next_id = pd.Series(tube).groupby(mgraph).max().to_dict()
+    new = tube.copy()
+    rows = np.flatnonzero(piece > 0)
+    groups = pd.DataFrame(dict(m=mgraph[rows], f=code[rows], p=piece[rows]))
+    for (m, _f, _p), idx in groups.groupby(["m", "f", "p"], sort=True).groups.items():
+        next_id[m] += 1
+        new[rows[np.asarray(idx)]] = next_id[m]
+    data["rlnHelicalTubeID"] = new
+    return data
+
+
 _LAZY_REEXPORTS = {"AgglomerativeClusteringWithMinSize": ".clustering"}
 
 

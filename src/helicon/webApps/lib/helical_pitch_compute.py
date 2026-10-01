@@ -8,8 +8,6 @@ and adapted to use helicon library utilities where available.
 
 
 import numpy as np
-import pandas as pd
-import pathlib
 
 import helicon
 
@@ -187,6 +185,37 @@ def _annotate_helix_ids(df):
         df.loc[helix.index, "length"] = l
         df.loc[helix.index, "helixID"] = hi + 1
     return df
+
+
+def split_distinct_filaments(df, max_axis_distance):
+    """``df`` with tube ids that hold several filaments split.
+
+    See ``helicon.split_distinct_filaments``. The ``helixID`` and ``length``
+    columns are recomputed for the new filaments.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Class2D parameters as loaded here.
+    max_axis_distance : float
+        Largest distance (Å) of a segment from its filament's axis; 0 or less
+        leaves ``df`` as it is.
+
+    Returns
+    -------
+    df : pandas.DataFrame
+    n_before, n_after : int
+        Filaments before and after.
+    """
+    key = ["rlnMicrographName", "rlnHelicalTubeID"]
+    n = df.groupby(key).ngroups
+    if not max_axis_distance or max_axis_distance <= 0:
+        return df, n, n
+    fixed = helicon.split_distinct_filaments(df, max_axis_distance=max_axis_distance)
+    n_after = fixed.groupby(key).ngroups
+    if n_after > n:
+        fixed = _annotate_helix_ids(fixed)
+    return fixed, n, n_after
 
 
 def get_class2d_params_from_file(params_file):
