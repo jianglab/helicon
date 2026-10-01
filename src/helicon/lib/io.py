@@ -35,6 +35,7 @@ __all__ = [
     "guess_data_type",
     "image2dataframe",
     "images2dataframe",
+    "merge_optics_groups",
     "mrc2mrcs",
     "relion_astigmatism_to_eman",
     "star2dataframe",
@@ -362,6 +363,115 @@ except ImportError:
 ########################################################################################################################
 
 
+def _optics_group_number(value: Any) -> Any:
+    """Return an optics group number as an int when it is one, else unchanged."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _optics_values_equal(a: Any, b: Any) -> bool:
+    """Compare two optics group parameter values, treating NaN as equal to NaN."""
+    a_missing = a is None or (isinstance(a, float) and np.isnan(a))
+    b_missing = b is None or (isinstance(b, float) and np.isnan(b))
+    if a_missing or b_missing:
+        return a_missing and b_missing
+    if isinstance(a, (int, float, np.number)) and isinstance(
+        b, (int, float, np.number)
+    ):
+        return bool(np.isclose(float(a), float(b), rtol=1e-6, atol=1e-9))
+    return str(a) == str(b)
+
+
+def merge_optics_groups(
+    opticslist: list[pd.DataFrame | None],
+    labels: list[str] | None = None,
+) -> pd.DataFrame | None:
+    """Combine the optics blocks of several datasets from the same project.
+
+    Inputs from one project (e.g. several pickings) share their optics groups,
+    so a group that appears in more than one input is kept once. A group number
+    or name that has different parameters, or is paired with a different name or
+    number, in another input means the inputs do not share their optics groups,
+    and is an error.
+
+    Parameters
+    ----------
+    opticslist : list of pd.DataFrame or None
+        The optics block of each dataset, ``None`` when it has none.
+    labels : list of str, optional
+        A name for each dataset (e.g. its file name) used in error messages.
+
+    Returns
+    -------
+    pd.DataFrame or None
+        The merged optics block, or ``None`` if no dataset has one.
+
+    Raises
+    ------
+    HeliconValueError
+        If two inputs define the same optics group differently.
+    """
+    tables = [o for o in opticslist if o is not None and len(o)]
+    if not tables:
+        return None
+    if labels is None:
+        labels = [f"input {i + 1}" for i in range(len(opticslist))]
+    columns = list(dict.fromkeys(c for o in tables for c in o.columns))
+    param_columns = [
+        c for c in columns if c not in ("rlnOpticsGroup", "rlnOpticsGroupName")
+    ]
+
+    by_number = {}  # number -> (label, row)
+    by_name = {}  # name -> (label, row)
+    merged = []
+    for optics, label in zip(opticslist, labels):
+        if optics is None or len(optics) == 0:
+            continue
+        if "rlnOpticsGroup" not in optics:
+            raise HeliconValueError(f"{label}: optics block has no rlnOpticsGroup")
+        for row in optics.to_dict("records"):
+            number = _optics_group_number(row["rlnOpticsGroup"])
+            name = row.get("rlnOpticsGroupName")
+            if name is not None and isinstance(name, float) and np.isnan(name):
+                name = None
+            seen = by_number.get(number)
+            if seen is None and name is not None:
+                seen = by_name.get(name)
+                if seen is not None and seen[0] == label:
+                    seen = None  # an input may give several of its groups one name
+            if seen is None:
+                by_number[number] = (label, row)
+                if name is not None:
+                    by_name[name] = (label, row)
+                merged.append(row)
+                continue
+            seen_label, seen_row = seen
+            if seen_label == label:
+                raise HeliconValueError(
+                    f"{label}: optics group {number} ({name}) is listed more than once"
+                )
+            differences = [
+                c
+                for c in ["rlnOpticsGroup", "rlnOpticsGroupName", *param_columns]
+                if not _optics_values_equal(row.get(c), seen_row.get(c))
+            ]
+            if differences:
+                raise HeliconValueError(
+                    f"optics group {number} ({name}) of {label} conflicts with optics "
+                    f"group {seen_row['rlnOpticsGroup']} "
+                    f"({seen_row.get('rlnOpticsGroupName')}) of {seen_label} in "
+                    + ", ".join(
+                        f"{c} ({row.get(c)} vs {seen_row.get(c)})" for c in differences
+                    )
+                    + ". The inputs must come from the same project and share their "
+                    "optics groups"
+                )
+
+    return pd.DataFrame(merged, columns=columns)
+
+
 def images2dataframe(
     inputFiles: str | list[str],
     csparc_passthrough_files: list[str] = [],
@@ -427,11 +537,7 @@ def images2dataframe(
             warn_missing_ctf,
         )
         datalist.append(p)
-        try:
-            if p.attrs["optics"] is not None:
-                opticslist.append(p.attrs["optics"])
-        except (KeyError, AttributeError):
-            pass
+        opticslist.append(p.attrs.get("optics"))
 
     convention = None
     if target_convention is not None:
@@ -460,11 +566,8 @@ def images2dataframe(
         # pd.concat raises an ambiguous truth value error
         p.attrs = {}
 
+    optics = merge_optics_groups(opticslist, labels=list(inputFiles))
     data = pd.concat(datalist, sort=False)
-    if len(opticslist):
-        optics = pd.concat(opticslist, sort=False)
-    else:
-        optics = None
     data.attrs["optics"] = optics
     data.attrs["convention"] = target_convention
     data.attrs["source_path"] = inputFiles
@@ -1311,8 +1414,7 @@ def _cs2dataframe_from_star_import(
             n = min(len(star_data), len(import_uids))
             star_data = star_data.iloc[:n]
             import_uids = import_uids[:n]
-        if "optics" in star_data.attrs:
-            optics.append(star_data.attrs["optics"])
+        optics.append(star_data.attrs.get("optics"))
         # pandas compares attrs when concatenating, and optics tables in them
         # cannot be compared as booleans; they are recombined below
         star_data.attrs = {}
@@ -1320,6 +1422,7 @@ def _cs2dataframe_from_star_import(
         star_data["_uid"] = np.asarray(import_uids, dtype=np.uint64)
         star_data["_source"] = si
         frames.append(star_data)
+    optics = merge_optics_groups(optics, labels=[s for s, _ in sources])
     star_data = pd.concat(frames, ignore_index=True)
 
     if (
@@ -1386,8 +1489,8 @@ def _cs2dataframe_from_star_import(
         if cs_field in names:
             data[rln_name] = cs[cs_field][k].astype(float) * mul
 
-    if optics:
-        data.attrs["optics"] = pd.concat(optics, ignore_index=True).drop_duplicates()
+    if optics is not None:
+        data.attrs["optics"] = optics
     data.attrs["source_path"] = csFile
     data.attrs["convention"] = "relion"
     return data
