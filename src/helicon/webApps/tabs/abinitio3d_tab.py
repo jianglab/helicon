@@ -1559,7 +1559,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             class_numbers=_selected_class_numbers(),
         )
         star_name = f"helices_pitch_{low:.0f}-{high:.0f}.star"
-        csym = int(input.rot_fold() or 1)
+        csym = _imposed_csym()
         band_ui = render.download(
             label=_download_label(subset, "Download"),
             filename=star_name,
@@ -1590,7 +1590,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 '(90), <span style="font-family: monospace; color: #ffd479;">rlnAnglePsi</span> and origins, and each filament\'s '
                 "pitch, length and direction score. It can be used directly to "
                 "reconstruct a 3D map, without helical symmetry, for example (the "
-                "rlnAngleRot follow the C symmetry set below, and --sym imposes it):<br>"
+                "rlnAngleRot follow the C symmetry set below; --sym imposes it when "
+                "Impose C is ticked in Parameters):<br>"
                 f'<span style="font-family: monospace; color: #ffd479;">relion_reconstruct --i {star_name} '
                 f"--o map.mrc --ctf --sym c{csym}</span><br>"
                 "and the map serves as a starting reference for refinement."
@@ -1599,6 +1600,10 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         )
 
     # ── a 3D map from the segments, by relion_reconstruct ──
+
+    def _imposed_csym():
+        """The C symmetry to impose on a map: the tab's, when Impose C is ticked."""
+        return int(input.rot_fold() or 1) if input.map_csym() else 1
 
     relion_map = reactive.value(None)
 
@@ -1658,8 +1663,9 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                     style="width: 100%;",
                 ),
                 "Reconstruct the segments in the selected ranges with their angles "
-                "and origins: no helical symmetry, the C symmetry set below, and CTF "
-                "correction when the star file has it. "
+                "and origins: no helical symmetry, no C symmetry unless Impose C is "
+                "ticked in Parameters (as for the map from the class averages), and "
+                "CTF correction when the star file has it. "
                 + (
                     "Runs relion_reconstruct_mpi, with as many MPI processes as "
                     "the free CPUs and memory allow."
@@ -1703,7 +1709,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                     subset,
                     input.relion_project_dir(),
                     cpu=max(1, int(helicon.available_cpu())),
-                    csym=int(input.rot_fold() or 1),
+                    csym=_imposed_csym(),
                 )
         except Exception as e:
             logger.error("relion_reconstruct failed: %s", e)

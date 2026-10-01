@@ -176,3 +176,28 @@ class TestFileBrowserLaunch:
 
         src = Path(display.__file__).read_text()
         assert 'if mode == "abInitio3D":\n            _launch_abinitio3d(' in src
+
+
+class TestRelionSymmetry:
+    """relion_reconstruct imposes the C symmetry only when Impose C is ticked,
+    as the map from the class averages does."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_the_symmetry_follows_impose_c(self):
+        src = self._src()
+        helper = src[src.index("def _imposed_csym") :]
+        helper = helper[: helper.index("\n\n")]
+        assert "input.map_csym()" in helper and "else 1" in helper
+
+    def test_the_run_and_the_star_file_hint_use_it(self):
+        src = self._src()
+        run = src[src.index("def run_relion") :]
+        run = run[: run.index("relion_map.set(result)")]
+        assert "csym=_imposed_csym()" in run
+        hint = src[src.index("def pitch_band_download") :]
+        hint = hint[: hint.index("return ui.tooltip(")]
+        assert "csym = _imposed_csym()" in hint
