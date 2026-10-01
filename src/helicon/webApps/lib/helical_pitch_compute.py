@@ -224,53 +224,42 @@ def _star_to_dataframe(starFile):
 
 
 def _cs_to_dataframe(cs_file):
-    cs = np.load(cs_file)
-    data = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
-    required_attrs = (
-        "blob/idx blob/path filament/filament_uid filament/position_A "
-        "alignments2D/class alignments2D/pose "
-        "location/micrograph_path".split()
+    """Class2D parameters from a cryoSPARC particles file, in RELION terms.
+
+    Delegates to helicon's own cs -> star conversion, so the conventions are
+    the library's: coordinates from the centre fractions and micrograph shape,
+    the psi prior from ``filament_pose``, origins as minus the 2D shift, and --
+    for particles imported from RELION, whose .cs keeps no usable filament
+    geometry -- everything helical from the original star files, matched on
+    uid (see ``helicon.lib.io._detect_cs_import_origin``).
+    """
+    data = helicon.cs2dataframe(
+        cs_file,
+        warn_missing_ctf=0,
+        ignore_bad_particle_path=2,
+        ignore_bad_micrograph_path=2,
     )
-    missing_attrs = [attr for attr in required_attrs if attr not in data]
-    if missing_attrs:
+    if data.attrs.get("convention") != "relion":
+        data = helicon.dataframe_cryosparc_to_relion(data)
+    required = (
+        "rlnMicrographName rlnHelicalTubeID rlnHelicalTrackLengthAngst "
+        "rlnClassNumber rlnAnglePsi".split()
+    )
+    missing = [c for c in required if c not in data]
+    if missing:
         msg = (
-            f"ERROR: required attrs '{', '.join(missing_attrs)}' "
-            f"are not included in {cs_file}"
+            f"ERROR: {cs_file} does not provide {', '.join(missing)}. A cryoSPARC "
+            "job that imported particles from RELION is read through the star "
+            "files it kept (particles.star and imported_particles*.cs in the "
+            "import job's directory), so the .cs file has to stay in its "
+            "cryoSPARC project."
         )
         msg += (
-            "\nIf the particles were imported from a RELION star file, "
-            "use: helicon images2star <cs file> <output star> "
+            "\nOtherwise use: helicon images2star <cs file> <output star> "
             "--copyParm <original star>"
         )
         raise ValueError(msg)
-    ret = pd.DataFrame()
-    ret["rlnImageName"] = (
-        (data["blob/idx"].astype(int) + 1).map("{:06d}".format)
-        + "@"
-        + data["blob/path"].str.decode("utf-8")
-    )
-    if "micrograph_blob/path" in data:
-        ret["rlnMicrographName"] = data["micrograph_blob/path"]
-    else:
-        ret["rlnMicrographName"] = data["location/micrograph_path"].str.decode("utf-8")
-    if data["filament/filament_uid"].min() > 1000:
-        micrographs = data.groupby(["blob/path"])
-        for _, m in micrographs:
-            mapping = {
-                v: i + 1
-                for i, v in enumerate(sorted(m["filament/filament_uid"].unique()))
-            }
-            ret.loc[m.index, "rlnHelicalTubeID"] = m["filament/filament_uid"].map(
-                mapping
-            )
-    else:
-        ret["rlnHelicalTubeID"] = data["filament/filament_uid"].astype(int)
-    ret["rlnHelicalTrackLengthAngst"] = (
-        data["filament/position_A"].astype(np.float32).values.round(2)
-    )
-    ret["rlnClassNumber"] = data["alignments2D/class"].astype(int) + 1
-    ret["rlnAnglePsi"] = -np.rad2deg(data["alignments2D/pose"]).round(2)
-    return ret
+    return data
 
 
 # ── Histogram plotting ────────────────────────────────────────────

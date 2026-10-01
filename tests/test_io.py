@@ -479,3 +479,62 @@ class TestIo(object):
             io.clean_cs_micrograph_path("250123_SF0431_00004_1-4.mrc")
             == "250123_SF0431_00004_1-4.mrc"
         )
+
+
+class TestCsFromRelionImport:
+    """cs2dataframe on particles that cryoSPARC imported from RELION stars."""
+
+    @staticmethod
+    def _project(tmp_path, jobs, chunked=True):
+        from test_helical_pitch_cs_loader import make_import_project
+
+        return make_import_project(tmp_path, jobs, chunked=chunked)
+
+    def test_chunked_import_file_is_detected(self, tmp_path):
+        cs_file = self._project(tmp_path, {"J1": [1, 1, 2]}, chunked=True)
+        df = io.cs2dataframe(cs_file, warn_missing_ctf=0)
+        assert df.attrs["convention"] == "relion"
+        assert list(df["rlnHelicalTubeID"]) == [1, 1, 2]
+
+    def test_unchunked_import_file_is_detected(self, tmp_path):
+        cs_file = self._project(tmp_path, {"J1": [1, 1, 2]}, chunked=False)
+        df = io.cs2dataframe(cs_file, warn_missing_ctf=0)
+        assert df.attrs["convention"] == "relion"
+
+    def test_overlay_follows_the_uid_not_the_row_order(self, tmp_path):
+        # the .cs rows are in reverse; classes were assigned by .cs row
+        cs_file = self._project(tmp_path, {"J1": [1, 1, 1, 1]})
+        df = io.cs2dataframe(cs_file, warn_missing_ctf=0)
+        cs = np.load(cs_file)
+        expected = {
+            int(u): int(c) + 1 for u, c in zip(cs["uid"], cs["alignments2D/class"])
+        }
+        star_uids = sorted(expected)  # import order = star order
+        assert list(df["rlnClassNumber"]) == [expected[u] for u in star_uids]
+
+    def test_shift_and_pose_use_the_library_conventions(self, tmp_path):
+        cs_file = self._project(tmp_path, {"J1": [1, 1]})
+        df = io.cs2dataframe(cs_file, warn_missing_ctf=0)
+        # origin = -shift * psize, as dataframe_cryosparc_to_relion does
+        assert np.allclose(df["rlnOriginXAngst"], -2.0 * 1.15, atol=1e-5)
+        assert np.allclose(df["rlnOriginYAngst"], 1.0 * 1.15, atol=1e-5)
+        assert "rlnMaxValueProbDistribution" in df
+
+    def test_every_import_job_is_used(self, tmp_path):
+        cs_file = self._project(tmp_path, {"J1": [1, 1, 1], "J2": [1, 1]})
+        df = io.cs2dataframe(cs_file, warn_missing_ctf=0)
+        assert len(df) == 5
+        assert set(df["rlnImageName"].str.split("@").str[1]) == {
+            "Extract/J1.mrcs",
+            "Extract/J2.mrcs",
+        }
+
+    def test_imports_sharing_a_micrograph_keep_their_filaments_apart(self, tmp_path):
+        cs_file = self._project(tmp_path, {"J1": [1, 1, 1], "J2": [1, 1]})
+        df = io.cs2dataframe(cs_file, warn_missing_ctf=0)
+        assert df.groupby(["rlnMicrographName", "rlnHelicalTubeID"]).ngroups == 2
+
+    def test_not_an_import_when_a_job_lacks_its_star(self, tmp_path):
+        cs_file = self._project(tmp_path, {"J1": [1, 1], "J2": [1]})
+        (tmp_path / "CS-proj" / "J2" / "particles.star").unlink()
+        assert io._detect_cs_import_origin(cs_file) == []
