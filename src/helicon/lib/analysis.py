@@ -1485,7 +1485,9 @@ def join_collinear_filaments(
             ri, rj = find(pi), find(pj)
             if ri == rj:
                 continue
-            if filament_pieces_overlap(ends[pi, 0], ends[pi, 1], ends[pj, 0], ends[pj, 1], epsilon):
+            if filament_pieces_overlap(
+                ends[pi, 0], ends[pi, 1], ends[pj, 0], ends[pj, 1], epsilon
+            ):
                 parent[max(ri, rj)] = min(ri, rj)
 
     roots = np.array([find(i) for i in range(n_pieces)])
@@ -1576,7 +1578,10 @@ def join_collinear_filaments(
         ref_rows = piece_rows[pcs[0]]
         ref_t = tracks[track_attrs[0]][ref_rows]
         ref_proj = xy[ref_rows] @ axis
-        if len(ref_rows) > 1 and np.dot(ref_proj - ref_proj.mean(), ref_t - ref_t.mean()) < 0:
+        if (
+            len(ref_rows) > 1
+            and np.dot(ref_proj - ref_proj.mean(), ref_t - ref_t.mean()) < 0
+        ):
             axis = -axis
         proj = pts @ axis
         proj -= proj.min()

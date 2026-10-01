@@ -54,24 +54,16 @@ def _run(monkeypatch, argv):
 
 class TestFilamentPiecesOverlap:
     def test_collinear_overlapping(self):
-        assert helicon.filament_pieces_overlap(
-            [0, 0], [400, 0], [300, 0], [700, 0]
-        )
+        assert helicon.filament_pieces_overlap([0, 0], [400, 0], [300, 0], [700, 0])
 
     def test_contained(self):
-        assert helicon.filament_pieces_overlap(
-            [0, 0], [400, 0], [100, 0], [200, 0]
-        )
+        assert helicon.filament_pieces_overlap([0, 0], [400, 0], [100, 0], [200, 0])
 
     def test_collinear_with_gap(self):
-        assert not helicon.filament_pieces_overlap(
-            [0, 0], [400, 0], [500, 0], [700, 0]
-        )
+        assert not helicon.filament_pieces_overlap([0, 0], [400, 0], [500, 0], [700, 0])
 
     def test_parallel_offset(self):
-        assert not helicon.filament_pieces_overlap(
-            [0, 0], [400, 0], [0, 50], [400, 50]
-        )
+        assert not helicon.filament_pieces_overlap([0, 0], [400, 0], [0, 50], [400, 50])
 
     def test_crossing(self):
         assert not helicon.filament_pieces_overlap(
@@ -79,9 +71,7 @@ class TestFilamentPiecesOverlap:
         )
 
     def test_single_particle_on_filament(self):
-        assert helicon.filament_pieces_overlap(
-            [0, 0], [400, 0], [150, 0], [150, 0]
-        )
+        assert helicon.filament_pieces_overlap([0, 0], [400, 0], [150, 0], [150, 0])
 
 
 class TestJoinCollinearFilaments:
@@ -95,13 +85,17 @@ class TestJoinCollinearFilaments:
             ],
             ignore_index=True,
         )
-        out = helicon.join_collinear_filaments(data, piece_attrs=["src", "rlnHelicalTubeID"])
+        out = helicon.join_collinear_filaments(
+            data, piece_attrs=["src", "rlnHelicalTubeID"]
+        )
         assert sorted(out["rlnHelicalTubeID"].unique()) == [1, 2]
         joined = out[out["rlnCoordinateY"] == 0]
         assert joined["rlnHelicalTubeID"].nunique() == 1
         assert out[out["rlnCoordinateY"] == 500]["rlnHelicalTubeID"].nunique() == 1
         # overlapping particles are removed, leaving one particle every 50 pixels
-        np.testing.assert_allclose(np.sort(joined["rlnCoordinateX"]), np.arange(0, 1001, 50))
+        np.testing.assert_allclose(
+            np.sort(joined["rlnCoordinateX"]), np.arange(0, 1001, 50)
+        )
         np.testing.assert_allclose(
             joined["rlnHelicalTrackLengthAngst"], joined["rlnCoordinateX"], atol=1e-3
         )
@@ -114,7 +108,9 @@ class TestJoinCollinearFilaments:
             ],
             ignore_index=True,
         )
-        out = helicon.join_collinear_filaments(data, piece_attrs=["src", "rlnHelicalTubeID"])
+        out = helicon.join_collinear_filaments(
+            data, piece_attrs=["src", "rlnHelicalTubeID"]
+        )
         assert out["rlnHelicalTubeID"].nunique() == 1
         # 430 and 480 are 20 pixels (< 50/2) from particles of the larger piece;
         # 530 is 30 pixels from 500 and kept
@@ -138,10 +134,15 @@ class TestJoinCollinearFilaments:
 
     def test_estimate_inter_box_distance(self):
         data = pd.concat(
-            [_filament("m1", 1, (0, 0), (300, 400), step=20), _filament("m1", 2, (0, 500), (0, 900), step=20)],
+            [
+                _filament("m1", 1, (0, 0), (300, 400), step=20),
+                _filament("m1", 2, (0, 500), (0, 900), step=20),
+            ],
             ignore_index=True,
         )
-        d = helicon.estimate_inter_box_distance(data, ["rlnMicrographName", "rlnHelicalTubeID"])
+        d = helicon.estimate_inter_box_distance(
+            data, ["rlnMicrographName", "rlnHelicalTubeID"]
+        )
         assert d == pytest.approx(20)
 
 
@@ -150,7 +151,9 @@ class TestImages2starJoinFilaments:
         a = pd.concat(
             [
                 _filament("m1.mrc", 1, (100, 100), (550, 100), stack="a.mrcs"),
-                _filament("m1.mrc", 2, (1000, 100), (1000, 500), stack="a.mrcs", first=101),
+                _filament(
+                    "m1.mrc", 2, (1000, 100), (1000, 500), stack="a.mrcs", first=101
+                ),
             ],
             ignore_index=True,
         )
@@ -159,10 +162,16 @@ class TestImages2starJoinFilaments:
                 # overlaps file a tube 1, picked in the opposite direction
                 _filament("m1.mrc", 1, (800, 100), (400, 100), stack="b.mrcs"),
                 # parallel to file a tube 1 but offset
-                _filament("m1.mrc", 2, (100, 900), (500, 900), stack="b.mrcs", first=101),
+                _filament(
+                    "m1.mrc", 2, (100, 900), (500, 900), stack="b.mrcs", first=101
+                ),
                 # collinear with file a tube 2 but separated by a gap
-                _filament("m1.mrc", 3, (1000, 700), (1000, 900), stack="b.mrcs", first=201),
-                _filament("m2.mrc", 1, (100, 100), (500, 100), stack="b.mrcs", first=301),
+                _filament(
+                    "m1.mrc", 3, (1000, 700), (1000, 900), stack="b.mrcs", first=201
+                ),
+                _filament(
+                    "m2.mrc", 1, (100, 100), (500, 100), stack="b.mrcs", first=301
+                ),
                 a.iloc[[0]],  # duplicate particle
             ],
             ignore_index=True,
@@ -174,7 +183,18 @@ class TestImages2starJoinFilaments:
     def test_join(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         a, b = self._inputs(tmp_path)
-        _run(monkeypatch, ["a.star", "b.star", "out.star", "--ignoreBadParticlePath", "2", "--verbose", "0"])
+        _run(
+            monkeypatch,
+            [
+                "a.star",
+                "b.star",
+                "out.star",
+                "--ignoreBadParticlePath",
+                "2",
+                "--verbose",
+                "0",
+            ],
+        )
         out = starfile.read(tmp_path / "out.star")["particles"]
         # 1 duplicate rlnImageName, and file b particles at x=400-550 overlap file a tube 1
         assert len(out) == len(a) + len(b) - 1 - 4
@@ -187,10 +207,14 @@ class TestImages2starJoinFilaments:
         joined = m1[m1["rlnCoordinateY"] == 100]
         joined = joined[joined["rlnCoordinateX"] < 900]
         assert joined["rlnHelicalTubeID"].nunique() == 1
-        np.testing.assert_allclose(np.sort(joined["rlnCoordinateX"]), np.arange(100, 801, 50))
+        np.testing.assert_allclose(
+            np.sort(joined["rlnCoordinateX"]), np.arange(100, 801, 50)
+        )
         # track length runs along the start->end direction of the larger piece (file a)
         np.testing.assert_allclose(
-            joined["rlnHelicalTrackLengthAngst"], joined["rlnCoordinateX"] - 100, atol=1e-3
+            joined["rlnHelicalTrackLengthAngst"],
+            joined["rlnCoordinateX"] - 100,
+            atol=1e-3,
         )
         # unmerged filaments keep their track lengths
         gap = m1[(m1["rlnCoordinateX"] == 1000) & (m1["rlnCoordinateY"] >= 700)]
@@ -203,7 +227,17 @@ class TestImages2starJoinFilaments:
         a, b = self._inputs(tmp_path)
         _run(
             monkeypatch,
-            ["a.star", "b.star", "out.star", "--ignoreBadParticlePath", "2", "--verbose", "0", "--joinFilaments", "0"],
+            [
+                "a.star",
+                "b.star",
+                "out.star",
+                "--ignoreBadParticlePath",
+                "2",
+                "--verbose",
+                "0",
+                "--joinFilaments",
+                "0",
+            ],
         )
         out = starfile.read(tmp_path / "out.star")["particles"]
         assert len(out) == len(a) + len(b)
