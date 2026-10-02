@@ -43,6 +43,35 @@ import math
 import numpy as np
 
 
+def _tile_contrast(frame: np.ndarray) -> tuple[float, float]:
+    """Black and white points of a gallery tile.
+
+    The 0.5th and 99.5th percentiles: only outlier pixels are clipped. A
+    median +/- 3 MAD window, which suits a micrograph, is too narrow for a
+    class average: most of its pixels are flat background outside the mask,
+    so the window clipped the particle itself to white.
+
+    Parameters
+    ----------
+    frame : numpy.ndarray
+        2D image data.
+
+    Returns
+    -------
+    tuple[float, float]
+        (black, white), with white > black.
+    """
+    finite = frame[np.isfinite(frame)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    black, white = (float(v) for v in np.percentile(finite, (0.5, 99.5)))
+    if black >= white:
+        black, white = float(finite.min()), float(finite.max())
+        if black >= white:
+            white = black + 1.0
+    return black, white
+
+
 def _gallery_theme_colors() -> dict[str, str]:
     """Return colors for custom-painted gallery widgets."""
     from helicon.lib.gui.file_browser import (
@@ -996,11 +1025,9 @@ class ImageGalleryWidget(QWidget):
         QPixmap
             Grayscale thumbnail.
         """
-        from helicon.commands.display import _auto_contrast
-
         if self._log_transform:
             frame = np.log1p(frame - frame.min())
-        black, white = _auto_contrast(frame)
+        black, white = _tile_contrast(frame)
         arr = frame.astype(np.float64)
         arr = np.clip((arr - black) / max(1e-9, white - black), 0.0, 1.0)
 
