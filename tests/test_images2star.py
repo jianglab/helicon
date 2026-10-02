@@ -531,36 +531,8 @@ class TestImages2starBreakFilaments(object):
         )
         return df
 
-    def _make_args(self, verbose=0):
-        return argparse.Namespace(verbose=verbose)
-
     def _make_index_d(self):
         return {"breakFilaments": 0}
-
-    def _make_data(self, n_micrographs=1, segments_per_filament=10, n_filaments=3):
-        rows = []
-        for mi in range(n_micrographs):
-            for ti in range(n_filaments):
-                for si in range(segments_per_filament):
-                    rows.append(
-                        {
-                            "rlnMicrographName": f"/data/micrograph_{mi}.mrc",
-                            "rlnHelicalTubeID": ti,
-                            "rlnHelicalTrackLengthAngst": si * 10.0,
-                            "rlnImageName": f"{si + mi * 1000:06d}@/data/particles.mrcs",
-                        }
-                    )
-        df = pd.DataFrame(rows)
-        df.attrs["optics"] = pd.DataFrame(
-            {
-                "rlnOpticsGroup": [1],
-                "rlnOpticsGroupName": ["opticsGroup1"],
-                "rlnVoltage": [300.0],
-                "rlnSphericalAberration": [2.7],
-                "rlnAmplitudeContrast": [0.1],
-            }
-        )
-        return df
 
     def test_breaks_long_filaments(self):
         from helicon.plugins.images2star.break_filaments import handle

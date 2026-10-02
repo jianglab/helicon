@@ -66,3 +66,33 @@ def cs_file(tmp_path, cs_array):
 def clean_tmp_path(tmp_path):
     """Provide a clean temp directory (pytest's tmp_path already does this)."""
     return tmp_path
+
+
+# Fixtures of pytest-playwright. Its sync API starts one Playwright per session
+# and leaves an asyncio event loop marked as running on the main thread, so any
+# later ``asyncio.run()`` -- the HILL tab tests use it -- fails with "cannot be
+# called from a running event loop". Running the browser tests last keeps the
+# whole suite runnable in one pytest invocation.
+_PLAYWRIGHT_FIXTURES = frozenset(
+    {
+        "playwright",
+        "browser_type",
+        "browser",
+        "context",
+        "new_context",
+        "page",
+        "launch_browser",
+    }
+)
+
+
+def _uses_playwright(item) -> bool:
+    """Whether a collected test asks for any pytest-playwright fixture."""
+    return not _PLAYWRIGHT_FIXTURES.isdisjoint(getattr(item, "fixturenames", ()))
+
+
+def pytest_collection_modifyitems(config, items):
+    """Move the tests that drive a browser to the end, keeping relative order."""
+    browser = [item for item in items if _uses_playwright(item)]
+    if browser:
+        items[:] = [item for item in items if not _uses_playwright(item)] + browser

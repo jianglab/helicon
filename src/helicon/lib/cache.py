@@ -15,11 +15,35 @@ __all__ = [
 ]
 
 
-def setup_cache_dir() -> Path:
+def _can_create_dir(path: Path) -> bool:
+    """Whether *path* is a writable directory, or could be created as one.
+
+    Nothing is created: the nearest existing ancestor of *path* is checked for
+    write permission instead.
+    """
+    path = Path(path).absolute()
+    if path.exists():
+        return path.is_dir() and os.access(path, os.W_OK | os.X_OK)
+    for parent in path.parents:
+        if parent.exists():
+            return parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)
+    return False
+
+
+def setup_cache_dir(create: bool = True) -> Path:
     """Set up and return a writable cache directory.
 
-    Checks the HELION_CACHE_DIR environment variable first, then
+    Checks the HELICON_CACHE_DIR environment variable first (the misspelled
+    HELION_CACHE_DIR is still honoured, for compatibility), then
     /fast-scratch, and falls back to ~/.cache/helicon or a temp directory.
+
+    Parameters
+    ----------
+    create : bool, optional
+        Create the directory now. With False, the directory is only chosen
+        (by checking that it could be created) and is left to be made on
+        first write -- ``joblib.Memory`` makes its folder itself, so
+        ``import helicon`` need not touch the disk. Defaults to True.
 
     Returns
     -------
@@ -28,17 +52,22 @@ def setup_cache_dir() -> Path:
     """
     import getpass, tempfile
 
-    if "HELION_CACHE_DIR" in os.environ:
-        cache_dir = Path(os.getenv("HELION_CACHE_DIR"))
+    env_dir = os.getenv("HELICON_CACHE_DIR") or os.getenv("HELION_CACHE_DIR")
+    if env_dir:
+        cache_dir = Path(env_dir)
     elif Path("/fast-scratch").exists():
         cache_dir = Path("/fast-scratch") / getpass.getuser() / "helicon_cache"
     else:
         cache_dir = Path.home() / ".cache" / "helicon"
 
+    fallback = Path(tempfile.gettempdir()) / getpass.getuser() / "helicon_cache"
+    if not create:
+        return cache_dir if _can_create_dir(cache_dir) else fallback
+
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        cache_dir = Path(tempfile.gettempdir()) / getpass.getuser() / "helicon_cache"
+        cache_dir = fallback
         cache_dir.mkdir(parents=True, exist_ok=True)
 
     return cache_dir
@@ -418,28 +447,48 @@ def cache(
     if cache_dir is None:
         cache_dir = setup_cache_dir()
 
-    try:
-        memory = joblib.Memory(cache_dir, verbose=verbose)
-    except Exception:
-        logger.warning(
-            "cannot create the cache folder %s. Please make sure that you have write permission in the folder (%s)",
-            cache_dir,
-            str(Path(cache_dir).parent.absolute()),
-        )
-        memory = DummyMemory()
+    # joblib.Memory makes its folder when it is constructed, and many cached
+    # functions are decorated at import time, so the Memory (and the folder) is
+    # made on the first call instead: importing helicon must not write to disk.
+    state = {}
+    state_lock = threading.Lock()
+
+    def _memory():
+        with state_lock:
+            if "memory" not in state:
+                try:
+                    state["memory"] = joblib.Memory(cache_dir, verbose=verbose)
+                except Exception:
+                    logger.warning(
+                        "cannot create the cache folder %s. Please make sure that you have write permission in the folder (%s)",
+                        cache_dir,
+                        str(Path(cache_dir).parent.absolute()),
+                    )
+                    state["memory"] = DummyMemory()
+            return state["memory"]
 
     def decorator(func):
-        cached_func = memory.cache(
-            func, ignore=ignore, cache_validation_callback=cache_validation_callback
-        )
+        cached = {}
+
+        def _cached_func():
+            memory = _memory()
+            with state_lock:
+                if "func" not in cached:
+                    cached["func"] = memory.cache(
+                        func,
+                        ignore=ignore,
+                        cache_validation_callback=cache_validation_callback,
+                    )
+                return memory, cached["func"]
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            memory, cached_func = _cached_func()
             _prune_expired(memory, cache_dir, expires_after)
             return cached_func(*args, **kwargs)
 
-        wrapper.clear_cache = lambda: _clear_function_cache(cached_func)
-        wrapper.clear_cache_dir = lambda: getattr(memory, "clear", lambda: None)()
+        wrapper.clear_cache = lambda: _clear_function_cache(_cached_func()[1])
+        wrapper.clear_cache_dir = lambda: getattr(_memory(), "clear", lambda: None)()
         wrapper.get_cache_info = lambda: {
             "cache_dir": cache_dir,
             "cache_period": expires_after,

@@ -446,7 +446,7 @@ class TestEverythingUsesTheOneCacheRoot:
     """Every cache and log location has to come from ``setup_cache_dir``.
 
     Spelling out ``~/.cache/helicon`` picks one of the four places that function
-    may choose and ignores the rest -- HELION_CACHE_DIR and the ``/fast-scratch``
+    may choose and ignores the rest -- HELICON_CACHE_DIR and the ``/fast-scratch``
     preference both move the cache, and anything that hardcoded the home path
     stayed behind, which is exactly where a user would not look for it.
     """
@@ -466,7 +466,8 @@ class TestEverythingUsesTheOneCacheRoot:
         assert not offenders, f"hardcoded cache paths: {offenders}"
 
     def test_the_denovo3d_log_follows_the_cache_root(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HELION_CACHE_DIR", str(tmp_path / "elsewhere"))
+        monkeypatch.delenv("HELION_CACHE_DIR", raising=False)
+        monkeypatch.setenv("HELICON_CACHE_DIR", str(tmp_path / "elsewhere"))
         import importlib
 
         import helicon.lib.cache as cache_mod

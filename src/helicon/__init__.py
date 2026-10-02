@@ -230,6 +230,18 @@ _LAZY_FROM_GAUSS = (
 
 
 def __getattr__(name):
+    if name == "shiny":
+        # helicon.shiny (the web-app widgets) pulls in the shiny package, which
+        # takes seconds to import, so it is loaded on first use rather than with
+        # helicon. Without shiny installed, the name is simply not there.
+        try:
+            from .lib import shiny
+        except ImportError as e:
+            raise AttributeError(
+                f"module 'helicon' has no attribute {name!r} ({e})"
+            ) from e
+        globals()[name] = shiny  # resolved once
+        return shiny
     if name in _LAZY_FROM_GAUSS:
         try:
             from .lib import gauss
@@ -243,14 +255,11 @@ def __getattr__(name):
     raise AttributeError(f"module 'helicon' has no attribute {name!r}")
 
 
-cache_dir = setup_cache_dir()
+# Only chosen here, not created: whatever writes to it first (joblib.Memory in
+# helicon.cache, or the code that saves a log) makes the folder.
+cache_dir = setup_cache_dir(create=False)
 
 from .lib import dataset
-
-try:
-    from .lib import shiny
-except ImportError:
-    pass
 
 try:
     from .lib import curvelet

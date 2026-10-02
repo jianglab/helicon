@@ -1,1 +1,5 @@
+# Installs helicon from the main branch on GitHub, as it is at deploy time, so a
+# redeploy picks up whatever main holds then. To deploy a fixed version, pin it
+# by appending a release tag or commit to the URL, e.g.
+#   helicon[shiny] @ git+https://github.com/jianglab/helicon.git@<tag or commit>
 helicon[shiny] @ git+https://github.com/jianglab/helicon.git
