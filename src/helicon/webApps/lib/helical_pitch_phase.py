@@ -1589,15 +1589,18 @@ _POOL_IMAGES = {}
 def _register_chunk(args):
     from . import denovo3d_register as R
 
-    pairs, turn = args
+    pairs, turn, refine = args
     return [
-        R.register_pair(_POOL_IMAGES[i], _POOL_IMAGES[j], flips=turn, refine=False)
+        R.register_pair(_POOL_IMAGES[i], _POOL_IMAGES[j], flips=turn, refine=refine)
         for i, j in pairs
     ]
 
 
-def _register_all(prepared, todo, turn, progress=None):
-    """Register every pair in ``todo``, on all available CPUs when there are many."""
+def _register_all(prepared, todo, turn, progress=None, refine=False):
+    """Register every pair in ``todo``, on all available CPUs when there are many.
+
+    The results are in the order of ``todo``.
+    """
     from . import denovo3d_register as R
 
     workers = 1
@@ -1613,7 +1616,7 @@ def _register_all(prepared, todo, turn, progress=None):
             if progress is not None:
                 progress(k, len(todo))
             out.append(
-                R.register_pair(prepared[i], prepared[j], flips=turn, refine=False)
+                R.register_pair(prepared[i], prepared[j], flips=turn, refine=refine)
             )
         return out
     import multiprocessing as mp
@@ -1622,7 +1625,7 @@ def _register_all(prepared, todo, turn, progress=None):
     _POOL_IMAGES.clear()
     _POOL_IMAGES.update(prepared)
     size = max(1, len(todo) // (workers * 4))
-    chunks = [(todo[k : k + size], turn) for k in range(0, len(todo), size)]
+    chunks = [(todo[k : k + size], turn, refine) for k in range(0, len(todo), size)]
     out = []
     with ProcessPoolExecutor(workers, mp_context=mp.get_context("fork")) as pool:
         for k, part in enumerate(pool.map(_register_chunk, chunks)):
@@ -1817,7 +1820,6 @@ def suggest_counterparts(
         own rotated self (a class that looks the same both ways is its own
         counterpart and needs no partner).
     """
-    from . import denovo3d_register as R
     from . import helix_transform as HT
 
     selected = [int(i) for i in selected]
@@ -1832,19 +1834,20 @@ def suggest_counterparts(
         for i, im, (r, sy) in zip(idx, raw, at.per_image)
     }
     rot = [(True, True)]  # flip x and y: a 180-degree rotation
-    self_corr = {
-        i: R.register_pair(prepared[i], prepared[i], flips=rot)["corr"]
-        for i in selected
-    }
+    # every registration at once, on all available CPUs (one at a time, the
+    # 360 of 12 selected classes and 30 candidates took 53 s); the results come
+    # back in order, so the best match of each candidate is chosen as before
+    selves = [(i, i) for i in selected]
+    todo = [(i, j) for i in selected for j in candidates]
+    corr = [
+        r["corr"]
+        for r in _register_all(prepared, selves + todo, rot, progress, refine=True)
+    ]
+    self_corr = dict(zip(selected, corr[: len(selves)]))
     best = {}
-    n = len(selected) * len(candidates)
-    for k, i in enumerate(selected):
-        for m, j in enumerate(candidates):
-            if progress is not None:
-                progress(k * len(candidates) + m, n)
-            c = R.register_pair(prepared[i], prepared[j], flips=rot)["corr"]
-            if c >= min_corr and c > self_corr[i] and c > best.get(j, (None, -1))[1]:
-                best[j] = (i, c)
+    for (i, j), c in zip(todo, corr[len(selves) :]):
+        if c >= min_corr and c > self_corr[i] and c > best.get(j, (None, -1))[1]:
+            best[j] = (i, c)
     out = [dict(selected=i, candidate=j, corr=float(c)) for j, (i, c) in best.items()]
     return sorted(out, key=lambda d: d["corr"], reverse=True)
 

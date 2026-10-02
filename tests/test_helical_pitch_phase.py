@@ -435,6 +435,19 @@ class TestCounterparts:
         assert [d["candidate"] for d in found] == [1]
         assert found[0]["selected"] == 0
 
+    def test_on_all_cpus_the_same_as_on_one(self, monkeypatch):
+        # 3 selected x 14 candidates: enough registrations for the process pool
+        import helicon
+
+        views = [_filament_image(k / 17.0, seed=k) for k in range(17)]
+        images = views[:3] + [np.rot90(v, 2) for v in views[3:]]
+        args = dict(selected=[0, 1, 2], candidates=list(range(3, 17)), min_corr=0.3)
+        monkeypatch.setattr(helicon, "available_cpu", lambda *a, **k: 4)
+        pooled = ph.suggest_counterparts(images, **args)
+        monkeypatch.setattr(helicon, "available_cpu", lambda *a, **k: 1)
+        serial = ph.suggest_counterparts(images, **args)
+        assert pooled == serial and pooled
+
     def test_nothing_to_suggest_without_candidates(self):
         a = _filament_image(0.0)
         assert ph.suggest_counterparts([a], selected=[0], candidates=[0]) == []
