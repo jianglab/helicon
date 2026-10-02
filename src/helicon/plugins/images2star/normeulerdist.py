@@ -60,7 +60,7 @@ def handle(data, args, index_d, param):
         binAssignments = binAngles.groupby(binAngles, sort=False)
 
         counts = binAssignments.size().sort_values(ascending=True)
-        elbow = counts[helicon.findElbowPoint(counts)]
+        elbow = counts.iloc[helicon.find_elbow_point(counts.values)]
         if nkeep < 1:
             nkeep = elbow
 

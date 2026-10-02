@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import logging
+import sys
 import helicon
 import numpy as np
 from pathlib import Path
@@ -156,7 +157,13 @@ def handle(
                     )
             else:
                 micrograph_input = f"{args.projectID}/{micrographs_job_id}"
-                micrograph_input_job = cs.find_job(args.projectID, micrographs_job_id)
+                if getattr(args, "cryosparc_client", None) is None:
+                    raise HeliconError(
+                        "micrographs_job_id requires the input from a CryoSPARC server (--projectID/--jobID)"
+                    )
+                micrograph_input_job = args.cryosparc_client.find_job(
+                    args.projectID, micrographs_job_id
+                )
                 input_micrographs_group_name = None
                 for g in micrograph_input_job.doc["output_result_groups"]:
                     if g["type"] == "exposure":
@@ -262,6 +269,10 @@ def handle(
             )
 
         reuse_result_folder = None
+        cs = getattr(args, "cryosparc_client", None)
+        project = getattr(args, "cryosparc_project", None)
+        input_project_folder = Path(args.input_project_folder)
+        output_project_folder = Path(args.output_project_folder)
         if args.projectID and not args.saveLocal:
             output_job = project.create_external_job(
                 args.outputWorkspaceID,
@@ -285,7 +296,7 @@ def handle(
                 passthrough="particles",
                 title="Particles extracted",
             )
-            if micrographs_job_id is not None:
+            if micrographs_job_id:
                 output_job.connect(
                     target_input="micrographs",
                     source_job_uid=micrographs_job_id,
@@ -311,7 +322,7 @@ def handle(
         else:
             output_job = None
             particle_dir = "extract"
-            Path(particle_dir).mkdir(parents=True, exist_ok=True)
+            (output_project_folder / particle_dir).mkdir(parents=True, exist_ok=True)
 
         tasks = []
         mids = np.unique(data[col_mid])

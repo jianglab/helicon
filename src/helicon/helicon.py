@@ -26,6 +26,8 @@ streamlit_commands = [
     "map2seq",
     "procart",
 ]
+# not registered (hidden from `helicon --help`); run with
+# `python -m helicon.commands.HOM_containerC`
 temporary_commands = [
     "HOM_containerC",
 ]
@@ -200,13 +202,14 @@ def _get_commands(
     except HeliconError as e:
         logger.error(f"ERROR: {e}")
         sys.exit(1)
-    except Exception:
+    except Exception as e:
         subparser = sys.argv[1] if len(sys.argv) > 1 else None
         if subparser and subparser in subparsers.choices:
             subparsers.choices[subparser].print_help()
         else:
             parser.print_usage()
-
+        # after the help text so that the message is not scrolled away
+        logger.error(f"ERROR: {type(e).__name__}: {e}")
         sys.exit(-1)
 
     try:

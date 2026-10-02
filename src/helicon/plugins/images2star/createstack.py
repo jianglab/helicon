@@ -58,7 +58,7 @@ def handle(data, args, index_d, param):
 
         images = data["rlnImageName"].str.split("@", expand=True)
         images.columns = ["pid", "filename"]
-        images.loc[:, "pid"] = images.loc[:, "pid"].astype(int)
+        images["pid"] = images["pid"].astype(int)
 
         attr = helicon.unique_attr_name(data, attr_prefix="rlnImageNameOrig")
         data[attr] = data["rlnImageName"]
@@ -97,7 +97,8 @@ def handle(data, args, index_d, param):
                 fill=None,
                 overwrite=True,
             ) as mrc:
-                apix0 = None
+                with mrcfile.open(images["filename"].iloc[0], header_only=True) as m:
+                    apix0 = float(m.voxel_size.x)
                 for i in tqdm(
                     list(range(nImage)), unit=" particles", disable=args.verbose > 1
                 ):
@@ -114,26 +115,49 @@ def handle(data, args, index_d, param):
                     d = helicon.read_image_2d(
                         images["filename"].iloc[i], int(images["pid"].iloc[i] - 1)
                     )
-                    if apix0 is None:
-                        apix0 = d["apix_x"]
-                    if newsize < nx:
-                        d = d.FourTruncate(
-                            newsize, newsize, 1, 1
-                        )  # crop Fourier transform
-                    elif newsize > nx:
-                        d = d.FourInterpol(
-                            newsize, newsize, 1, 1
-                        )  # pad Fourier transform
-                    d_numpy = helicon.EMNumPy.em2numpy(d)
-                    mrc.data[i, :, :] = d_numpy
+                    if newsize != nx:
+                        d = resize_image(d, newsize)
+                    mrc.data[i, :, :] = d
                 mrc.voxel_size = apix0 * nx / newsize
-        images.loc[:, "pid"] = np.arange(nImage) + 1
-        data.loc[:, "rlnImageName"] = images["pid"].astype(str) + "@" + outputFile
+        images["pid"] = np.arange(nImage) + 1
+        data["rlnImageName"] = images["pid"].astype(str) + "@" + outputFile
+        optics = data.attrs.get("optics")
         if optics is not None and newsize != nx:
+            optics = optics.copy()
             optics.loc[:, "rlnImageSize"] = newsize
             if "rlnImagePixelSize" in optics:
                 optics.loc[:, "rlnImagePixelSize"] = (
                     optics.loc[:, "rlnImagePixelSize"] * nx / newsize
                 )
+            data.attrs["optics"] = optics
         index_d[option_name] += 1
     return data, index_d
+
+
+def resize_image(image: np.ndarray, newsize: int) -> np.ndarray:
+    """Resize a square image by cropping or zero-padding its Fourier transform.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        2D square image.
+    newsize : int
+        The new image size in pixels.
+
+    Returns
+    -------
+    np.ndarray
+        The ``newsize`` x ``newsize`` image (float32) with the same mean value.
+    """
+    ny, nx = image.shape
+    fft = np.fft.fftshift(np.fft.fft2(image))
+    out = np.zeros((newsize, newsize), dtype=complex)
+    # copy the central (lowest-frequency) part that both boxes have
+    m_y, m_x = min(ny, newsize), min(nx, newsize)
+    src_y, src_x = ny // 2 - m_y // 2, nx // 2 - m_x // 2
+    dst = newsize // 2 - m_y // 2, newsize // 2 - m_x // 2
+    out[dst[0] : dst[0] + m_y, dst[1] : dst[1] + m_x] = fft[
+        src_y : src_y + m_y, src_x : src_x + m_x
+    ]
+    ret = np.fft.ifft2(np.fft.ifftshift(out)).real * (newsize * newsize) / (nx * ny)
+    return ret.astype(np.float32)

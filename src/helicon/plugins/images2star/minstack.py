@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 import helicon
+import numpy as np
 import pandas as pd
+import mrcfile
 from pathlib import Path
 import logging
 
@@ -56,17 +58,18 @@ def handle(data, args, index_d, param):
         for mgraphName, mgraphParticles in mgraphs:
             mgraphName2 = subdir / Path(mgraphName).name
             n = len(mgraphParticles)
+            # keep the particle order: image k of the new stack is the k-th particle
+            src_indices = indices.loc[mgraphParticles.index].astype(int).values - 1
             if not (
                 mgraphName2.exists()
-                and helicon.EMUtil.get_image_count(str(mgraphName2)) == n
+                and helicon.get_image_size(str(mgraphName2))[2] == n
             ):
-                particles_indices = sorted(
-                    list(indices.iloc[mgraphParticles.index].astype(int))
-                )
-                for i in range(n):
-                    i2 = particles_indices[i] - 1
-                    d.read_image(mgraphName, i2)
-                    d.write_image(str(mgraphName2), i)
+                with mrcfile.mmap(mgraphName, mode="r", permissive=True) as mrc:
+                    stack = mrc.data if mrc.data.ndim == 3 else mrc.data[np.newaxis]
+                    images = np.array(stack[src_indices])
+                    voxel_size = mrc.voxel_size
+                with mrcfile.new(str(mgraphName2), data=images, overwrite=True) as mrc:
+                    mrc.voxel_size = voxel_size
             rlnImageName = (
                 pd.Series(list(range(1, n + 1))).map("{:06d}".format)
                 + "@"
@@ -83,7 +86,7 @@ def handle(data, args, index_d, param):
                         count,
                         len(mgraphs),
                         len(mgraphParticles),
-                        helicon.EMUtil.get_image_count(mgraphName),
+                        helicon.get_image_size(mgraphName)[2],
                         mgraphName,
                         mgraphName2,
                     )

@@ -16,8 +16,6 @@ from helicon.lib.images2star_engine import apply_options
 
 logger = logging.getLogger(__name__)
 
-pd.options.mode.copy_on_write = True
-
 import helicon
 from helicon.lib.io import getPixelSize, setPixelSize, pixelSizeAttrForImageAttr
 from helicon.lib.analysis import estimate_inter_segment_distance
@@ -272,16 +270,22 @@ def main(args: argparse.Namespace) -> None:
             for si in range(args.splitNumSets):
                 subsets[si] = list(range(si, len(data), args.splitNumSets))
 
-        prefix = Path(args.output_starFile).stem
-        suffix = Path(args.output_starFile).suffix
+        subset_files = split_subset_filenames(
+            args.output_starFile, args.splitNumSets, args.splitMode
+        )
+        existing = [f for f in subset_files if f.exists()]
+        if existing and args.force != 1:
+            raise HeliconFileExistsError(
+                "the output file(s) (%s) exist. Use --force=1 to overwrite them"
+                % (" ".join(str(f) for f in existing))
+            )
         for si, subset in enumerate(subsets):
-            if args.splitNumSets == 2 and args.splitMode == "evenodd":
-                imageSubSetFileName = f"{prefix}.{['e', 'o'][si]}{suffix}"
-            else:
-                imageSubSetFileName = f"{prefix}.subset-{si}{suffix}"
-
+            imageSubSetFileName = str(subset_files[si])
             data_subset = data.iloc[subset, :]
-            data_subset = data_subset.sort_values(["rlnImageName"], ascending=True)
+            if "rlnImageName" in data_subset:
+                data_subset = data_subset.sort_values(["rlnImageName"], ascending=True)
+            else:
+                data_subset = data_subset.copy()
             data_subset["rlnRandomSubset"] = si + 1
             data_subset.reset_index(drop=True, inplace=True)
             data_subset.attrs["optics"] = optics
@@ -323,6 +327,35 @@ def main(args: argparse.Namespace) -> None:
                     )
             else:
                 logger.info("%d images saved to %s", len(data), args.output_starFile)
+
+
+def split_subset_filenames(
+    output_starFile: str, n_sets: int, split_mode: str
+) -> list[Path]:
+    """Names of the subset files written by ``--splitNumSets``.
+
+    Parameters
+    ----------
+    output_starFile : str
+        The output file given on the command line.
+    n_sets : int
+        Number of subsets.
+    split_mode : str
+        The ``--splitMode``.
+
+    Returns
+    -------
+    list of Path
+        One file per subset, in the folder of ``output_starFile``:
+        ``<stem>.e<suffix>``/``<stem>.o<suffix>`` for an even/odd split into
+        2 subsets, otherwise ``<stem>.subset-<i><suffix>``.
+    """
+    output = Path(output_starFile)
+    if n_sets == 2 and split_mode == "evenodd":
+        tags = ["e", "o"]
+    else:
+        tags = [f"subset-{si}" for si in range(n_sets)]
+    return [output.with_name(f"{output.stem}.{tag}{output.suffix}") for tag in tags]
 
 
 def join_filaments_from_multiple_files(
@@ -623,12 +656,10 @@ def check_args(
         args.all_options = []
         return args
 
-    args.all_options = [
-        o
-        for o in all_options
-        if o
-        not in "cpu first force ignoreBadParticlePath ignoreBadMicrographPath joinFilaments last folder splitNumSets splitMode micrographStar tag verbose".split()
-    ]
+    from helicon.plugins import plugin_options_in_argv
+    from helicon.plugins.images2star import _plugins
+
+    args.all_options = plugin_options_in_argv(sys.argv[1:], parser, _plugins)
 
     if Path(args.output_starFile).suffix not in ".star .cs .csv".split():
         raise HeliconValidationError(

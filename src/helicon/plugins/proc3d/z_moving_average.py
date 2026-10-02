@@ -89,12 +89,46 @@ def handle(
             )
 
         if length > 0:
-            n_pixel = int(np.round(length / apix))
+            n_pixel = length / apix
+        n_pixel = max(1, int(np.round(n_pixel)))
+        if n_pixel > nz:
+            raise HeliconError(
+                f"the moving average window ({n_pixel} slices) is longer than the map ({nz} slices)"
+            )
 
-        tmp = np.cumsum(data, axis=0, dtype=float)
-        data = data.copy()
-        data[n_pixel // 2 : -n_pixel // 2] = (tmp[n_pixel:] - tmp[:-n_pixel]) / n_pixel
+        data = z_moving_average(data, n_pixel)
 
         index_d[option_name] += 1
 
     return data, apix, nx, ny, nz
+
+
+def z_moving_average(data: np.ndarray, n_pixel: int) -> np.ndarray:
+    """Average each z-slice with its neighbours in a window of ``n_pixel`` slices.
+
+    The window is centred on the slice (for an even ``n_pixel`` it extends one
+    slice further towards higher z than lower z). The slices near the ends,
+    whose window would extend beyond the map, are left unchanged.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        3D map (nz, ny, nx).
+    n_pixel : int
+        Window length in slices (>= 1).
+
+    Returns
+    -------
+    np.ndarray
+        The averaged map, the same shape and dtype as ``data``.
+    """
+    nz = data.shape[0]
+    csum = np.zeros((nz + 1,) + data.shape[1:], dtype=float)
+    np.cumsum(data, axis=0, dtype=float, out=csum[1:])
+    ret = data.copy()
+    # window [a, a+n_pixel-1] -> its centre slice a + (n_pixel-1)//2
+    first = (n_pixel - 1) // 2
+    ret[first : first + nz - n_pixel + 1] = (
+        csum[n_pixel:] - csum[: nz - n_pixel + 1]
+    ) / n_pixel
+    return ret

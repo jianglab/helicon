@@ -17,13 +17,9 @@ from scipy.optimize import minimize, curve_fit, OptimizeWarning
 from matplotlib import pyplot as plt
 
 import os
-import datetime, time, pytz
-
-#!pip install pytz
-local_tz = pytz.timezone("America/New_York")  # Change this to your timezone
+import datetime, time
 
 logger = logging.getLogger(__name__)
-# local_tz = pytz.timezone("America/Chicago")  # Change this to your timezone
 
 from uuid import uuid4
 import sys
@@ -454,7 +450,7 @@ def HelicalSegmentConsistency(
     logger.info("Section 0")
     # Get UTC time and convert to local time
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     stats = dict()
@@ -542,7 +538,7 @@ def HelicalSegmentConsistency(
 
     # Get UTC time and convert to local time
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     # Section 2.5: Empirically calculate period and symmetry
@@ -554,7 +550,7 @@ def HelicalSegmentConsistency(
     AllRotArray = []
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info(
         "Section 2.5 PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z")
     )
@@ -620,7 +616,7 @@ def HelicalSegmentConsistency(
     logger.info("Period = " + str(Period))
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     logger.info("CWD: %s", os.getcwd())
@@ -733,7 +729,7 @@ def HelicalSegmentConsistency(
     plt.savefig(f"{StarFileNameKey}BestHelix.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     mBest = np.abs(mManySegmentsMin)
@@ -764,7 +760,7 @@ def HelicalSegmentConsistency(
 
     # Get UTC time and convert to local time
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     #################################################################################
@@ -772,7 +768,7 @@ def HelicalSegmentConsistency(
     #  Section 4.0: Make Global Plots
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     plt.figure(figsize=(8, 3))
@@ -820,7 +816,7 @@ def HelicalSegmentConsistency(
     plt.savefig(f"{StarFileNameKey}StatsLongHelicesGT25.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     logger.info("CWD: %s", os.getcwd())
@@ -862,7 +858,7 @@ def HelicalSegmentConsistency(
     plt.savefig(f"{StarFileNameKey}PlotsForGoodLongHelices.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     logger.info("StarFileName: %s", StarFileName)
@@ -1048,7 +1044,7 @@ def HelicalSegmentConsistency(
         )
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     #################################################################################
@@ -1084,7 +1080,7 @@ def HelicalSegmentConsistency(
     logger.info("mBest: %s", mBest)
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     #################################################################################
@@ -1179,7 +1175,7 @@ def HelicalSegmentConsistency(
         return AngErrors, AbsAngErrors
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     #################################################################################
@@ -1222,7 +1218,7 @@ def HelicalSegmentConsistency(
     logger.info("Page path: %s", page_path)
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     #################################################################################
@@ -1314,7 +1310,7 @@ def HelicalSegmentConsistency(
     plt.savefig(f"{StarFileNameKey}BestFitWorstError.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     #    Section 7.2: Curve fitting toward cdf
@@ -1384,29 +1380,22 @@ def HelicalSegmentConsistency(
 
     APeak_fit, sigmaPeak_fit, ATail_fit, sigmaTail_fit = popt
 
-    if 0:
-        print("A_fit   =", A_fit)
-        print("sigma_fit =", sigma_fit)
-    else:
-        logger.debug("APeak_fit = %s", APeak_fit)
-        logger.debug("sigmaPeak_fit = %s", sigmaPeak_fit)
-        logger.debug("ATail_fit = %s", ATail_fit)
-        logger.debug("sigmaTail_fit = %s", sigmaTail_fit)
+    logger.debug("APeak_fit = %s", APeak_fit)
+    logger.debug("sigmaPeak_fit = %s", sigmaPeak_fit)
+    logger.debug("ATail_fit = %s", ATail_fit)
+    logger.debug("sigmaTail_fit = %s", sigmaTail_fit)
 
     # --------------------------------------------------
     # 4. Optional: evaluate fitted curve on a dense grid for plotting
     # --------------------------------------------------
     xx = np.linspace(0, Period / 2, 500)
 
-    if 0:
-        yy = G_model(xx, A_fit, sigma_fit)
-    else:
-        yy = G2_model(xx, APeak_fit, sigmaPeak_fit, ATail_fit, sigmaTail_fit)
+    yy = G2_model(xx, APeak_fit, sigmaPeak_fit, ATail_fit, sigmaTail_fit)
 
     logger.info("len(xx)=%d, len(yy)=%d", len(xx), len(yy))
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(local_tz)
+    now_local = now_utc.astimezone()
     logger.info(
         "Section 7 PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z")
     )

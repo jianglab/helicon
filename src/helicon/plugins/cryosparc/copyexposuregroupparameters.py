@@ -104,7 +104,9 @@ def handle(
                     f"{param_dict['source_cs_file']} does not contain exp_group_id"
                 )
         elif param_dict["source_job_id"]:
-            source_job = cs.find_job(args.projectID, param_dict["source_job_id"])
+            source_job = args.cryosparc_client.find_job(
+                args.projectID, param_dict["source_job_id"]
+            )
             input_particle_group_name = None
             for g in source_job.doc["output_result_groups"]:
                 if g["type"] in ["particle", "exposure"]:

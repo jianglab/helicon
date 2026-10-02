@@ -114,8 +114,9 @@ class TestApplyOptions:
         data = _volume()
         out, _ = self._apply(data, [("z_moving_average", "length=2")])
         assert out.shape == data.shape
-        # The window average leaves the boundary slices untouched.
-        assert np.array_equal(out[0], data[0])
+        # length=2 -> a 2-slice window [k, k+1]; only the last slice, whose
+        # window would extend beyond the map, is left untouched.
+        assert np.allclose(out[0], (data[0] + data[1]) / 2)
         assert np.array_equal(out[-1], data[-1])
 
     def test_ordered_dispatch_clip_sees_flipped_geometry(self):

@@ -45,7 +45,7 @@ def handle(data, args, index_d, param):
         if not Path(replaceImageName).exists():
             raise HeliconError("\\t%s does not exist")
 
-        nImage = helicon.EMUtil.get_image_count(replaceImageName)
+        nImage = helicon.get_image_size(replaceImageName)[2]
         if nImage != len(data):
             raise HeliconError(
                 "\\tERROR: {replaceImageName} contains {len(nImage)} particles, different from the expected {len(data)} particles"

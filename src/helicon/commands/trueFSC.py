@@ -1,7 +1,6 @@
 """A command line tool to compute True FSC curve with optimal mask and phase randomization"""
 
 import argparse
-from asyncio import subprocess
 import logging
 import sys
 from pathlib import Path
@@ -10,10 +9,6 @@ from datetime import datetime
 import numpy as np
 from scipy import ndimage
 from scipy.interpolate import interp1d
-
-import matplotlib
-
-matplotlib.use("Agg")
 
 import helicon
 from helicon.lib.exceptions import HeliconError
@@ -75,11 +70,6 @@ def main(args):
     return result
 
 
-@helicon.cache(
-    cache_dir=str(helicon.cache_dir / "trueFSC"),
-    expires_after=None,
-    ignore=["plot_file"],
-)
 def compute_truefsc(
     map1_file,
     map2_file,
@@ -256,14 +246,17 @@ def compute_truefsc(
     if user_mask:
         if len(mask_file) == 2:
             logger.info("Reading mask files: %s", " ".join(mask_file))
-            mask1 = mrcfile.open(mask_file[0]).data.astype(np.float64)
-            mask2 = mrcfile.open(mask_file[1]).data.astype(np.float64)
+            with mrcfile.open(mask_file[0]) as mrc:
+                mask1 = mrc.data.astype(np.float64)
+            with mrcfile.open(mask_file[1]) as mrc:
+                mask2 = mrc.data.astype(np.float64)
             if one_mask:
                 mask_avg = (mask1 + mask2) / 2
                 mask1, mask2 = mask_avg, mask_avg
         else:
             logger.info("Reading mask file: %s", mask_file[0])
-            mask1 = mrcfile.open(mask_file[0]).data.astype(np.float64)
+            with mrcfile.open(mask_file[0]) as mrc:
+                mask1 = mrc.data.astype(np.float64)
             mask2 = mask1
         logger.info("Using user-provided mask(s), skipping mask slope optimization")
     else:
@@ -313,62 +306,35 @@ def compute_truefsc(
                 mask_soft_px,
             )
         elif refine_mask:
-            from scipy.optimize import minimize_scalar
             from scipy.fft import irfftn
 
             logger.info("Searching for optimal mask slope width")
             map1r = irfftn(F1r, workers=-1)
             map2r = irfftn(F2r, workers=-1)
 
-            def _fsc_score(x, map1, map2, map1r, map2r, mask_a, cutoff_i):
-                mask_e = _soft_mask(mask_a, x)
-                m1 = map1 * mask_e
-                m2 = map2 * mask_e
-                fsc_t = helicon.calc_fsc_per_shell(
-                    m1, m2, pix_size, shell_flat=_shell_flat_full, n=n
-                )
-
-                m1r = map1r * mask_e
-                m2r = map2r * mask_e
-                fsc_n = helicon.calc_fsc_per_shell(
-                    m1r, m2r, pix_size, shell_flat=_shell_flat_full, n=n
-                )
-
-                fsc_t_arr = fsc_t[cutoff_i:]
-                fsc_n_arr = fsc_n[cutoff_i:]
-
-                fsc_true = (fsc_t_arr - fsc_n_arr) / (1 - fsc_n_arr)
-                fsc_true[np.isnan(fsc_true)] = 1.0
-
-                score = (
-                    np.mean(1 - np.abs(fsc_true))
-                    + np.mean(np.abs(fsc_n_arr))
-                    + np.mean(np.abs(fsc_t_arr - fsc_true))
-                    + np.mean(1 - np.abs(fsc_true - fsc_n_arr))
-                )
-
-                if logger.isEnabledFor(logging.DEBUG):
-                    nshells = len(fsc_t)
-                    saxis_shells = np.arange(nshells) / (map1.shape[0] * pix_size)
-                    res = _find_resolution(saxis_shells[cutoff_i:], fsc_true, 0.143)
-                    logger.debug(
-                        "\tMask width: %.2f Angstrom (%.2f pixels)\t->\t%.2f Angstrom at FSC=0.143\tfval=%g",
-                        x * pix_size,
-                        x,
-                        res,
-                        score,
-                    )
-
-                return score
-
-            res_opt = minimize_scalar(
-                _fsc_score,
-                bounds=(0, map1.shape[0] / 3),
-                method="bounded",
-                args=(map1, map2, map1r, map2r, mask1, cutoff_res_i + 2),
-                options={"xatol": 2},
+            # the search is the slow part. It is cached by the identity of the
+            # input files and the parameters that determine mask1
+            input_files = [map1_file, map2_file]
+            mask_soft_px = _optimal_mask_slope(
+                [_file_identity(f) for f in input_files],
+                (
+                    pix_size,
+                    cutoff_res_val,
+                    one_mask,
+                    mask_fraction_thresh,
+                    mask_thresh,
+                    mask_mass,
+                ),
+                map1,
+                map2,
+                map1r,
+                map2r,
+                mask1,
+                pix_size,
+                cutoff_res_i + 2,
+                _shell_flat_full,
+                n,
             )
-            mask_soft_px = res_opt.x
             logger.info(
                 "Optimal mask slope width: %.1f Angstrom (%.1f pixels)",
                 mask_soft_px * pix_size,
@@ -532,6 +498,129 @@ def compute_truefsc(
             "masked_map2_file": masked2_file,
         },
     }
+
+
+def _file_identity(filename):
+    """Identify the content of a file by its resolved path, size and mtime.
+
+    Parameters
+    ----------
+    filename : str or Path
+        The file.
+
+    Returns
+    -------
+    tuple
+        ``(resolved path, size in bytes, modification time in ns)``; it changes
+        when the file is overwritten.
+    """
+    path = Path(filename).resolve()
+    st = path.stat()
+    return (str(path), st.st_size, st.st_mtime_ns)
+
+
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "trueFSC"),
+    expires_after=None,
+    ignore=[
+        "map1",
+        "map2",
+        "map1r",
+        "map2r",
+        "mask",
+        "pix_size",
+        "cutoff_i",
+        "shell_flat",
+        "n",
+    ],
+)
+def _optimal_mask_slope(
+    input_files,
+    params,
+    map1,
+    map2,
+    map1r,
+    map2r,
+    mask,
+    pix_size,
+    cutoff_i,
+    shell_flat,
+    n,
+):
+    """Find the mask slope width that best separates signal from noise.
+
+    Parameters
+    ----------
+    input_files : list of tuple
+        :func:`_file_identity` of the half-maps; with ``params`` this is the
+        cache key (the arrays are not hashed).
+    params : tuple
+        The parameters that determine ``mask``.
+    map1, map2 : np.ndarray
+        The half-maps.
+    map1r, map2r : np.ndarray
+        The phase-randomized half-maps.
+    mask : np.ndarray
+        The binary mask.
+    pix_size : float
+        Pixel size (Angstrom).
+    cutoff_i : int
+        First Fourier shell used in the score.
+    shell_flat : np.ndarray
+        Flattened Fourier shell labels for :func:`helicon.calc_fsc_per_shell`.
+    n : int
+        Box size.
+
+    Returns
+    -------
+    float
+        The mask slope width in pixels.
+    """
+    from scipy.optimize import minimize_scalar
+
+    def _fsc_score(x):
+        mask_e = _soft_mask(mask, x)
+        fsc_t = helicon.calc_fsc_per_shell(
+            map1 * mask_e, map2 * mask_e, pix_size, shell_flat=shell_flat, n=n
+        )
+        fsc_n = helicon.calc_fsc_per_shell(
+            map1r * mask_e, map2r * mask_e, pix_size, shell_flat=shell_flat, n=n
+        )
+
+        fsc_t_arr = fsc_t[cutoff_i:]
+        fsc_n_arr = fsc_n[cutoff_i:]
+
+        fsc_true = (fsc_t_arr - fsc_n_arr) / (1 - fsc_n_arr)
+        fsc_true[np.isnan(fsc_true)] = 1.0
+
+        score = (
+            np.mean(1 - np.abs(fsc_true))
+            + np.mean(np.abs(fsc_n_arr))
+            + np.mean(np.abs(fsc_t_arr - fsc_true))
+            + np.mean(1 - np.abs(fsc_true - fsc_n_arr))
+        )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            nshells = len(fsc_t)
+            saxis_shells = np.arange(nshells) / (map1.shape[0] * pix_size)
+            res = _find_resolution(saxis_shells[cutoff_i:], fsc_true, 0.143)
+            logger.debug(
+                "\tMask width: %.2f Angstrom (%.2f pixels)\t->\t%.2f Angstrom at FSC=0.143\tfval=%g",
+                x * pix_size,
+                x,
+                res,
+                score,
+            )
+
+        return score
+
+    res_opt = minimize_scalar(
+        _fsc_score,
+        bounds=(0, map1.shape[0] / 3),
+        method="bounded",
+        options={"xatol": 2},
+    )
+    return float(res_opt.x)
 
 
 def _show_plot(plot_file):
@@ -907,7 +996,8 @@ def _soft_mask(mask, soft_width):
     soft = np.ones(mask.shape, dtype=np.float64)
     outside = ~mask.astype(bool)
     near_edge = outside & (dist > 0) & (dist <= soft_width)
-    soft[near_edge] = (np.cos(dist[near_edge] / soft_width * np.pi / 2) + 1) / 2
+    # falls smoothly from 1 at the mask edge to 0 at soft_width
+    soft[near_edge] = (np.cos(dist[near_edge] / soft_width * np.pi) + 1) / 2
     soft[outside & (dist > soft_width)] = 0.0
     return soft
 
@@ -927,7 +1017,9 @@ def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
     showPlot : bool, optional
         If True, display the plot interactively. Defaults to False.
     """
-    import matplotlib.pyplot as plt
+    # plain Figures (not pyplot) so that saving the plot does not depend on, or
+    # change, the matplotlib backend of the process
+    from matplotlib.figure import Figure
     from matplotlib.ticker import MultipleLocator
     from matplotlib.lines import Line2D
     from matplotlib.backends.backend_pdf import PdfPages
@@ -943,51 +1035,49 @@ def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
     ymin = 1.0
     ymax = 0.0
     xmax = 0.0
-    fig = plt.figure(figsize=(9, 6), facecolor="w", edgecolor="w")
+    fig = Figure(figsize=(9, 6), facecolor="w", edgecolor="w")
+    ax = fig.add_subplot()
     for x, y, label in fsccurves:
         xmax = max(xmax, np.max(x))
         ymin = min(ymin, np.min(y[len(y) // 2 :]))
         ymax = max(ymax, np.max(y))
-        plt.plot(x, y, label=label)
+        ax.plot(x, y, label=label)
 
     l = Line2D([0, xmax], [0.143, 0.143], linestyle="--", color="r")
-    plt.gca().add_line(l)
+    ax.add_line(l)
 
-    plt.xlim([0, xmax])
+    ax.set_xlim([0, xmax])
     xstep = round(xmax / 5 / 2, 2) * 2
     if xstep > 0:
         xticks = [xstep * i for i in range(int(xmax / xstep) + 1)]
         xlabels = [r"1/$\infty$"] + ["1/%.1f" % (1 / xt) for xt in xticks[1:]]
-        plt.xticks(xticks, xlabels)
-        plt.gca().xaxis.set_minor_locator(MultipleLocator(xstep / 10))
+        ax.set_xticks(xticks, xlabels)
+        ax.xaxis.set_minor_locator(MultipleLocator(xstep / 10))
 
-    plt.ylim([ymin, ymax])
-    plt.yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
-    plt.gca().yaxis.set_minor_locator(MultipleLocator(0.02))
+    ax.set_ylim([ymin, ymax])
+    ax.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.yaxis.set_minor_locator(MultipleLocator(0.02))
 
-    plt.gca().xaxis.grid(True)
-    plt.gca().yaxis.grid(True)
-    plt.gca().grid(linestyle="--", linewidth="0.5")
+    ax.xaxis.grid(True)
+    ax.yaxis.grid(True)
+    ax.grid(linestyle="--", linewidth="0.5")
 
-    plt.xlabel(r"Resolution (1/$\AA$)", fontsize=14)
-    plt.ylabel("Fourier Shell Correlation", fontsize=14)
+    ax.set_xlabel(r"Resolution (1/$\AA$)", fontsize=14)
+    ax.set_ylabel("Fourier Shell Correlation", fontsize=14)
 
-    plt.gca().legend(loc="best", shadow=False, frameon=True, fontsize=12)
+    ax.legend(loc="best", shadow=False, frameon=True, fontsize=12)
 
     if pdf is not None:
         pdf.savefig(fig)
-        plt.close(fig)
     else:
-        plt.gcf().savefig(fscfile)
-        plt.close()
+        fig.savefig(fscfile)
 
     # --- Subsequent pages: grouped central sections ---
     if volumes:
         for page_title, vol_list in volumes:
             n_vols = len(vol_list)
-            fig, axes = plt.subplots(
-                n_vols, 3, figsize=(15, 4.5 * n_vols), facecolor="w", edgecolor="w"
-            )
+            fig = Figure(figsize=(15, 4.5 * n_vols), facecolor="w", edgecolor="w")
+            axes = fig.subplots(n_vols, 3)
             fig.suptitle(page_title, fontsize=18, fontweight="bold")
 
             for row, (vol_name, vol_data) in enumerate(vol_list):
@@ -996,12 +1086,10 @@ def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
             fig.tight_layout(rect=[0, 0, 1, 0.95])
             if pdf is not None:
                 pdf.savefig(fig)
-                plt.close(fig)
             else:
                 outbase = str(Path(fscfile).with_suffix(""))
                 safe_name = page_title.lower().replace(" ", "_")
                 fig.savefig(f"{outbase}.{safe_name}.png")
-                plt.close(fig)
 
     if pdf is not None:
         pdf.close()

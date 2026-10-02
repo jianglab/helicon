@@ -183,12 +183,10 @@ def check_args(
     args.append_options = [
         a.dest for a in parser._actions if type(a) is argparse._AppendAction
     ]
-    all_options = helicon.get_option_list(sys.argv[1:])
-    args.all_options = [
-        o
-        for o in all_options
-        if o not in "cpu force inputMapFile outputMapFile_opt verbose".split()
-    ]
+    from helicon.plugins import plugin_options_in_argv
+    from helicon.plugins.proc3d import _plugins
+
+    args.all_options = plugin_options_in_argv(sys.argv[1:], parser, _plugins)
 
     if args.outputMapFile is not None:
         args.outputMapFile = Path(args.outputMapFile)

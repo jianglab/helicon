@@ -104,7 +104,15 @@ def handle(
             ),
             output_size=(new_nz, new_ny, new_nx),
         )
-        data = np.abs(np.fft.ifftn(fft)).astype(np.float32)
+        # when upsampling, the Fourier series of the input repeats beyond its
+        # Nyquist frequency; drop those aliased copies
+        for axis, (n_old, n_new) in enumerate(zip((nz, ny, nx), fft.shape)):
+            if n_new > n_old:
+                k = np.abs(np.fft.fftfreq(n_new) * n_new)
+                shape = [1, 1, 1]
+                shape[axis] = n_new
+                fft = fft * (k <= n_old / 2).reshape(shape)
+        data = np.fft.ifftn(fft).real.astype(np.float32)
         data *= new_nx * new_ny * new_nz / (nx * ny * nz)
         apix = round(apix * nx / new_nx, 4)
         nx = new_nx

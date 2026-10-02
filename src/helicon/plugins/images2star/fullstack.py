@@ -53,7 +53,7 @@ def handle(data, args, index_d, param):
         dataframes = []
         count = 0
         for mgraphName, mgraphParticles in mgraphs:
-            n = helicon.EMUtil.get_image_count(mgraphName)
+            n = helicon.get_image_size(mgraphName)[2]
             rlnImageName = (
                 pd.Series(list(range(1, n + 1))).map("{:06d}".format) + "@" + mgraphName
             )

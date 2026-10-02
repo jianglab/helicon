@@ -74,12 +74,18 @@ def main(args: argparse.Namespace) -> None:
                         tmp[_col] = _pdata[_col]
             data_orig.append(tmp)
         input_type = ["particle" if "blob/path" in d else "exposure" for d in data_orig]
+        cs = None
+        project = None
+        input_job = None
+        input_group_name = None
     else:
         cs = helicon.connect_cryosparc()
         project = cs.find_project(args.projectID)
         input_project_folder = project.dir()
         data_orig = []
         input_type = []
+        input_job = None
+        input_group_name = None
         for i, jobID in enumerate(args.jobID):
             input_job = cs.find_job(args.projectID, jobID)
             if len(input_job.doc["output_result_groups"]) < 1:
@@ -102,8 +108,6 @@ def main(args: argparse.Namespace) -> None:
         input_type = input_type[0]
 
     if len(data_orig) > 1:
-        from cryosparc.dataset import Dataset
-
         data_orig = Dataset.union(*data_orig)
     else:
         data_orig = data_orig[0]
@@ -116,10 +120,12 @@ def main(args: argparse.Namespace) -> None:
         output_project_folder = Path(".")
     else:
         output_project_folder = input_project_folder
-        output_job = None
 
     args.input_project_folder = input_project_folder
     args.output_project_folder = output_project_folder
+    # the plugins that talk to the CryoSPARC server (None for local .cs files)
+    args.cryosparc_client = cs
+    args.cryosparc_project = project
 
     data = data_orig.copy()
 
@@ -185,6 +191,71 @@ def main(args: argparse.Namespace) -> None:
             micrograph_name,
             original_exp_group_ids,
         )
+        if data is None:  # the plugin has saved its own output (e.g. an external job)
+            return
+
+    from helicon.plugins.cryosparc.extractparticles import fill_missing_fields
+
+    data = fill_missing_fields(data)
+
+    if args.csFile or args.saveLocal:
+        output_file = output_cs_filename(args, output_title)
+        data.save(output_file)
+        if args.verbose > 1:
+            logger.info("The results are saved to %s", output_file)
+    else:
+        if len(args.jobID) == 1 and len(output_slots):
+            passthrough = (input_job.uid, input_group_name)
+        else:
+            passthrough = None
+            output_slots = [p for p in data.prefixes()]
+
+        new_jobID = project.save_external_result(
+            workspace_uid=args.outputWorkspaceID,
+            dataset=data,
+            type=input_type,
+            name=input_type,
+            slots=list(output_slots),
+            passthrough=passthrough,
+            title=f"{', '.join(args.jobID)}" + output_title,
+            desc=f"{' '.join(sys.argv)}",
+        )
+        if args.verbose > 1:
+            logger.info(
+                "The results are saved to a new CryoSPARC external job: %s/%s/%s",
+                args.projectID,
+                args.outputWorkspaceID,
+                new_jobID,
+            )
+
+
+def output_cs_filename(args: argparse.Namespace, output_title: str) -> str:
+    """Build the name of the local output .cs file.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments (``csFile``, ``projectID`` and ``jobID`` are used).
+    output_title : str
+        Title accumulated by the option handlers, e.g. ``"->split by micrograph"``.
+
+    Returns
+    -------
+    str
+        The output file name, without spaces, ``->`` or ``/``.
+    """
+    if args.csFile:
+        output_file = (
+            f"{'-'.join([Path(f).stem for f in args.csFile])}"
+            + (output_title if output_title else ".output")
+            + ".cs"
+        )
+    else:
+        output_file = f"{args.projectID}_{' '.join(args.jobID)}" + output_title + ".cs"
+    output_file = "-".join(output_file.split())
+    output_file = output_file.replace("->", "_")
+    output_file = output_file.replace("/", "_")
+    return output_file
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -281,13 +352,10 @@ def check_args(
     args.append_options = [
         a.dest for a in parser._actions if type(a) is argparse._AppendAction
     ]
-    all_options = helicon.get_option_list(sys.argv[1:])
-    args.all_options = [
-        o
-        for o in all_options
-        if o
-        not in "cpu groupIndex jobID projectID saveLocal verbose outputWorkspaceID".split()
-    ]
+    from helicon.plugins import plugin_options_in_argv
+    from helicon.plugins.cryosparc import _plugins
+
+    args.all_options = plugin_options_in_argv(sys.argv[1:], parser, _plugins)
 
     if (args.projectID or args.jobID or args.groupIndex) and args.csFile:
         msg = f"You should only specify options for CryoSPARC server (--projectID --jobID) or local file (--csFile), but not both"
