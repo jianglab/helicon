@@ -280,6 +280,9 @@ def where_is_my_class_tab_server(input, output, session, project: ProjectState):
         req(input.wimc_input_mode() == helicon.shiny.SERVER)
         filepath = input.wimc_server_star().strip()
         req(len(filepath))
+        # the tab is not started on a hosting service; checked here as well
+        if deployment.refuse_server_mode():
+            return
         if not pathlib.Path(filepath).is_file():
             ui.modal_show(
                 ui.modal(
@@ -319,6 +322,8 @@ def where_is_my_class_tab_server(input, output, session, project: ProjectState):
         req(input.wimc_input_mode() == "url")
         url = input.wimc_url_star()
         req(url and url.strip())
+        if deployment.refuse_local_path(url):
+            return
 
         # If the "URL" is a local file path (as passed by the file browser),
         # resolve the project root so micrographs and the class-selection

@@ -76,7 +76,13 @@ class TestTheAppFollowsIt:
 
 
 class TestHostedCopiesReadOnlyByUrl:
-    def test_urls_only_on_a_host(self):
+    def test_urls_only_on_a_host(self, monkeypatch):
+        # no network: every name resolves to a public address
+        monkeypatch.setattr(
+            deployment.socket,
+            "getaddrinfo",
+            lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))],
+        )
         host = {"HELICON_DEPLOYMENT": "cloud"}
         assert deployment.url_allowed("https://ftp.ebi.ac.uk/x.star", host)
         assert deployment.url_allowed("FTP://example.org/x.mrcs", host)

@@ -866,6 +866,8 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def _load_images_server():
         req(input.input_mode_images() == "server")
         req(len(input.server_images().strip()) > 0)
+        if deployment.refuse_server_mode():
+            return
         _load_images(input.server_images().strip())
 
     def _load_images(url):
@@ -1255,6 +1257,8 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def _load_map_server():
         req(input.input_mode_maps() == "server")
         req(len(input.server_map().strip()) > 0)
+        if deployment.refuse_server_mode():
+            return
         _use_map(input.server_map().strip())
 
     def _use_map(url_val):

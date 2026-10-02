@@ -1589,6 +1589,8 @@ def hill_tab_server(input, output, session, project: ProjectState):
     @reactive.event(input.hill_input_mode_params, input.hill_img_file_server)
     def _load_input_data_from_server():
         req(input.hill_input_mode_params() == helicon.shiny.SERVER)
+        if deployment.refuse_server_mode():
+            return
         _load_input_data(input.hill_img_file_server().strip())
 
     def _load_input_data(url):

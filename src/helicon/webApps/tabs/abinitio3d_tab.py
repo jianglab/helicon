@@ -11,6 +11,7 @@ with relion_reconstruct, from the segments.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -572,6 +573,36 @@ def abinitio3d_tab_ui():
     )
 
 
+def _mrc_bytes(volume, apix):
+    """The bytes of an MRC file holding ``volume``.
+
+    Parameters
+    ----------
+    volume : numpy.ndarray
+        The 3D map (z, y, x).
+    apix : float
+        The voxel size (Angstrom).
+
+    Returns
+    -------
+    bytes
+    """
+    import tempfile
+
+    import mrcfile
+
+    fd, name = tempfile.mkstemp(suffix=".mrc")
+    os.close(fd)
+    path = Path(name)
+    try:
+        with mrcfile.new(name, overwrite=True) as mrc:
+            mrc.set_data(np.asarray(volume, dtype=np.float32))
+            mrc.voxel_size = float(apix)
+        return path.read_bytes()
+    finally:
+        path.unlink(missing_ok=True)
+
+
 @module.server
 def abinitio3d_tab_server(input, output, session, project: ProjectState):
     # the Class2D parameters as read, and as used: with tube ids that hold
@@ -606,6 +637,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def get_class2d_from_upload():
         req(input.input_mode_classes() == "upload")
         fileinfo = input.upload_classes()
+        req(fileinfo)
         class_file = fileinfo[0]["datapath"]
         try:
             data, apix = compute.get_class2d_from_file(class_file)
@@ -632,6 +664,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             input.input_mode_classes(), input.url_classes, input.server_classes
         )
         req(len(url) > 0)
+        if input.input_mode_classes() == "server" and deployment.refuse_server_mode():
+            return
         if deployment.refuse_local_path(url):
             return
         try:
@@ -656,6 +690,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def get_params_from_upload():
         req(input.input_mode_params() == "upload")
         fileinfo = input.upload_params()
+        req(fileinfo)
         param_file = fileinfo[0]["datapath"]
         msg = None
         try:
@@ -682,6 +717,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         req(input.input_mode_params() in ("url", "server"))
         url = _source(input.input_mode_params(), input.url_params, input.server_params)
         req(len(url) > 0)
+        if input.input_mode_params() == "server" and deployment.refuse_server_mode():
+            return
         if deployment.refuse_local_path(url):
             return
         msg = None
@@ -749,6 +786,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     # A server file chosen or typed in one of the two server fields brings the
     # other file of the same 2D classification with it, when it is beside it.
     def _fill_companion(given, other_id, other_value):
+        if deployment.is_cloud():  # no looking at the server's files
+            return
         found = class2d_files.companion(given)
         if (
             found
@@ -986,8 +1025,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 )
             )
             return
-        n_boot = input.phase_n_boot()
-        n_boot = 20 if n_boot is None else max(2, int(n_boot))
+        # the UI's bounds, enforced here too: the browser's are not binding
+        n_boot = helicon.shiny.clamp_number(input.phase_n_boot(), 20, 2, 200)
         try:
             with ui.Progress(min=0, max=8) as p:
                 counterparts = None
@@ -1595,7 +1634,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def _angles():
         r = phase_result()
         req(r is not None)
-        return phase.segment_angles(params(), r, fold=int(input.rot_fold() or 1))
+        fold = helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
+        return phase.segment_angles(params(), r, fold=fold)
 
     def _download_label(subset, prefix="Download"):
         n_fil = subset.groupby(["rlnMicrographName", "rlnHelicalTubeID"]).ngroups
@@ -1662,7 +1702,11 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
 
     def _imposed_csym():
         """The C symmetry to impose on a map: the tab's, when Impose C is ticked."""
-        return int(input.rot_fold() or 1) if input.map_csym() else 1
+        return (
+            helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
+            if input.map_csym()
+            else 1
+        )
 
     relion_map = reactive.value(None)
 
@@ -1673,6 +1717,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
 
     def _relion_project_guess():
         """The directory the segments' image paths resolve from, if it can be found."""
+        if deployment.is_cloud():  # no looking at the server's files
+            return ""
         p = params()
         if p is None or "rlnImageName" not in p:
             return ""
@@ -1745,6 +1791,9 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def run_relion():
         r = phase_result()
         req(r is not None)
+        # the RELION project folder is a free-text path on the server
+        if deployment.refuse_server_mode():
+            return
         low, high = _pitch_band()
         lo, hi = _length_range()
         subset = phase.select_segments(
@@ -1840,7 +1889,9 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
 
         @btn
         def download_relion_map():
-            yield Path(m["path"]).read_bytes()
+            # the run's own folder is gone (it was temporary): write the map
+            # from memory
+            yield _mrc_bytes(m["volume"], m["apix"])
 
         return ui.div(_fig_to_html(fig), btn)
 
@@ -1858,7 +1909,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def run_map():
         r = phase_result()
         req(r is not None)
-        csym = int(input.rot_fold() or 1)
+        csym = helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
         position = {int(c): i for i, c in enumerate(displayed_class_ids())}
         images = displayed_class_images()
         at = [position[int(c)] for c in map(lambda k: int(k) - 1, r.class_ids)]
@@ -1886,7 +1937,9 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                     float(input.rise()),
                     left_handed=input.map_hand() == "left",
                     apix=max(5.0, apix_orig),
-                    helical_sym_order=int(input.map_hsym() or 1),
+                    helical_sym_order=helicon.shiny.clamp_number(
+                        input.map_hsym(), 1, 1, 1000
+                    ),
                     impose_csym=bool(input.map_csym()),
                     method=(
                         "backprojection"

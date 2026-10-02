@@ -16,9 +16,9 @@ related apps that run outside this one, such as ``helicon procart``):
 
 Architecture: uses Shiny's classic ``App()`` API with modules so that
 each tool is an independent ``@module.ui`` + ``@module.server`` pair
-that can be composed into the parent navset.  A shared
-``ProjectState`` singleton (defined in ``shared_state.py``) holds
-reactive values that enable cross-tab data flow.
+that can be composed into the parent navset.  A
+``ProjectState`` (defined in ``shared_state.py``), one per browser
+session, holds reactive values that enable cross-tab data flow.
 
 This is the only Shiny web app in helicon; the individual apps
 (denovo3D, whereIsMyClass) were consolidated into this app.
@@ -93,7 +93,7 @@ from starlette.routing import Route
 from shiny import App, reactive, ui
 
 from helicon.lib.shiny import encode_query_params
-from helicon.webApps.lib.shared_state import project
+from helicon.webApps.lib.shared_state import ProjectState
 
 logger = logging.getLogger(__name__)
 
@@ -645,6 +645,50 @@ def _page(theme: str, initial_theme: str, active_tab: str):
     )
 
 
+def install_error_modal(session) -> None:
+    """Show unhandled errors of one session in a popup in that session.
+
+    Shiny catches exceptions inside reactive effects / render functions and
+    calls ``session._unhandled_error(e)``; the default only logs to stderr and
+    closes the session.  The override is set on the root session *instance*
+    (module sessions forward to it), so each browser session gets its own
+    handler and its own modal, and the original handler still runs after it.
+
+    Parameters
+    ----------
+    session : shiny.Session
+        The session (or a module proxy of it) to install the handler on.
+    """
+    import traceback as _tb
+
+    root = session
+    while getattr(root, "_root_session", None) is not None:
+        root = root._root_session
+    orig_unhandled = root._unhandled_error
+
+    async def _show_error_modal(e: Exception) -> None:
+        tb_str = "".join(_tb.format_exception(type(e), e, e.__traceback__)).strip()
+        try:
+            ui.modal_show(
+                ui.modal(
+                    ui.pre(
+                        tb_str,
+                        style="white-space: pre-wrap; word-break: break-word;"
+                        " font-size: 9pt; max-height: 60vh; overflow-y: auto;",
+                    ),
+                    title="Unhandled Error",
+                    easy_close=True,
+                    footer=None,
+                ),
+                session=root,
+            )
+        except Exception:
+            logger.debug("could not show the error modal", exc_info=True)
+        await orig_unhandled(e)
+
+    root._unhandled_error = _show_error_modal
+
+
 def server(input, output, session):
     """Top-level server: wires shared state and delegates to tab modules."""
 
@@ -668,32 +712,12 @@ def server(input, output, session):
     def _register_launch_token():
         _control.register_token(session.clientdata.url_search())
 
-    # ── Global unhandled-exception handler ────────────────────
-    # Shiny catches exceptions inside reactive effects / render
-    # functions and calls session._unhandled_error(e).  The default
-    # only logs to stderr and closes the session without telling the
-    # user.  We override it to also show a popup in the browser.
-    import traceback as _tb
+    # Unhandled exceptions also show a popup in this session's browser.
+    install_error_modal(session)
 
-    _orig_unhandled = session._unhandled_error
-
-    async def _show_error_modal(e: Exception) -> None:
-        _tb_str = "".join(_tb.format_exception(type(e), e, e.__traceback__)).strip()
-        ui.modal_show(
-            ui.modal(
-                ui.pre(
-                    _tb_str,
-                    style="white-space: pre-wrap; word-break: break-word;"
-                    " font-size: 9pt; max-height: 60vh; overflow-y: auto;",
-                ),
-                title="Unhandled Error",
-                easy_close=True,
-                footer=None,
-            )
-        )
-        await _orig_unhandled(e)
-
-    type(session)._unhandled_error = lambda self, e: _show_error_modal(e)
+    # Cross-tab state belongs to this browser session only, so one visitor's
+    # twist/rise/map never shows up in another visitor's tabs.
+    project = ProjectState()
 
     # Home has no reactive work besides starting non-integrated apps, and it
     # is the default tab, so it is wired up eagerly rather than lazily.

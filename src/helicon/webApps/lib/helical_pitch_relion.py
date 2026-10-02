@@ -114,13 +114,15 @@ def reconstruct(segments, project_dir, cpu=1, csym=1, extra_args=(), work_dir=No
     extra_args : sequence of str, optional
         More ``relion_reconstruct`` arguments.
     work_dir : str, optional
-        Where the star file and the map are written. Defaults to a new
-        temporary directory, which is left in place for the map to be read.
+        Where the star file and the map are written, and left. Defaults to a
+        new temporary directory, which is removed once the map has been read
+        (also when the run fails).
 
     Returns
     -------
     dict
-        ``volume`` (z, y, x), ``apix``, ``path`` of the map, ``n_segments``,
+        ``volume`` (z, y, x), ``apix``, ``path`` of the map (None when it was
+        written to a temporary directory, now removed), ``n_segments``,
         ``csym``, the ``command`` that was run and ``mpi`` (the number of MPI
         processes, 0 for the threaded program).
 
@@ -132,9 +134,6 @@ def reconstruct(segments, project_dir, cpu=1, csym=1, extra_args=(), work_dir=No
     RuntimeError
         When relion_reconstruct fails; the message ends with its output.
     """
-    import mrcfile
-    import starfile
-
     exe = find_relion_reconstruct()
     if exe is None:
         raise FileNotFoundError("relion_reconstruct is not on the PATH")
@@ -149,7 +148,24 @@ def reconstruct(segments, project_dir, cpu=1, csym=1, extra_args=(), work_dir=No
     # only RELION's own columns; the helicon ones would only draw warnings
     parts = parts[[c for c in parts.columns if c.startswith("rln")]]
     optics = segments.attrs.get("optics")
+    own_folder = not work_dir
     folder = Path(work_dir or tempfile.mkdtemp(prefix="helicon_relion_"))
+    try:
+        return _reconstruct_in(
+            folder, parts, segments, optics, exe, cpu, csym, extra_args, own_folder
+        )
+    finally:
+        if own_folder:  # a temporary folder of ours: nothing is read from it later
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _reconstruct_in(
+    folder, parts, segments, optics, exe, cpu, csym, extra_args, own_folder
+):
+    """The body of :func:`reconstruct`, writing into ``folder``."""
+    import mrcfile
+    import starfile
+
     folder.mkdir(parents=True, exist_ok=True)
     star = folder / "segments.star"
     blocks = dict(optics=optics, particles=parts) if optics is not None else parts
@@ -205,7 +221,7 @@ def reconstruct(segments, project_dir, cpu=1, csym=1, extra_args=(), work_dir=No
     return dict(
         volume=volume,
         apix=apix,
-        path=str(out),
+        path=None if own_folder else str(out),
         n_segments=len(parts),
         csym=int(max(csym, 1)),
         command=" ".join(command),

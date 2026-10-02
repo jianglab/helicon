@@ -1,5 +1,7 @@
 """relion_reconstruct from the AbInitio3D tab's segments."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -198,3 +200,49 @@ class TestMpi:
         relion.reconstruct(_segments(tmp_path), str(tmp_path), cpu=8, csym=2)
         (command,) = fake.commands
         assert command[0] == "/r/rr" and command[command.index("--sym") + 1] == "c2"
+
+
+class TestTemporaryFolder:
+    def _fake(self, monkeypatch, tmp_path, fail=False):
+        import tempfile
+
+        made = []
+        real = tempfile.mkdtemp
+
+        def mkdtemp(*a, **k):
+            k["dir"] = str(tmp_path)
+            made.append(Path(real(*a, **k)))
+            return str(made[-1])
+
+        monkeypatch.setattr(relion.tempfile, "mkdtemp", mkdtemp)
+        monkeypatch.setattr(relion, "find_relion_reconstruct", lambda: "/r/rr")
+        monkeypatch.setattr(relion, "find_relion_reconstruct_mpi", lambda: None)
+        if fail:
+            from types import SimpleNamespace
+
+            monkeypatch.setattr(
+                relion.subprocess,
+                "run",
+                lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="x"),
+            )
+        else:
+            monkeypatch.setattr(relion.subprocess, "run", _FakeRun())
+        return made
+
+    def test_the_temporary_folder_is_removed_after_the_run(self, tmp_path, monkeypatch):
+        made = self._fake(monkeypatch, tmp_path)
+        out = relion.reconstruct(_segments(tmp_path), str(tmp_path))
+        assert out["volume"].shape == (4, 4, 4) and out["path"] is None
+        assert len(made) == 1 and not made[0].exists()
+
+    def test_and_after_a_failed_run(self, tmp_path, monkeypatch):
+        made = self._fake(monkeypatch, tmp_path, fail=True)
+        with pytest.raises(RuntimeError):
+            relion.reconstruct(_segments(tmp_path), str(tmp_path))
+        assert len(made) == 1 and not made[0].exists()
+
+    def test_a_given_work_dir_is_kept(self, tmp_path, monkeypatch):
+        self._fake(monkeypatch, tmp_path)
+        work = tmp_path / "work"
+        out = relion.reconstruct(_segments(tmp_path), str(tmp_path), work_dir=work)
+        assert Path(out["path"]).exists() and out["path"].startswith(str(work))

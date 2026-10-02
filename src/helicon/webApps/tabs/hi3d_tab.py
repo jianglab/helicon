@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
-import gzip
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +41,66 @@ BOOKMARK_DEFAULTS = {
     "radius": ("hi3d_radius", (0.0, 0.0), _DERIVED),
     "npeaks": ("hi3d_npeaks", 0, _DERIVED),
 }
+
+
+def _read_map(path):
+    """Read a map file, plain or gzip/bzip2-compressed, without changing it.
+
+    Parameters
+    ----------
+    path : str or Path
+        The map (``.map``, ``.mrc``, ``.map.gz``, ...).
+
+    Returns
+    -------
+    data : numpy.ndarray
+        The map as float32.
+    apix : float
+        The voxel size (Angstrom).
+    crs : list of int
+        The ``mapc``, ``mapr``, ``maps`` header fields.
+    """
+    import mrcfile
+
+    with mrcfile.open(str(path)) as mrc:
+        d = np.array(mrc.data, dtype=np.float32)
+        apix_val = float(mrc.voxel_size.x)
+        crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
+    return d, apix_val, crs
+
+
+def _mask_angle_range(cp, ang_min, ang_max, da):
+    """Zero the columns (azimuthal angles) of ``cp`` outside the ROI, in place.
+
+    Parameters
+    ----------
+    cp : numpy.ndarray
+        Cylindrical projection, shape ``(nz, na)``; column ``na // 2`` is 0°.
+    ang_min, ang_max : float
+        The angle range kept (degrees, -180..180). ``ang_min > ang_max``
+        means the range wraps around ±180°: ``[ang_min, 180]`` and
+        ``[-180, ang_max]`` are kept and the angles between are zeroed.
+    da : float
+        Angular step of one column (degrees).
+
+    Returns
+    -------
+    numpy.ndarray
+        ``cp``, for convenience.
+    """
+    na = cp.shape[1]
+    if ang_min < ang_max:
+        if ang_min > -180:
+            a0 = int(round(ang_min / da)) + na // 2
+            cp[:, : max(a0, 0)] = 0
+        if ang_max < 180:
+            a1 = int(round(ang_max / da)) + na // 2
+            cp[:, max(a1, 0) :] = 0
+    else:
+        a1 = int(round(ang_max / da)) + na // 2 if ang_max > -180 else 0
+        a0 = int(round(ang_min / da)) + na // 2 if ang_min < 180 else na
+        cp[:, max(a1, 0) : max(a0, 0)] = 0
+    return cp
 
 
 def lattice_line_segments(twist, phase_degree, rise, y_min, y_max):
@@ -498,12 +557,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         if not fi:
             return
         try:
-            import mrcfile
-
-            with mrcfile.open(fi[0]["datapath"]) as mrc:
-                d = np.array(mrc.data, dtype=np.float32)
-                apix_val = float(mrc.voxel_size.x)
-                crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
+            d, apix_val, crs = _read_map(fi[0]["datapath"])
             _set_map(d, apix_val, crs, fi[0]["name"])
         except Exception as e:
             ui.modal_show(ui.modal(str(e), title="Error", easy_close=True, footer=None))
@@ -521,6 +575,8 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     @reactive.event(input.hi3d_input_mode, input.hi3d_server_map)
     async def _load_server_map():
         if input.hi3d_input_mode() != helicon.shiny.SERVER:
+            return
+        if deployment.refuse_server_mode():
             return
         await _load_map(input.hi3d_server_map())
 
@@ -607,6 +663,20 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
                 )
                 return None
 
+    def _fetch_and_read(url, suffix, progress=None):
+        """Download ``url`` into a private temporary file and read the map.
+
+        The temporary file is removed afterwards, also when reading fails.
+        """
+        fd, name = tempfile.mkstemp(suffix=suffix)
+        tmp = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                _fetch_to_file(url, handle, progress)
+            return _read_map(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def _download_emd(emd_id, progress=None):
         """Download map from EMDB and return (data, apix, crs, label).
 
@@ -616,22 +686,9 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         invalidation cascades run on the correct event loop.
         """
         logger.debug("[HI3D] _download_emd: starting download for emd-%s", emd_id)
-        import mrcfile
-
         url = get_emdb_map_url(f"emd-{emd_id}")
         logger.debug("[HI3D] _download_emd: url=%s", url)
-        with tempfile.NamedTemporaryFile(suffix=".map.gz", delete=False) as tmp:
-            _fetch_to_file(url, tmp, progress)
-            gz_path = tmp.name
-        mrc_path = gz_path[:-3]
-        with gzip.open(gz_path, "rb") as f_in, open(mrc_path, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
-        with mrcfile.open(mrc_path) as mrc:
-            d = np.array(mrc.data, dtype=np.float32)
-            apix_val = float(mrc.voxel_size.x)
-            crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
-        Path(gz_path).unlink(missing_ok=True)
-        Path(mrc_path).unlink(missing_ok=True)
+        d, apix_val, crs = _fetch_and_read(url, ".map.gz", progress)
         logger.debug("[HI3D] _download_emd: download complete, shape=%s", d.shape)
         return d, apix_val, crs, f"EMD-{emd_id}"
 
@@ -640,47 +697,16 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         ``(data, apix, crs, label)``.  Pure I/O — no reactive writes, no UI.
 
         Accepts plain ``.map``/``.mrc`` files and gzip-compressed
-        ``.map.gz``/``.mrc.gz``.  Local file paths are also supported.
+        ``.map.gz``/``.mrc.gz`` (mrcfile reads those directly). Local file
+        paths are also supported and are only read, never changed or removed.
         """
-        import mrcfile
-
         url_stripped = url.strip()
-        suffix = Path(url_stripped).suffixes[-1] if url_stripped else ".map"
-        is_gz = suffix == ".gz"
-        if is_gz:
-            suffix += ".map.gz"
-        else:
-            suffix = ".map"
-
         logger.debug("[HI3D] _download_url: starting for %s", url_stripped)
-
         if url_stripped.startswith(("http://", "https://", "ftp://")):
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                import requests
-
-                _fetch_to_file(url_stripped, tmp, progress)
-                local_path = Path(tmp.name)
+            suffix = "".join(Path(url_stripped).suffixes[-2:]) or ".map"
+            d, apix_val, crs = _fetch_and_read(url_stripped, suffix, progress)
         else:
-            local_path = Path(url_stripped)
-
-        if is_gz:
-            mrc_path = local_path.with_suffix("")
-            with gzip.open(local_path, "rb") as f_in, open(mrc_path, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-            is_temp = True
-        else:
-            mrc_path = local_path
-            is_temp = False
-
-        with mrcfile.open(mrc_path) as mrc:
-            d = np.array(mrc.data, dtype=np.float32)
-            apix_val = float(mrc.voxel_size.x)
-            crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
-
-        if is_temp:
-            local_path.unlink(missing_ok=True)
-            mrc_path.unlink(missing_ok=True)
-
+            d, apix_val, crs = _read_map(Path(url_stripped))
         label = Path(url_stripped).name or url_stripped
         logger.debug("[HI3D] _download_url: download complete, shape=%s", d.shape)
         return d, apix_val, crs, label
@@ -1092,20 +1118,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
                 and abs(z_max - nz_cp // 2 * dz) < 0.1
             )
             if draw_box:
-                if ang_min < ang_max:
-                    if ang_min > -180:
-                        a0 = int(round(ang_min / da)) + na_cp // 2
-                        cp_work[:, :a0] = 0
-                    if ang_max < 180:
-                        a1 = int(round(ang_max / da)) + na_cp // 2
-                        cp_work[:, a1:] = 0
-                else:
-                    if ang_min < 180:
-                        a0 = int(round(ang_min / da)) + na_cp // 2
-                        cp_work[a0:] = 0
-                    if ang_max > -180:
-                        a1 = int(round(ang_max / da)) + na_cp // 2
-                        cp_work[:a1] = 0
+                _mask_angle_range(cp_work, ang_min, ang_max, da)
                 if z_min > -nz_cp // 2 * dz:
                     z0 = int(round(z_min / dz)) + nz_cp // 2
                     cp_work[:z0, :] = 0

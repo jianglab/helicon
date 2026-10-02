@@ -53,10 +53,11 @@ __all__ = [
     "file_picker_server",
 ]
 
-# Folders used most recently, newest first, shared by every picker of the app:
-# the app runs for one user, who tends to go back to the same few folders.
-_RECENT: list[str] = []
+# Folders used most recently, newest first, are shared by every picker of one
+# browser session (a user tends to go back to the same few folders) but not
+# between sessions: on a lab server several people use the same app.
 _MAX_RECENT = 6
+_RECENT_ATTR = "_helicon_recent_folders"
 
 _FOLDER_SVG = (
     '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">'
@@ -369,8 +370,44 @@ def list_folder(folder, patterns=(), show_hidden=False, max_entries=5000):
     return entries[:max_entries], truncated
 
 
-def _start_folder(start):
-    """The folder (and file to select) the dialog opens at."""
+def recent_folders(session):
+    """The recently used folders of one browser session, newest first.
+
+    Parameters
+    ----------
+    session : shiny.Session
+        The session, or a module proxy of it (they share the list).
+
+    Returns
+    -------
+    list of str
+        The session's own list, changed in place by :func:`_remember`.
+    """
+    root = session
+    while getattr(root, "_root_session", None) is not None:
+        root = root._root_session
+    recent = getattr(root, _RECENT_ATTR, None)
+    if recent is None:
+        recent = []
+        setattr(root, _RECENT_ATTR, recent)
+    return recent
+
+
+def _start_folder(start, recent=()):
+    """The folder (and file to select) the dialog opens at.
+
+    Parameters
+    ----------
+    start : callable, str or None
+        The path to open at, or a function returning it.
+    recent : sequence of str, optional
+        The recently used folders, newest first, to fall back on.
+
+    Returns
+    -------
+    tuple of (Path, str or None)
+        The folder, and the name of the file to select in it.
+    """
     value = start() if callable(start) else start
     if value and "://" not in str(value):
         p = Path(str(value).strip()).expanduser()
@@ -383,18 +420,45 @@ def _start_folder(start):
                 return p.absolute().parent, None
         except OSError:
             pass
-    for folder in _RECENT:
+    for folder in recent:
         if Path(folder).is_dir():
             return Path(folder), None
     return Path.cwd(), None
 
 
-def _remember(folder):
+def _remember(folder, recent):
+    """Put ``folder`` first in the list ``recent``, without repeats.
+
+    Parameters
+    ----------
+    folder : str or Path
+        The folder just used.
+    recent : list of str
+        The list to update in place (see :func:`recent_folders`).
+    """
     folder = str(folder)
-    if folder in _RECENT:
-        _RECENT.remove(folder)
-    _RECENT.insert(0, folder)
-    del _RECENT[_MAX_RECENT:]
+    if folder in recent:
+        recent.remove(folder)
+    recent.insert(0, folder)
+    del recent[_MAX_RECENT:]
+
+
+def _server_files_refused():
+    """True, after telling the user, when the app runs on a hosting service.
+
+    The picker lists the server's own files, which a hosted copy must not
+    show; the apps hide the Browse button there, and this is a second check.
+    """
+    from helicon.webApps import deployment
+
+    if not deployment.is_cloud():
+        return False
+    ui.notification_show(
+        "This copy of Helicon runs on a hosting service: the server's files "
+        "cannot be browsed.",
+        type="warning",
+    )
+    return True
 
 
 @module.server
@@ -429,6 +493,7 @@ def file_picker_server(
         The absolute path of the file chosen, set each time one is chosen.
     """
     patterns = tuple(patterns or ())
+    recent = recent_folders(session)
     chosen = reactive.value(None)
     cwd = reactive.value(Path.cwd())
     preselect = reactive.value(None)
@@ -453,7 +518,9 @@ def file_picker_server(
     @reactive.effect
     @reactive.event(input.open)
     def _open():
-        folder, name = _start_folder(start)
+        if _server_files_refused():
+            return
+        folder, name = _start_folder(start, recent)
         go(folder, name)
         ui.modal_show(
             ui.modal(
@@ -517,6 +584,8 @@ def file_picker_server(
     @reactive.effect
     @reactive.event(input.act)
     def _act():
+        if _server_files_refused():
+            return
         msg = input.act() or {}
         op = msg.get("op")
         here = cwd()
@@ -548,7 +617,7 @@ def file_picker_server(
         elif op == "choose":
             p = here / msg.get("name", "")
             if p.is_file():
-                _remember(here)
+                _remember(here, recent)
                 chosen.set(str(p))
                 ui.modal_remove()
 
@@ -604,7 +673,7 @@ def file_picker_server(
         cwd()
         seen, chips = set(), []
         for label, folder in [("Home", Path.home()), ("Working folder", Path.cwd())] + [
-            (Path(f).name or f, Path(f)) for f in _RECENT
+            (Path(f).name or f, Path(f)) for f in recent
         ]:
             key = str(folder)
             if key in seen:

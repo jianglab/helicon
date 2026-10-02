@@ -49,6 +49,9 @@ BOOKMARK_DEFAULTS = {
     "split": ("split_axis_distance", 50),
 }
 
+# most histogram bins the server draws
+MAX_BINS = 10000
+
 
 def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
     """Convert a plotly figure to responsive HTML for rendering via render.ui."""
@@ -235,6 +238,7 @@ def helical_pitch_tab_ui():
                         "bins",
                         "Number of histogram bins",
                         min=1,
+                        max=MAX_BINS,
                         value=150,
                         step=1,
                         update_on="blur",
@@ -400,6 +404,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     def get_class2d_from_upload():
         req(input.input_mode_classes() == "upload")
         fileinfo = input.upload_classes()
+        req(fileinfo)
         class_file = fileinfo[0]["datapath"]
         try:
             data, apix = compute.get_class2d_from_file(class_file)
@@ -426,6 +431,8 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             input.input_mode_classes(), input.url_classes, input.server_classes
         )
         req(len(url) > 0)
+        if input.input_mode_classes() == "server" and deployment.refuse_server_mode():
+            return
         if deployment.refuse_local_path(url):
             return
         try:
@@ -450,6 +457,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     def get_params_from_upload():
         req(input.input_mode_params() == "upload")
         fileinfo = input.upload_params()
+        req(fileinfo)
         param_file = fileinfo[0]["datapath"]
         msg = None
         try:
@@ -476,6 +484,8 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         req(input.input_mode_params() in ("url", "server"))
         url = _source(input.input_mode_params(), input.url_params, input.server_params)
         req(len(url) > 0)
+        if input.input_mode_params() == "server" and deployment.refuse_server_mode():
+            return
         if deployment.refuse_local_path(url):
             return
         msg = None
@@ -543,6 +553,8 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     # A server file chosen or typed in one of the two server fields brings the
     # other file of the same 2D classification with it, when it is beside it.
     def _fill_companion(given, other_id, other_value):
+        if deployment.is_cloud():  # no looking at the server's files
+            return
         found = class2d_files.companion(given)
         if (
             found
@@ -771,26 +783,33 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(selected_helices_min_len, input.max_len)
     def select_helices_by_length():
-        previous = getattr(select_helices_by_length, "previous", ([], 0))
-        selected_image_indices_previous, min_len_previous = previous
+        previous = getattr(select_helices_by_length, "previous", ([], 0, None))
+        selected_image_indices_previous, min_len_previous, max_len_previous = previous
         (helices, filement_lengths, _), min_len = selected_helices_min_len()
+        max_len = input.max_len()
+        max_len = 0 if max_len is None else max_len
         req(
             set(selected_image_indices_previous) != set(input.select_classes_inner())
             or min_len_previous != min_len
+            or max_len_previous != max_len
         )
         if len(helices) == 0:
             retained_helices_by_length.set([])
-        elif min_len == 0 and input.max_len() <= 0:
+        elif min_len == 0 and max_len <= 0:
             retained_helices_by_length.set(helices)
         else:
             helices_retained, _ = compute.select_helices_by_length(
                 helices=helices,
                 lengths=filement_lengths,
                 min_len=min_len,
-                max_len=input.max_len(),
+                max_len=max_len,
             )
             retained_helices_by_length.set(helices_retained)
-        select_helices_by_length.previous = (input.select_classes_inner(), min_len)
+        select_helices_by_length.previous = (
+            input.select_classes_inner(),
+            min_len,
+            max_len,
+        )
 
     @reactive.effect
     @reactive.event(retained_helices_by_length)
@@ -877,6 +896,10 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
 
     # ── Lengths histogram ──
 
+    def _bins():
+        # bounded here as well as in the browser: the bin count sets the work
+        return helicon.shiny.clamp_number(input.bins(), 150, 1, MAX_BINS)
+
     @render.ui
     def lengths_histogram():
         req(input.bins() is not None and input.bins() > 0)
@@ -893,7 +916,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             title=title,
             xlabel="Filament Length (\u00c5)",
             ylabel="# of Filaments",
-            bins=input.bins(),
+            bins=_bins(),
             log_y=True,
             fig=None,
         )
@@ -933,7 +956,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             xlabel="Pair Distance (\u00c5)",
             ylabel="# of Pairs",
             max_pair_dist=input.max_pair_dist(),
-            bins=input.bins(),
+            bins=_bins(),
             log_y=True,
             show_pitch_twist=dict(rise=rise, csyms=(1, 2, 3, 4)),
             multi_crosshair=True,
@@ -1011,7 +1034,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             xlabel="Pair Distance (\u00c5)",
             ylabel="# of Pairs",
             max_pair_dist=input.max_pair_dist(),
-            bins=input.bins(),
+            bins=_bins(),
             log_y=True,
             show_pitch_twist=dict(rise=rise, csyms=(1, 2, 3, 4)),
             multi_crosshair=True,

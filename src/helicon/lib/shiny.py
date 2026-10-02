@@ -319,21 +319,78 @@ def _editable_slider(
     )
 
 
+def clamp_number(value, default, lo, hi, kind=int):
+    """A numeric input's value, kept within the bounds the UI gives it.
+
+    The ``min``/``max`` of a numeric input are enforced only by the browser,
+    so a server function that lets the value drive its cost reads it through
+    this.
+
+    Parameters
+    ----------
+    value : number, str or None
+        The input's value.
+    default : number
+        Used when the value is missing or not a number.
+    lo, hi : number
+        The bounds (inclusive).
+    kind : type, optional
+        ``int`` (default) or ``float``.
+
+    Returns
+    -------
+    number
+        ``kind(value)`` clipped to ``[lo, hi]``.
+    """
+    try:
+        v = kind(value)
+    except (TypeError, ValueError, OverflowError):
+        v = kind(default)
+    if v != v:  # NaN
+        v = kind(default)
+    return kind(min(max(v, lo), hi))
+
+
+def _getter(value, default):
+    """A zero-argument callable giving ``value``.
+
+    The gallery parameters take a reactive value (or any callable), a plain
+    value, or None for ``default``. A fresh default is made on each call, so
+    no reactive value is created at import time or shared between sessions.
+
+    Parameters
+    ----------
+    value : callable, object or None
+        What the caller passed.
+    default : object
+        What None stands for.
+
+    Returns
+    -------
+    callable
+    """
+    if value is None:
+        return lambda: default
+    if callable(value):
+        return value
+    return lambda: value
+
+
 def image_gallery(
     id,
-    label=reactive.value(""),
-    images=reactive.value([]),
+    label=None,
+    images=None,
     display_image_labels=True,
     display_dashed_line=False,
-    image_labels=reactive.value([]),
-    image_links=reactive.value([]),
-    image_size=reactive.value(128),
+    image_labels=None,
+    image_links=None,
+    image_size=None,
     image_border=2,
     gap=0,
     justification="center",
     enable_selection=False,
     allow_multiple_selection=False,
-    initial_selected_indices=reactive.value([]),
+    initial_selected_indices=None,
     style="",
 ):
     """Render a gallery of images as a flexbox grid.
@@ -344,19 +401,19 @@ def image_gallery(
     ----------
     id : str
         Unique element ID.
-    label : reactive.value, optional
+    label : reactive.value, callable or value, optional
         Gallery heading label.
-    images : reactive.value, optional
+    images : reactive.value, callable or value, optional
         List of images (file paths, PIL Images, or 2D numpy arrays).
     display_image_labels : bool, optional
         Whether to show image labels. Defaults to True.
     display_dashed_line : bool, optional
         Whether to show a dashed midline. Defaults to False.
-    image_labels : reactive.value, optional
+    image_labels : reactive.value, callable or value, optional
         Labels for each image.
-    image_links : reactive.value, optional
+    image_links : reactive.value, callable or value, optional
         Links for each image.
-    image_size : reactive.value, optional
+    image_size : reactive.value, callable or value, optional
         Image display size in pixels. Defaults to 128.
     image_border : int, optional
         Border width in pixels. Defaults to 2.
@@ -368,7 +425,7 @@ def image_gallery(
         If True, adds click-to-select behavior. Defaults to False.
     allow_multiple_selection : bool, optional
         If True, allows selecting multiple images. Defaults to False.
-    initial_selected_indices : reactive.value, optional
+    initial_selected_indices : reactive.value, callable or value, optional
         Indices of pre-selected images.
     style : str, optional
         Additional CSS inline styles.
@@ -378,6 +435,12 @@ def image_gallery(
     ui.Tag or tuple
         UI element(s) for the gallery.
     """
+    label = _getter(label, "")
+    images = _getter(images, [])
+    image_labels = _getter(image_labels, [])
+    image_links = _getter(image_links, [])
+    image_size = _getter(image_size, 128)
+    initial_selected_indices = _getter(initial_selected_indices, [])
     if images() is None or len(images()) == 0:
         return None
 
@@ -601,18 +664,18 @@ def image_select(
     output,
     session,
     label="Select Image(s):",
-    images=reactive.value([]),
+    images=None,
     display_image_labels=True,
     display_dashed_line=False,
-    image_labels=reactive.value([]),
-    image_links=reactive.value([]),
-    image_size=reactive.value(128),
+    image_labels=None,
+    image_links=None,
+    image_size=None,
     image_border=2,
     gap=0,
     justification="center",
     enable_selection=True,
     allow_multiple_selection=True,
-    initial_selected_indices=reactive.value([]),
+    initial_selected_indices=None,
     style="",
 ):
     @shiny.render.ui

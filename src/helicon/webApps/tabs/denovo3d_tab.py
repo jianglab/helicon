@@ -75,7 +75,6 @@ BOOKMARK_DEFAULTS = {
     "input_mode_images": ("dn_input_mode_images", "url"),
     "url_images": ("dn_url_images", _urls[_url_key][0]),
     "server_images": ("dn_server_images", ""),
-    "show_emdb": ("dn_show_emdb_input_mode", False),
     "is_3d": ("dn_is_3d", False),
     "ignore_blank": ("dn_ignore_blank", True),
     "plot_scores": ("dn_plot_scores", True),
@@ -181,7 +180,7 @@ def _denovo3d_logger():
     """The tab's log, under whichever cache root helicon resolved.
 
     Not ``~/.cache/helicon`` spelled out, which is only one of the four places
-    ``setup_cache_dir`` may choose: it also honours HELION_CACHE_DIR and
+    ``setup_cache_dir`` may choose: it also honours HELICON_CACHE_DIR and
     prefers ``/fast-scratch`` when that exists. Hardcoding the home path sent
     the log somewhere other than the cache whenever either applied, which is
     the one thing a user looking for it would not expect.
@@ -2357,6 +2356,8 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     def _get_images_from_server():
         req(input.dn_input_mode_images() == "server")
         req(len(input.dn_server_images().strip()) > 0)
+        if deployment.refuse_server_mode():
+            return
         _load_images(input.dn_server_images().strip())
 
     def _load_images(url):

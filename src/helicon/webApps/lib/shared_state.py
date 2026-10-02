@@ -1,7 +1,8 @@
 """Shared reactive project state for Helicon Lab.
 
-This module defines a single ``ProjectState`` whose reactive values persist
-across all tabs.  Any tab can read or write these values, enabling
+This module defines ``ProjectState``, whose reactive values persist across
+all tabs of one browser session (the app creates one per session, so
+visitors never see each other's values).  Any tab can read or write these values, enabling
 cross-tab data flow:
 
     HelicalPitch → (twist estimate) → HILL / denovo3D / HelicalProjection
@@ -114,7 +115,3 @@ class ProjectState:
         ):
             return getattr(self, key)()
         return self._data.get(key, default)
-
-
-# Singleton instance imported by all tabs
-project = ProjectState()

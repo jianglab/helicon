@@ -645,6 +645,41 @@ def _log_tail(log, lines=25):
     return "\n".join(text.rstrip().splitlines()[-lines:])
 
 
+def client_is_local(session) -> bool:
+    """Whether the browser of ``session`` runs on this machine.
+
+    Decided on the server side, from the address the connection comes from:
+    a loopback one, and not passed on by a proxy (which would connect from
+    loopback for a remote visitor too).
+
+    Parameters
+    ----------
+    session : shiny.Session
+        The session (or a module proxy of it).
+
+    Returns
+    -------
+    bool
+    """
+    import ipaddress
+
+    root = session
+    while getattr(root, "_root_session", None) is not None:
+        root = root._root_session
+    conn = getattr(root, "http_conn", None)
+    if conn is None:
+        return False
+    try:
+        headers = conn.headers
+        if any(h in headers for h in ("x-forwarded-for", "forwarded", "x-real-ip")):
+            return False
+        client = conn.client
+        host = client[0] if client is not None else None
+        return bool(host) and ipaddress.ip_address(str(host)).is_loopback
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return False
+
+
 def home_tab_server(input, session) -> None:
     """Start the subcommand of a Home app that is not integrated here, or the
     file browser."""
@@ -662,6 +697,10 @@ def home_tab_server(input, session) -> None:
         # server that must not start processes for a remote visitor -- and
         # never on a hosting service.
         if deployment.is_cloud():
+            return
+        # The page's hostname is what the browser says, so the decision rests
+        # on the connection's own address.
+        if not client_is_local(session):
             return
         if session.clientdata.url_hostname() not in _LOCAL_HOSTS:
             return

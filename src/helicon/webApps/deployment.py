@@ -18,7 +18,10 @@ the file browser start it.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
+from urllib.parse import urlsplit
 
 # (host, variable, value or None for "set to anything"), checked in order.
 # Sources: each service's documentation of the variables it sets in a
@@ -126,7 +129,68 @@ def url_allowed(url, environ=None) -> bool:
     """
     if not is_cloud(environ):
         return True
-    return str(url).strip().lower().startswith(_URL_SCHEMES)
+    text = str(url).strip()
+    if not text.lower().startswith(_URL_SCHEMES):
+        return False
+    try:
+        host = urlsplit(text).hostname
+    except ValueError:
+        return False
+    return host_is_public(host)
+
+
+def host_is_public(host) -> bool:
+    """Whether every address ``host`` resolves to is a public one.
+
+    On a hosting service a URL to ``localhost``, a private network or the
+    cloud metadata address (169.254.169.254) would let a visitor make the
+    server fetch from inside its own network. A name that does not resolve
+    counts as not public (fail closed).
+
+    Parameters
+    ----------
+    host : str or None
+        A host name or a literal IPv4/IPv6 address.
+
+    Returns
+    -------
+    bool
+        True only when the host resolves and none of its addresses is
+        loopback, link-local, private, multicast, reserved or unspecified.
+    """
+    if not host:
+        return False
+    host = str(host).strip("[]")
+    try:
+        addrs = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except (OSError, UnicodeError):
+            return False
+        addrs = []
+        for info in infos:
+            try:
+                addrs.append(ipaddress.ip_address(info[4][0].split("%")[0]))
+            except ValueError:
+                return False
+    if not addrs:
+        return False
+    for addr in addrs:
+        mapped = getattr(addr, "ipv4_mapped", None)
+        if mapped is not None:
+            addr = mapped
+        if (
+            addr.is_loopback
+            or addr.is_link_local
+            or addr.is_private
+            or addr.is_multicast
+            or addr.is_reserved
+            or addr.is_unspecified
+            or not addr.is_global
+        ):
+            return False
+    return True
 
 
 def refuse_local_path(url) -> bool:
@@ -141,9 +205,40 @@ def refuse_local_path(url) -> bool:
 
     ui.modal_show(
         ui.modal(
-            "This copy of Helicon reads files by URL only (http, https or ftp): "
-            f"{url} is not one.",
+            "This copy of Helicon reads files by URL only (http, https or ftp) "
+            f"from a public host: {url} is not one.",
             title="Not a URL",
+            easy_close=True,
+            footer=None,
+        )
+    )
+    return True
+
+
+def refuse_server_mode() -> bool:
+    """Tell the user, and return True, when server files may not be read.
+
+    On a hosting service the server has none of the user's files, and reading
+    a path a visitor typed would expose the server's own files. Every loader
+    that reads a path on the server (the "server" input mode, companion-file
+    lookups, a RELION project folder) starts with ``if
+    deployment.refuse_server_mode(): return``, as a server-side check behind
+    the UI that already hides those choices.
+
+    Returns
+    -------
+    bool
+        True (after showing a popup) on a hosting service, else False.
+    """
+    if not is_cloud():
+        return False
+    from shiny import ui
+
+    ui.modal_show(
+        ui.modal(
+            "This copy of Helicon runs on a hosting service and cannot read "
+            "files on the server. Upload the file or give its URL instead.",
+            title="Server files are not available",
             easy_close=True,
             footer=None,
         )

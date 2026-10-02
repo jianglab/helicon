@@ -86,20 +86,42 @@ class TestStartFolder:
         assert fp._start_folder(str(job)) == (job, None)
         assert fp._start_folder(str(job / "gone.star")) == (job, None)
 
-    def test_a_url_falls_back_to_the_last_folder_used(self, tmp_path, monkeypatch):
+    def test_a_url_falls_back_to_the_last_folder_used(self, tmp_path):
         job = _tree(tmp_path)
-        monkeypatch.setattr(fp, "_RECENT", [])
-        fp._remember(job)
-        assert fp._start_folder("https://ftp.ebi.ac.uk/x/run_it020_data.star") == (
-            job,
-            None,
-        )
+        recent = []
+        fp._remember(job, recent)
+        assert fp._start_folder(
+            "https://ftp.ebi.ac.uk/x/run_it020_data.star", recent
+        ) == (job, None)
 
-    def test_recent_folders_are_newest_first_without_repeats(self, monkeypatch):
-        monkeypatch.setattr(fp, "_RECENT", [])
+    def test_recent_folders_are_newest_first_without_repeats(self):
+        recent = []
         for f in ("/a", "/b", "/a", "/c"):
-            fp._remember(f)
-        assert fp._RECENT == ["/c", "/a", "/b"]
+            fp._remember(f, recent)
+        assert recent == ["/c", "/a", "/b"]
+
+    def test_recent_folders_are_kept_per_session(self):
+        class Root:
+            pass
+
+        class Proxy:
+            def __init__(self, root):
+                self._root_session = root
+
+        a, b = Root(), Root()
+        fp._remember("/data/a", fp.recent_folders(Proxy(a)))
+        assert fp.recent_folders(a) == ["/data/a"]
+        assert fp.recent_folders(Proxy(Proxy(a))) is fp.recent_folders(a)
+        assert fp.recent_folders(b) == []
+
+    def test_the_picker_refuses_on_a_host(self, monkeypatch):
+        shown = []
+        monkeypatch.setattr(fp.ui, "notification_show", lambda *a, **k: shown.append(a))
+        monkeypatch.setenv("HELICON_DEPLOYMENT", "cloud")
+        assert fp._server_files_refused()
+        assert shown
+        monkeypatch.setenv("HELICON_DEPLOYMENT", "local")
+        assert not fp._server_files_refused()
 
 
 APP = """
