@@ -45,10 +45,21 @@ class _FlowLayout(_FlowLayoutBase):
     capped strip height.
     """
 
-    def __init__(self, parent=None, margin=0, spacing=6):
+    def __init__(
+        self,
+        parent=None,
+        margin=0,
+        spacing=6,
+        keep_last_with_previous=False,
+        first_line_height=None,
+    ):
         super().__init__(parent)
         self.setContentsMargins(margin, margin, margin, margin)
         self._spacing = spacing
+        # never leave the last item alone on a line
+        self._keep_last_with_previous = keep_last_with_previous
+        # called with the first line's height after each layout
+        self._first_line_height = first_line_height
         self._item_list = []
 
     def addItem(self, item):
@@ -102,42 +113,53 @@ class _FlowLayout(_FlowLayoutBase):
         effective = rect.adjusted(
             margins.left(), margins.top(), -margins.right(), -margins.bottom()
         )
-        x = effective.x()
-        y = effective.y()
-        line_height = 0
-        line_items = []
+        visible = [
+            (item, item.sizeHint())
+            for item in self._item_list
+            if item.widget() is None or not item.widget().isHidden()
+        ]
+        # break into lines: an item goes on the next line when it would end
+        # past the right edge
         lines = []
-        for item in self._item_list:
-            widget = item.widget()
-            if widget is not None and widget.isHidden():
-                continue
-            hint = item.sizeHint()
-            space_x = self._spacing
-            space_y = self._spacing
-            next_x = x + hint.width() + space_x
-            if next_x - space_x > effective.right() and line_height > 0:
-                lines.append((y, line_height, line_items))
+        x = effective.x()
+        for item, hint in visible:
+            if lines and x + hint.width() > effective.right():
+                lines.append([])
                 x = effective.x()
-                y = y + line_height + space_y
-                next_x = x + hint.width() + space_x
-                line_height = 0
-                line_items = []
-            line_items.append((item, x, hint))
-            x = next_x
-            line_height = max(line_height, hint.height())
-        if line_items:
-            lines.append((y, line_height, line_items))
+            elif not lines:
+                lines.append([])
+            lines[-1].append((item, hint))
+            x += hint.width() + self._spacing
+        # the trailing item (the "all"/"none" buttons) stays beside the
+        # checkbox before it rather than sitting on a line of its own
+        if (
+            self._keep_last_with_previous
+            and len(lines) > 1
+            and len(lines[-1]) == 1
+            and len(lines[-2]) > 1
+            and lines[-2][-1][1].width() + self._spacing + lines[-1][0][1].width()
+            <= effective.width()
+        ):
+            lines[-1].insert(0, lines[-2].pop())
 
-        if not test_only:
-            for line_y, height, items in lines:
-                for item, item_x, hint in items:
-                    item_y = line_y + (height - hint.height()) // 2
-                    item.setGeometry(QRect(QPoint(item_x, item_y), hint))
+        y = effective.y()
+        heights = []
+        for line in lines:
+            height = max(hint.height() for _item, hint in line)
+            heights.append(height)
+            if not test_only:
+                x = effective.x()
+                for item, hint in line:
+                    item_y = y + (height - hint.height()) // 2
+                    item.setGeometry(QRect(QPoint(x, item_y), hint))
+                    x += hint.width() + self._spacing
+            y += height + self._spacing
+        if not test_only and heights and self._first_line_height is not None:
+            self._first_line_height(heights[0])
 
         if not lines:
             return margins.top() + margins.bottom()
-        last_y, last_height, _items = lines[-1]
-        return last_y + last_height - rect.y() + margins.bottom()
+        return y - self._spacing - rect.y() + margins.bottom()
 
 
 class _FlowContainer(_FlowContainerBase):
@@ -509,7 +531,11 @@ class _FscPlotWindow(_FscPlotBase):
         iter_scroll.setFrameShape(QFrame.Shape.NoFrame)
         iter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         iter_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._iter_flow = _FlowLayout(spacing=checkbox_spacing)
+        self._iter_flow = _FlowLayout(
+            spacing=checkbox_spacing,
+            keep_last_with_previous=True,
+            first_line_height=iter_label.setFixedHeight,
+        )
         iter_container = _FlowContainer(self._iter_flow)
         iter_container.setLayout(self._iter_flow)
         iter_scroll.setWidget(iter_container)
@@ -564,7 +590,11 @@ class _FscPlotWindow(_FscPlotBase):
         class_scroll.setFrameShape(QFrame.Shape.NoFrame)
         class_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         class_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._class_flow = _FlowLayout(spacing=checkbox_spacing)
+        self._class_flow = _FlowLayout(
+            spacing=checkbox_spacing,
+            keep_last_with_previous=True,
+            first_line_height=class_label.setFixedHeight,
+        )
         class_container = _FlowContainer(self._class_flow)
         class_container.setLayout(self._class_flow)
         class_scroll.setWidget(class_container)
