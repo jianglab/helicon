@@ -214,8 +214,8 @@ class TestIo(object):
         assert "rlnImageName" in relion_df.columns
         assert relion_df["rlnImageName"][0] == "000001@/path/to/test.mrcs"
 
-        # Test RELION to CryoSPARC conversion
-        with pytest.raises(NameError):
+        # RELION to CryoSPARC conversion is not implemented: a clear error
+        with pytest.raises(NotImplementedError):
             io.dataframe_convert(relion_df, target="cryosparc")
 
     def test_mrc2mrcs_preserves_extension(self, tmp_path):

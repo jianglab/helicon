@@ -234,7 +234,7 @@ def normalize_min_max(data: np.ndarray, min: float = 0, max: float = 1) -> np.nd
     data_max = data.max()
     if data_max == data_min:
         return data
-    return (max - min) * (data - data_min) / (data_max - data_min)
+    return min + (max - min) * (data - data_min) / (data_max - data_min)
 
 
 def normalize_mean_std(data: np.ndarray, mean: float = 0, std: float = 1) -> np.ndarray:
@@ -258,7 +258,7 @@ def normalize_mean_std(data: np.ndarray, mean: float = 0, std: float = 1) -> np.
     if data_std == 0:
         return data
     data_mean = data.mean()
-    return (data - data_mean) / data_std
+    return mean + std * (data - data_mean) / data_std
 
 
 def normalize_percentile(

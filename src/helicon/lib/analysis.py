@@ -297,9 +297,9 @@ def calc_fsc(map1, map2, apix, F1=None, F2=None, shell_flat=None, n=None):
         F2 = rfftn(map2, workers=-1)
 
     fsc = _fsc_from_rfft(F1, F2, shell_flat, n)
-    qx_max = np.fft.rfftfreq(n).max()
+    qx_max = np.fft.rfftfreq(n).max() / apix  # Nyquist in 1/Angstrom
     saxis = np.arange(n // 2 + 1) * df
-    idx = np.where(saxis <= qx_max)
+    idx = np.where(saxis <= qx_max * (1 + 1e-9))
     return np.vstack((saxis[idx], fsc[idx])).T
 
 
@@ -333,9 +333,9 @@ def calc_fsc_from_fft(F1, F2, n, apix):
     del shell
 
     fsc = _fsc_from_rfft(F1, F2, shell_flat, n)
-    qx_max = np.fft.rfftfreq(n).max()
+    qx_max = np.fft.rfftfreq(n).max() / apix  # Nyquist in 1/Angstrom
     saxis = np.arange(n // 2 + 1) * df
-    idx = np.where(saxis <= qx_max)
+    idx = np.where(saxis <= qx_max * (1 + 1e-9))
     return np.vstack((saxis[idx], fsc[idx])).T
 
 
@@ -439,8 +439,8 @@ def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float):
     -------
     tuple of (np.ndarray, np.ndarray)
         Tuple of (spatial_frequencies, fsc_curve) where both are 1D arrays
-        of the same length. spatial_frequencies is in 1/Angstrom.
-        Returns (None, None) if either image is zero or computation fails.
+        of the same length. spatial_frequencies is in 1/Angstrom. Shells
+        without any Fourier sample or power are NaN.
     """
     from scipy.fft import fft2
 
@@ -448,7 +448,8 @@ def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float):
         raise ValueError(f"Image shapes must match: {img1.shape} vs {img2.shape}")
 
     img_h, img_w = img1.shape
-    n_shells = min(img_h, img_w) // 2
+    n = min(img_h, img_w)
+    n_shells = n // 2
 
     try:
         F1 = fft2(img1, workers=-1)
@@ -459,29 +460,35 @@ def calc_frc_2d(img1: np.ndarray, img2: np.ndarray, apix: float):
 
     kx = np.fft.fftfreq(img_w) ** 2
     ky = np.fft.fftfreq(img_h) ** 2
-    kr = np.sqrt(ky[:, None] + kx[None, :])
-    shell = np.round(kr * n_shells).astype(np.int32)
-    np.clip(shell, 0, n_shells, out=shell)
+    kr = np.sqrt(ky[:, None] + kx[None, :])  # cycles/pixel
+    # shell i is at i / n cycles/pixel, matching saxis below; the corners
+    # beyond Nyquist go to a discarded extra shell
+    shell = np.round(kr * n).astype(np.int32)
+    np.clip(shell, 0, n_shells + 1, out=shell)
     shell_flat = shell.ravel()
 
+    nbins = n_shells + 2
+    count = np.bincount(shell_flat, minlength=nbins)[: n_shells + 1]
     num = np.bincount(
         shell_flat,
         weights=np.real(F1 * np.conj(F2)).ravel(),
-        minlength=n_shells + 1,
-    )
-    den1 = np.bincount(
-        shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=n_shells + 1
-    )
-    den2 = np.bincount(
-        shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=n_shells + 1
-    )
+        minlength=nbins,
+    )[: n_shells + 1]
+    den1 = np.bincount(shell_flat, weights=(np.abs(F1) ** 2).ravel(), minlength=nbins)[
+        : n_shells + 1
+    ]
+    den2 = np.bincount(shell_flat, weights=(np.abs(F2) ** 2).ravel(), minlength=nbins)[
+        : n_shells + 1
+    ]
 
     denom = np.sqrt(den1 * den2)
-    fsc = np.ones(n_shells + 1, dtype=np.float64)
-    valid = denom > 0
+    # shells with no Fourier sample or no power are undefined (NaN, skipped
+    # by frc_score) instead of a perfect 1.0
+    fsc = np.full(n_shells + 1, np.nan, dtype=np.float64)
+    valid = (denom > 0) & (count > 0)
     fsc[valid] = num[valid] / denom[valid]
 
-    saxis = np.arange(n_shells + 1) / (min(img_h, img_w) * apix)
+    saxis = np.arange(n_shells + 1) / (n * apix)
     return saxis, fsc
 
 

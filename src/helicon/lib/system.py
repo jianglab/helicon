@@ -123,19 +123,19 @@ def validate_param_dict(
 
 
 def has_shiny() -> bool:
-    """Check whether the helicon shiny module is available.
+    """Check whether the packages helicon's web apps need are installed.
+
+    Looks the packages up without importing them, which would cost seconds
+    on every ``helicon`` command.
 
     Returns
     -------
     bool
-        True if the shiny module can be imported, False otherwise.
+        True if shiny and shinywidgets are installed, False otherwise.
     """
-    try:
-        from helicon.lib import shiny
+    from importlib.util import find_spec
 
-        return True
-    except ImportError:
-        return False
+    return all(find_spec(name) is not None for name in ("shiny", "shinywidgets"))
 
 
 def has_streamlit() -> bool:
@@ -232,7 +232,7 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
     Returns
     -------
     int
-        Number of usable CPUs.
+        Number of usable CPUs (at least 1).
     """
     import os
 
@@ -255,7 +255,7 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
         mem = psutil.virtual_memory()
         cpu = min(cpu, int(mem.available / 1024**3 / mem_gb_per_cpu))
 
-    return cpu
+    return max(1, cpu)
 
 
 def _load_omp_library():

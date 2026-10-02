@@ -325,8 +325,19 @@ def EPU_xml_2_beamshift(xml_file: str | Path) -> tuple[float, float]:
     -------
     tuple of float
         Tuple of (beamshift_x, beamshift_y) as floats.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``xmltodict`` package is not installed.
     """
-    import xmltodict
+    try:
+        import xmltodict
+    except ImportError as e:
+        raise ImportError(
+            "reading EPU XML files requires the 'xmltodict' package: "
+            "pip install xmltodict"
+        ) from e
 
     with open(xml_file, "rb") as fp:
         xml = xmltodict.parse(fp, dict_constructor=dict)

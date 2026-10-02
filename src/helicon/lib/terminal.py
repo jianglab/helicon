@@ -100,7 +100,7 @@ def _linux_terminal_candidates(target: str) -> list[tuple[str, list[str]]]:
     shell = os.environ.get("SHELL") or "/bin/sh"
     # xterm/uxterm run an embedded shell command (rather than accepting a
     # working-directory flag), so reproduce the inherited environment here
-    # too -- sourcing the shared env snapshot keeps the same Python that
+    # too -- sourcing the private env snapshot keeps the same Python that
     # launched Helicon (desktop emulators that take ``--working-directory``
     # already inherit it through the subprocess env).
     shell_cd = f"cd {shlex.quote(target)} && {_source_env_command()} ; exec {shell}"
@@ -192,6 +192,8 @@ def _open_terminal(folder: str | None = None) -> None:
             if _spawn_detached(["wsl.exe", "--cd", target], env=env):
                 return
 
+    # xterm/uxterm and the final fallback source the snapshot: write it now
+    _write_env_file(env)
     for exe, args in _linux_terminal_candidates(target):
         if _spawn_detached([exe, *args], check_early_exit=True, env=env):
             return
@@ -221,8 +223,6 @@ def _open_terminal_macos(target: str, env: dict) -> None:
     """
     _write_env_file(env)
     command = f"cd {shlex.quote(target)} && {_source_env_command()}"
-    script_dir = Path(tempfile.gettempdir()) / "helicon_terminal"
-    script_dir.mkdir(parents=True, exist_ok=True)
     osascript = (
         'tell application "Terminal" to do script ' f'"{_applescript_escape(command)}"'
     )
@@ -234,10 +234,26 @@ def _applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _env_dir() -> Path:
+    """Return the per-user folder that holds the environment snapshot.
+
+    The snapshot is sourced by a shell, so it must not live in a folder that
+    other users can write to (a shared ``/tmp/helicon_terminal`` let anyone
+    plant a script there).  POSIX systems use ``terminal`` in helicon's own
+    cache folder, restricted to the owner; Windows uses the per-user temp
+    folder.
+    """
+    if os.name == "nt":
+        return Path(tempfile.gettempdir()) / "helicon_terminal"
+    import helicon
+
+    return Path(helicon.cache_dir) / "terminal"
+
+
 def _env_file() -> Path:
     """Return the persistent path of the generated environment snapshot."""
     name = "helicon-terminal-env.bat" if os.name == "nt" else "helicon-terminal-env.sh"
-    return Path(tempfile.gettempdir()) / "helicon_terminal" / name
+    return _env_dir() / name
 
 
 def _env_pairs(env: dict) -> list[tuple[str, str]]:
@@ -263,12 +279,20 @@ def _write_env_file(env: dict) -> Path:
     Reusing the same temp file each launch keeps a single source/call line.
     """
     path = _env_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == "nt":
         body = "\r\n".join(f'set "{k}={v}"' for k, v in _env_pairs(env)) + "\r\n"
-    else:
-        body = "\n".join(_env_export_lines(env)) + "\n"
-    path.write_text(body)
+        path.write_text(body)
+        return path
+    path.parent.chmod(0o700)
+    body = "\n".join(_env_export_lines(env)) + "\n"
+    # write a fresh owner-only file (never follow or reuse a planted one)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(body)
+    os.replace(tmp, path)
     return path
 
 
@@ -282,7 +306,9 @@ def _source_env_command() -> str:
     envfile = _env_file()
     if os.name == "nt":
         return f'call "{envfile}"'
-    return f"source {shlex.quote(str(envfile))}"
+    quoted = shlex.quote(str(envfile))
+    # skip quietly when the snapshot is missing instead of sourcing nothing
+    return f"[ -f {quoted} ] && source {quoted}"
 
 
 def _spawn_detached(

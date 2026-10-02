@@ -8,6 +8,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# seconds to wait for a server to respond (connect or between bytes)
+_REQUEST_TIMEOUT = 60
+
 __all__ = [
     "which",
     "find_relion_project_folders",
@@ -159,7 +162,7 @@ def get_file_size(url: str) -> int | None:
     """
     import requests
 
-    response = requests.head(url)
+    response = requests.head(url, timeout=_REQUEST_TIMEOUT)
     if "Content-Length" in response.headers:
         file_size = int(response.headers["Content-Length"])
         return file_size
@@ -185,7 +188,9 @@ def download_file_from_url(
     Returns
     -------
     file object or str
-        Opened file (readable binary) or filename.
+        Opened file (readable binary) or filename. A temporary file whose
+        name is returned (``return_filename`` without ``target_file_name``)
+        is left for the caller to delete.
 
     Raises
     ------
@@ -214,7 +219,7 @@ def download_file_from_url(
             ".%s.%d.%s.part" % (target.name, os.getpid(), uuid.uuid4().hex[:8])
         )
         try:
-            with requests.get(url, stream=True) as r:
+            with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
                 r.raise_for_status()
                 with open(partial, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
@@ -231,14 +236,19 @@ def download_file_from_url(
     try:
         local_filename = url.split("/")[-1]
         suffix = "." + local_filename
-        fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
-        with requests.get(url) as r:
+        with requests.get(url, timeout=_REQUEST_TIMEOUT) as r:
             r.raise_for_status()  # Check for request success
-            fileobj.write(r.content)
+            content = r.content
         if return_filename:
-            return fileobj.name
-        else:
-            return fileobj
+            # the caller owns the file: it must outlive this function
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                f.write(content)
+            return f.name
+        fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
+        fileobj.write(content)
+        fileobj.flush()  # so readers that open fileobj.name see the data
+        fileobj.seek(0)
+        return fileobj
     except requests.exceptions.RequestException:
         logger.error("Failed to download %s", url, exc_info=True)
         raise IOError(f"ERROR: failed to down {url}")

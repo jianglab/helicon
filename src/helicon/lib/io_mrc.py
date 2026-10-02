@@ -91,6 +91,8 @@ def read_image_2d(imageFile: str, i: int) -> np.ndarray:
     with mrcfile.open(imageFile) as mrc:
         nz = mrc.header.nz
         if 0 <= i < nz:
+            if mrc.data.ndim == 2:  # a single 2D image, not a stack
+                return mrc.data
             return mrc.data[i]
         else:
             raise HeliconIOError(
@@ -125,7 +127,16 @@ def change_map_axes_order(
     except AttributeError:
         current_axes_int = [0, 1, 2]
     new_axes_int = [map_axes[a] for a in new_axes]
-    data2 = np.moveaxis(data, current_axes_int, new_axes_int)
+    # mapc/mapr/maps give the spatial axis stored along the columns, rows and
+    # sections, and numpy orders a map as (sections, rows, columns)
+    numpy_axis_of = {
+        current_axes_int[0]: 2,
+        current_axes_int[1]: 1,
+        current_axes_int[2]: 0,
+    }
+    # new_axes lists the spatial axis wanted along the columns, rows, sections
+    perm = [numpy_axis_of[a] for a in reversed(new_axes_int)]
+    data2 = np.transpose(data, perm)
     header2 = header.copy()
     header2.mapc = new_axes_int[0] + 1
     header2.mapr = new_axes_int[1] + 1

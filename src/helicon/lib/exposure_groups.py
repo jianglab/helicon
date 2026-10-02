@@ -152,7 +152,8 @@ def propagate_ctf_median(data, group_id_name: str) -> None:
         mask = np.where(data[group_id_name] == gi)
         for col in ctf_cols.split():
             if col in data:
-                data[col][mask] = np.median(data[col][mask])
+                # axis=0: per-component median for vector columns (e.g. tilt_A)
+                data[col][mask] = np.median(data[col][mask], axis=0)
 
 
 def sync_group_columns(

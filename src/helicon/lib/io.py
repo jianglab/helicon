@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import logging, os
+import logging, math, os
 from pathlib import Path
 from typing import Any, Callable
 import numpy as np
 import pandas as pd
 from .exceptions import HeliconIOError, HeliconValueError, HeliconConfigError
-
-pd.options.mode.copy_on_write = True
 
 logger = logging.getLogger(__name__)
 
@@ -225,21 +223,12 @@ def get_relion_project_folder(starFile: str) -> str | None:
     str or None
         Absolute path to the project folder, or None if it cannot be determined.
     """
-    filename_abs = str(Path(starFile).resolve())
-    if filename_abs.find("/job") == -1:
-        return None
-    parts = filename_abs.split("/")
-    for pi, p in enumerate(parts):
-        if p.startswith("job"):
-            break
-    job_folder = "/".join(parts[: pi + 1])
-    if not Path(job_folder, "default_pipeline.star").exists():
-        return None
-    pi = max(0, pi - 1)
-    proj_folder = "/".join(parts[:pi])
-    if not Path(proj_folder, "default_pipeline.star").exists():
-        return None
-    return proj_folder
+    # A RELION project root holds default_pipeline.star; its job folders
+    # (e.g. Class2D/job003) only hold job_pipeline.star.
+    for folder in Path(starFile).resolve().parents:
+        if (folder / "default_pipeline.star").is_file():
+            return str(folder)
+    return None
 
 
 def __process_cluster(
@@ -557,7 +546,7 @@ def images2dataframe(
                 convention = "cryosparc"
     if convention:  # don't convert convention by default
         for pi, p in enumerate(datalist):
-            p = dataframe_convert(p, target=target_convention)
+            p = dataframe_convert(p, target=convention)
             datalist[pi] = p
     for pi, p in enumerate(datalist):
         if source_index_attr:
@@ -824,45 +813,28 @@ def star_dissolve_opticsgroup(data: pd.DataFrame) -> None:
     assert (
         data.attrs["convention"] == "relion"
     ), f"star_dissolve_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
-    try:
-        optics = data.attrs["optics"]
-        optics.loc[:, "rlnOpticsGroup"] = optics.loc[:, "rlnOpticsGroup"].astype(str)
-    except (KeyError, AttributeError):
-        optics = None
-    if optics is not None:
-        og_names = set(optics["rlnOpticsGroup"].unique())
-        data.loc[:, "rlnOpticsGroup"] = data.loc[:, "rlnOpticsGroup"].astype(str)
-        for gn, g in data.groupby("rlnOpticsGroup", sort=False):
-            if gn not in og_names:
-                raise HeliconValueError(
-                    f"optic group {gn} not available ({sorted(og_names)})"
-                )
-            ptcl_indices = g.index
-            og_index = optics["rlnOpticsGroup"] == gn
-            if "rlnAmplitudeContrast" in optics:
-                data.loc[ptcl_indices, "rlnAmplitudeContrast"] = optics.loc[
-                    og_index, "rlnAmplitudeContrast"
-                ]
-            if "rlnImagePixelSize" in optics:
-                data.loc[ptcl_indices, "rlnImagePixelSize"] = optics.loc[
-                    og_index, "rlnImagePixelSize"
-                ]
-            if "rlnSphericalAberration" in optics:
-                data.loc[ptcl_indices, "rlnSphericalAberration"] = optics.loc[
-                    og_index, "rlnSphericalAberration"
-                ]
-            if "rlnVoltage" in optics:
-                data.loc[ptcl_indices, "rlnVoltage"] = optics.loc[
-                    og_index, "rlnVoltage"
-                ]
-            if "rlnMagnification" in optics:
-                data.loc[ptcl_indices, "rlnMagnification"] = optics.loc[
-                    og_index, "rlnMagnification"
-                ]
-            if "rlnDetectorPixelSize" in optics:
-                data.loc[ptcl_indices, "rlnDetectorPixelSize"] = optics.loc[
-                    og_index, "rlnDetectorPixelSize"
-                ]
+    optics = data.attrs.get("optics")
+    if optics is not None and "rlnOpticsGroup" in optics:
+        # match the groups as strings so int and str group labels both work
+        og_keys = optics["rlnOpticsGroup"].astype(str).to_numpy()
+        ptcl_keys = data["rlnOpticsGroup"].astype(str)
+        og_names = set(og_keys)
+        missing = sorted(set(ptcl_keys.unique()) - og_names)
+        if missing:
+            raise HeliconValueError(
+                f"optic group {missing[0]} not available ({sorted(og_names)})"
+            )
+        for col in (
+            "rlnAmplitudeContrast",
+            "rlnImagePixelSize",
+            "rlnSphericalAberration",
+            "rlnVoltage",
+            "rlnMagnification",
+            "rlnDetectorPixelSize",
+        ):
+            if col in optics:
+                mapping = pd.Series(optics[col].to_numpy(), index=og_keys)
+                data[col] = ptcl_keys.map(mapping).to_numpy()
     data.attrs["optics"] = None
 
 
@@ -1229,6 +1201,11 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
         optics group block; any other value dissolves it.
     """
     data2 = dataframe_convert(data, target="relion")
+    if data2 is data:
+        # the optics-group steps below drop/add columns in place
+        data2 = data.copy()
+        if data.attrs.get("optics") is not None:
+            data2.attrs["optics"] = data.attrs["optics"].copy()
 
     if "rlnImageName" in data2:
         data2 = mrc2mrcs(data2)
@@ -1629,15 +1606,35 @@ def dataframe2cs(data: pd.DataFrame, csFile: str) -> None:
     csFile : str
         Path to the output .cs file.
     """
-    structured_array = data.to_records(index=False)
-    dtypes = []
-    for col_name in structured_array.dtype.names:
-        if structured_array[col_name].dtype.kind == "O":
-            max_len = max(map(len, structured_array[col_name]))
-            dtypes.append((col_name, f"S{max_len}"))
+    fields = []
+    columns = []
+    for col_name in data.columns:
+        col = data[col_name]
+        numpy_dtype = getattr(col.dtype, "numpy_dtype", None)
+        if numpy_dtype is not None and not col.isna().any():
+            values = col.to_numpy(dtype=numpy_dtype)  # nullable Int64/Float64/...
         else:
-            dtypes.append((col_name, structured_array[col_name].dtype.kind))
-    structured_array = structured_array.astype(dtypes)
+            values = col.to_numpy()
+        if values.dtype.kind in "OUST":
+            first = values[0] if len(values) else None
+            if isinstance(first, (np.ndarray, list, tuple)):
+                # vector field (e.g. alignments2D/shift): keep element dtype and shape
+                values = np.stack([np.asarray(v) for v in values])
+                fields.append((col_name, values.dtype.str, values.shape[1:]))
+            else:
+                encoded = [
+                    v if isinstance(v, bytes) else str(v).encode() for v in values
+                ]
+                max_len = max((len(v) for v in encoded), default=1) or 1
+                values = np.array(encoded, dtype=f"S{max_len}")
+                fields.append((col_name, values.dtype.str))
+        else:
+            # keep the full dtype (float64 stays float64, uint64 uid stays uint64)
+            fields.append((col_name, values.dtype.str))
+        columns.append(values)
+    structured_array = np.empty(len(data), dtype=fields)
+    for (col_name, *_), values in zip(fields, columns):
+        structured_array[col_name] = values
     with open(csFile, "wb") as f:
         np.save(f, structured_array)
 
@@ -2128,6 +2125,8 @@ def dataframe_convert(data: pd.DataFrame, target: str = "relion") -> pd.DataFram
     ------
     AttributeError
         If the conversion is not supported.
+    NotImplementedError
+        If a RELION to cryoSPARC conversion is requested.
     """
     data.attrs["convention"] = get_dataframe_convention(data)
 
@@ -2137,7 +2136,9 @@ def dataframe_convert(data: pd.DataFrame, target: str = "relion") -> pd.DataFram
     msg = f"ERROR: dataframe_convert(): unavailable conversion of convention from {data.attrs['convention']} to {target}"
     if data.attrs["convention"] == "relion":
         if target == "cryosparc":
-            return dataframe_relion_to_cryosparc(data)
+            raise NotImplementedError(
+                "dataframe_convert(): conversion from RELION to cryoSPARC convention is not implemented"
+            )
         else:
             raise AttributeError(msg)
     elif data.attrs["convention"] == "cryosparc":
@@ -2226,7 +2227,8 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         msg = f"ERROR: dataframe_cryosparc_to_relion(): input dataframe is in {data.attrs['convention']} instead of the required cryosparc convention"
         raise AttributeError(msg)
 
-    ret = pd.DataFrame()
+    # keep the caller's index so every column below lines up by label
+    ret = pd.DataFrame(index=data.index)
     if "blob/idx" in data and "blob/path" in data:
         ret["rlnImageName"] = (
             (data["blob/idx"].astype(int) + 1).map("{:06d}".format)
@@ -2269,7 +2271,9 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         ret["rlnClassNumber"] = data["alignments2D/class"].astype(int) + 1
     origin_x = origin_y = None
     if "alignments2D/shift" in data:
-        shifts = pd.DataFrame(data["alignments2D/shift"].tolist()).round(2)
+        shifts = pd.DataFrame(
+            data["alignments2D/shift"].tolist(), index=data.index
+        ).round(2)
         origin_x = -shifts.iloc[:, 0]
         origin_y = -shifts.iloc[:, 1]
     if "alignments2D/pose" in data:
@@ -2297,7 +2301,9 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         ret["rlnAnglePsi"] = e[:, 2]
 
     if "alignments3D/shift" in data:
-        shifts = pd.DataFrame(data["alignments3D/shift"].tolist()).round(2)
+        shifts = pd.DataFrame(
+            data["alignments3D/shift"].tolist(), index=data.index
+        ).round(2)
         origin_x = shifts.iloc[:, 0]
         origin_y = shifts.iloc[:, 1]
 
@@ -2315,7 +2321,7 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
         else:
             loc_shape = None
         if loc_shape is not None:
-            shape_df = pd.DataFrame(loc_shape.tolist())
+            shape_df = pd.DataFrame(loc_shape.tolist(), index=data.index)
             my = shape_df.iloc[:, 0]
             mx = shape_df.iloc[:, 1]
             y_frac = data["location/center_y_frac"]

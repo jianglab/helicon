@@ -218,6 +218,12 @@ def apply_helical_symmetry(
     new_apix=None,
     cpu=1,
 ):
+    # resolve the defaults here: numba cannot compare None with a shape tuple
+    if new_size is None:
+        new_size = data.shape
+    new_size = tuple(int(n) for n in new_size)
+    if new_apix is None:
+        new_apix = apix
     set_num_threads(cpu)
     return _apply_helical_symmetry_jit(
         data,
@@ -452,7 +458,8 @@ def crop_center_z(data: np.ndarray, n: int) -> np.ndarray:
     """
     assert data.ndim in [3]
     nz = data.shape[0]
-    return data[nz // 2 - n // 2 : nz // 2 + n // 2 + n, :, :]
+    start = nz // 2 - n // 2
+    return data[start : start + n, :, :]
 
 
 def crop_center(
@@ -688,7 +695,7 @@ def fft_crop(
     Returns
     -------
     np.ndarray
-        Fourier-cropped array.
+        Fourier-cropped array with the same mean intensity as *data*.
     """
     if output_size is None or data.shape == output_size:
         return data
@@ -696,34 +703,53 @@ def fft_crop(
     assert data.ndim in (2, 3), f"ERROR: only 2-D images and 3-D maps are supported"
     assert data.ndim == len(output_size)
 
-    if data.ndim == 2:
-        ny, nx = data.shape
-        ony, onx = output_size
-        assert ony <= ny and onx <= nx
-        fft = np.fft.rfft2(data)  # shape = (ny//2+1, nx//2+1)
-        fft_truncated = np.fft.fftshift(
-            np.fft.fftshift(fft, axes=0)[
-                ny // 2 - ony // 2 : ny // 2 + ony // 2, : onx // 2 + 1
-            ],
-            axes=0,
-        )
-        data_downnscaled = np.fft.irfft2(fft_truncated)
-        return data_downnscaled
-    elif data.ndim == 3:
-        nz, ny, nx = data.shape
-        onz, ony, onx = output_size
-        assert onz <= nz and ony <= ny and onx <= nx
-        fft = np.fft.rfftn(data)  # shape = (ny//2+1, nx//2+1)
-        fft_truncated = np.fft.fftshift(
-            np.fft.fftshift(fft, axes=(0, 1))[
-                nz // 2 - onz // 2 : nz // 2 + onz // 2,
-                ny // 2 - ony // 2 : ny // 2 + ony // 2,
-                : onx // 2 + 1,
-            ],
-            axes=(0, 1),
-        )
-        data_downnscaled = np.fft.irfft2(fft_truncated)
-        return data_downnscaled
+    output_size = tuple(int(n) for n in output_size)
+    assert all(
+        on <= n for on, n in zip(output_size, data.shape)
+    ), f"ERROR: output size {output_size} must not exceed input size {data.shape}"
+
+    full_axes = tuple(range(data.ndim - 1))  # the last axis is the rfft half axis
+    fft = np.fft.fftshift(np.fft.rfftn(data), axes=full_axes)
+    slices = [
+        slice(n // 2 - on // 2, n // 2 - on // 2 + on)
+        for n, on in zip(data.shape[:-1], output_size[:-1])
+    ]
+    slices.append(slice(0, output_size[-1] // 2 + 1))
+    fft_truncated = np.fft.ifftshift(fft[tuple(slices)], axes=full_axes)
+    # np.fft normalises the inverse by the output size: rescale so the mean
+    # intensity of the image is preserved
+    scale = np.prod(output_size) / np.prod(data.shape)
+    axes = tuple(range(data.ndim))
+    return np.fft.irfftn(fft_truncated, s=output_size, axes=axes) * scale
+
+
+def _half_box_phase(shape: tuple[int, ...]) -> np.ndarray:
+    """Phase factors that shift a centred box so its centre is at the origin.
+
+    finufft treats the input as centred at index ``n // 2``. Multiplying its
+    output by these factors gives the layout of ``np.fft.fftn`` of an output
+    image centred at index ``m // 2``, for odd and even sizes.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Output array shape.
+
+    Returns
+    -------
+    np.ndarray
+        Complex phase factors with the given shape.
+    """
+    phase = np.ones(shape, dtype=np.complex128)
+    for axis, m in enumerate(shape):
+        k = np.fft.fftfreq(m) * m  # signed integer frequency index
+        p = np.exp(-2j * np.pi * k * (m // 2) / m)
+        if m % 2 == 0:
+            p = np.where(np.arange(m) % 2, -1.0, 1.0)  # exact (-1)^k
+        expand = [np.newaxis] * len(shape)
+        expand[axis] = slice(None)
+        phase = phase * p[tuple(expand)]
+    return phase
 
 
 def fft_rescale(
@@ -771,11 +797,9 @@ def fft_rescale(
             fft = nufft2d2(x=Y, y=X, f=data.astype(np.complex128), eps=1e-6)
         fft = fft.reshape((ony, onx))
 
-        # phase shifts for real-space shifts by half of the image box in both directions
-        phase_shift = np.ones(fft.shape)
-        phase_shift[1::2, :] *= -1
-        phase_shift[:, 1::2] *= -1
-        fft *= phase_shift
+        # move the box centre (index n//2) back to the origin; exact for odd and
+        # even sizes ((-1)^k is the special case of an even output size)
+        fft *= _half_box_phase((ony, onx))
         # now fft has the same layout and phase origin (i.e. np.fft.ifft2(fft) would obtain original image)
         return fft
     elif data.ndim == 3:
@@ -801,12 +825,9 @@ def fft_rescale(
             fft = nufft3d2(x=Z, y=Y, z=X, f=data.astype(np.complex128), eps=1e-6)
         fft = fft.reshape((onz, ony, onx))
 
-        # phase shifts for real-space shifts by half of the image box in both directions
-        phase_shift = np.ones(fft.shape)
-        phase_shift[1::2, :, :] *= -1
-        phase_shift[:, 1::2, :] *= -1
-        phase_shift[:, :, 1::2] *= -1
-        fft *= phase_shift
+        # move the box centre (index n//2) back to the origin; exact for odd and
+        # even sizes ((-1)^k is the special case of an even output size)
+        fft *= _half_box_phase((onz, ony, onx))
         # now fft has the same layout and phase origin (i.e. np.fft.ifft2(fft) would obtain original image)
         return fft
 
