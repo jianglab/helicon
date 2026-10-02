@@ -334,15 +334,34 @@ def refined_path_positions(track, x, y):
     return g["position"], g["across"]
 
 
-def _path_positions(h, track, apix, refined):
-    """Position of each segment (sorted by track length) along its filament, in A."""
-    if not refined:
-        return track, np.zeros(len(track))
-    ox = h["rlnOriginXAngst"].values if "rlnOriginXAngst" in h else 0.0
-    oy = h["rlnOriginYAngst"].values if "rlnOriginYAngst" in h else 0.0
-    x = h["rlnCoordinateX"].values.astype(float) * apix - np.asarray(ox, float)
-    y = h["rlnCoordinateY"].values.astype(float) * apix - np.asarray(oy, float)
-    return refined_path_positions(track, x, y)
+def _filament_slices(df):
+    """The rows of each filament, in the order ``groupby(sort=False)`` gives.
+
+    Returns
+    -------
+    order : np.ndarray
+        Row positions sorted by filament (first appearance) and, within one,
+        by track length.
+    starts, ends : np.ndarray
+        Each filament's slice of ``order``.
+    keys : list of tuple
+        ``(rlnMicrographName, rlnHelicalTubeID)`` of each filament.
+    """
+    key = ["rlnMicrographName", "rlnHelicalTubeID"]
+    fil = df.groupby(key, sort=False).ngroup().to_numpy()
+    track = df["rlnHelicalTrackLengthAngst"].to_numpy().astype(float)
+    order = np.lexsort((track, fil))
+    fil = fil[order]
+    starts = np.flatnonzero(np.r_[True, np.diff(fil) != 0])
+    ends = np.r_[starts[1:], len(fil)]
+    first = order[starts]
+    keys = list(
+        zip(
+            df["rlnMicrographName"].to_numpy()[first].tolist(),
+            df["rlnHelicalTubeID"].to_numpy()[first].tolist(),
+        )
+    )
+    return order, starts, ends, keys
 
 
 def prepare_pairs(
@@ -404,15 +423,33 @@ def prepare_pairs(
     has_conf = weight_confidence and "rlnMaxValueProbDistribution" in df
 
     seg_class, seg_fil, seg_pos, seg_pol, seg_perp, seg_conf = [], [], [], [], [], []
-    seg_row, seg_ref, spans, keys = [], [], [], []
-    groups = df.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False)
-    for f, (key, h) in enumerate(groups):
-        keys.append(key)
-        h = h.sort_values("rlnHelicalTrackLengthAngst")
-        track = h["rlnHelicalTrackLengthAngst"].values.astype(float)
-        psi = h["rlnAnglePsi"].values.astype(float)
+    seg_row, seg_ref, spans = [], [], []
+    # The columns are taken out once and the filaments walked as slices of
+    # them: selecting columns of each filament's sub-frame cost 18 of 25 s on
+    # EMPIAR-10940 (10,800 filaments), most of it pandas copying the frame's
+    # attrs on every access.
+    order, starts, ends, keys = _filament_slices(df)
+    col = lambda name: df[name].to_numpy()[order]  # noqa: E731
+    track_all = col("rlnHelicalTrackLengthAngst").astype(float)
+    psi_all = col("rlnAnglePsi").astype(float)
+    prior_all = col("rlnAnglePsiPrior").astype(float) if has_prior else None
+    class_all = np.array([row_of[int(c)] for c in col("rlnClassNumber")], np.int32)
+    row_all = col("_row")
+    conf_all = (
+        col("rlnMaxValueProbDistribution").astype(float)
+        if has_conf
+        else np.ones(len(order))
+    )
+    if refined:
+        ox = col("rlnOriginXAngst").astype(float) if "rlnOriginXAngst" in df else 0.0
+        oy = col("rlnOriginYAngst").astype(float) if "rlnOriginYAngst" in df else 0.0
+        x_all = col("rlnCoordinateX").astype(float) * apix - ox
+        y_all = col("rlnCoordinateY").astype(float) * apix - oy
+    for f, (a, b) in enumerate(zip(starts, ends)):
+        track = track_all[a:b]
+        psi = psi_all[a:b]
         if has_prior:
-            ref = h["rlnAnglePsiPrior"].values.astype(float)
+            ref = prior_all[a:b]
         else:
             r = np.deg2rad(psi)
             ref = np.full(
@@ -420,18 +457,17 @@ def prepare_pairs(
             )
         delta = (psi - ref + 180.0) % 360.0 - 180.0
         seg_ref.append(ref)
-        pos, perp = _path_positions(h, track, apix, refined)
-        seg_class.append([row_of[int(c)] for c in h["rlnClassNumber"].values])
-        seg_fil.append(np.full(len(h), f))
-        seg_row.append(h["_row"].values)
+        if refined:
+            pos, perp = refined_path_positions(track, x_all[a:b], y_all[a:b])
+        else:
+            pos, perp = track, np.zeros(len(track))
+        seg_class.append(class_all[a:b])
+        seg_fil.append(np.full(b - a, f))
+        seg_row.append(row_all[a:b])
         seg_pos.append(pos)
         seg_pol.append(delta)
         seg_perp.append(perp)
-        seg_conf.append(
-            h["rlnMaxValueProbDistribution"].values.astype(float)
-            if has_conf
-            else np.ones(len(h))
-        )
+        seg_conf.append(conf_all[a:b])
         spans.append(pos.max() - pos.min() if len(pos) else 0.0)
 
     seg_class = np.concatenate(seg_class).astype(np.int32)
@@ -920,22 +956,48 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
     if not n_fil or not len(d):
         return curves
     lo = float(d.min())
-    nb = int((float(d.max()) - lo) / bin_width) + 1
     b = np.round((d - lo) / bin_width).astype(np.int64)
+    # as many bins as the rounded positions reach: with int() a pair at the
+    # longest separation could round one bin past the end, into the next
+    # filament's first bin (or past the array, for the last filament)
+    nb = int(b.max()) + 1
     c = w * np.exp(-1j * dphi)
     centres = lo + np.arange(nb) * bin_width
     E = np.exp(2j * np.pi * centres[:, None] / np.asarray(grid)[None, :])
-    # filaments in batches, so that the binned array stays small
-    batch = max(1, int(2e7 // max(nb, 1)))
-    for s0 in range(0, n_fil, batch):
-        s1 = min(n_fil, s0 + batch)
-        m = (fi >= s0) & (fi < s1)
-        flat = (fi[m] - s0) * nb + b[m]
-        size = (s1 - s0) * nb
-        h = np.bincount(flat, weights=c[m].real, minlength=size) + 1j * np.bincount(
-            flat, weights=c[m].imag, minlength=size
+    # A filament's pairs fill only the bins its own length reaches, and most
+    # filaments are far shorter than the longest: with every filament over all
+    # the bins, most of the product multiplied zeros, more so the longer the
+    # repeat searched. The filaments are taken shortest first, in batches that
+    # each use only the rows of E their pairs reach (the same bins and sums).
+    first = np.full(n_fil, nb, np.int64)
+    last = np.full(n_fil, -1, np.int64)
+    np.minimum.at(first, fi, b)
+    np.maximum.at(last, fi, b)
+    zero = int(np.round(-lo / bin_width))  # the bin of separation 0
+    reach = np.maximum(zero - first, last - zero).clip(min=0)
+    by_reach = np.argsort(reach, kind="stable")
+    rank = np.empty(n_fil, np.int64)
+    rank[by_reach] = np.arange(n_fil)
+    order = np.argsort(rank[fi], kind="stable")
+    fr, b, c = rank[fi][order], b[order], c[order]
+    edges = np.searchsorted(fr, np.arange(n_fil + 1))
+    s0 = 0
+    while s0 < n_fil:
+        s1 = s0 + 1
+        # grow the batch while the binned array stays small
+        while s1 < n_fil and (s1 + 1 - s0) * (2 * reach[by_reach[s1]] + 1) <= 2e7:
+            s1 += 1
+        r = int(reach[by_reach[s1 - 1]])
+        i0, i1 = max(0, zero - r), min(nb, zero + r + 1)
+        width = i1 - i0
+        lo_p, hi_p = edges[s0], edges[s1]
+        flat = (fr[lo_p:hi_p] - s0) * width + (b[lo_p:hi_p] - i0)
+        size = (s1 - s0) * width
+        h = np.bincount(flat, weights=c[lo_p:hi_p].real, minlength=size) + 1j * (
+            np.bincount(flat, weights=c[lo_p:hi_p].imag, minlength=size)
         )
-        curves[:, s0:s1] = (h.reshape(s1 - s0, nb) @ E).real.T
+        curves[:, by_reach[s0:s1]] = (h.reshape(s1 - s0, width) @ E[i0:i1]).real.T
+        s0 = s1
     return curves
 
 
@@ -1631,24 +1693,21 @@ def _direction_convention(params, min_span=300.0):
     The direction of a filament in the coordinates is ``atan2(sign * dy, dx)``
     for the sign that agrees with the psi prior.
     """
-    key = ["rlnMicrographName", "rlnHelicalTubeID"]
     devs = {1.0: [], -1.0: []}
-    for _, h in params.groupby(key, sort=False):
-        if len(h) < 4:
+    order, starts, ends, _ = _filament_slices(params)
+    track = params["rlnHelicalTrackLengthAngst"].to_numpy().astype(float)[order]
+    x = params["rlnCoordinateX"].to_numpy().astype(float)[order]
+    y = params["rlnCoordinateY"].to_numpy().astype(float)[order]
+    prior_all = params["rlnAnglePsiPrior"].to_numpy().astype(float)[order]
+    for a, b in zip(starts, ends):
+        if b - a < 4 or track[b - 1] - track[a] < min_span:
             continue
-        h = h.sort_values("rlnHelicalTrackLengthAngst")
-        if (
-            h["rlnHelicalTrackLengthAngst"].iloc[-1]
-            - h["rlnHelicalTrackLengthAngst"].iloc[0]
-            < min_span
-        ):
-            continue
-        dx = float(h["rlnCoordinateX"].iloc[-1] - h["rlnCoordinateX"].iloc[0])
-        dy = float(h["rlnCoordinateY"].iloc[-1] - h["rlnCoordinateY"].iloc[0])
-        prior = np.deg2rad(float(h["rlnAnglePsiPrior"].median()))
+        dx = float(x[b - 1] - x[a])
+        dy = float(y[b - 1] - y[a])
+        prior = np.deg2rad(float(np.nanmedian(prior_all[a:b])))
         for sgn in devs:
-            a = np.arctan2(sgn * dy, dx)
-            devs[sgn].append(abs(np.angle(np.exp(2j * (a - prior)))))
+            angle = np.arctan2(sgn * dy, dx)
+            devs[sgn].append(abs(np.angle(np.exp(2j * (angle - prior)))))
     if not devs[1.0]:
         return 1.0
     return 1.0 if np.median(devs[1.0]) <= np.median(devs[-1.0]) else -1.0
@@ -1947,10 +2006,11 @@ def analyze(
 
     used = params
     merged = []
+    pairs = None
     if counterparts:
         step("merging classes that are each other's 180-degree rotation")
-        best = None
-        for sign in (1.0, -1.0):
+
+        def trial_of(sign):
             trial, gone = merge_counterparts(params, counterparts, image_apix, sign)
             keep = None
             if class_ids is not None:
@@ -1961,13 +2021,24 @@ def analyze(
                     np.max(estimate_period(tp, length_scale=length_scale)["scores"])
                 )
             except ValueError:
-                continue
-            if best is None or score > best[0]:
-                best = (score, trial, keep, gone)
+                return None
+            return score, trial, keep, gone, tp
+
+        # the two signs at once: the scans are numpy work that runs in parallel
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(2) as pool:
+            trials = [t for t in pool.map(trial_of, (1.0, -1.0)) if t is not None]
+        best = None
+        for t in trials:  # in sign order, so a tie keeps +1 as before
+            if best is None or t[0] > best[0]:
+                best = t
         if best is not None:
-            _, used, class_ids, merged = best
-    step("collecting segment pairs")
-    pairs = prepare_pairs(used, class_ids=class_ids, **kw)
+            _, used, class_ids, merged, pairs = best
+    if pairs is None:
+        step("collecting segment pairs")
+        # the winning merge trial already collected its pairs
+        pairs = prepare_pairs(used, class_ids=class_ids, **kw)
     if len(pairs.D) == 0:
         raise ValueError("no same-polarity segment pairs in the selected filaments")
     step(f"scanning repeats up to {pairs.max_sep:.0f} \u00c5")

@@ -537,3 +537,86 @@ class TestLongRepeats:
     def test_missed_by_the_old_fixed_limit(self, long_repeat):
         r = ph.analyze(long_repeat, n_boot=2, max_sep=1500.0)
         assert r.period < 1500.0 * 1.15
+
+
+class TestFilamentSlices:
+    """The per-filament walk over numpy columns gives what the per-filament
+    pandas walk gave, without its cost."""
+
+    def test_filaments_in_groupby_order_and_rows_by_track(self):
+        df = make_params(n_fil=30, n_seg=12, seed=7).sample(frac=1.0, random_state=1)
+        order, starts, ends, keys = ph._filament_slices(df)
+        groups = list(df.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False))
+        assert keys == [k for k, _ in groups]
+        track = df["rlnHelicalTrackLengthAngst"].to_numpy()
+        for (a, b), (_, h) in zip(zip(starts, ends), groups):
+            rows = order[a:b]
+            assert sorted(rows.tolist()) == sorted(df.index.get_indexer(h.index))
+            assert np.all(np.diff(track[rows]) >= 0)
+
+    def test_pairs_do_not_depend_on_the_frames_attrs(self):
+        # pandas copies attrs on every column access: the cost the walk avoids
+        df = make_params(n_fil=40, seed=8)
+        plain = ph.prepare_pairs(df)
+        heavy = df.copy()
+        heavy.attrs["optics"] = pd.DataFrame(np.zeros((2000, 20)))
+        loaded = ph.prepare_pairs(heavy)
+        for f in ("I", "J", "D", "W", "seg_pos", "seg_class", "seg_row"):
+            assert np.array_equal(getattr(plain, f), getattr(loaded, f))
+
+    @pytest.mark.parametrize("flip", [1.0, -1.0])
+    def test_direction_convention(self, flip):
+        df = make_params(n_fil=20, n_seg=60, seed=9)
+        # filaments at 30 degrees, the prior agreeing with +y (or -y)
+        t = df["rlnHelicalTrackLengthAngst"].to_numpy()
+        a = np.deg2rad(30.0)
+        df["rlnCoordinateX"] = (1000.0 + t * np.cos(a)) / APIX_MIC
+        df["rlnCoordinateY"] = (500.0 + flip * t * np.sin(a)) / APIX_MIC
+        df["rlnAnglePsiPrior"] = 30.0
+        assert ph._direction_convention(df) == flip
+
+
+class TestMergeTrials:
+    def test_the_winning_trial_pairs_are_the_ones_used(self, monkeypatch):
+        df = make_params(n_fil=60, seed=10)
+        calls = []
+        real = ph.prepare_pairs
+        monkeypatch.setattr(
+            ph, "prepare_pairs", lambda *a, **k: calls.append(1) or real(*a, **k)
+        )
+        cps = [dict(a=1, b=7, corr=0.9, dx=0.0)]
+        r = ph.analyze(df, n_boot=2, counterparts=cps, image_apix=1.0)
+        # one per sign; the final collection reuses the better one
+        assert len(calls) == 2
+        assert np.isfinite(r.period)
+
+
+class TestFilamentCurves:
+    def _direct(self, fi, n_fil, d, w, dphi, grid):
+        out = np.zeros((len(grid), n_fil))
+        for k, p in enumerate(grid):
+            np.add.at(out[k], fi, w * np.cos(2 * np.pi * d / p - dphi))
+        return out
+
+    def test_matches_the_sum_over_pairs(self):
+        rng = np.random.default_rng(11)
+        n_fil = 40
+        reach = rng.uniform(50, 3000, n_fil)  # short and long filaments
+        fi = rng.integers(0, n_fil, 4000)
+        d = rng.uniform(-1, 1, len(fi)) * reach[fi]
+        # separations on the bins themselves, so binning moves nothing
+        d = np.round(d / 0.5) * 0.5
+        w, dphi = rng.random(len(fi)), rng.uniform(-np.pi, np.pi, len(fi))
+        grid = np.arange(600.0, 800.0, 7.0)
+        got = ph._filament_curves(fi, n_fil, d, w, dphi, grid)
+        assert np.allclose(got, self._direct(fi, n_fil, d, w, dphi, grid))
+
+    def test_the_longest_pair_stays_in_its_own_filament(self):
+        # 0.3 A past the first pair rounds up a bin: it used to spill into the
+        # next filament's first bin, or past the array for the last one
+        fi = np.array([0, 1, 1])
+        d = np.array([0.0, 0.0, 0.3])
+        w, dphi = np.ones(3), np.zeros(3)
+        grid = np.array([700.0])
+        got = ph._filament_curves(fi, 2, d, w, dphi, grid)
+        assert np.allclose(got, self._direct(fi, 2, d, w, dphi, grid), atol=1e-6)
