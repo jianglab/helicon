@@ -46,8 +46,9 @@ def bessel_n_image(
     """Bessel order for each pixel in a power spectrum image."""
     table = bessel_1st_peak_positions()
     if tilt:
-        dsx = 1.0 / (nyquist_res_x * nx // 2)
-        dsy = 1.0 / (nyquist_res_x * ny // 2)
+        # Same pixel spacing as the power-spectrum axes the image is drawn on.
+        dsx = 1.0 / (nx // 2 * nyquist_res_x)
+        dsy = 1.0 / (ny // 2 * nyquist_res_y)
         Y, X = np.meshgrid(
             np.arange(ny, dtype=np.float32) - ny // 2,
             np.arange(nx, dtype=np.float32) - nx // 2,
@@ -55,13 +56,14 @@ def bessel_n_image(
         )
         Y = 2 * np.pi * np.abs(Y) * dsy * radius
         X = 2 * np.pi * np.abs(X) * dsx * radius
-        Y /= np.cos(np.deg2rad(tilt))
+        # A tilted helix shows radial frequency R at hypot(sx_obs, sy_obs * sin(t)),
+        # the inverse of compute_layer_line_positions (sy_obs is the observed row).
         X = np.hypot(X, Y * np.sin(np.deg2rad(tilt)))
         X = np.expand_dims(X.flatten(), axis=-1)
         indices = np.abs(table - X).argmin(axis=-1)
         return np.reshape(indices, (ny, nx)).astype(np.int16)
     else:
-        ds = 1.0 / (nyquist_res_x * nx // 2)
+        ds = 1.0 / (nx // 2 * nyquist_res_x)
         xs = 2 * np.pi * np.abs(np.arange(nx) - nx // 2) * ds * radius
         xs = np.expand_dims(xs, axis=-1)
         indices = np.abs(table - xs).argmin(axis=-1)
@@ -857,18 +859,13 @@ def auto_correlation(data, sqrt=True, high_pass_fraction=0):
     if sqrt:
         product = np.sqrt(product)
     if 0 < high_pass_fraction <= 1:
-        ny, nx = product.shape
-        Y, X = np.meshgrid(
-            np.arange(-ny // 2, ny // 2, dtype=float),
-            np.arange(-nx // 2, nx // 2, dtype=float),
-            indexing="ij",
-        )
-        Y /= ny // 2
-        X /= nx // 2
+        ny = product.shape[0]
+        # Signed row frequencies in FFT order (correct for odd ny as well).
+        Y = np.fft.fftfreq(ny) * ny / max(1, ny // 2)
         f2 = np.log(2) / (high_pass_fraction**2)
         filt = 1.0 - np.exp(-f2 * Y**2)
-        product *= np.fft.fftshift(filt)
-    corr = np.fft.fftshift(np.fft.irfft2(product))
+        product *= filt[:, None]
+    corr = np.fft.fftshift(np.fft.irfft2(product, s=np.shape(data)))
     corr /= np.max(corr)
     return corr
 

@@ -87,7 +87,7 @@ def find_first_peak(distances, cutoff=500):
 def select_helices_by_length(helices, lengths, min_len, max_len):
     """Filter helices by filament length range."""
     min_len = 0 if min_len is None else min_len
-    max_len = -1 if min_len is None else max_len
+    max_len = -1 if max_len is None else max_len
     helices_retained = []
     n_ptcls = 0
     for gi, (gn, g) in enumerate(helices):

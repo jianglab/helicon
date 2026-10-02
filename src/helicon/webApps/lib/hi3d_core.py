@@ -241,7 +241,7 @@ def transform_map(
     -------
     (nz, ny, nx) array
     """
-    if not (shift_x or shift_y or angle_x or angle_y):
+    if not (shift_x or shift_y or shift_z or angle_x or angle_y):
         return data
 
     from scipy.ndimage import affine_transform
@@ -271,12 +271,16 @@ def change_mrc_map_crs_order(
     """
     if target_order is None:
         target_order = [1, 2, 3]
+    current_order = [int(i) for i in current_order]
+    target_order = [int(i) for i in target_order]
     if current_order == target_order:
         return data
-    map_crs_to_np = {1: 2, 2: 1, 3: 0}
-    cur_np = [map_crs_to_np[int(i)] for i in current_order]
-    tgt_np = [map_crs_to_np[int(i)] for i in target_order]
-    return np.moveaxis(data, cur_np, tgt_np)
+    # The numpy array is (section, row, column): the k-th entry of an order
+    # (column, row, section) is the physical axis stored on numpy axis 2 - k.
+    # Move each physical axis from where it is now to where the target wants it.
+    src = [2 - current_order.index(p) for p in (1, 2, 3)]
+    dst = [2 - target_order.index(p) for p in (1, 2, 3)]
+    return np.moveaxis(data, src, dst)
 
 
 # ── Cylindrical projection ─────────────────────────────────────────────
@@ -390,19 +394,14 @@ def auto_correlation(
     if sqrt_transform:
         product = np.sqrt(product)
     if 0 < high_pass_fraction <= 1:
-        nz, na = product.shape
-        Z, A = np.meshgrid(
-            np.arange(-nz // 2, nz // 2, dtype=float),
-            np.arange(-na // 2, na // 2, dtype=float),
-            indexing="ij",
-        )
-        Z /= nz // 2
-        A /= na // 2
+        nz = product.shape[0]
+        # Signed row frequencies in FFT order (correct for odd nz as well).
+        Z = np.fft.fftfreq(nz) * nz / max(1, nz // 2)
         f2 = np.log(2) / (high_pass_fraction**2)
         filt = 1.0 - np.exp(-f2 * Z**2)  # Z-direction only
-        product *= np.fft.fftshift(filt)
+        product *= filt[:, None]
 
-    corr = np.fft.fftshift(np.fft.irfft2(product))
+    corr = np.fft.fftshift(np.fft.irfft2(product, s=data.shape))
     corr -= np.median(corr, axis=1, keepdims=True)
     corr = normalize(corr)
     if sqrt_transform:
@@ -654,6 +653,42 @@ def get_helical_lattice(peaks: np.ndarray) -> tuple[float, float, int]:
 # ── Lattice fitting: generic 2D method ──────────────────────────────────
 
 
+def peaks_to_lattice(pts, va, vb, origin):
+    """Least-squares fit of a 2D lattice to the peaks that lie on it.
+
+    Parameters
+    ----------
+    pts : (N, 2) array
+        Peak positions.
+    va, vb : (2,) array
+        Initial lattice vectors.
+    origin : (2,) array
+        Initial lattice origin.
+
+    Returns
+    -------
+    dict
+        Keys "NaNb" (lattice indices), "a", "b", "origin" (refined) and
+        "err" (root-sum-square residual of the on-lattice peaks / N).
+    """
+    A = np.vstack((va, vb)).T
+    b_pts = (pts - origin).T
+    x = np.linalg.solve(A, b_pts)
+    NaNb = np.around(x)
+    good = np.abs(x - NaNb).max(axis=0) < 0.1
+    one = np.ones((1, int(NaNb[:, good].shape[1])))
+    A2 = np.vstack((NaNb[:, good], one)).T
+    p_out, *_ = np.linalg.lstsq(A2, pts[good, :], rcond=-1)
+    va2 = p_out[0]
+    vb2 = p_out[1]
+    origin2 = p_out[2]
+    # Each point is na * a + nb * b + origin: a matrix product, not an
+    # element-wise one.
+    residues = pts[good, :] - (NaNb[:, good].T @ np.vstack((va2, vb2)) + origin2)
+    err = float(np.sqrt(np.sum(residues**2))) / len(pts)
+    return {"NaNb": NaNb, "a": va2, "b": vb2, "origin": origin2, "err": err}
+
+
 def get_generic_lattice(peaks: np.ndarray) -> tuple[float, float, int]:
     """Fit a generic 2D lattice from peaks (method 2).
 
@@ -686,10 +721,12 @@ def get_generic_lattice(peaks: np.ndarray) -> tuple[float, float, int]:
     def _on_equator(v, eps=0.5):
         return int(abs(v[1]) <= eps)
 
+    rng = np.random.default_rng(0)
+
     def _pick_triplet(kdtree, index=-1):
         m = kdtree.data.shape[0]
         if index < 0:
-            index = np.random.randint(0, m)
+            index = int(rng.integers(0, m))
         origin = kdtree.data[index]
         distances, indices = kdtree.query(origin, k=m)
         first = None
@@ -709,24 +746,6 @@ def get_generic_lattice(peaks: np.ndarray) -> tuple[float, float, int]:
                 break
         return origin, first, second
 
-    def _peaks2lattice(pts, va, vb, origin):
-        A = np.vstack((va, vb)).T
-        b_pts = (pts - origin).T
-        x = np.linalg.solve(A, b_pts)
-        NaNb = np.around(x)
-        good = np.abs(x - NaNb).max(axis=0) < 0.1
-        one = np.ones((1, int(NaNb[:, good].shape[1])))
-        A2 = np.vstack((NaNb[:, good], one)).T
-        p_out, *_ = np.linalg.lstsq(A2, pts[good, :], rcond=-1)
-        va2 = p_out[0]
-        vb2 = p_out[1]
-        origin2 = p_out[2]
-        residues = pts[good, :] - (
-            NaNb[:, good].T * va2 + NaNb[:, good].T * vb2 + origin2
-        )
-        err = float(np.sqrt(np.sum(residues**2))) / len(pts)
-        return {"NaNb": NaNb, "a": va2, "b": vb2, "origin": origin2, "err": err}
-
     kdt = KDTree(peaks)
     best = None
     min_err = 1e30
@@ -736,8 +755,8 @@ def get_generic_lattice(peaks: np.ndarray) -> tuple[float, float, int]:
             continue
         va = first - origin
         vb = second - origin
-        lattice = _peaks2lattice(peaks, va, vb, origin)
-        lattice = _peaks2lattice(peaks, lattice["a"], lattice["b"], lattice["origin"])
+        lattice = peaks_to_lattice(peaks, va, vb, origin)
+        lattice = peaks_to_lattice(peaks, lattice["a"], lattice["b"], lattice["origin"])
         err = lattice["err"]
         if err < min_err:
             dist = _distance(lattice["a"], lattice["b"])
@@ -853,7 +872,8 @@ def refine_twist_rise(
 
     i = np.repeat(range(1, npeak), cn)
     w = np.power(i, 1.0 / 2)
-    x_sym = np.tile(range(cn), npeak - 1) * 360.0 / cn
+    # The symmetry copies are 360/cn degrees apart: convert to ACF columns.
+    x_sym = np.tile(range(cn), npeak - 1) * 360.0 / cn / da
 
     def score(x):
         t, r = x
@@ -881,8 +901,20 @@ def fit_helical_lattice(
     acf: np.ndarray,
     da: float = 1.0,
     dz: float = 1.0,
+    seed: int = 0,
 ) -> tuple[tuple[float, float, int], tuple[float, float, int]]:
     """Run both lattice fitting methods and return consistent solutions.
+
+    Parameters
+    ----------
+    peaks : (N, 2) array
+        Columns are (twist_degrees, rise_angstrom).
+    acf : (ny, nx) array
+        Auto-correlation image used to refine the solutions.
+    da, dz : float
+        Step sizes (degrees, Angstrom).
+    seed : int
+        Seed of the random peak subsets tried when the first passes disagree.
 
     Returns
     -------
@@ -905,15 +937,16 @@ def fit_helical_lattice(
             break
 
     if not consistent:
+        # Seeded so that the same peaks always give the same lattice.
+        rng = np.random.default_rng(seed)
         for _ in range(100):
             if len(peaks) // 2 > 5:
-                n = np.random.randint(5, len(peaks) // 2)
-                choices = sorted(np.random.choice(range(2 * n), size=n, replace=False))
+                n = int(rng.integers(5, len(peaks) // 2))
+                choices = sorted(rng.choice(2 * n, size=n, replace=False).tolist())
             else:
-                n = np.random.randint(3, len(peaks))
-                choices = sorted(
-                    np.random.choice(range(len(peaks)), size=n, replace=False)
-                )
+                # Up to and including all the peaks, so exactly 3 peaks works.
+                n = int(rng.integers(3, len(peaks) + 1))
+                choices = sorted(rng.choice(len(peaks), size=n, replace=False).tolist())
             if 0 not in choices:
                 choices = [0] + choices
             p_random = peaks[choices]
@@ -983,9 +1016,9 @@ def minimal_grids(map3d: np.ndarray, max_map_dim: int = 300) -> tuple[np.ndarray
     n_min_z = min(nz, n_min_xy)
     bin_factor = max(1, n_min_xy // max_map_dim + 1)
     ret = map3d[
-        nz // 2 - n_min_xy // 2 : nz // 2 + n_min_xy // 2 : bin_factor,
+        nz // 2 - n_min_z // 2 : nz // 2 + n_min_z // 2 : bin_factor,
         ny // 2 - n_min_xy // 2 : ny // 2 + n_min_xy // 2 : bin_factor,
-        nx // 2 - n_min_z // 2 : nx // 2 + n_min_z // 2 : bin_factor,
+        nx // 2 - n_min_xy // 2 : nx // 2 + n_min_xy // 2 : bin_factor,
     ]
     return ret, bin_factor
 

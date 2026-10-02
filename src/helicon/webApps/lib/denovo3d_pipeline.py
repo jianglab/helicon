@@ -258,7 +258,10 @@ def process_one_task(
     ny, nx = data.shape
 
     if thresh_fraction >= 0:
-        data_orig = data
+        # The thresholding below works in place: keep the unthresholded image
+        # (and the caller's array, when down_scale returned it unchanged).
+        data_orig = data.copy()
+        data = data.copy()
         nr = min(
             ny // 2 - 1, int(np.ceil(reconstruct_diameter / 2 / target_apix2d) + 1)
         )
@@ -388,7 +391,12 @@ def process_one_task(
         ):
             solve_kwargs["cpu"] = n_cpu
             solve_kwargs["refine_tilt_psi_dy_range"] = refine_range
-        (rec3d, rec3d_set_1, rec3d_set_2), score = solve_fn(**solve_kwargs)
+            # the refined tilt/psi/dy come back with the result, so threads
+            # running other tasks at the same time cannot see them
+            solve_kwargs["return_refined_params"] = True
+        solved = solve_fn(**solve_kwargs)
+        (rec3d, rec3d_set_1, rec3d_set_2), score = solved[:2]
+        refined_params = solved[2] if len(solved) > 2 else {}
     with helicon.Timer("apply_helical_symmetry", verbose=verbose > 10):
         twist_degree = twist if abs(twist) < 90 else 180 - abs(twist)
         if abs(twist_degree) > 1e-2:
@@ -416,15 +424,9 @@ def process_one_task(
         )
 
     # Use refined tilt/psi/dy if available from local refinement
-    tilt_viz = tilt
-    psi_viz = psi
-    dy_viz = dy
-    if hasattr(lsq_reconstruct, "_refined_params") and lsq_reconstruct._refined_params:
-        rp = lsq_reconstruct._refined_params
-        tilt_viz = rp.get("tilt", tilt)
-        psi_viz = rp.get("psi", psi)
-        dy_viz = rp.get("dy", dy)
-        lsq_reconstruct._refined_params = {}  # consume once
+    tilt_viz = refined_params.get("tilt", tilt)
+    psi_viz = refined_params.get("psi", psi)
+    dy_viz = refined_params.get("dy", dy)
 
     rec3d_xform_2 = helicon.transform_map(
         rec3d_xform, scale=1.0, tilt=tilt_viz, psi=psi_viz, dy=dy_viz / apix2d_orig

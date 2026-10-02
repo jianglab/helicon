@@ -216,6 +216,7 @@ def lsq_reconstruct(
     algorithm=dict(model="lsq"),
     refine_tilt_psi_dy_range=None,
     cpu=1,
+    return_refined_params=False,
 ):
     """Build and solve the least-squares reconstruction system.
 
@@ -269,12 +270,25 @@ def lsq_reconstruct(
         Verbosity level. Defaults to 0.
     algorithm : dict, optional
         Solver configuration. Defaults to ``{"model": "lsq"}``.
+    refine_tilt_psi_dy_range : dict, optional
+        Ranges for a local refinement of tilt/psi/dy. Defaults to None (off).
+    cpu : int, optional
+        Number of threads. Defaults to 1.
+    return_refined_params : bool, optional
+        Also return the refined tilt/psi/dy. They are part of the return value
+        rather than state kept on the function, so concurrent calls (the
+        denovo3D tab runs tasks in a thread pool) cannot see each other's.
+        Defaults to False.
 
     Returns
     -------
     tuple of ((ndarray, ndarray or None, ndarray or None), float)
-        (rec3d_full, rec3d_half1, rec3d_half2), score.
+        (rec3d_full, rec3d_half1, rec3d_half2), score. With
+        ``return_refined_params`` a third item is added: a dict with keys
+        "tilt", "psi" and "dy" when the refinement improved the score, or an
+        empty dict.
     """
+    refined_params = {}
 
     rmin = reconstruct_diameter_3d_inner_pixel / 2
     rmax = reconstruct_diameter_3d_pixel // 2 - 1
@@ -340,7 +354,7 @@ def lsq_reconstruct(
             return (A, b), (A, b)
 
         if b_id is None:
-            b_id_unique = np.arrange(len(b))
+            b_id_unique = np.arange(len(b))
         else:
             b_id_unique = sorted(set(b_id))
         n = len(b_id_unique)
@@ -466,12 +480,8 @@ def lsq_reconstruct(
                 xs = [x]
                 scores = [score]
                 Abx_data_triplets = [(A_data, b_data, x)]
-                # Store refined params for post-reconstruction transform
-                if not hasattr(lsq_reconstruct, "_refined_params"):
-                    lsq_reconstruct._refined_params = {}
-                lsq_reconstruct._refined_params["tilt"] = tilt_opt
-                lsq_reconstruct._refined_params["psi"] = psi_opt
-                lsq_reconstruct._refined_params["dy"] = dy_opt
+                # Returned for the post-reconstruction transform
+                refined_params = {"tilt": tilt_opt, "psi": psi_opt, "dy": dy_opt}
                 logger.info(
                     f"  Refined tilt/psi/dy: [{tilt_opt:.3f}, {psi_opt:.3f}, {dy_opt:.3f}] "
                     f"score {score:.6f}"
@@ -577,13 +587,16 @@ def lsq_reconstruct(
     rec3d[mask] = xs[0]
 
     if len(xs) == 1:
-        return (rec3d, None, None), score
+        recs = (rec3d, None, None)
     else:
         rec3d_set_1 = np.zeros(shape, dtype=np.float32)
         rec3d_set_2 = np.zeros(shape, dtype=np.float32)
         rec3d_set_1[mask] = xs[1]
         rec3d_set_2[mask] = xs[2]
-        return (rec3d, rec3d_set_1, rec3d_set_2), score
+        recs = (rec3d, rec3d_set_1, rec3d_set_2)
+    if return_refined_params:
+        return recs, score, refined_params
+    return recs, score
 
 
 def refine_tilt_psi_dy(
@@ -850,8 +863,10 @@ def refine_tilt_psi_dy(
                 logger.info(f"  Refine converged at iteration {iteration}")
             break
 
-        # Re-solve with updated parameters
-        A_data_new, _, _ = build_A_data_matrix(
+        # Re-solve with updated parameters. A new geometry can map a different
+        # set of pixels into the volume, so its matrix may have a different
+        # number of rows: use the data vector built with it, not the old one.
+        A_data_new, b_data_new, _ = build_A_data_matrix(
             image=projection_image,
             scale2d_to_3d=scale2d_to_3d,
             twist_degree=twist_degree,
@@ -873,6 +888,7 @@ def refine_tilt_psi_dy(
             cpu=cpu,
         )
 
+        b_data = b_data_new
         x_cur = _solve_system(A_data_new, b_data)
         p_0 = A_data_new @ x_cur
 
@@ -980,12 +996,14 @@ def build_A_helical_sym_matrix(
                 k = mask_indices_Z[mi]
                 j = mask_indices_Y[mi]
                 i = mask_indices_X[mi]
-                zi = int(Zi[k, j, i])
-                yi = int(Yi[k, j, i])
-                xi = int(Xi[k, j, i])
-                zj = int(Zj[k, j, i])
-                yj = int(Yj[k, j, i])
-                xj = int(Xj[k, j, i])
+                # floor, not int(): int() rounds a coordinate in (-1, 0) up to 0,
+                # which gives that point a fraction below 0 and a weight above 1
+                zi = int(np.floor(Zi[k, j, i]))
+                yi = int(np.floor(Yi[k, j, i]))
+                xi = int(np.floor(Xi[k, j, i]))
+                zj = int(np.floor(Zj[k, j, i]))
+                yj = int(np.floor(Yj[k, j, i]))
+                xj = int(np.floor(Xj[k, j, i]))
                 if zi < 0 or zi > mz - 1:
                     continue
                 if zj < 0 or zj > mz - 1:
@@ -1085,7 +1103,9 @@ def build_A_helical_sym_matrix(
                 if j_111 < 0 or j_111 > n_x - 1:
                     continue
 
-                if abs(zi - zj) < 3 or abs(yi - yj) < 3 or abs(xi - xj) < 3:
+                # skip a pair only when the two points are close in all three
+                # directions, so that their interpolation stencils would overlap
+                if abs(zi - zj) < 3 and abs(yi - yj) < 3 and abs(xi - xj) < 3:
                     continue
 
                 zir = round(Zi[k, j, i])
@@ -1132,7 +1152,7 @@ def build_A_helical_sym_matrix(
                 csr_rc_tmp_count += 1
                 csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
                 csr_col_tmp[csr_rc_tmp_count] = i_110
-                csr_data_tmp[csr_rc_tmp_count] = xf * yf * (1 - xf)
+                csr_data_tmp[csr_rc_tmp_count] = zf * yf * (1 - xf)
                 csr_rc_tmp_count += 1
                 csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
                 csr_col_tmp[csr_rc_tmp_count] = i_111
@@ -1168,7 +1188,7 @@ def build_A_helical_sym_matrix(
                 csr_rc_tmp_count += 1
                 csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
                 csr_col_tmp[csr_rc_tmp_count] = j_110
-                csr_data_tmp[csr_rc_tmp_count] = -xf * yf * (1 - xf)
+                csr_data_tmp[csr_rc_tmp_count] = -zf * yf * (1 - xf)
                 csr_rc_tmp_count += 1
                 csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
                 csr_col_tmp[csr_rc_tmp_count] = j_111
@@ -1628,12 +1648,7 @@ def build_A_data_matrix(
 
     hcsyms = list(product(hsyms, csyms))
     hcsyms.sort(key=lambda x: (abs(x[0]), x[1]))
-    from scipy.stats import qmc
-
-    qmc_method = qmc.Halton(d=1, scramble=False)
-    n = len(hcsyms)
-    indices = qmc_method.integers(l_bounds=0, u_bounds=n, n=n)
-    hcsyms = [hcsyms[int(i[0])] for i in indices]
+    hcsyms = [hcsyms[i] for i in halton_permutation(len(hcsyms))]
 
     def _process_hcsym(hci, hi, ci):
         """Process a single (h, csym) symmetry combination."""
@@ -1847,10 +1862,31 @@ def sorted_hsym_csym_pairs(twist, rise, csym, nz):
             (angle, abs(hsym1 + hsym2), abs(hsym1 - hsym2), abs(hsym1), abs(hsym2), p)
         )
     hcsym_pair_angles.sort(key=lambda x: x[:-1])
+    ret = [hcsym_pair_angles[i] for i in halton_permutation(len(hcsym_pair_angles))]
+    return ret
+
+
+def halton_permutation(n):
+    """A low-discrepancy ordering of ``range(n)`` that uses every index once.
+
+    Drawing ``n`` Halton integers in ``[0, n)`` repeats some indices and skips
+    others (``n=3`` gives ``[0, 1, 0]``). The first ``n`` Halton points are
+    distinct, so their ranks are a true permutation that keeps the same
+    spread-out visiting order (0, n/2, n/4, 3n/4, ...).
+
+    Parameters
+    ----------
+    n : int
+        Number of items.
+
+    Returns
+    -------
+    ndarray of int
+        A permutation of ``range(n)``.
+    """
+    if n <= 0:
+        return np.zeros(0, dtype=int)
     from scipy.stats import qmc
 
-    qmc_method = qmc.Halton(d=1, scramble=False)
-    n = len(hcsym_pair_angles)
-    indices = qmc_method.integers(l_bounds=0, u_bounds=n, n=n)
-    ret = [hcsym_pair_angles[int(i[0])] for i in indices]
-    return ret
+    samples = qmc.Halton(d=1, scramble=False).random(n)[:, 0]
+    return np.argsort(np.argsort(samples, kind="stable"), kind="stable")

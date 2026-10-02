@@ -84,9 +84,9 @@ class MapInfo:
             and len(self.filename)
             and pathlib.Path(self.filename).exists()
         ):
-            return get_images_from_file(self.filename)
+            return get_map_from_file(self.filename)
         if isinstance(self.url, str) and len(self.url):
-            return get_images_from_url(self.url)
+            return get_map_from_url(self.url)
         if isinstance(self.emd_id, str) and len(self.emd_id):
             emdb = helicon.dataset.EMDB()
             return emdb(self.emd_id)
@@ -105,6 +105,56 @@ def get_images_from_url(url: str):
         )
     data, apix = get_images_from_file(fileobj.name)
     return data, apix
+
+
+@helicon.cache(
+    cache_dir=str(helicon.cache_dir / "helical_lab"), expires_after=7, verbose=0
+)
+def get_map_from_url(url: str):
+    """Download a 3D map and read it with :func:`get_map_from_file`.
+
+    Parameters
+    ----------
+    url : str
+        Direct (or cloud-drive) download link of an MRC map.
+
+    Returns
+    -------
+    tuple
+        ``(data, apix)`` with ``data`` in (z, y, x) order.
+    """
+    url_final = helicon.get_direct_url(url)
+    fileobj = helicon.download_file_from_url(url_final)
+    if fileobj is None:
+        raise ValueError(
+            f"ERROR: {url} could not be downloaded. If this url points to a cloud drive file, make sure the link is a direct download link instead of a link for preview"
+        )
+    return get_map_from_file(fileobj.name)
+
+
+def get_map_from_file(mapFile: str):
+    """Read a 3D map as stored, in (z, y, x) order with its original values.
+
+    Unlike :func:`get_images_from_file`, which is meant for stacks of 2D images
+    and transposes and inverts each image when it is taller than wide, a map is
+    returned unchanged, so a non-cubic map keeps its orientation and contrast.
+
+    Parameters
+    ----------
+    mapFile : str
+        Path to an MRC map.
+
+    Returns
+    -------
+    tuple
+        ``(data, apix)``.
+    """
+    import mrcfile
+
+    with mrcfile.open(mapFile) as mrc:
+        apix = float(mrc.voxel_size.x)
+        data = np.array(mrc.data)
+    return data, round(apix, 4)
 
 
 def get_images_from_file(imageFile: str):
