@@ -332,10 +332,6 @@ def denovo3d_tab_ui():
                         width="100%",
                     ),
                     ui.layout_columns(
-                        col_widths=6,
-                        style="align-items: flex-end;",
-                    ),
-                    ui.layout_columns(
                         # ui.input_checkbox("dn_show_emdb_input_mode", "Show EMDB input mode", value=False),
                         ui.input_checkbox(
                             "dn_is_3d", "The input is a 3D map", value=False
@@ -455,10 +451,6 @@ def denovo3d_tab_ui():
                             update_on="blur",
                         ),
                         col_widths=6,
-                        style="align-items: flex-end;",
-                    ),
-                    ui.layout_columns(
-                        col_widths=12,
                         style="align-items: flex-end;",
                     ),
                     ui.tooltip(

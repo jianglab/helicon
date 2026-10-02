@@ -4983,6 +4983,33 @@ class TestReexecMacosDisplay:
         assert captured["env"]["HELICON_MACOS_IDENTITY"] == "1"
         assert captured["env"]["PYTHONHOME"] == str((tmp_path / "env").resolve())
 
+    def test_reexec_keeps_code_of_python_dash_c(self, monkeypatch, tmp_path):
+        """``python -c <code> display`` (Home's file browser button) must
+        re-run the code, not ``display`` as Python code."""
+        import helicon.helicon as cli
+
+        code = "import sys; from helicon.helicon import main; sys.exit(main())"
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.delenv("HELICON_MACOS_IDENTITY", raising=False)
+        monkeypatch.setattr(cli.sys, "argv", ["-c", "display"])
+        monkeypatch.setattr(cli.sys, "orig_argv", ["python", "-c", code, "display"])
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+        python_bin = tmp_path / "python3.14"
+        python_bin.write_bytes(b"\x0a\x0b\x0c\x0d" * 16)
+        python_bin.chmod(0o755)
+        monkeypatch.setattr(cli.sys, "executable", str(python_bin))
+        monkeypatch.setattr(cli.sys, "prefix", str(tmp_path / "env"))
+
+        captured = {}
+        monkeypatch.setattr(
+            cli.os, "execve", lambda path, cmd, env: captured.update(cmd=list(cmd))
+        )
+
+        cli._maybe_reexec_macos_display()
+
+        assert captured["cmd"][1:] == ["-c", code, "display"]
+
     def test_reexec_replaces_legacy_symlink_with_real_copy(self, monkeypatch, tmp_path):
         """A leftover ``Helicon`` symlink (from older launches) must be replaced
         by a real executable so the Dock does not resolve back to ``python``."""

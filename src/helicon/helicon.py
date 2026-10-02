@@ -36,6 +36,22 @@ class HeliconArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: error: {message}\n")
 
 
+def _interpreter_args() -> list[str]:
+    """The program the interpreter was started with, to repeat on re-exec.
+
+    Normally that is ``sys.argv[0]``, the script. After ``python -c <code>
+    display`` it is just ``-c``, and the code must be taken from
+    ``sys.orig_argv``, or the re-executed interpreter would run ``display`` as
+    Python code (this is how Home's "Open file browser" button starts it).
+    """
+    if sys.argv[:1] == ["-c"]:
+        orig = getattr(sys, "orig_argv", [])
+        if "-c" in orig[:-1]:
+            i = orig.index("-c")
+            return orig[i : i + 2]
+    return sys.argv[:1]
+
+
 def _maybe_reexec_macos_display() -> None:
     """Relaunch ``helicon display`` under a Helicon-named executable on macOS.
 
@@ -103,7 +119,7 @@ def _maybe_reexec_macos_display() -> None:
         env = os.environ.copy()
         env["HELICON_MACOS_IDENTITY"] = "1"
         env["PYTHONHOME"] = str(Path(sys.prefix).resolve())
-        cmd = [str(helicon_bin)] + sys.argv
+        cmd = [str(helicon_bin)] + _interpreter_args() + sys.argv[1:]
         os.execve(str(helicon_bin), cmd, env)
     except Exception as exc:  # pragma: no cover - macOS only, env dependent
         # Keep the original process if the identity relaunch fails. This

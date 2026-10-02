@@ -756,7 +756,6 @@ def create_layerline_image_figure(
         x_range=x_range,
         y_range=y_range,
         tools=tools_str,
-        active_drag="box_zoom",
     )
     fig.grid.visible = False
     # Lay out responsively inside a gridplot row: fit to the column so the
