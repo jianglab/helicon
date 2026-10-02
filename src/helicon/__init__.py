@@ -216,15 +216,32 @@ if has_curvelet_udct():
         curvelet_denoise_udct_tiled,
         curvelet_denoise_mct_tiled,
     )
-try:
-    from .lib.gauss import (
-        AnisotropicGaussian,
-        AnisotropicGaussianSet,
-        IsotropicGaussian,
-        IsotropicGaussianSet,
-    )
-except ImportError:
-    pass
+# The Gaussian representations need torch, which is imported only when one of
+# them is first used (PEP 562 below), not with helicon: torch bundles its own
+# OpenMP runtime, and a second libomp next to the one numpy/scipy/numba use
+# segfaults the process in __kmp_fork_barrier -- seen in the web app's HILL tab
+# on macOS, where pip's torch ships libomp.dylib. See also lib/curvelet.py.
+_LAZY_FROM_GAUSS = (
+    "AnisotropicGaussian",
+    "AnisotropicGaussianSet",
+    "IsotropicGaussian",
+    "IsotropicGaussianSet",
+)
+
+
+def __getattr__(name):
+    if name in _LAZY_FROM_GAUSS:
+        try:
+            from .lib import gauss
+        except ImportError as e:  # no torch: as if the name were not there
+            raise AttributeError(
+                f"module 'helicon' has no attribute {name!r} ({e})"
+            ) from e
+        value = getattr(gauss, name)
+        globals()[name] = value  # resolved once
+        return value
+    raise AttributeError(f"module 'helicon' has no attribute {name!r}")
+
 
 cache_dir = setup_cache_dir()
 
