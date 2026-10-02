@@ -520,3 +520,20 @@ class TestClassDiagnosis:
         r = ph.estimate_period(pairs)
         fit = ph.class_fit(pairs, r["phases"], r["period"], min_separation=10.0)
         assert np.all(np.isnan(fit))
+
+
+class TestLongRepeats:
+    """A slowly twisting filament: a repeat beyond the old fixed 1500 A."""
+
+    @pytest.fixture(scope="class")
+    def long_repeat(self):
+        # 2400 A repeat (0.71 degree twist at 4.75 A rise), 3600 A filaments
+        return make_params(n_fil=120, period=2400.0, n_seg=180, step=20.0, seed=5)
+
+    def test_found_when_the_search_reaches_it(self, long_repeat):
+        r = ph.analyze(long_repeat, n_boot=2, max_sep=360.0 * 4.75 / 0.3)
+        assert r.period == pytest.approx(2400.0, rel=0.02)
+
+    def test_missed_by_the_old_fixed_limit(self, long_repeat):
+        r = ph.analyze(long_repeat, n_boot=2, max_sep=1500.0)
+        assert r.period < 1500.0 * 1.15

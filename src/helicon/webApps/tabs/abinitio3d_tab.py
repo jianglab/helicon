@@ -48,6 +48,7 @@ BOOKMARK_DEFAULTS = {
     "ignore_blank": ("ignore_blank", True),
     "sort_abundance": ("sort_abundance", True),
     "rise": ("rise", 4.75),
+    "min_twist": ("min_twist", 0.3),
     "merge_counterparts": ("merge_counterparts", True),
     "csym": ("rot_fold", 1),
     "hand": ("map_hand", "left"),
@@ -252,6 +253,25 @@ def abinitio3d_tab_ui():
                         max=1000.0,
                         value=4.75,
                         step=0.01,
+                        update_on="blur",
+                    ),
+                    ui.input_numeric(
+                        "min_twist",
+                        ui.span(
+                            "Smallest |twist| (\u00b0)",
+                            _info(
+                                "With the rise, sets the longest repeat the pitch "
+                                "estimate searches: 360\u00b0 \u00d7 rise / "
+                                "|twist| (4.75 \u00c5 and 0.3\u00b0: 5700 "
+                                "\u00c5). Any C symmetry only shortens the repeat "
+                                "of a given twist. Lower it for filaments that "
+                                "twist very slowly."
+                            ),
+                        ),
+                        min=0.05,
+                        max=30.0,
+                        value=0.3,
+                        step=0.05,
                         update_on="blur",
                     ),
                     ui.input_checkbox(
@@ -1021,6 +1041,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             progress=lambda msg: progress.inc(1, message=msg),
             counterparts=counterparts,
             image_apix=job["apix"],
+            max_sep=job["max_repeat"],
         )
 
     def _phase_apply(job, result):
@@ -1071,6 +1092,19 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         label="Class-azimuth pitch estimate",
     )
 
+    def _max_repeat():
+        """The longest repeat the pitch estimate searches, in A.
+
+        One repeat turns the helix by 360 degrees at the C1 twist, the largest
+        of the twists a repeat allows: 360 * rise / |smallest twist|.
+        """
+        rise = helicon.shiny.clamp_number(input.rise(), 4.75, 0.01, 1000.0, float)
+        twist = helicon.shiny.clamp_number(
+            abs(input.min_twist() or 0.3), 0.3, 0.05, 30.0, float
+        )
+        # the scan starts at 100 A
+        return max(200.0, 360.0 * rise / twist)
+
     @reactive.effect
     @reactive.event(input.phase_run)
     def run_phase_pitch():
@@ -1110,6 +1144,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 # binding
                 n_boot=helicon.shiny.clamp_number(input.phase_n_boot(), 20, 2, 200),
                 merge=merge,
+                max_repeat=_max_repeat(),
                 ids=list(displayed_class_ids()) if merge else None,
                 images=list(displayed_class_images()) if merge else None,
                 apix=float(data_all()[1]),
@@ -1621,8 +1656,10 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                     size=size,
                     color=fit,
                     colorscale="Viridis",
+                    # the full 0-1 range, so the colours mean the same on
+                    # every data set
                     cmin=0.0,
-                    cmax=max(0.2, float(fit.max())),
+                    cmax=1.0,
                     colorbar=dict(title="fit", thickness=10, len=0.6),
                 ),
                 hovertemplate=(

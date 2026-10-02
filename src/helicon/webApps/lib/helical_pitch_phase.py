@@ -1970,7 +1970,7 @@ def analyze(
     pairs = prepare_pairs(used, class_ids=class_ids, **kw)
     if len(pairs.D) == 0:
         raise ValueError("no same-polarity segment pairs in the selected filaments")
-    step("scanning periods")
+    step(f"scanning repeats up to {pairs.max_sep:.0f} \u00c5")
     est = estimate_period(pairs, length_scale=length_scale)
     step("syncing filament directions")
     est, flipped = sync_filament_directions(pairs, est, length_scale=length_scale)

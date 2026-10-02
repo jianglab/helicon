@@ -254,3 +254,46 @@ class TestRelionOnAHost:
         run = src[src.index("def run_relion") :]
         run = run[: run.index("relion_task.invoke(")]
         assert "deployment.refuse_server_mode()" in run
+
+
+class TestRepeatSearchRange:
+    """The longest repeat searched comes from the rise and the smallest
+    twist, not a fixed 1500 A."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_the_input_is_in_parameters_and_bookmarked(self):
+        src = self._src()
+        params = src[src.index('"Parameters"') :]
+        params = params[: params.index('"3D map from classes"')]
+        assert '"min_twist"' in params
+        assert abinitio3d_tab.BOOKMARK_DEFAULTS["min_twist"] == ("min_twist", 0.3)
+        assert re.search(r'"min_twist",.*?value=0\.3,', params, re.S)
+
+    def test_the_range_follows_rise_and_twist(self):
+        src = self._src()
+        helper = src[src.index("def _max_repeat") :]
+        helper = helper[: helper.index("def run_phase_pitch")]
+        assert "input.rise()" in helper and "input.min_twist()" in helper
+        assert "360.0 * rise / twist" in helper
+        run = src[src.index("@reactive.event(input.phase_run)") :]
+        assert (
+            "max_repeat=_max_repeat()" in run[: run.index("phase_task.invoke(") + 600]
+        )
+        work = src[src.index("def _phase_work") :]
+        work = work[: work.index("def _phase_apply")]
+        assert 'max_sep=job["max_repeat"]' in work
+        assert "1500" not in src
+
+
+class TestRingColours:
+    def test_the_fit_colour_always_spans_0_to_1(self):
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        plot = src[src.index("def phase_circle_plot") :]
+        plot = plot[: plot.index("@render.")]
+        assert "cmin=0.0" in plot and "cmax=1.0" in plot
