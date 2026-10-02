@@ -142,6 +142,21 @@ if (!window.__heliconSetDisabled) {
 )
 
 
+# The smallest-twist box and the Estimate pitch button on one row, the box
+# narrow and both aligned at the bottom.
+_PITCH_ROW_CSS = ui.tags.style(
+    """
+.ab-pitch-row {
+  display: grid;
+  grid-template-columns: minmax(9rem, 11rem) 1fr;
+  gap: 8px;
+  align-items: end;
+}
+.ab-pitch-row > .shiny-input-container { margin-bottom: 0; }
+"""
+)
+
+
 @module.ui
 def abinitio3d_tab_ui():
     return ui.layout_sidebar(
@@ -253,25 +268,6 @@ def abinitio3d_tab_ui():
                         max=1000.0,
                         value=4.75,
                         step=0.01,
-                        update_on="blur",
-                    ),
-                    ui.input_numeric(
-                        "min_twist",
-                        ui.span(
-                            "Smallest |twist| (\u00b0)",
-                            _info(
-                                "With the rise, sets the longest repeat the pitch "
-                                "estimate searches: 360\u00b0 \u00d7 rise / "
-                                "|twist| (4.75 \u00c5 and 0.3\u00b0: 5700 "
-                                "\u00c5). Any C symmetry only shortens the repeat "
-                                "of a given twist. Lower it for filaments that "
-                                "twist very slowly."
-                            ),
-                        ),
-                        min=0.05,
-                        max=30.0,
-                        value=0.3,
-                        step=0.05,
                         update_on="blur",
                     ),
                     ui.input_checkbox(
@@ -457,6 +453,28 @@ def abinitio3d_tab_ui():
                 # would otherwise shrink every plot and row to fit its height
                 ui.div(
                     ui.div(
+                        # the smallest twist sets how far the estimate searches,
+                        # so it sits with the button that starts it
+                        ui.input_numeric(
+                            "min_twist",
+                            ui.span(
+                                "Smallest |twist| (\u00b0)",
+                                _info(
+                                    "With the rise (Parameters), sets the longest "
+                                    "repeat the pitch estimate searches: "
+                                    "360\u00b0 \u00d7 rise / |twist| (4.75 \u00c5 "
+                                    "and 0.3\u00b0: 5700 \u00c5). Any C symmetry "
+                                    "only shortens the repeat of a given twist. "
+                                    "Lower it for filaments that twist very slowly."
+                                ),
+                            ),
+                            min=0.05,
+                            max=30.0,
+                            value=0.3,
+                            step=0.05,
+                            update_on="blur",
+                            width="100%",
+                        ),
                         _tip(
                             ui.input_task_button(
                                 "phase_run",
@@ -474,6 +492,8 @@ def abinitio3d_tab_ui():
                             "the ring, and each long filament's own repeat.",
                         ),
                         _SET_DISABLED_JS,
+                        _PITCH_ROW_CSS,
+                        class_="ab-pitch-row",
                     ),
                     ui.output_ui("phase_summary"),
                     # takes no room, and is never hidden itself, so that it keeps

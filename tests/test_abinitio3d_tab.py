@@ -265,13 +265,19 @@ class TestRepeatSearchRange:
 
         return inspect.getsource(abinitio3d_tab)
 
-    def test_the_input_is_in_parameters_and_bookmarked(self):
+    def test_the_input_sits_left_of_the_estimate_button(self):
         src = self._src()
+        row = src[
+            src.index('class_="ab-pitch-row"')
+            - 3000 : src.index('class_="ab-pitch-row"')
+        ]
+        row = row[row.rindex("ui.div(") :]
+        assert row.index('"min_twist"') < row.index('"phase_run"')
+        assert re.search(r'"min_twist",.*?value=0\.3,', row, re.S)
         params = src[src.index('"Parameters"') :]
         params = params[: params.index('"3D map from classes"')]
-        assert '"min_twist"' in params
+        assert '"min_twist"' not in params
         assert abinitio3d_tab.BOOKMARK_DEFAULTS["min_twist"] == ("min_twist", 0.3)
-        assert re.search(r'"min_twist",.*?value=0\.3,', params, re.S)
 
     def test_the_range_follows_rise_and_twist(self):
         src = self._src()
