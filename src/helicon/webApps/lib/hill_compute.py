@@ -127,10 +127,9 @@ def compute_layer_line_positions(
         sx = table[np.clip(np.abs(ll_i), 0, len(table) - 1)]
         if tilt:
             sy = np.array(sy, dtype=np.float32) * tf
-            sx = np.sqrt(
-                np.power(np.array(sx, dtype=np.float32), 2) - np.power(sy * tf2, 2)
-            )
-            sx[np.isnan(sx)] = 1e-6
+            # layer lines that do not reach the tilted plane are put at the axis
+            sx2 = np.power(np.array(sx, dtype=np.float32), 2) - np.power(sy * tf2, 2)
+            sx = np.where(sx2 >= 0, np.sqrt(np.maximum(sx2, 0)), 1e-6)
         px = list(sx) + list(-sx)
         py = list(sy) + list(sy)
         n_vals = list(ll_i) + list(ll_i)
