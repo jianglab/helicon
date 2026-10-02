@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 
 import helicon
 from helicon.lib.exceptions import HeliconError, HeliconIOError
+from helicon.lib.gui.workers import release_threads
 from helicon.lib.images2star_engine import (
     apply_options,
     gui_operation_specs,
@@ -368,6 +369,14 @@ class _DataFramePreviewModel(QAbstractTableModel):
         if value is None:
             return None
         text = str(value).strip()
+        # bool counts as numeric for pandas, so test it first.
+        if pd.api.types.is_bool_dtype(dtype):
+            lowered = text.lower()
+            if lowered in ("1", "true", "yes", "on"):
+                return True
+            if lowered in ("0", "false", "no", "off"):
+                return False
+            return None
         if pd.api.types.is_numeric_dtype(dtype):
             if text == "":
                 return float("nan") if pd.api.types.is_float_dtype(dtype) else None
@@ -378,13 +387,6 @@ class _DataFramePreviewModel(QAbstractTableModel):
             if pd.api.types.is_integer_dtype(dtype):
                 return int(number) if number.is_integer() else None
             return number
-        if pd.api.types.is_bool_dtype(dtype):
-            lowered = text.lower()
-            if lowered in ("1", "true", "yes", "on"):
-                return True
-            if lowered in ("0", "false", "no", "off"):
-                return False
-            return None
         return text
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
@@ -1580,8 +1582,22 @@ class Images2StarDialog(QDialog):
         else:
             self._set_status(f"Copied column label: {text}")
 
+    def _release_workers(self) -> None:
+        """Hand still-running workers over so closing never destroys them.
+
+        With ``WA_DeleteOnClose`` the dialog and its child workers are
+        deleted on close; :func:`release_threads` re-parents any worker that
+        is still running so its thread object outlives the dialog.
+        """
+        release_threads(self._workers)
+        self._workers = [w for w in self._workers if w.parent() is self]
+
+    def done(self, result: int) -> None:
+        """Release workers before Close / Esc (``reject``) or ``accept``."""
+        self._release_workers()
+        super().done(result)
+
     def closeEvent(self, event) -> None:
-        """Give background workers a moment to finish before closing."""
-        for worker in self._workers:
-            worker.wait(2000)
+        """Release background workers before the window closes."""
+        self._release_workers()
         super().closeEvent(event)

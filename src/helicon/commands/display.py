@@ -1509,17 +1509,17 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
     def _on_brightness(val):
         gallery.set_brightness(val / 100.0)
         panel._brightness_val.setText(f"{gallery._brightness:.2f}")
-        _refresh_histogram()
+        _update_histogram_curve()
 
     def _on_contrast(val):
         gallery.set_contrast(val / 100.0)
         panel._contrast_val.setText(f"{gallery._contrast:.2f}")
-        _refresh_histogram()
+        _update_histogram_curve()
 
     def _on_gamma(val):
         gallery.set_gamma(val / 100.0)
         panel._gamma_val.setText(f"{gallery._gamma:.2f}")
-        _refresh_histogram()
+        _update_histogram_curve()
 
     def _on_histogram_bcg(brightness, contrast, gamma):
         """Apply curve drags through the same quantized values as the sliders."""
@@ -1550,10 +1550,22 @@ def _wrap_gallery_with_panel(gallery: "ImageGalleryWidget") -> "QWidget":
         gallery.set_log_transform(checked)
         _refresh_histogram()
 
+    def _update_histogram_curve():
+        # Brightness / contrast / gamma do not change the pixel samples, so
+        # only the transfer curve is redrawn; frames are not re-read.
+        if panel._histogram_widget._bins is None:
+            _refresh_histogram()
+        else:
+            panel._histogram_widget.set_bcg(
+                gallery._brightness, gallery._contrast, gallery._gamma
+            )
+
     def _refresh_histogram():
         if gallery.has_data() and panel._histogram_chk.isChecked():
+            # Read through the gallery's frame cache when it has one.
+            read_fn = getattr(gallery, "_frame", None) or gallery._read_fn
             panel._histogram_widget.update_histogram(
-                gallery._read_fn,
+                read_fn,
                 gallery._n,
                 gallery._brightness,
                 gallery._contrast,
@@ -1780,7 +1792,9 @@ def _open_image_ref_stack(
         # lazy behaviour we want.
         contrast = _auto_contrast(frame)
 
-    lazy = _LazyStarStack(entries, (n,) + first_shape, dtype)
+    # ``first_shape`` is (nx, ny[, nz]); each entry is one 2D frame, which
+    # numpy (and napari) index as (ny, nx).
+    lazy = _LazyStarStack(entries, (n, first_shape[1], first_shape[0]), dtype)
 
     if mode == "gallery":
         _open_gallery(
@@ -1801,7 +1815,7 @@ def _open_image_ref_stack(
     layer = viewer.add_image(
         lazy,
         name=name,
-        scale=(1.0,) + (first_apix,) * len(first_shape),
+        scale=(1.0, first_apix, first_apix),
         contrast_limits=contrast,
         interpolation2d="linear",
         interpolation3d="linear",
@@ -2537,18 +2551,37 @@ def main(args: argparse.Namespace) -> None:
     if hasattr(signal, "SIGHUP"):
         _exit_signals.append(signal.SIGHUP)
     for signum in _exit_signals:
-
-        def _handle_signal(sig=signum):
-            _terminate_web_apps()
-            signal.signal(sig, signal.SIG_DFL)
-            os.kill(os.getpid(), sig)
-
         try:
-            signal.signal(signum, _handle_signal)
+            signal.signal(signum, _make_exit_signal_handler(signum))
         except (ValueError, OSError):
             pass
 
     app.exec()
+
+
+def _make_exit_signal_handler(sig: int):
+    """Build a handler that stops the web apps, then re-raises ``sig``.
+
+    Parameters
+    ----------
+    sig : int
+        The signal the handler is installed for.
+
+    Returns
+    -------
+    callable
+        ``handler(signum, frame)``, the signature ``signal.signal`` calls
+        with: it terminates the web-app servers, restores the default
+        disposition of ``sig`` and re-sends ``sig`` to this process.
+    """
+    import signal
+
+    def _handle_signal(signum, frame):
+        _terminate_web_apps()
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+
+    return _handle_signal
 
 
 def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

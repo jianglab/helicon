@@ -42,6 +42,8 @@ import math
 
 import numpy as np
 
+from helicon.lib.gui.caches import LRUCache
+
 
 def _tile_contrast(frame: np.ndarray) -> tuple[float, float]:
     """Black and white points of a gallery tile.
@@ -856,6 +858,15 @@ class ImageGalleryWidget(QWidget):
     image_activated = Signal(int)
     panel_toggle_requested = Signal()
 
+    # Smallest zoom: the longer side of a tile stays at least this many
+    # screen pixels, so zooming out never asks for thousands of tiles.
+    MIN_TILE_PX = 16
+    # Bounds of the raw-frame and rendered-pixmap caches.
+    FRAME_CACHE_ITEMS = 4096
+    FRAME_CACHE_BYTES = 512 * 2**20
+    THUMB_CACHE_ITEMS = 4096
+    THUMB_CACHE_BYTES = 256 * 2**20
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(200, 200)
@@ -881,7 +892,15 @@ class ImageGalleryWidget(QWidget):
         self._scroll_y = 0
         self._panel = GalleryPanel(0, 1, 1)
         self._coords: dict[int, QRect] = {}
-        self._thumb_cache: dict[int, QPixmap] = {}
+        # Raw frames (as read) and rendered pixmaps are cached separately:
+        # a brightness/contrast/gamma change only re-renders the pixmaps,
+        # it does not re-read the frames. Both caches are bounded.
+        self._frame_cache = LRUCache(
+            max_items=self.FRAME_CACHE_ITEMS, max_bytes=self.FRAME_CACHE_BYTES
+        )
+        self._thumb_cache = LRUCache(
+            max_items=self.THUMB_CACHE_ITEMS, max_bytes=self.THUMB_CACHE_BYTES
+        )
         self._drag_last = None
         self._dragged = False
         self._sb_width = 12
@@ -986,10 +1005,22 @@ class ImageGalleryWidget(QWidget):
         self._source_name = source_name
         self._panel = GalleryPanel(self._n, self._img_w, self._img_h)
         self._coords = {}
-        self._thumb_cache = {}
+        self._frame_cache.clear()
+        self._thumb_cache.clear()
         self._scroll_y = 0
         self._selected_idx = None
 
+        self.update()
+
+    def invalidate_frames(self) -> None:
+        """Drop the cached frames and pixmaps and repaint.
+
+        Call this when ``read_fn`` starts returning different data for the
+        same indices (re-sorting, a new slab thickness, ...). Display
+        adjustments only need the pixmap cache cleared.
+        """
+        self._frame_cache.clear()
+        self._thumb_cache.clear()
         self.update()
 
     def has_data(self) -> bool:
@@ -1026,6 +1057,9 @@ class ImageGalleryWidget(QWidget):
             Grayscale thumbnail.
         """
         if self._log_transform:
+            # Work in float: ``frame - frame.min()`` and ``log1p`` overflow or
+            # wrap around for integer frames.
+            frame = np.asarray(frame, dtype=np.float64)
             frame = np.log1p(frame - frame.min())
         black, white = _tile_contrast(frame)
         arr = frame.astype(np.float64)
@@ -1085,6 +1119,34 @@ class ImageGalleryWidget(QWidget):
         available = max(1, canvas_w - self._panel.min_sep)
         return max(1e-3, min(20.0, available / max(1, self._img_w)))
 
+    def _min_zoom_scale(self) -> float:
+        """Smallest zoom scale: the longer tile side stays ``MIN_TILE_PX``."""
+        longest = max(1, self._img_w, self._img_h)
+        return max(1e-3, self.MIN_TILE_PX / longest)
+
+    def _clamp_zoom_scale(self, scale: float) -> float:
+        """Clamp a requested zoom scale to the allowed range.
+
+        The lower bound keeps tiles at least ``MIN_TILE_PX`` on screen (a
+        paint then reads a bounded number of frames); the upper bound keeps
+        one column visible and never exceeds 20x. Fitting one column wins
+        over the lower bound.
+        """
+        scale = max(scale, self._min_zoom_scale())
+        if self._img_w > 0:
+            available = self._canvas_width() - self._panel.min_sep
+            max_fit = available / max(1, self._img_w)
+            scale = min(scale, max(max_fit, 1e-3))
+        return min(scale, 20.0)
+
+    def _frame(self, i: int) -> np.ndarray:
+        """Return frame ``i``, reading it through the bounded frame cache."""
+        frame = self._frame_cache.get(i)
+        if frame is None:
+            frame = self._read_fn(i)
+            self._frame_cache[i] = frame
+        return frame
+
     def _max_scroll(self, view_h: int) -> int:
         """Maximum vertical scroll offset (negative) for the current layout."""
         self._panel.visible_row_col(
@@ -1103,10 +1165,7 @@ class ImageGalleryWidget(QWidget):
         """Zoom by ``factor`` about the canvas point ``(cx, cy)``."""
         if self._img_w <= 0:
             return
-        new_scale = self._scale * factor
-        available = self._canvas_width() - self._panel.min_sep
-        max_fit = available / max(1, self._img_w)
-        new_scale = min(max(new_scale, 1e-3), max(max_fit, 1e-3), 20.0)
+        new_scale = self._clamp_zoom_scale(self._scale * factor)
         if new_scale == self._scale:
             return
 
@@ -1208,13 +1267,13 @@ class ImageGalleryWidget(QWidget):
                     # selected thumbnail; others use identity values.
                     if self._adjust_scope == "selected" and i != self._selected_idx:
                         self._thumb_cache[i] = self._to_thumb(
-                            self._read_fn(i),
+                            self._frame(i),
                             brightness=0.0,
                             contrast=1.0,
                             gamma=1.0,
                         )
                     else:
-                        self._thumb_cache[i] = self._to_thumb(self._read_fn(i))
+                        self._thumb_cache[i] = self._to_thumb(self._frame(i))
                 thumb = self._thumb_cache[i]
                 painter.drawPixmap(tx, ty, draw_w, draw_h, thumb)
                 self._coords[i] = QRect(tx, ty, draw_w, draw_h)
@@ -1252,13 +1311,7 @@ class ImageGalleryWidget(QWidget):
         if event.modifiers() & Qt.ControlModifier:
             delta = event.angleDelta().y()
             factor = 1.1 if delta > 0 else 1.0 / 1.1
-            new_scale = self._scale * factor
-            if self._img_w > 0:
-                available = self._canvas_width() - self._panel.min_sep
-                max_fit = available / max(1, self._img_w)
-                new_scale = min(new_scale, max(max_fit, 1e-3))
-            new_scale = min(new_scale, 20.0)
-            self._scale = new_scale
+            self._scale = self._clamp_zoom_scale(self._scale * factor)
             self.update()
             event.accept()
             return
@@ -2364,31 +2417,48 @@ class OrthogonalViewerWidget(QWidget):
         x, y, z, val = voxel
         views[panel_idx].set_hover_tip(self._format_hover_tip(x, y, z, val))
 
-    def _on_pan(self, panel_idx: int, dpx: int, dpy: int) -> None:
-        """Linked panning: dragging in one view shifts the other two to keep
-        corresponding regions visible, matching IMOD's XYZ window behavior."""
-        views = [self._xy_view, self._xz_view, self._yz_view]
-        view = views[panel_idx]
+    # (horizontal, vertical) volume axis of each panel: Z panel shows (x, y),
+    # X panel (z, y), Y panel (x, z) -- the same order as ``set_axes``.
+    _PANEL_AXES = (("x", "y"), ("z", "y"), ("x", "z"))
+
+    @staticmethod
+    def _view_scale(view) -> float:
+        """Screen pixels per voxel of ``view`` (0 if it has no image)."""
         if view._image is None:
-            return
+            return 0.0
         ih, iw = view._image.shape[:2]
         w, h = view.width(), view.height()
-        scale = min(w / max(iw, 1), h / max(ih, 1)) * view._zoom
+        return min(w / max(iw, 1), h / max(ih, 1)) * view._zoom
+
+    def _on_pan(self, panel_idx: int, dpx: int, dpy: int) -> None:
+        """Linked panning: dragging in one view shifts the other two to keep
+        corresponding regions visible, matching IMOD's XYZ window behavior.
+
+        A drag moves the dragged panel's two volume axes; every other panel
+        showing one of those axes pans along it by the same distance in
+        voxels (converted to that panel's screen scale).
+        """
+        views = [self._xy_view, self._xz_view, self._yz_view]
+        view = views[panel_idx]
+        scale = self._view_scale(view)
         if scale < 1e-9:
             return
 
         view._pan_x += dpx
         view._pan_y += dpy
 
-        if panel_idx == 0:
-            self._xz_view._pan_x += dpx
-            self._yz_view._pan_y += dpy
-        elif panel_idx == 1:
-            self._xy_view._pan_x += dpx
-            self._yz_view._pan_y += dpy
-        else:
-            self._xy_view._pan_y += dpx
-            self._xz_view._pan_y += dpy
+        # Shift in voxels along each axis the dragged panel shows.
+        h_axis, v_axis = self._PANEL_AXES[panel_idx]
+        shift = {h_axis: dpx / scale, v_axis: dpy / scale}
+        for other_idx, other in enumerate(views):
+            if other_idx == panel_idx:
+                continue
+            other_scale = self._view_scale(other) or scale
+            oh_axis, ov_axis = self._PANEL_AXES[other_idx]
+            if oh_axis in shift:
+                other._pan_x += shift[oh_axis] * other_scale
+            if ov_axis in shift:
+                other._pan_y += shift[ov_axis] * other_scale
 
         for v in views:
             v.update()

@@ -164,46 +164,78 @@ def _save_geometry(dock, viewer):
 
 
 class _LazyStarStack:
-    """Lazy array that reads individual images from star file references on demand."""
+    """Lazy array that reads individual images from star file references on demand.
+
+    Recently read frames are kept in a bounded LRU cache
+    (``CACHE_ITEMS`` frames, ``CACHE_BYTES`` bytes).
+    """
+
+    CACHE_ITEMS = 1024
+    CACHE_BYTES = 512 * 2**20
 
     def __init__(self, entries: list[tuple[int, str, float]], shape: tuple, dtype):
+        from helicon.lib.gui.caches import LRUCache
+
         self._entries = entries
         self.shape = shape
         self.ndim = len(shape)
         self.dtype = dtype
-        self._cache: dict[int, object] = {}
+        self._cache = LRUCache(max_items=self.CACHE_ITEMS, max_bytes=self.CACHE_BYTES)
+
+    def _frame(self, idx: int):
+        """Return frame ``idx`` (0-based, already wrapped), via the cache."""
+        frame = self._cache.get(idx)
+        if frame is None:
+            frame = self._read(idx)
+            self._cache[idx] = frame
+        return frame
 
     def __getitem__(self, key):
+        import numbers
+
         import numpy as np
 
-        if isinstance(key, int):
-            key = key % self.shape[0]
-            if key not in self._cache:
-                self._cache[key] = self._read(key)
-            return self._cache[key]
+        if isinstance(key, numbers.Integral):
+            return self._frame(int(key) % self.shape[0])
 
         if isinstance(key, slice):
             indices = range(*key.indices(self.shape[0]))
-            return np.stack([self._read(i) for i in indices])
+            return np.stack([self._frame(i) for i in indices])
 
         if isinstance(key, tuple):
-            if len(key) == 1:
-                return self[key[0]]
-            return np.stack(
-                [self._read(i)[key[1:]] for i in range(*key[0].indices(self.shape[0]))]
-            )
+            if len(key) == 0:
+                return self[slice(None)]
+            first, rest = key[0], key[1:]
+            if isinstance(first, numbers.Integral):
+                frame = self[first]
+                return frame[rest] if rest else frame
+            if isinstance(first, slice):
+                indices = range(*first.indices(self.shape[0]))
+            else:
+                indices = np.arange(self.shape[0])[first]
+            return np.stack([self._frame(int(i))[rest] for i in indices])
 
         raise TypeError(f"unsupported key type: {type(key)}")
 
     def _read(self, idx: int):
         import mrcfile
+        import numpy as np
 
         frame_idx_0based, mrc_path, apix = self._entries[idx]
-        with mrcfile.open(mrc_path, permissive=True) as mrc:
-            data = mrc.data
-            if data.ndim == 2:
-                return data
-            return data[frame_idx_0based]
+        try:
+            # Memory-map so only the requested frame is read from the stack.
+            with mrcfile.mmap(mrc_path, mode="r", permissive=True) as mrc:
+                data = mrc.data
+                if data.ndim == 2:
+                    return np.array(data)
+                return np.array(data[frame_idx_0based])
+        except Exception:
+            # Not memory-mappable (e.g. compressed): read it whole.
+            with mrcfile.open(mrc_path, permissive=True) as mrc:
+                data = mrc.data
+                if data.ndim == 2:
+                    return data
+                return data[frame_idx_0based]
 
     @property
     def nbytes(self):

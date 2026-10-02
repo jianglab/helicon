@@ -41,6 +41,7 @@ import mrcfile
 from helicon.lib.gui.gallery_widget import OrthogonalViewerWidget
 from helicon.lib.images2star_engine import parse_operation_value
 from helicon.lib.gui.images2star_widget import _OperationStackModel
+from helicon.lib.gui.workers import release_threads
 from helicon.lib.proc3d_engine import (
     apply_options,
     gui_operation_specs,
@@ -967,8 +968,22 @@ class Proc3dDialog(QDialog):
         self._btn_save.setEnabled(True)
         self._set_status(f"Save failed: {message}", error=True)
 
+    def _release_workers(self) -> None:
+        """Hand still-running workers over so closing never destroys them.
+
+        With ``WA_DeleteOnClose`` the dialog and its child workers are
+        deleted on close; :func:`release_threads` re-parents any worker that
+        is still running so its thread object outlives the dialog.
+        """
+        release_threads(self._workers)
+        self._workers = [w for w in self._workers if w.parent() is self]
+
+    def done(self, result: int) -> None:
+        """Release workers before Close / Esc (``reject``) or ``accept``."""
+        self._release_workers()
+        super().done(result)
+
     def closeEvent(self, event) -> None:
-        """Give background workers a moment to finish before closing."""
-        for worker in self._workers:
-            worker.wait(2000)
+        """Release background workers before the window closes."""
+        self._release_workers()
         super().closeEvent(event)

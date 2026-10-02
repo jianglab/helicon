@@ -300,7 +300,9 @@ def _open_text_window(path, reuse_window=None):
 def _open_html(viewer, path: str) -> None:
     import webbrowser
 
-    webbrowser.open(f"file://{path}")
+    from pathlib import Path
+
+    webbrowser.open(Path(path).resolve().as_uri())
 
 
 def _open_pdf(viewer, path: str) -> None:
@@ -600,14 +602,13 @@ def _open_bild(viewer, path: str) -> None:
                 # ``open`` keyword (8th field) leaves the cylinder uncapped.
                 capped = not (len(parts) > 8 and parts[8] == "open")
                 verts, faces = _capped_cylinder_mesh((x1, y1, z1), (x2, y2, z2), r)
-                if not capped:
-                    # Drop the two end-cap fans (last 2 * segments triangles);
-                    # approximate by rebuilding an uncapped tube.
-                    n = len(verts)
-                    segs = (n - 4) // 2
-                    side_faces = faces[: 2 * segs]
-                    verts = verts[: 2 * segs]
-                    faces = side_faces
+                if not capped and len(verts):
+                    # Drop the two end-cap fans and their centre vertices
+                    # (the last two). Side and cap triangles are interleaved,
+                    # so keep the faces that use only ring vertices.
+                    n_ring = len(verts) - 2
+                    faces = faces[(faces < n_ring).all(axis=1)]
+                    verts = verts[:n_ring]
                 meshes.append((verts, faces, current_color))
             elif line.startswith(".sphere"):
                 parts = line.split()

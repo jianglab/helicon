@@ -861,7 +861,33 @@ class FileBrowserModel(QStandardItemModel):
         # a previous load are discarded via this epoch so stale results never
         # land in the new model.
         self._epoch = 0
+        # filepath -> row index for _row_for_filepath; rebuilt lazily after
+        # any change to the rows (insert, remove, sort, reset).
+        self._row_index: dict[str, int] = {}
+        self._row_index_dirty = True
+        for signal in (
+            self.rowsInserted,
+            self.rowsRemoved,
+            self.rowsMoved,
+            self.layoutChanged,
+            self.modelReset,
+        ):
+            signal.connect(self._invalidate_row_index)
         self._load_directory(root_path)
+
+    def _invalidate_row_index(self, *_args) -> None:
+        """Mark the filepath -> row index stale after the rows changed."""
+        self._row_index_dirty = True
+
+    def _rebuild_row_index(self) -> None:
+        """Rebuild the filepath -> row index from the Name column."""
+        index: dict[str, int] = {}
+        for row in range(self.rowCount()):
+            path = self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
+            if path is not None:
+                index.setdefault(path, row)
+        self._row_index = index
+        self._row_index_dirty = False
 
     def _matches_filter(self, name: str) -> bool:
         return _name_matches_filter(name, self._filter_pattern, self._use_regex)
@@ -1069,14 +1095,25 @@ class FileBrowserModel(QStandardItemModel):
                 apix_item.setData(0, ROLE_SORT)
 
     def _row_for_filepath(self, filepath: str) -> int:
-        """Return the model row containing *filepath*, or -1 if not found."""
-        for row in range(self.rowCount()):
-            if (
-                self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
-                == filepath
-            ):
-                return row
-        return -1
+        """Return the model row containing *filepath*, or -1 if not found.
+
+        Uses a cached filepath -> row index (rebuilt after the rows change),
+        so applying many worker results stays linear in the number of rows.
+        """
+        if self._row_index_dirty:
+            self._rebuild_row_index()
+        row = self._row_index.get(filepath, -1)
+        if row < 0:
+            return -1
+        if (
+            row >= self.rowCount()
+            or self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
+            != filepath
+        ):
+            # Rows changed without a signal we track: rebuild once.
+            self._rebuild_row_index()
+            row = self._row_index.get(filepath, -1)
+        return row
 
     def refresh(self) -> None:
         self._file_infos.clear()
@@ -1863,12 +1900,17 @@ class FolderBrowserWidget(QMainWindow):
         try:
             import mrcfile
 
-            with mrcfile.open(path, permissive=True) as mrc:
-                return (
-                    mrc.data is not None
-                    and mrc.data.ndim == 3
-                    and mrc.data.shape[0] > 1
-                )
+            # Read only the header: the data block can be gigabytes.
+            with mrcfile.open(path, permissive=True, header_only=True) as mrc:
+                header = mrc.header
+                nz = int(header.nz)
+                mz = int(header.mz)
+                ispg = int(header.ispg)
+            # A volume stack (space group 401-630 with several volumes) is
+            # 4D, not a single volume.
+            if 401 <= ispg <= 630 and 0 < mz < nz:
+                return False
+            return nz > 1
         except Exception:
             return False
 
@@ -2540,14 +2582,47 @@ class FolderBrowserWidget(QMainWindow):
         super().closeEvent(event)
 
 
-@cache(
-    cache_dir=str(setup_cache_dir() / "file_browser"), expires_after=timedelta(days=7)
-)
 def _folder_is_helical(folder: str) -> bool:
     """Check if any ``model.star`` in *folder* has ``rlnIsHelix = 1``.
 
-    The result is cached for one week so repeated file selections within the
-    same RELION job folder do not re-scan the STAR header.
+    The answer is cached on disk so repeated file selections within the same
+    RELION job folder do not re-scan the STAR header. The cache key includes
+    the name, size and modification time of every ``*model.star`` file, so a
+    running job that writes a new (helical) ``model.star`` is re-checked
+    instead of returning a stale answer.
+    """
+    try:
+        signature = tuple(
+            sorted(
+                (f.name, f.stat().st_size, f.stat().st_mtime_ns)
+                for f in Path(folder).glob("*model.star")
+            )
+        )
+    except Exception:
+        signature = ()
+    if not signature:
+        return False
+    return _folder_is_helical_cached(folder, signature)
+
+
+@cache(
+    cache_dir=str(setup_cache_dir() / "file_browser"), expires_after=timedelta(days=7)
+)
+def _folder_is_helical_cached(folder: str, signature: tuple) -> bool:
+    """Scan the ``*model.star`` files of *folder* for ``rlnIsHelix = 1``.
+
+    Parameters
+    ----------
+    folder : str
+        Folder to scan.
+    signature : tuple
+        ``(name, size, mtime_ns)`` of each ``*model.star`` file; only used
+        as part of the cache key.
+
+    Returns
+    -------
+    bool
+        True if any of the files marks the job as helical.
     """
     try:
         folder_path = Path(folder)

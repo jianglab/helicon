@@ -20,6 +20,30 @@ from typing import Any, Callable
 import numpy as np
 
 
+def _open_mrc(path):
+    """Open an MRC file memory-mapped, or fully when it cannot be mapped.
+
+    Memory mapping reads just the slices used; a compressed file (``.gz``,
+    ``.bz2``) cannot be mapped and is read whole instead.
+
+    Parameters
+    ----------
+    path : str or Path
+        The MRC file.
+
+    Returns
+    -------
+    mrcfile.mrcfile.MrcFile
+        An open file, to be used as a context manager.
+    """
+    import mrcfile
+
+    try:
+        return mrcfile.mmap(path, mode="r", permissive=True)
+    except ValueError:
+        return mrcfile.open(path, mode="r", permissive=True)
+
+
 class BaseGallery:
     """Base class for all gallery types.
 
@@ -339,7 +363,8 @@ class StackGallery(BaseGallery):
         self._img_w, self._img_h = first_shape[0], first_shape[1]
         self._apix = first_apix
 
-        stack_shape = (self._n,) + first_shape
+        # first_shape is (nx, ny[, nz]); frames are numpy (ny, nx).
+        stack_shape = (self._n, first_shape[1], first_shape[0])
         lazy = _LazyStarStack(entries, stack_shape, None)
         self._read_fn = lazy.__getitem__
         self._labels = [str(i + 1) for i in range(self._n)]
@@ -389,9 +414,9 @@ class Class3dGallery(BaseGallery):
         if parsed is not None:
             _, self._dists = parsed
 
-        with mrcfile.open(self._mrc_paths[0], permissive=True) as mrc:
+        with mrcfile.open(self._mrc_paths[0], permissive=True, header_only=True) as mrc:
             self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
-            self._nz_first = mrc.data.shape[0]
+            self._nz_first = int(mrc.header.nz)
 
         slices_per_mrc = 3
         self._n = len(self._mrc_paths) * slices_per_mrc
@@ -408,7 +433,8 @@ class Class3dGallery(BaseGallery):
         mrc_idx = i // 3
         slice_idx = i % 3
 
-        with mrcfile.open(self._mrc_paths[mrc_idx], permissive=True) as mrc:
+        # Memory-map the map so only the requested slice(s) are read.
+        with _open_mrc(self._mrc_paths[mrc_idx]) as mrc:
             data = mrc.data
             nz, ny, nx = data.shape
             z_center = nz // 2
@@ -457,7 +483,7 @@ class Class3dGallery(BaseGallery):
             def _on_z_thickness(val):
                 self._z_thickness_a[0] = val
                 widget._labels = self._make_labels(val)
-                widget._thumb_cache.clear()
+                widget.invalidate_frames()
                 widget.update()
 
             panel.z_thickness_changed.connect(_on_z_thickness)
@@ -490,9 +516,9 @@ class Refine3dGallery(BaseGallery):
         if not self._mrc_paths:
             return
 
-        with mrcfile.open(self._mrc_paths[0], permissive=True) as mrc:
+        with mrcfile.open(self._mrc_paths[0], permissive=True, header_only=True) as mrc:
             self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
-            self._nz_first = mrc.data.shape[0]
+            self._nz_first = int(mrc.header.nz)
 
         slices_per_mrc = 3
         self._n = len(self._mrc_paths) * slices_per_mrc
@@ -509,7 +535,8 @@ class Refine3dGallery(BaseGallery):
         mrc_idx = i // 3
         slice_idx = i % 3
 
-        with mrcfile.open(self._mrc_paths[mrc_idx], permissive=True) as mrc:
+        # Memory-map the map so only the requested slice(s) are read.
+        with _open_mrc(self._mrc_paths[mrc_idx]) as mrc:
             data = mrc.data
             nz, ny, nx = data.shape
             z_center = nz // 2
@@ -554,7 +581,7 @@ class Refine3dGallery(BaseGallery):
             def _on_z_thickness(val):
                 self._z_thickness_a[0] = val
                 widget._labels = self._make_labels(val)
-                widget._thumb_cache.clear()
+                widget.invalidate_frames()
                 widget.update()
 
             panel.z_thickness_changed.connect(_on_z_thickness)
@@ -603,12 +630,9 @@ class Class2dGallery(BaseGallery):
             return
 
         first_mrc, first_frame = self._entries[0]
-        with mrcfile.open(first_mrc, permissive=True) as mrc:
+        with _open_mrc(first_mrc) as mrc:
             self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
-            sample = np.asarray(mrc.data)
-            if sample.ndim >= 3:
-                sample = sample[first_frame]
-        self._img_h, self._img_w = sample.shape
+            self._img_h, self._img_w = mrc.data.shape[-2:]
 
         self._apply_sort()
         self._labels = self._make_labels()
@@ -635,11 +659,12 @@ class Class2dGallery(BaseGallery):
 
         orig_idx = self._order[i]
         mrc_path, frame_idx = self._entries[orig_idx]
-        with mrcfile.open(mrc_path, permissive=True) as mrc:
-            d = np.asarray(mrc.data)
+        # Memory-map the class stack so only this one class average is read.
+        with _open_mrc(mrc_path) as mrc:
+            d = mrc.data
             if d.ndim >= 3:
                 d = d[frame_idx]
-            return d.astype(np.float32)
+            return np.array(d, dtype=np.float32)
 
     def _make_labels(self) -> list[str]:
         labels = []
@@ -668,7 +693,7 @@ class Class2dGallery(BaseGallery):
                 settings.setValue("sort_reverse", self._sort_reverse)
                 self._apply_sort()
                 widget._labels = self._make_labels()
-                widget._thumb_cache.clear()
+                widget.invalidate_frames()
                 widget.update()
 
             panel.sort_column_changed.connect(lambda _: _on_sort_changed())
@@ -708,12 +733,9 @@ class CryosparcClass2dGallery(Class2dGallery):
         if self._n == 0:
             return
 
-        with mrcfile.open(str(self.star_path), permissive=True) as mrc:
+        with _open_mrc(str(self.star_path)) as mrc:
             self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
-            sample = np.asarray(mrc.data)
-            if sample.ndim >= 3:
-                sample = sample[self._entries[0][1]]
-        self._img_h, self._img_w = sample.shape
+            self._img_h, self._img_w = mrc.data.shape[-2:]
 
         self._apply_sort()
         self._labels = self._make_labels()
