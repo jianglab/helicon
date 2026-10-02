@@ -229,6 +229,11 @@ def parse(query_string: str, tabs: Mapping[str, Any]) -> tuple[str | None, dict]
     if tab not in tabs:
         return None, {}
     namespace, module = tabs[tab]
+    from . import deployment
+
+    # a bookmark made where the files are, opened on a hosting service: the
+    # "server" input mode is not offered there, so the tab keeps its default
+    no_server = deployment.is_cloud()
     inputs = {}
     for key, entry in tab_entries(module).items():
         if key in typed:
@@ -239,6 +244,8 @@ def parse(query_string: str, tabs: Mapping[str, Any]) -> tuple[str | None, dict]
             except (TypeError, ValueError):
                 continue
         else:
+            continue
+        if no_server and value == "server":
             continue
         inputs[f"{namespace}-{entry.input_id}"] = value
     return tab, inputs

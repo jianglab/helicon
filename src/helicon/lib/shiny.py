@@ -1,25 +1,33 @@
-from typing import Optional
 from pathlib import Path
 
 import shiny
 from shiny import reactive
-from shiny.express import ui, module, render, expressify
+from shiny.express import ui, module, render
 import logging
 
 logger = logging.getLogger(__name__)
 
+from .shiny_file_picker import (  # noqa: E402
+    SERVER,
+    source_modes,
+    file_picker_button,
+    file_picker_field,
+    file_picker_fill,
+    file_picker_server,
+)
 
 __all__ = [
-    "file_selection_server",
-    "file_selection_ui",
-    "get_client_url",
-    "get_client_url_query_params",
+    "SERVER",
+    "source_modes",
+    "file_picker_button",
+    "file_picker_field",
+    "file_picker_fill",
+    "file_picker_server",
     "google_analytics",
     "image_gallery",
     "image_select",
     "launch_shiny_app",
     "range_slider",
-    "set_client_url_query_params",
     "slider",
 ]
 
@@ -124,8 +132,41 @@ _SLIDER_EDIT_JS = """
     return true;
   }
 
+  // show numbers to the slider's own precision: a value worked out on the
+  // server (-0.012799999999970169) or a range end (300.0064) otherwise shows
+  // every digit. Only the display: the value sent is as it was.
+  function decimals(step) {
+    var t = String(step);
+    if (t.indexOf('e-') >= 0) { return Math.min(6, parseInt(t.split('e-')[1], 10)); }
+    var dot = t.indexOf('.');
+    return dot < 0 ? 0 : Math.min(6, t.length - dot - 1);
+  }
+  function tidy(wrapper) {
+    var input = $(wrapper).find('input.js-range-slider').first();
+    var slider = input.length ? input.data('ionRangeSlider') : null;
+    if (!slider) { return false; }
+    var type = input.attr('data-data-type');
+    if (type === 'date' || type === 'datetime') { return true; }
+    var current = slider.options.prettify;
+    // Shiny puts its own formatter back on every update from the server, so
+    // this is checked again on each scan rather than done once
+    if (current && current.__heliconTidy) { return true; }
+    var enabled = slider.options.prettify_enabled;
+    var tidied = function (n) {
+      var d = decimals(slider.options.step);
+      var v = Number(Number(n).toFixed(d));
+      if (Object.is(v, -0)) { v = 0; }
+      // Shiny's own formatter (separators, ...) reads its settings from this
+      return enabled && current ? current.call(this, v) : String(v);
+    };
+    tidied.__heliconTidy = true;
+    slider.update({prettify_enabled: true, prettify: tidied});
+    return true;
+  }
+
   function scan() {
     document.querySelectorAll('.helicon-editable-slider').forEach(function (w) {
+      tidy(w);
       if (!w.__heliconGateTried || w.__heliconGateTried < 40) {
         w.__heliconGateTried = (w.__heliconGateTried || 0) + 1;
         if (gate(w)) { w.__heliconGateTried = 1000; }
@@ -596,276 +637,65 @@ def image_select(
 
 
 # server-side file selection
-@shiny.module.ui
-def file_selection_ui(label="Select a file", value=None, width="100%"):
-    """Shiny UI component for selecting a file via a browse popover.
+def google_analytics(id, tab_input="helicon_tab"):
+    """The Google tag (gtag.js) for a page, reporting the page without its query.
+
+    A Helicon page's address carries its inputs -- data URLs and, run locally,
+    file paths on the server -- so only the page itself and the tab shown
+    (``?tab=<name>``) are reported, both on load and on each change of tab.
 
     Parameters
     ----------
-    label : str, optional
-        Label for the file selector. Defaults to ``"Select a file"``.
-    value : str, optional
-        Initial file path. Defaults to None.
-    width : str, optional
-        CSS width. Defaults to ``"100%"``.
+    id : str
+        The tag ID, e.g. ``"GT-579RJLLW"`` or ``"G-XXXXXXX"``. Nothing is
+        returned for an empty one.
+    tab_input : str, optional
+        The input holding the tab shown, for a page view on each change.
 
     Returns
     -------
-    ui.Tag
-        The file selection UI element.
+    htmltools.Tag or None
+        The head content to put in the page (core) -- or, in Shiny Express,
+        a call whose value is the content shown.
     """
-    return shiny.ui.div(
-        shiny.ui.popover(
-            shiny.ui.input_action_button(
-                "browse", label="Browse", style="height: 30px; --bs-btn-padding-y: 0"
-            ),
-            shiny.ui.input_text(
-                "current_directory",
-                label="Current directory",
-                value=str(Path(value).parent) if value else str(Path.cwd()),
-                width="100%",
-            ),
-            shiny.ui.layout_column_wrap(
-                shiny.ui.input_select(
-                    "sub_directory",
-                    "Go to a sub-directory",
-                    choices=[],
-                    width="100%",
-                ),
-                shiny.ui.input_select(
-                    "file",
-                    "Select a file",
-                    choices=[Path(value).name] if value else [],
-                    selected=Path(value).name if value else None,
-                    width="100%",
-                ),
-                title="Select a file",
-                width="100%",
-            ),
-            width="100%",
+    if not id:
+        return None
+    import json
+
+    tag = json.dumps(str(id))
+    tab = json.dumps(str(tab_input))
+    return shiny.ui.head_content(
+        shiny.ui.tags.script(
+            src=f"https://www.googletagmanager.com/gtag/js?id={id}", async_=True
         ),
-        shiny.ui.input_text(
-            "selected_file_path", label=None, value=value, width="100%"
+        shiny.ui.tags.script(
+            shiny.ui.HTML(
+                f"""
+window.dataLayer = window.dataLayer || [];
+function gtag(){{dataLayer.push(arguments);}}
+(function () {{
+  var ID = {tag}, TAB = {tab};
+  function where(t) {{
+    if (t === undefined) t = new URLSearchParams(location.search).get('tab');
+    return location.origin + location.pathname + (t ? '?tab=' + encodeURIComponent(t) : '');
+  }}
+  gtag('js', new Date());
+  gtag('set', {{page_location: where()}});
+  gtag('config', ID, {{page_location: where()}});
+  // the tab the page opened on, counted by the config above
+  var last = new URLSearchParams(location.search).get('tab') || 'Home';
+  if (window.jQuery) jQuery(document).on('shiny:inputchanged', function (e) {{
+    if (e.name !== TAB || e.value === last) return;
+    last = e.value;
+    var loc = where(e.value === 'Home' ? '' : e.value);
+    gtag('set', {{page_location: loc}});
+    gtag('event', 'page_view', {{page_location: loc, page_title: 'Helicon: ' + e.value}});
+  }});
+}})();
+"""
+            )
         ),
-        style=f"display: flex; flex-flow: row; align-items: stretch; gap: 2px; margin: 0; padding: 0; width: {width};",
     )
-
-
-@shiny.module.server
-def file_selection_server(
-    input,
-    output,
-    session,
-    file_types: Optional[str | list[str]] = None,
-    ignore_hidden_files=True,
-):
-    """Shiny server module for file selection with directory browsing.
-
-    Parameters
-    ----------
-    input : shiny.Inputs
-        Module input.
-    output : shiny.Outputs
-        Module output.
-    session : shiny.Session
-        Module session.
-    file_types : str or list of str, optional
-        Allowed file extensions. If None, all files shown.
-    ignore_hidden_files : bool, optional
-        If True, hide filenames starting with ``.``. Defaults to True.
-
-    Returns
-    -------
-    reactive.value
-        Reactive value with the selected file path.
-    """
-    if file_types is None:
-        file_types = []
-    elif isinstance(file_types, str):
-        file_types = [file_types]
-
-    @reactive.effect
-    @reactive.event(input.current_directory)
-    def update_sub_directories():
-        p = Path(input.current_directory())
-        shiny.req(p.exists())
-        try:
-            directories = [d.name for d in sorted(p.iterdir()) if d.is_dir()]
-            if ignore_hidden_files:
-                directories = [d for d in directories if d[0] != "."]
-            directories = [".", ".."] + directories
-            ui.update_select("sub_directory", choices=directories)
-        except Exception:
-            logger.error(
-                "Failed to list sub-directories in %s",
-                input.current_directory(),
-                exc_info=True,
-            )
-            m = ui.modal(
-                f"{input.current_directory()}: failed to list sub-directories.",
-                title="Folder access error",
-                easy_close=True,
-                footer=None,
-            )
-            ui.modal_show(m)
-
-    @reactive.effect
-    @reactive.event(input.sub_directory)
-    def goto_sub_directories():
-        shiny.req(len(input.sub_directory()))
-        sub_dir = Path(input.current_directory()) / input.sub_directory()
-        ui.update_text("current_directory", value=str(sub_dir.resolve()))
-
-    @reactive.effect
-    @reactive.event(input.current_directory)
-    def update_files():
-        p = Path(input.current_directory())
-        shiny.req(p.exists())
-        try:
-            files = [f.name for f in sorted(p.iterdir(), reverse=True) if f.is_file()]
-            if ignore_hidden_files:
-                files = [f for f in files if f[0] != "."]
-            if file_types:
-                files_final = []
-                for f in files:
-                    for ft in file_types:
-                        if f.endswith(ft):
-                            files_final.append(f)
-                            continue
-            else:
-                files_final = files
-
-            selected = None
-            same_folder = Path(input.selected_file_path()).parent.samefile(
-                Path(input.current_directory())
-            )
-            if len(files_final):
-                if input.file() and same_folder and input.file() in files_final:
-                    selected = input.file()
-                else:
-                    selected = files_final[0]
-            ui.update_select("file", choices=files_final, selected=selected)
-        except Exception:
-            logger.error(
-                "Failed to list files in %s",
-                str(input.current_directory()),
-                exc_info=True,
-            )
-            m = ui.modal(
-                f"{str(input.current_directory())}: failed to list files.",
-                title="Folder access error",
-                easy_close=True,
-                footer=None,
-            )
-            ui.modal_show(m)
-
-    @reactive.effect
-    @reactive.event(input.parent_button)
-    def go_to_parent_folder():
-        parent_directory = Path(input.current_directory()).parent
-        if parent_directory.exists():
-            ui.update_text("current_directory", value=str(parent_directory))
-
-    @reactive.effect
-    @reactive.event(input.file)
-    def _():
-        ui.update_text(
-            "selected_file_path",
-            value=str(Path(input.current_directory()) / input.file()),
-        )
-
-    return input.selected_file_path
-
-
-@expressify
-def google_analytics(id):
-    if id is None or not len(id):
-        return
-    ui.head_content(
-        ui.HTML(
-            f"""
-            <script async src="https://www.googletagmanager.com/gtag/js?id={id}"></script>
-            <script>
-            window.dataLayer = window.dataLayer || [];
-            function gtag(){{dataLayer.push(arguments);}}
-            gtag('js', new Date());
-            gtag('config', '{id}');
-            </script>
-            """
-        )
-    )
-
-
-def get_client_url(input):
-    """Reconstruct the full client URL from Shiny input data.
-
-    Parameters
-    ----------
-    input : shiny.Inputs
-        Shiny input object.
-
-    Returns
-    -------
-    str
-        The full client URL.
-    """
-    d = input._map
-    url = f"{d['.clientdata_url_protocol']()}//{d['.clientdata_url_hostname']()}:{d['.clientdata_url_port']()}{d['.clientdata_url_pathname']()}{d['.clientdata_url_search']()}"
-    return url
-
-
-def get_client_url_query_params(input, keep_list=True):
-    """Parse query parameters from the client URL.
-
-    Parameters
-    ----------
-    input : shiny.Inputs
-        Shiny input object.
-    keep_list : bool, optional
-        If True, keep single-value parameters as lists.
-        Defaults to True.
-
-    Returns
-    -------
-    dict
-        Parsed query parameters.
-    """
-    d = input._map
-    qs = d[".clientdata_url_search"]().strip("?")
-    import urllib.parse
-
-    parsed_qs = urllib.parse.parse_qs(qs)
-    if not keep_list:
-        for k, v in parsed_qs.items():
-            if isinstance(v, list) and len(v) == 1:
-                parsed_qs[k] = v[0]
-    return parsed_qs
-
-
-def set_client_url_query_params(query_params):
-    """Update the client URL query parameters without reloading the page.
-
-    Parameters
-    ----------
-    query_params : dict
-        Query parameters to set.
-
-    Returns
-    -------
-    ui.Tag
-        A script tag that updates the browser URL.
-    """
-    import urllib.parse
-
-    encoded_query_params = urllib.parse.urlencode(query_params, doseq=True)
-    script = ui.tags.script(
-        f"""
-                var url = new URL(window.location.href);
-                url.search = '{encoded_query_params}';
-                window.history.pushState(null, '', url.toString());
-            """
-    )
-    return script
 
 
 def encode_query_params(query_params):

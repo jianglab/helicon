@@ -145,10 +145,10 @@ class TestFileBrowserLaunch:
         mrcs = tmp_path / "run_it020_classes.mrcs"
         mrcs.write_text("dummy")
         expected = dict(
-            mode_params="url",
-            mode_classes="url",
-            url_params=str(star.resolve()),
-            url_classes=str(mrcs.resolve()),
+            mode_params="server",
+            mode_classes="server",
+            server_params=str(star.resolve()),
+            server_classes=str(mrcs.resolve()),
         )
         assert _class2d_bookmark(str(star)) == expected
         assert _class2d_bookmark(str(mrcs)) == expected
@@ -158,7 +158,7 @@ class TestFileBrowserLaunch:
 
         star = tmp_path / "run_it020_data.star"
         star.write_text("dummy")
-        assert "url_classes" not in _class2d_bookmark(str(star))
+        assert "server_classes" not in _class2d_bookmark(str(star))
 
     def test_cryosparc_class_averages_find_their_particles(self, tmp_path):
         from helicon.lib.gui.webapps import _class2d_bookmark
@@ -168,8 +168,8 @@ class TestFileBrowserLaunch:
         averages.write_text("x")
         particles.write_text("x")
         bookmark = _class2d_bookmark(str(averages))
-        assert bookmark["url_classes"] == str(averages)
-        assert bookmark["url_params"] == str(particles)
+        assert bookmark["server_classes"] == str(averages)
+        assert bookmark["server_params"] == str(particles)
 
     def test_the_display_dispatches_the_mode(self):
         import helicon.commands.display as display

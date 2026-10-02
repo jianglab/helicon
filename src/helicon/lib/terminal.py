@@ -289,7 +289,9 @@ def _spawn_detached(
     cmd: list[str],
     check_early_exit: bool = False,
     env: dict | None = None,
-) -> bool:
+    log_path: str | os.PathLike | None = None,
+    return_process: bool = False,
+):
     """Start ``cmd`` detached so it outlives the Helicon process.
 
     Parameters
@@ -302,11 +304,18 @@ def _spawn_detached(
     env : dict, optional
         Environment for the child process.  Defaults to the current process
         environment.
+    log_path : str or PathLike, optional
+        File to append the child's output and errors to, so that a failure
+        can be told; by default they are discarded.
+    return_process : bool, optional
+        Return the ``subprocess.Popen`` (or None when it failed to start)
+        instead of a bool, for a caller that watches it.
 
     Returns
     -------
-    bool
-        True if the process appears to have started successfully.
+    bool or subprocess.Popen or None
+        True if the process appears to have started successfully (or the
+        process, with ``return_process``).
     """
     try:
         kwargs: dict = {}
@@ -316,19 +325,30 @@ def _spawn_detached(
                 if hasattr(subprocess, "DETACHED_PROCESS")
                 else 0
             )
-        proc = subprocess.Popen(
-            cmd,
-            cwd=os.getcwd(),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=os.name != "nt",
-            **kwargs,
-        )
+        out = subprocess.DEVNULL
+        if log_path is not None:
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            out = open(log_path, "ab")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=os.getcwd(),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT if log_path is not None else out,
+                start_new_session=os.name != "nt",
+                **kwargs,
+            )
+        finally:
+            if log_path is not None:
+                out.close()  # the child has its own copy
     except Exception as exc:
         print(f"[helicon] failed to launch terminal: {exc}")
-        return False
+        return None if return_process else False
+
+    if return_process:
+        return proc
 
     if not check_early_exit:
         return True

@@ -21,12 +21,15 @@ user's machine, since its window opens on the server's desktop.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import sys
 import time
 from dataclasses import dataclass
 from html import escape
 
 from shiny import reactive, ui
+
+from .. import deployment
 
 logger = logging.getLogger(__name__)
 
@@ -593,18 +596,22 @@ def home_tab_ui():
             "Hover over an app to see what it does; click it to open the app.",
             class_="hh-subtitle",
         ),
-        ui.div(
-            ui.tags.button(
-                "Open file browser",
-                type="button",
-                class_="btn btn-sm btn-outline-secondary hh-display",
-                title="Browse a folder and view its images, maps, STAR files and "
-                f"more in a new window (helicon {_DISPLAY_COMMAND})",
-                data_command=_DISPLAY_COMMAND,
-            ),
-            class_="hh-toolbar",
-            # Shown by the script once it knows the server is on this machine.
-            hidden=True,
+        (
+            None
+            if deployment.is_cloud()
+            else ui.div(
+                ui.tags.button(
+                    "Open file browser",
+                    type="button",
+                    class_="btn btn-sm btn-outline-secondary hh-display",
+                    title="Browse a folder and view its images, maps, STAR files and "
+                    f"more in a new window (helicon {_DISPLAY_COMMAND})",
+                    data_command=_DISPLAY_COMMAND,
+                ),
+                class_="hh-toolbar",
+                # Shown by the script once it knows the server is on this machine.
+                hidden=True,
+            )
         ),
         ui.HTML(_workflow_svg()),
         ui.div(
@@ -625,6 +632,17 @@ _COMMAND_APPS = {a.command: a for a in HOME_APPS if a.command}
 _COMMAND_NAMES = {c: a.name for c, a in _COMMAND_APPS.items()}
 _COMMAND_NAMES[_DISPLAY_COMMAND] = "the file browser"
 _RELAUNCH_SECS = 5.0  # ignore a repeat click (e.g. a double click) this soon
+_WATCH_START_SECS = 30  # an exit this soon after starting is reported (an abort
+# that writes a core dump of a large process can take 15 s or more)
+
+
+def _log_tail(log, lines=25):
+    """The last lines of ``log``, for an error message."""
+    try:
+        text = Path(log).read_text(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.rstrip().splitlines()[-lines:])
 
 
 def home_tab_server(input, session) -> None:
@@ -641,7 +659,10 @@ def home_tab_server(input, session) -> None:
         if name is None:
             return
         # The browser only asks when it is on this machine, but it is the
-        # server that must not start processes for a remote visitor.
+        # server that must not start processes for a remote visitor -- and
+        # never on a hosting service.
+        if deployment.is_cloud():
+            return
         if session.clientdata.url_hostname() not in _LOCAL_HOSTS:
             return
         now = time.monotonic()
@@ -677,23 +698,25 @@ def home_tab_server(input, session) -> None:
             )
             return
 
-        # Same as running ``helicon <command>`` in a terminal.
-        started = _spawn_detached(
+        # Same as running ``helicon <command>`` in a terminal; what it prints
+        # goes to a log, so that a start that fails can be told
+        log = Path(helicon.cache_dir) / "logs" / f"{command}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a") as f:
+            f.write(
+                f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} helicon {command} =====\n"
+            )
+        proc = _spawn_detached(
             [
                 sys.executable,
                 "-c",
                 "import sys; from helicon.helicon import main; sys.exit(main())",
                 command,
-            ]
+            ],
+            log_path=log,
+            return_process=True,
         )
-        if started:
-            where = "window" if command == _DISPLAY_COMMAND else "browser window"
-            ui.notification_show(
-                f"Starting {name} (helicon {command}); it will open in a "
-                f"new {where}.",
-                duration=8,
-            )
-        else:
+        if proc is None:
             logger.error("failed to launch helicon %s", command)
             ui.notification_show(
                 f"Failed to start {name}. Try running `helicon {command}` "
@@ -701,3 +724,51 @@ def home_tab_server(input, session) -> None:
                 type="error",
                 duration=10,
             )
+            return
+        where = "window" if command == _DISPLAY_COMMAND else "browser window"
+        ui.notification_show(
+            f"Starting {name} (helicon {command}); it will open in a new {where}.",
+            duration=8,
+        )
+        _watch_start(proc, name, command, log)
+
+    # programs just started, watched for an early exit: (process, name,
+    # command, log, deadline)
+    starting = []
+    watching = reactive.value(0)
+
+    def _watch_start(proc, name, command, log):
+        starting.append(
+            (proc, name, command, log, time.monotonic() + _WATCH_START_SECS)
+        )
+        watching.set(watching() + 1)
+
+    @reactive.effect
+    def _check_starts():
+        """Say so when a program started from here exits with an error soon after."""
+        watching()
+        for item in list(starting):
+            proc, name, command, log, deadline = item
+            code = proc.poll()
+            if code is None and time.monotonic() < deadline:
+                continue
+            starting.remove(item)
+            if code is None or code == 0:
+                continue
+            tail = _log_tail(log)
+            logger.error("helicon %s exited with %s:\n%s", command, code, tail)
+            ui.notification_show(
+                ui.div(
+                    ui.tags.b(f"{name} stopped (exit code {code})."),
+                    ui.tags.pre(
+                        tail,
+                        style="white-space: pre-wrap; max-height: 12em; "
+                        "overflow: auto; font-size: 0.8em; margin: 4px 0;",
+                    ),
+                    ui.tags.small(f"Full log: {log}"),
+                ),
+                type="error",
+                duration=None,
+            )
+        if starting:
+            reactive.invalidate_later(0.25)

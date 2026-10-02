@@ -214,8 +214,8 @@ def _launch_denovo3d(path: str, *, new_window: bool = False) -> None:
             _make_bookmark_query(
                 "Denovo3D",
                 {
-                    "input_mode_images": "url",
-                    "url_images": str(Path(path).resolve()),
+                    "input_mode_images": "server",
+                    "server_images": str(Path(path).absolute()),
                 },
             ),
             new_window=new_window,
@@ -240,8 +240,8 @@ def _launch_whereismyclass(path: str, *, new_window: bool = False) -> None:
             _make_bookmark_query(
                 "WhereIsMyClass",
                 {
-                    "input_mode": "url",
-                    "url_star": str(Path(path).resolve()),
+                    "input_mode": "server",
+                    "server_star": str(Path(path).absolute()),
                 },
             ),
             new_window=new_window,
@@ -266,8 +266,8 @@ def _launch_helicalprojection(path: str, *, new_window: bool = False) -> None:
             _make_bookmark_query(
                 "HelicalProjection",
                 {
-                    "mode_images": "url",
-                    "url_images": str(Path(path).resolve()),
+                    "mode_images": "server",
+                    "server_images": str(Path(path).absolute()),
                 },
             ),
             new_window=new_window,
@@ -297,8 +297,8 @@ def _class2d_bookmark(path: str) -> dict:
     Returns
     -------
     dict
-        The tab's bookmark values, with ``url_params`` and ``url_classes``
-        set for the files that were found.
+        The tab's bookmark values, in the "server" input mode, with
+        ``server_params`` and ``server_classes`` set for the files found.
     """
     from pathlib import Path
 
@@ -306,15 +306,16 @@ def _class2d_bookmark(path: str) -> dict:
 
     file_path = str(Path(path).absolute())
     other = class2d_files.companion(file_path)
-    bookmark = {"mode_params": "url", "mode_classes": "url"}
+    # files on this computer: the tabs' "server" input mode
+    bookmark = {"mode_params": "server", "mode_classes": "server"}
     if class2d_files.is_params_file(file_path):
-        bookmark["url_params"] = file_path
+        bookmark["server_params"] = file_path
         if other:
-            bookmark["url_classes"] = other
+            bookmark["server_classes"] = other
     else:
-        bookmark["url_classes"] = file_path
+        bookmark["server_classes"] = file_path
         if other:
-            bookmark["url_params"] = other
+            bookmark["server_params"] = other
     return bookmark
 
 
@@ -374,7 +375,8 @@ def _launch_hill(path: str, *, new_window: bool = False) -> None:
         from pathlib import Path
 
         params = _make_bookmark_query(
-            "HILL", {"input_mode": "2", "url": str(Path(path).resolve())}
+            "HILL",
+            {"input_mode": "server", "server_image": str(Path(path).absolute())},
         )
         _launch_or_reuse_web_app("HILL", params, new_window=new_window)
     except Exception as exc:
@@ -396,7 +398,8 @@ def _launch_hi3d(path: str, *, new_window: bool = False) -> None:
         from pathlib import Path
 
         params = _make_bookmark_query(
-            "HI3D", {"input_mode": "url", "url": str(Path(path).resolve())}
+            "HI3D",
+            {"input_mode": "server", "server_map": str(Path(path).absolute())},
         )
         _launch_or_reuse_web_app("HI3D", params, new_window=new_window)
     except Exception as exc:

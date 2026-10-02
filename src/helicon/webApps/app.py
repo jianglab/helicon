@@ -134,7 +134,8 @@ from helicon.webApps.tabs.where_is_my_class_tab import (
     where_is_my_class_tab_ui,
     where_is_my_class_tab_server,
 )
-from helicon.webApps import bookmark
+import helicon
+from helicon.webApps import bookmark, deployment
 from helicon.webApps.tabs.home_tab import (
     HOME_APPS,
     HOME_TAB,
@@ -306,6 +307,9 @@ async def _helicon_navigate(request: Request):
     )
 
 
+# The Google tag of the Helicon web apps (HELICON_ANALYTICS=0 turns it off).
+_GOOGLE_TAG = "GT-579RJLLW"
+
 # ── Bookmark URL (page side) ────────────────────────────────────
 # Keeps the address bar a bookmark of the current tab: only the parameters that
 # differ from their defaults (see webApps/bookmark.py, which also restores
@@ -431,9 +435,36 @@ def app_ui(request: Request):
         return _page(theme, initial_theme, active_tab)
 
 
+def _local_only_note(app: str, needs: str):
+    """What a tab shows on a hosting service in place of a feature that needs
+    the user's files on the server."""
+    host = deployment.hosting_service() or "a hosting service"
+    return ui.div(
+        ui.h3(f"{app} runs only where your data are"),
+        ui.p(
+            f"This copy of Helicon runs on {host}, which cannot reach {needs}. "
+            f"Run {app} on a computer that can: follow the instructions on ",
+            ui.a(
+                "https://jianglab.science.psu.edu/helicon/",
+                href="https://jianglab.science.psu.edu/helicon/",
+                target="_blank",
+            ),
+            " to install helicon, and start it with helicon webApps, or open "
+            "the Class2D job from the file browser (helicon display).",
+        ),
+        style="max-width: 46em; margin: 3em auto;",
+    )
+
+
 def _page(theme: str, initial_theme: str, active_tab: str):
     """The page, with every tab's UI; see app_ui."""
     return ui.page_fillable(
+        # its own head content: one nested in another's is dropped
+        (
+            None
+            if os.environ.get("HELICON_ANALYTICS", "1").strip() == "0"
+            else helicon.shiny.google_analytics(_GOOGLE_TAG)
+        ),
         ui.head_content(
             ui.tags.title("Helicon"),
             ui.tags.link(rel="icon", type="image/png", href="icon.png"),
@@ -576,7 +607,12 @@ def _page(theme: str, initial_theme: str, active_tab: str):
         ui.navset_bar(
             ui.nav_panel(HOME_TAB, home_tab_ui()),
             ui.nav_panel(
-                "WhereIsMyClass", where_is_my_class_tab_ui("where_is_my_class")
+                "WhereIsMyClass",
+                (
+                    _local_only_note("WhereIsMyClass", "the micrographs")
+                    if deployment.is_cloud()
+                    else where_is_my_class_tab_ui("where_is_my_class")
+                ),
             ),
             ui.nav_panel(
                 "HelicalProjection", helical_projection_tab_ui("helical_projection")
@@ -669,25 +705,13 @@ def server(input, output, session):
     # reactive effects (EMDB lookups, default-map downloads, plot setup)
     # used to run on every page load even though only one tab is visible.
 
-    def _start_where_is_my_class():
-        # FileChooser must be built in the top-level session context;
-        # ipywidgets comms fail when it is created inside a @module.server.
-        from ipyfilechooser import FileChooser
-
-        where_is_my_class_tab_server(
-            "where_is_my_class",
-            project,
-            wimc_filechooser=FileChooser(
-                path=".",
-                select_desc="Select",
-                show_hidden=False,
-                filter_pattern=["*_data.star", "*.cs"],
-                title="Select a RELION star or cryoSPARC cs file on the server",
-            ),
-        )
-
     _TAB_STARTERS: dict[str, object] = {
-        "WhereIsMyClass": _start_where_is_my_class,
+        # nothing to start on a hosting service: the tab shows a note instead
+        "WhereIsMyClass": (
+            (lambda: None)
+            if deployment.is_cloud()
+            else (lambda: where_is_my_class_tab_server("where_is_my_class", project))
+        ),
         "HelicalProjection": lambda: helical_projection_tab_server(
             "helical_projection", project
         ),

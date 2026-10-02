@@ -38,7 +38,7 @@ except Exception:
     hill = None
 
 # helicon.get_images_from_url does not exist; use the shared webApps lib.
-from .. import bookmark
+from .. import bookmark, deployment
 from ..lib import denovo3d_pipeline
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ _DERIVED = bookmark.DERIVED
 BOOKMARK_DEFAULTS = {
     "input_mode": ("hill_input_mode_params", "2"),
     "url": ("hill_img_file_url", "https://tinyurl.com/y5tq9fqa"),
+    "server_image": ("hill_img_file_server", ""),
     "is_3d": ("hill_is_3d", False),
     "twist": ("hill_twist", 29.40),
     "rise": ("hill_rise", 21.92),
@@ -166,7 +167,14 @@ def hill_tab_ui():
                                 ui.input_radio_buttons(
                                     "hill_input_mode_params",
                                     "How to obtain the input image/map:",
-                                    {"1": "upload", "2": "url", "3": "emd-xxxxx"},
+                                    helicon.shiny.source_modes(
+                                        deployment.is_cloud(),
+                                        (
+                                            ("1", "upload"),
+                                            ("2", "url"),
+                                            ("3", "emd-xxxxx"),
+                                        ),
+                                    ),
                                     selected="2",
                                     inline=True,
                                 ),
@@ -560,6 +568,16 @@ def hill_tab_ui():
 
 @module.server
 def hill_tab_server(input, output, session, project: ProjectState):
+    # Browse... in the server mode: pick the files on this computer
+    if not deployment.is_cloud():
+        helicon.shiny.file_picker_fill(
+            "image_browse",
+            "hill_img_file_server",
+            input,
+            ("*.mrcs", "*.mrc", "*.map", "*.mrc.gz", "*.map.gz"),
+            "Select 2D image(s) or a 3D map",
+        )
+
     if hill is None:
         ui.modal_show(
             ui.modal(
@@ -1336,6 +1354,20 @@ def hill_tab_server(input, output, session, project: ProjectState):
                 ),
                 ui.input_checkbox("hill_is_3d", "The input is a 3D map", value=False),
             ]
+        elif sel == helicon.shiny.SERVER:
+            return [
+                helicon.shiny.file_picker_field(
+                    ui.input_text(
+                        "hill_img_file_server",
+                        "2D image(s) or a 3D map on the server:",
+                        value="",
+                        placeholder="Browse, or type a path",
+                        update_on="blur",
+                    ),
+                    "image_browse",
+                ),
+                ui.input_checkbox("hill_is_3d", "The input is a 3D map", value=False),
+            ]
         elif sel == "3":
             return [
                 ui.input_text(
@@ -1539,7 +1571,7 @@ def hill_tab_server(input, output, session, project: ProjectState):
     @reactive.event(input.hill_input_mode_params)
     def _reset_helix_after_emdb():
         mode = input.hill_input_mode_params()
-        if _previous_input_mode[0] == "3" and mode == "2":
+        if _previous_input_mode[0] == "3" and mode in ("2", helicon.shiny.SERVER):
             ui.update_numeric("hill_twist", value=_INIT_TWIST)
             ui.update_numeric("hill_rise", value=_INIT_RISE)
             ui.update_numeric("hill_csym", value=BOOKMARK_DEFAULTS["csym"][1])
@@ -1549,7 +1581,18 @@ def hill_tab_server(input, output, session, project: ProjectState):
     @reactive.event(input.hill_input_mode_params, input.hill_img_file_url)
     def _load_input_data_from_url():
         req(input.hill_input_mode_params() == "2")
-        url = input.hill_img_file_url()
+        if deployment.refuse_local_path(input.hill_img_file_url()):
+            return
+        _load_input_data(input.hill_img_file_url())
+
+    @reactive.effect
+    @reactive.event(input.hill_input_mode_params, input.hill_img_file_server)
+    def _load_input_data_from_server():
+        req(input.hill_input_mode_params() == helicon.shiny.SERVER)
+        _load_input_data(input.hill_img_file_server().strip())
+
+    def _load_input_data(url):
+        """Read the image(s) or map from a URL or a server file."""
         if not url:
             return
         # Loading an image must not overwrite restored or user-edited helix params.

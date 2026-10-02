@@ -19,6 +19,7 @@ from shiny.types import SilentException
 import plotly.express as px
 
 
+from .. import deployment
 from ..lib.shared_state import ProjectState
 from ..lib import helical_projection_compute as compute
 from ..lib import helix_transform
@@ -109,6 +110,8 @@ BOOKMARK_DEFAULTS = {
     "mode_images": ("input_mode_images", "url"),
     "url_images": ("url_images", _urls[_url_key][0]),
     "url_map": ("url_map", _urls[_url_key][1]),
+    "server_images": ("server_images", ""),
+    "server_map": ("server_map", ""),
     "mode_maps": ("input_mode_maps", "url"),
     "ignore_blank": ("ignore_blank", True),
     "show_pdb": ("show_pdb", False),
@@ -139,7 +142,7 @@ def helical_projection_tab_ui():
                         ui.input_radio_buttons(
                             "input_mode_images",
                             "How to obtain the input images:",
-                            choices=["upload", "url"],
+                            choices=helicon.shiny.source_modes(deployment.is_cloud()),
                             selected="url",
                             inline=True,
                         ),
@@ -152,13 +155,16 @@ def helical_projection_tab_ui():
                         ui.input_radio_buttons(
                             "input_mode_maps",
                             "How to obtain the 3D maps:",
-                            choices=[
-                                "upload",
-                                "url",
-                                "amyloid_atlas",
-                                "EMDB-helical",
-                                "EMDB",
-                            ],
+                            choices=helicon.shiny.source_modes(
+                                deployment.is_cloud(),
+                                (
+                                    "upload",
+                                    "url",
+                                    "amyloid_atlas",
+                                    "EMDB-helical",
+                                    "EMDB",
+                                ),
+                            ),
                             selected="url",
                             inline=True,
                         ),
@@ -385,6 +391,23 @@ def helical_projection_tab_ui():
 
 @module.server
 def helical_projection_tab_server(input, output, session, project: ProjectState):
+    # Browse... in the server mode: pick the files on this computer
+    if not deployment.is_cloud():
+        helicon.shiny.file_picker_fill(
+            "images_browse",
+            "server_images",
+            input,
+            ("*.mrcs", "*.mrc"),
+            "Select the 2D images (mrcs or mrc)",
+        )
+        helicon.shiny.file_picker_fill(
+            "map_browse",
+            "server_map",
+            input,
+            ("*.mrc", "*.map", "*.mrc.gz", "*.map.gz"),
+            "Select a 3D map",
+        )
+
     images_all = reactive.value([])
     image_size = reactive.value(0)
     image_apix = reactive.value(0)
@@ -601,6 +624,16 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                 "Download URL for MRC images file",
                 value=_urls[_url_key][0],
             )
+        elif input.input_mode_images() == "server":
+            return helicon.shiny.file_picker_field(
+                ui.input_text(
+                    "server_images",
+                    "MRC images file (mrcs, mrc) on the server",
+                    value="",
+                    placeholder="Browse, or type a path",
+                ),
+                "images_browse",
+            )
         return None
 
     @render.ui
@@ -641,10 +674,22 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                     col_widths=[4, 4, 4],
                 ),
             )
-        elif mode == "url":
+        elif mode in ("url", "server"):
             return ui.div(
-                ui.input_text(
-                    "url_map", "Download URL for 3D map", value=_urls[_url_key][1]
+                (
+                    ui.input_text(
+                        "url_map", "Download URL for 3D map", value=_urls[_url_key][1]
+                    )
+                    if mode == "url"
+                    else helicon.shiny.file_picker_field(
+                        ui.input_text(
+                            "server_map",
+                            "3D map on the server",
+                            value="",
+                            placeholder="Browse, or type a path",
+                        ),
+                        "map_browse",
+                    )
                 ),
                 ui.layout_columns(
                     ui.input_numeric(
@@ -812,8 +857,21 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def _load_images_url():
         req(input.input_mode_images() == "url")
         req(len(input.url_images()) > 0)
+        if deployment.refuse_local_path(input.url_images()):
+            return
+        _load_images(input.url_images())
+
+    @reactive.effect
+    @reactive.event(input.input_mode_images, input.server_images)
+    def _load_images_server():
+        req(input.input_mode_images() == "server")
+        req(len(input.server_images().strip()) > 0)
+        _load_images(input.server_images().strip())
+
+    def _load_images(url):
+        """Read the 2D images from a URL or a server file."""
         try:
-            data, apix = compute.get_images_from_url(input.url_images())
+            data, apix = compute.get_images_from_url(url)
         except Exception as e:
             logger.error("Image URL download failed: %s", e)
             ui.modal_show(
@@ -1186,7 +1244,21 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def _load_map_url():
         req(input.input_mode_maps() == "url")
         req(len(input.url_map()) > 0)
-        url_val = input.url_map()
+        if deployment.refuse_local_path(input.url_map()):
+            return
+        _use_map(input.url_map())
+
+    @reactive.effect
+    @reactive.event(
+        input.input_mode_maps, input.server_map, input.twist, input.rise, input.csym
+    )
+    def _load_map_server():
+        req(input.input_mode_maps() == "server")
+        req(len(input.server_map().strip()) > 0)
+        _use_map(input.server_map().strip())
+
+    def _use_map(url_val):
+        """The map from a URL or a server file, with the helical parameters set."""
         label = url_val.split("/")[-1].split(".")[0]
         twist = input.twist() if input.twist() is not None else (project.twist() or 0)
         rise = input.rise() if input.rise() is not None else (project.rise() or 0)

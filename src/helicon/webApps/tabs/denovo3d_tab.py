@@ -26,6 +26,7 @@ import helicon
 from shiny import reactive, render, req, ui, module
 from shiny.types import SilentException
 
+from .. import deployment
 from ..lib.shared_state import ProjectState
 
 from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register
@@ -73,6 +74,7 @@ _url_key = "empiar-10940_job010"
 BOOKMARK_DEFAULTS = {
     "input_mode_images": ("dn_input_mode_images", "url"),
     "url_images": ("dn_url_images", _urls[_url_key][0]),
+    "server_images": ("dn_server_images", ""),
     "show_emdb": ("dn_show_emdb_input_mode", False),
     "is_3d": ("dn_is_3d", False),
     "ignore_blank": ("dn_ignore_blank", True),
@@ -273,7 +275,9 @@ def denovo3d_tab_ui():
                         ui.input_radio_buttons(
                             "dn_input_mode_images",
                             "How to obtain the input images:",
-                            choices=["upload", "url", "emdb"],
+                            choices=helicon.shiny.source_modes(
+                                deployment.is_cloud(), ("upload", "url", "emdb")
+                            ),
                             selected="url",
                             inline=True,
                         ),
@@ -681,6 +685,16 @@ def denovo3d_tab_ui():
 
 @module.server
 def denovo3d_tab_server(input, output, session, project: ProjectState):
+    # Browse... in the server mode: pick the files on this computer
+    if not deployment.is_cloud():
+        helicon.shiny.file_picker_fill(
+            "images_browse",
+            "dn_server_images",
+            input,
+            ("*.mrcs", "*.mrc", "*.star"),
+            "Select the 2D class averages (mrcs, mrc or star)",
+        )
+
     # ── Reactive values ──────────────────────────────────────────────
     url_images_init = reactive.value("")
     input_data = reactive.value(None)
@@ -1222,6 +1236,18 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     "dn_url_images",
                     "Download URL for a RELION or cryoSPARC 2D class mrc(s) file",
                     value=default_url,
+                )
+            )
+        elif mode == "server":
+            ret.append(
+                helicon.shiny.file_picker_field(
+                    ui.input_text(
+                        "dn_server_images",
+                        "RELION or cryoSPARC 2D class mrc(s) file on the server",
+                        value="",
+                        placeholder="Browse, or type a path",
+                    ),
+                    "images_browse",
                 )
             )
         elif mode == "emdb":
@@ -2322,14 +2348,26 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
     def _get_images_from_url():
         req(input.dn_input_mode_images() == "url")
         req(len(input.dn_url_images()) > 0)
-        url = input.dn_url_images()
+        if deployment.refuse_local_path(input.dn_url_images()):
+            return
+        _load_images(input.dn_url_images())
+
+    @reactive.effect
+    @reactive.event(input.dn_input_mode_images, input.dn_server_images)
+    def _get_images_from_server():
+        req(input.dn_input_mode_images() == "server")
+        req(len(input.dn_server_images().strip()) > 0)
+        _load_images(input.dn_server_images().strip())
+
+    def _load_images(url):
+        """Read the 2D images (or a 3D map) from a URL or a server file."""
         try:
             data, apix = denovo3d_pipeline.get_images_from_url(url)
         except Exception as e:
-            logger.error("Failed to download images from URL", exc_info=True)
+            logger.error("Failed to read images from %s", url, exc_info=True)
             ui.modal_show(
                 ui.modal(
-                    f"failed to download 2D images from {input.dn_url_images()}",
+                    f"failed to read 2D images from {url}",
                     title="File download error",
                     easy_close=True,
                     footer=None,

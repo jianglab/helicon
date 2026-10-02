@@ -3,8 +3,8 @@
 These tests exercise the real launch flow used by the "Show in WhereIsMyClass"
 command (``helicon.commands.display._launch_whereismyclass``): the app is
 served as a module (``helicon.webApps.app:app``) and a bookmark URL
-(``?tab=WhereIsMyClass&input_mode=url&url_star=...``) restores the "url" input
-mode pointing at a local star file. Clicking Run loads the class data into the helix table and
+(``?tab=WhereIsMyClass&input_mode=server&server_star=...``) restores the
+"server" input mode pointing at a local star file. Clicking Run loads the class data into the helix table and
 class gallery; selecting a helix row renders its micrograph with the class
 checkboxes populated.
 """
@@ -160,7 +160,7 @@ def _bookmark_url(base_url, star_path):
 
     params = _make_bookmark_query(
         "WhereIsMyClass",
-        {"input_mode": "url", "url_star": str(Path(star_path).resolve())},
+        {"input_mode": "server", "server_star": str(Path(star_path).absolute())},
     )
     parts = []
     for key, value in params.items():
@@ -178,23 +178,21 @@ def _open_wimc(page, server, star_path):
 def _open_wimc_restored(page, server, star_path):
     """Open the app with the bookmark URL and wait for the restore to land.
 
-    The restore messages (``send_input_message`` from ``on_restore``) update the
-    inputs client-side; the server only sees the new values after the client
-    echoes them back over the websocket. Waiting on the client-side state first
-    guarantees the echo precedes any later click on the same connection.
+    The bookmarked values are restored as the page is built; waiting on the
+    client-side state first guarantees they are in place before any click.
     """
     _open_wimc(page, server, star_path)
     controller.InputRadioButtons(
         page, "where_is_my_class-wimc_input_mode"
-    ).expect_selected("url", timeout=30000)
-    controller.InputText(page, "where_is_my_class-wimc_url_star").expect_value(
-        str(Path(star_path).resolve()), timeout=30000
+    ).expect_selected("server", timeout=30000)
+    controller.InputText(page, "where_is_my_class-wimc_server_star").expect_value(
+        str(Path(star_path).absolute()), timeout=30000
     )
 
 
-def test_bookmark_restore_activates_url_mode(page: Page, wimc_app, wimc_data):
-    # The radio defaults to "file selector"; a restored bookmark must switch
-    # it to "url" and prefill the star path.
+def test_bookmark_restore_activates_server_mode(page: Page, wimc_app, wimc_data):
+    # A restored bookmark selects the "server" mode and prefills the star path
+    # (the URL field is for URLs only).
     _open_wimc_restored(page, wimc_app, wimc_data["star"])
 
 

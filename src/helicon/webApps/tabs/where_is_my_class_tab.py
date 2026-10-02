@@ -16,6 +16,7 @@ import helicon
 from shiny import reactive, ui, module, req, render
 from shinywidgets import render_plotly, render_widget, output_widget
 
+from .. import deployment
 from ..lib.shared_state import ProjectState
 
 from ..lib import whereismyclass_compute as compute
@@ -23,8 +24,9 @@ from ..lib import whereismyclass_compute as compute
 logger = logging.getLogger(__name__)
 
 BOOKMARK_DEFAULTS = {
-    "input_mode": ("wimc_input_mode", "file selector"),
+    "input_mode": ("wimc_input_mode", "server"),
     "url_star": ("wimc_url_star", ""),
+    "server_star": ("wimc_server_star", ""),
     "ignore_blank": ("wimc_ignore_blank", True),
     "sort_abundance": ("wimc_sort_abundance", True),
     "rise": ("wimc_rise", 4.75),
@@ -48,14 +50,24 @@ def where_is_my_class_tab_ui():
                     ui.input_radio_buttons(
                         "wimc_input_mode",
                         "Input source:",
-                        choices=["file selector", "url"],
-                        selected="file selector",
+                        choices=helicon.shiny.source_modes(
+                            deployment.is_cloud(), ("url",)
+                        ),
+                        selected="url" if deployment.is_cloud() else "server",
                         inline=True,
                     ),
                     ui.div(
                         ui.panel_conditional(
-                            "input.wimc_input_mode === 'file selector'",
-                            output_widget("wimc_filepath_params"),
+                            "input.wimc_input_mode === 'server'",
+                            helicon.shiny.file_picker_field(
+                                ui.input_text(
+                                    "wimc_server_star",
+                                    "RELION star or cryoSPARC cs file on the server",
+                                    value="",
+                                    placeholder="Browse, or type a path",
+                                ),
+                                "star_browse",
+                            ),
                         ),
                         ui.panel_conditional(
                             "input.wimc_input_mode === 'url'",
@@ -217,9 +229,17 @@ def where_is_my_class_tab_ui():
 
 
 @module.server
-def where_is_my_class_tab_server(
-    input, output, session, project: ProjectState, wimc_filechooser=None
-):
+def where_is_my_class_tab_server(input, output, session, project: ProjectState):
+    # Browse... in the server mode: pick the files on this computer
+    if not deployment.is_cloud():
+        helicon.shiny.file_picker_fill(
+            "star_browse",
+            "wimc_server_star",
+            input,
+            ("*.star", "*.cs"),
+            "Select the Class2D parameter file (RELION star or cryoSPARC cs)",
+        )
+
     # ── Reactive state (mirrors the original app.py) ──
     params = reactive.value(None)
     project_root_dir = reactive.value(None)
@@ -254,30 +274,22 @@ def where_is_my_class_tab_server(
     # Track whether micrograph has been rendered at least once
     micrograph_rendered = reactive.value(False)
 
-    @render_widget
-    def wimc_filepath_params():
-        if wimc_filechooser is not None:
-            return wimc_filechooser
-        from ipyfilechooser import FileChooser
-
-        fc = FileChooser(
-            path=".",
-            select_desc="Select",
-            show_hidden=False,
-            filter_pattern=["*_data.star", "*.cs"],
-            title="Select a RELION star or cryoSPARC cs file on the server",
-        )
-        return fc
-
     @reactive.effect
     @reactive.event(input.wimc_run)
     def get_params_from_file():
-        req(input.wimc_input_mode() == "file selector")
-        fc = wimc_filechooser
-        req(fc is not None)
-        filepath = fc.selected
-        req(filepath is not None and len(filepath))
-        req(pathlib.Path(filepath).exists())
+        req(input.wimc_input_mode() == helicon.shiny.SERVER)
+        filepath = input.wimc_server_star().strip()
+        req(len(filepath))
+        if not pathlib.Path(filepath).is_file():
+            ui.modal_show(
+                ui.modal(
+                    f"{filepath} is not a file on the server",
+                    title="File not found",
+                    easy_close=True,
+                    footer=None,
+                )
+            )
+            return
 
         project_root_dir.set(compute.get_project_root_dir(filepath))
         filepath_classes.set(compute.get_class_file(filepath))

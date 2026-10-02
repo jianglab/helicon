@@ -15,7 +15,7 @@ import plotly.io as pio
 import helicon
 from shiny import reactive, ui, module, req, render
 
-from .. import bookmark, class2d_files
+from .. import bookmark, class2d_files, deployment
 from ..lib.shared_state import ProjectState
 
 from ..lib import helical_pitch_compute as compute
@@ -35,6 +35,8 @@ BOOKMARK_DEFAULTS = {
     "url_params": ("url_params", _urls[_url_key][0]),
     "mode_classes": ("input_mode_classes", "url"),
     "url_classes": ("url_classes", _urls[_url_key][1]),
+    "server_params": ("server_params", ""),
+    "server_classes": ("server_classes", ""),
     "ignore_blank": ("ignore_blank", True),
     "sort_abundance": ("sort_abundance", True),
     "auto_min_len": ("auto_min_len", True),
@@ -92,7 +94,7 @@ def helical_pitch_tab_ui():
                         ui.input_radio_buttons(
                             "input_mode_params",
                             "How to obtain the Class2D parameter file:",
-                            choices=["upload", "url"],
+                            choices=helicon.shiny.source_modes(deployment.is_cloud()),
                             selected="url",
                             inline=True,
                         ),
@@ -113,10 +115,22 @@ def helical_pitch_tab_ui():
                                 value=_urls[_url_key][0],
                             ),
                         ),
+                        ui.panel_conditional(
+                            "input.input_mode_params === 'server'",
+                            helicon.shiny.file_picker_field(
+                                ui.input_text(
+                                    "server_params",
+                                    "RELION star or cryoSPARC cs file on the server",
+                                    value="",
+                                    placeholder="Browse, or type a path",
+                                ),
+                                "params_browse",
+                            ),
+                        ),
                         ui.input_radio_buttons(
                             "input_mode_classes",
                             "How to obtain the class average images:",
-                            choices=["upload", "url"],
+                            choices=helicon.shiny.source_modes(deployment.is_cloud()),
                             selected="url",
                             inline=True,
                         ),
@@ -135,6 +149,19 @@ def helical_pitch_tab_ui():
                                 "url_classes",
                                 "Download URL for a RELION or cryoSPARC Class2D output mrc(s) file",
                                 value=_urls[_url_key][1],
+                            ),
+                        ),
+                        ui.panel_conditional(
+                            "input.input_mode_classes === 'server'",
+                            helicon.shiny.file_picker_field(
+                                ui.input_text(
+                                    "server_classes",
+                                    "RELION or cryoSPARC Class2D class averages (mrcs, mrc) "
+                                    "on the server",
+                                    value="",
+                                    placeholder="Browse, or type a path",
+                                ),
+                                "classes_browse",
                             ),
                         ),
                         ui.input_task_button("run", label="Run", style="width: 100%;"),
@@ -394,9 +421,13 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(input.run, auto_run, ignore_none=False, ignore_init=True)
     def get_class2d_from_url():
-        req(input.input_mode_classes() == "url")
-        req(len(input.url_classes()) > 0)
-        url = input.url_classes()
+        req(input.input_mode_classes() in ("url", "server"))
+        url = _source(
+            input.input_mode_classes(), input.url_classes, input.server_classes
+        )
+        req(len(url) > 0)
+        if deployment.refuse_local_path(url):
+            return
         try:
             data, apix = compute.get_class2d_from_url(url)
             nx = data.shape[-1]
@@ -405,7 +436,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             data, apix, nx = None, 0, 0
             ui.modal_show(
                 ui.modal(
-                    f"failed to download 2D class average images from {input.url_classes()}",
+                    f"failed to read 2D class average images from {url}",
                     title="File download error",
                     easy_close=True,
                     footer=None,
@@ -442,8 +473,11 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(input.run, auto_run, ignore_none=False, ignore_init=True)
     def get_params_from_url():
-        req(input.input_mode_params() == "url")
-        url = input.url_params()
+        req(input.input_mode_params() in ("url", "server"))
+        url = _source(input.input_mode_params(), input.url_params, input.server_params)
+        req(len(url) > 0)
+        if deployment.refuse_local_path(url):
+            return
         msg = None
         try:
             tmp_params = compute.get_class2d_helix_params_from_url(url)
@@ -453,7 +487,7 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         params_raw.set(tmp_params)
         if tmp_params is None:
             if msg is None:
-                msg = f"failed to download class2D parameters from {input.url_params()}"
+                msg = f"failed to read class2D parameters from {url}"
             msg_ui = ui.markdown(
                 msg.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br><br>")
             )
@@ -485,8 +519,29 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             )
         params.set(fixed)
 
-    # A local file typed into one of the two fields brings the other file of
-    # the same 2D classification with it, when it is beside it.
+    def _source(mode, url_input, server_input):
+        """The path or URL the mode reads from."""
+        return (server_input() if mode == "server" else url_input()).strip()
+
+    # Browse... in the server mode: pick the files on this computer
+    if not deployment.is_cloud():
+        helicon.shiny.file_picker_fill(
+            "params_browse",
+            "server_params",
+            input,
+            ("*.star", "*.cs"),
+            "Select the Class2D parameter file (RELION star or cryoSPARC cs)",
+        )
+        helicon.shiny.file_picker_fill(
+            "classes_browse",
+            "server_classes",
+            input,
+            ("*.mrcs", "*.mrc"),
+            "Select the Class2D class averages (mrcs or mrc)",
+        )
+
+    # A server file chosen or typed in one of the two server fields brings the
+    # other file of the same 2D classification with it, when it is beside it.
     def _fill_companion(given, other_id, other_value):
         found = class2d_files.companion(given)
         if (
@@ -497,16 +552,20 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
             ui.update_text(other_id, value=found)
 
     @reactive.effect
-    @reactive.event(input.url_params)
+    @reactive.event(input.server_params)
     def _fill_classes_from_params():
-        if input.input_mode_classes() == "url":
-            _fill_companion(input.url_params(), "url_classes", input.url_classes())
+        if input.input_mode_classes() == "server":
+            _fill_companion(
+                input.server_params(), "server_classes", input.server_classes()
+            )
 
     @reactive.effect
-    @reactive.event(input.url_classes)
+    @reactive.event(input.server_classes)
     def _fill_params_from_classes():
-        if input.input_mode_params() == "url":
-            _fill_companion(input.url_classes(), "url_params", input.url_params())
+        if input.input_mode_params() == "server":
+            _fill_companion(
+                input.server_classes(), "server_params", input.server_params()
+            )
 
     # ── Build class gallery ──
 
@@ -520,11 +579,11 @@ def helical_pitch_tab_server(input, output, session, project: ProjectState):
         # goes again until they have; once is all it is for
         if auto_started:
             return
+        modes = (input.input_mode_params(), input.input_mode_classes())
         both_urls = (
-            input.input_mode_params() == "url"
-            and input.input_mode_classes() == "url"
-            and bool(input.url_params())
-            and bool(input.url_classes())
+            all(m in ("url", "server") for m in modes)
+            and bool(_source(modes[0], input.url_params, input.server_params))
+            and bool(_source(modes[1], input.url_classes, input.server_classes))
         )
         auto_started.append(True)
         if both_urls:

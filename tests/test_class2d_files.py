@@ -74,8 +74,10 @@ class TestTheTabsUseIt:
         import inspect
 
         src = inspect.getsource(importlib.import_module(f"helicon.webApps.tabs.{tab}"))
-        assert "@reactive.event(input.url_params)" in src
-        assert "@reactive.event(input.url_classes)" in src
+        # files on the server only: a URL has no folder to look in
+        assert "@reactive.event(input.server_params)" in src
+        assert "@reactive.event(input.server_classes)" in src
+        assert "@reactive.event(input.url_params)" not in src
         assert "class2d_files.companion(" in src
 
     def test_tube_ids_are_split_on_load(self, tab):
@@ -87,3 +89,18 @@ class TestTheTabsUseIt:
         assert "@reactive.event(params_raw, input.split_axis_distance)" in src
         assert "compute.split_distinct_filaments(raw, distance)" in src
         assert mod.BOOKMARK_DEFAULTS["split"] == ("split_axis_distance", 50)
+
+    def test_the_server_mode_reads_its_own_fields(self, tab):
+        import importlib
+        import inspect
+
+        mod = importlib.import_module(f"helicon.webApps.tabs.{tab}")
+        src = inspect.getsource(mod)
+        assert "helicon.shiny.source_modes(deployment.is_cloud())" in src
+        assert "\"input.input_mode_params === 'server'\"" in src
+        assert (
+            'file_picker_fill(\n            "params_browse",\n            "server_params"'
+            in src
+        )
+        assert mod.BOOKMARK_DEFAULTS["server_params"] == ("server_params", "")
+        assert mod.BOOKMARK_DEFAULTS["server_classes"] == ("server_classes", "")

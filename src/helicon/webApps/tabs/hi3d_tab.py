@@ -17,7 +17,7 @@ import numpy as np
 import helicon
 from shiny import reactive, render, ui, module, req
 
-from .. import bookmark
+from .. import bookmark, deployment
 from ..lib.shared_state import ProjectState
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ _DERIVED = bookmark.DERIVED
 BOOKMARK_DEFAULTS = {
     "input_mode": ("hi3d_input_mode", "emd-xxxxx"),
     "url": ("hi3d_url_map", _DEFAULT_URL),
+    "server_map": ("hi3d_server_map", ""),
     "emd_id": ("hi3d_emd_id", "emd-10499"),
     "da": ("hi3d_da", 1.0),
     "dz": ("hi3d_dz", 1.0),
@@ -143,7 +144,10 @@ def hi3d_tab_ui():
                             ui.input_radio_buttons(
                                 "hi3d_input_mode",
                                 "How to obtain the input map:",
-                                choices=["upload", "url", "emd-xxxxx"],
+                                choices=helicon.shiny.source_modes(
+                                    deployment.is_cloud(),
+                                    ("upload", "url", "emd-xxxxx"),
+                                ),
                                 selected="emd-xxxxx",
                                 inline=True,
                             ),
@@ -161,6 +165,18 @@ def hi3d_tab_ui():
                                     "hi3d_url_map",
                                     "Input the url of a 3D map:",
                                     value=_DEFAULT_URL,
+                                ),
+                            ),
+                            ui.panel_conditional(
+                                "input.hi3d_input_mode === 'server'",
+                                helicon.shiny.file_picker_field(
+                                    ui.input_text(
+                                        "hi3d_server_map",
+                                        "3D map on the server:",
+                                        value="",
+                                        placeholder="Browse, or type a path",
+                                    ),
+                                    "map_browse",
                                 ),
                             ),
                             ui.panel_conditional(
@@ -326,6 +342,16 @@ def hi3d_tab_ui():
 
 @module.server
 def hi3d_tab_server(input, output, session, project: ProjectState):
+    # Browse... in the server mode: pick the files on this computer
+    if not deployment.is_cloud():
+        helicon.shiny.file_picker_fill(
+            "map_browse",
+            "hi3d_server_map",
+            input,
+            ("*.mrc", "*.map", "*.mrc.gz", "*.map.gz"),
+            "Select a 3D map",
+        )
+
     from ..lib.hi3d_core import (
         cylindrical_projection,
         auto_correlation,
@@ -487,7 +513,19 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     async def _load_url_map():
         if input.hi3d_input_mode() != "url":
             return
-        url = input.hi3d_url_map()
+        if deployment.refuse_local_path(input.hi3d_url_map()):
+            return
+        await _load_map(input.hi3d_url_map())
+
+    @reactive.effect
+    @reactive.event(input.hi3d_input_mode, input.hi3d_server_map)
+    async def _load_server_map():
+        if input.hi3d_input_mode() != helicon.shiny.SERVER:
+            return
+        await _load_map(input.hi3d_server_map())
+
+    async def _load_map(url):
+        """Read the map from a URL or a server file."""
         if not url or not url.strip():
             return
         progress = {"done": 0, "total": 0}
@@ -682,10 +720,9 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
 
             d = change_mrc_map_crs_order(d, crs, [1, 2, 3])
             crs = [1, 2, 3]
-        logger.error(
+        logger.debug(
             "[HI3D] _set_map: setting map_data shape=%s apix=%s", d.shape, apix_val
         )
-        logger.debug("[HI3D] _set_map: setting map_data shape=%s", d.shape)
         map_data.set(d)
         map_apix.set(apix_val)
         map_crs.set(crs)
@@ -797,7 +834,7 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
     @render.ui
     def hi3d_original_image():
         image = section_image()
-        logger.error(
+        logger.debug(
             "[HI3D] hi3d_original_image: image=%s",
             None if image is None else image.shape,
         )
