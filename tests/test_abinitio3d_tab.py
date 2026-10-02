@@ -196,8 +196,61 @@ class TestRelionSymmetry:
     def test_the_run_and_the_star_file_hint_use_it(self):
         src = self._src()
         run = src[src.index("def run_relion") :]
-        run = run[: run.index("relion_map.set(result)")]
+        run = run[: run.index("@render.ui")]
         assert "csym=_imposed_csym()" in run
         hint = src[src.index("def pitch_band_download") :]
         hint = hint[: hint.index("return ui.tooltip(")]
         assert "csym = _imposed_csym()" in hint
+
+
+class TestLongWorkInTheBackground:
+    """The pitch estimate, the suggestions and the two reconstructions run in
+    worker threads, so one visitor's run does not stall every other session."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    @pytest.mark.parametrize(
+        "button, task",
+        [
+            ("phase_run", "phase_task"),
+            ("suggest_run", "suggest_task"),
+            ("relion_run", "relion_task"),
+            ("map_run", "map_task"),
+        ],
+    )
+    def test_each_button_starts_a_background_task(self, button, task):
+        src = self._src()
+        assert re.search(
+            rf'{task} = helicon\.shiny\.background_task\(\s*"{button}"', src
+        )
+        start = src[src.index(f"@reactive.event(input.{button})") :]
+        start = start[: start.index("\n\n    ")]
+        assert f"{task}.invoke(" in start
+
+    def test_no_work_blocks_the_event_loop(self):
+        # a ui.Progress block in an effect is the sign of work done in place
+        assert "ui.Progress(" not in self._src()
+
+
+class TestRelionOnAHost:
+    def test_the_controls_are_replaced_by_a_note(self):
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        body = src[src.index("def relion_ui") :]
+        body = body[: body.index("@render.ui")]
+        cloud = body.index("deployment.is_cloud()")
+        assert cloud < body.index("find_relion_reconstruct()")
+        assert cloud < body.index('"relion_run"')
+        assert "not available on the hosted web site" in body
+
+    def test_the_run_is_refused_on_the_server_too(self):
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        run = src[src.index("def run_relion") :]
+        run = run[: run.index("relion_task.invoke(")]
+        assert "deployment.refuse_server_mode()" in run

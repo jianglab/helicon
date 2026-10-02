@@ -351,6 +351,122 @@ def clamp_number(value, default, lo, hi, kind=int):
     return kind(min(max(v, lo), hi))
 
 
+class ThreadProgress:
+    """A progress bar that a worker thread can update.
+
+    ``shiny.ui.Progress`` sends its messages from the event loop's thread
+    only. This one is created on the event loop, and its ``set``/``inc``
+    hand the update back to the loop, so work running in a thread (see
+    :func:`background_task`) can report its progress without blocking the
+    other sessions.
+
+    Parameters
+    ----------
+    min, max : int, optional
+        The range of the bar.
+    session : shiny.Session, optional
+        The session to show it in. Defaults to the current one.
+    """
+
+    def __init__(self, min=0, max=1, session=None):
+        import asyncio
+
+        from shiny import ui as core_ui
+
+        self._loop = asyncio.get_running_loop()
+        self._progress = core_ui.Progress(min=min, max=max, session=session)
+
+    def _call(self, fn, *args, **kwargs):
+        self._loop.call_soon_threadsafe(lambda: fn(*args, **kwargs))
+
+    def set(self, value=None, message=None, detail=None):
+        """Set the bar, as ``shiny.ui.Progress.set``. Safe from any thread."""
+        self._call(self._progress.set, value, message=message, detail=detail)
+
+    def inc(self, amount=0.1, message=None, detail=None):
+        """Advance the bar, as ``shiny.ui.Progress.inc``. Safe from any thread."""
+        self._call(self._progress.inc, amount, message=message, detail=detail)
+
+    def close(self):
+        """Remove the bar. Safe from any thread."""
+        self._call(self._progress.close)
+
+
+def background_task(
+    button_id, work, apply, on_error, progress_max=1, session=None, label=""
+):
+    """Run a long computation in a thread, so other sessions are not blocked.
+
+    Shiny runs every session's reactive code on one event loop: a computation
+    that takes minutes inside an effect stalls every visitor for that long.
+    The work given here runs in a worker thread instead, with the task button
+    showing it is busy, and its result is handed back to the session.
+
+    Call it in a server function. Read the inputs in an effect and pass them
+    to ``.invoke(job)`` on the returned task; ``work`` must not read reactive
+    values (they are refused in the thread).
+
+    Parameters
+    ----------
+    button_id : str
+        The ``input_task_button`` that starts the task; it is disabled while
+        the task runs.
+    work : callable
+        ``work(job, progress)``, run in a thread; returns the result.
+        ``progress`` is a :class:`ThreadProgress`.
+    apply : callable
+        ``apply(job, result)``, run in the session when the work succeeds.
+    on_error : callable
+        ``on_error(job, exception)``, run in the session when the work fails.
+    progress_max : int, optional
+        The ``max`` of the progress bar.
+    session : shiny.Session, optional
+        The session. Defaults to the current one.
+    label : str, optional
+        A name for log messages.
+
+    Returns
+    -------
+    shiny.reactive.ExtendedTask
+        The task; ``.invoke(job)`` starts it.
+    """
+    import asyncio
+
+    from shiny import ui as core_ui
+
+    if session is None:
+        from shiny.session import require_active_session
+
+        session = require_active_session(None)
+
+    @core_ui.bind_task_button(button_id=button_id)
+    @reactive.extended_task
+    async def task(job):
+        progress = ThreadProgress(min=0, max=progress_max, session=session)
+        try:
+            return job, await asyncio.to_thread(work, job, progress)
+        except Exception as e:
+            # keep the job with the error, for on_error
+            e.helicon_job = job
+            raise
+        finally:
+            progress.close()
+
+    @reactive.effect
+    @reactive.event(task.status)
+    def _finished():
+        status = task.status()
+        if status == "success":
+            job, result = task.value.get()
+            apply(job, result)
+        elif status == "error":
+            e = task.error.get()
+            logger.error("%s failed: %s", label or button_id, e)
+            on_error(getattr(e, "helicon_job", None), e)
+
+    return task
+
+
 def _getter(value, default):
     """A zero-argument callable giving ``value``.
 

@@ -976,24 +976,100 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
 
     counterpart_cache = {}
 
-    def _counterpart_pairs(class_numbers):
-        """Pairs of the selected classes that are each other's 180-degree rotation."""
+    def _counterpart_pairs(class_numbers, ids, images):
+        """Pairs of the selected classes that are each other's 180-degree rotation.
+
+        ``ids`` and ``images`` are the displayed class ids and images, read by
+        the caller: this runs in a worker thread, which cannot read them.
+        """
         key = tuple(sorted(class_numbers))
         if key not in counterpart_cache:
-            position = {int(c): i for i, c in enumerate(displayed_class_ids())}
-            images = displayed_class_images()
+            position = {int(c): i for i, c in enumerate(ids)}
             at = [position[int(c) - 1] for c in class_numbers if int(c) - 1 in position]
             found = phase.pair_counterparts(images, at)
             counterpart_cache[key] = [
                 dict(
-                    a=int(displayed_class_ids()[d["a"]]) + 1,
-                    b=int(displayed_class_ids()[d["b"]]) + 1,
+                    a=int(ids[d["a"]]) + 1,
+                    b=int(ids[d["b"]]) + 1,
                     corr=d["corr"],
                     dx=d["dx"],
                 )
                 for d in found
             ]
         return counterpart_cache[key]
+
+    # The pitch estimate, the suggestions and the two reconstructions take
+    # from seconds to minutes: they run in worker threads (background_task),
+    # so the event loop every session shares stays free. Their inputs are read
+    # in the effect that starts them, and a result is applied only if it still
+    # belongs to the data and selection it was computed from.
+
+    def _phase_work(job, progress):
+        counterparts = None
+        if job["merge"]:
+            progress.set(
+                0, message="pairing classes that are turned copies of each other"
+            )
+            counterparts = _counterpart_pairs(
+                job["class_ids"], job["ids"], job["images"]
+            )
+            progress.inc(1, message=f"{len(counterparts)} pair(s) of classes")
+        return phase.analyze(
+            job["params"],
+            class_ids=job["class_ids"],
+            n_boot=job["n_boot"],
+            progress=lambda msg: progress.inc(1, message=msg),
+            counterparts=counterparts,
+            image_apix=job["apix"],
+        )
+
+    def _phase_apply(job, result):
+        # a result belongs to the selection it was computed from
+        if (
+            params() is not job["params"]
+            or _selected_class_numbers() != job["class_ids"]
+        ):
+            return
+        phase_result.set(result)
+        spans = result.filaments["span"]
+        if len(spans):
+            top = int(np.ceil(float(spans.max()) / 10.0) * 10)
+            ui.update_slider("length_range", min=0, max=top, value=(0, top))
+        fil = result.filaments
+        pitches = fil["pitch"][fil["fitted"]]
+        if len(pitches):
+            lo_p = int(np.floor(float(pitches.min())))
+            hi_p = int(np.ceil(float(pitches.max())))
+            # centred on the pooled repeat (the green line), wide enough for
+            # the 40% of the filaments closest to it
+            half = float(np.percentile(np.abs(pitches - result.period), 40))
+            low, high = result.period - half, result.period + half
+            ui.update_slider(
+                "pitch_band",
+                min=lo_p,
+                max=max(hi_p, lo_p + 1),
+                value=(round(float(low)), round(float(high))),
+            )
+
+    def _phase_error(job, e):
+        ui.modal_show(
+            ui.modal(
+                f"The class-azimuth pitch estimate failed: {e}",
+                title="Pitch estimate error",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    phase_task = helicon.shiny.background_task(
+        "phase_run",
+        _phase_work,
+        _phase_apply,
+        _phase_error,
+        progress_max=8,
+        session=session,
+        label="Class-azimuth pitch estimate",
+    )
 
     @reactive.effect
     @reactive.event(input.phase_run)
@@ -1025,57 +1101,20 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 )
             )
             return
-        # the UI's bounds, enforced here too: the browser's are not binding
-        n_boot = helicon.shiny.clamp_number(input.phase_n_boot(), 20, 2, 200)
-        try:
-            with ui.Progress(min=0, max=8) as p:
-                counterparts = None
-                if input.merge_counterparts():
-                    p.set(
-                        0,
-                        message="pairing classes that are turned copies of each other",
-                    )
-                    counterparts = _counterpart_pairs(class_ids)
-                    p.inc(1, message=f"{len(counterparts)} pair(s) of classes")
-                result = phase.analyze(
-                    params(),
-                    class_ids=class_ids,
-                    n_boot=n_boot,
-                    progress=lambda msg: p.inc(1, message=msg),
-                    counterparts=counterparts,
-                    image_apix=float(data_all()[1]),
-                )
-        except Exception as e:
-            logger.error("Class-azimuth pitch estimate failed: %s", e)
-            ui.modal_show(
-                ui.modal(
-                    f"The class-azimuth pitch estimate failed: {e}",
-                    title="Pitch estimate error",
-                    easy_close=True,
-                    footer=None,
-                )
+        merge = bool(input.merge_counterparts())
+        phase_task.invoke(
+            dict(
+                params=params(),
+                class_ids=class_ids,
+                # the UI's bounds, enforced here too: the browser's are not
+                # binding
+                n_boot=helicon.shiny.clamp_number(input.phase_n_boot(), 20, 2, 200),
+                merge=merge,
+                ids=list(displayed_class_ids()) if merge else None,
+                images=list(displayed_class_images()) if merge else None,
+                apix=float(data_all()[1]),
             )
-            return
-        phase_result.set(result)
-        spans = result.filaments["span"]
-        if len(spans):
-            top = int(np.ceil(float(spans.max()) / 10.0) * 10)
-            ui.update_slider("length_range", min=0, max=top, value=(0, top))
-        fil = result.filaments
-        pitches = fil["pitch"][fil["fitted"]]
-        if len(pitches):
-            lo_p = int(np.floor(float(pitches.min())))
-            hi_p = int(np.ceil(float(pitches.max())))
-            # centred on the pooled repeat (the green line), wide enough for
-            # the 40% of the filaments closest to it
-            half = float(np.percentile(np.abs(pitches - result.period), 40))
-            low, high = result.period - half, result.period + half
-            ui.update_slider(
-                "pitch_band",
-                min=lo_p,
-                max=max(hi_p, lo_p + 1),
-                value=(round(float(low)), round(float(high))),
-            )
+        )
 
     # ── the classes in the computation, and suggestions for more ──
 
@@ -1134,6 +1173,76 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 dict(r, items=[d for d in r["items"] if d["pos"] not in sel])
             )
 
+    def _suggest_work(job, progress):
+        pos_of = {c: i for i, c in enumerate(job["ids"])}
+        found = {}  # display position -> label parts
+        progress.set(0.05, message="finding classes used by the same filaments")
+        for d in phase.suggest_expansion(
+            job["params"],
+            [c + 1 for c in job["selected"]],
+            [c + 1 for c in job["others"]],
+        ):
+            c = d["candidate"] - 1
+            found.setdefault(pos_of[c], {}).update(
+                share=d["share"], baseline=d["baseline"], filaments=d["filaments"]
+            )
+        if job["data"] is not None:
+            ab = job["abundance"]
+            by_size = sorted(job["others"], key=lambda c: -ab[c] if c < len(ab) else 0)
+            progress.set(0.1, message="matching class averages turned by 180\u00b0")
+            for d in phase.suggest_counterparts(
+                job["data"],
+                job["selected"],
+                by_size[:MAX_COUNTERPART_CANDIDATES],
+                progress=lambda k, n: progress.set(0.1 + 0.9 * k / max(n, 1)),
+            ):
+                found.setdefault(pos_of[d["candidate"]], {}).update(
+                    corr=d["corr"], of=d["selected"] + 1
+                )
+        return found
+
+    def _suggest_apply(job, found):
+        # suggestions for a selection or data set no longer shown are dropped
+        if params() is not job["params"] or list(
+            input.select_classes_inner() or []
+        ) != list(job["sel_disp"]):
+            return
+        labels = displayed_class_labels()
+        items = []
+        for pos, d in sorted(found.items()):
+            why = []
+            if "corr" in d:
+                why.append(f"\u21bb{d['corr']:.2f}")
+            if "share" in d:
+                why.append(f"\u25cf{100 * d['share']:.0f}%")
+            items.append(dict(pos=pos, text=f"{labels[pos]}  {' '.join(why)}"))
+        suggestions.set(
+            dict(
+                seeds=set(job["sel_disp"]),
+                items=items,
+                n_candidates=len(job["others"]),
+            )
+        )
+
+    def _suggest_error(job, e):
+        ui.modal_show(
+            ui.modal(
+                f"The suggestions could not be computed: {e}",
+                title="Suggestion error",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    suggest_task = helicon.shiny.background_task(
+        "suggest_run",
+        _suggest_work,
+        _suggest_apply,
+        _suggest_error,
+        session=session,
+        label="Class suggestions",
+    )
+
     @reactive.effect
     @reactive.event(input.suggest_run)
     def run_suggestions():
@@ -1151,47 +1260,17 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             )
             return
         ids = [int(c) for c in displayed_class_ids()]
-        pos_of = {c: i for i, c in enumerate(ids)}
         selected = [ids[i] for i in sel_disp]
-        others = [c for c in ids if c not in set(selected)]
-        found = {}  # display position -> label parts
-        with ui.Progress(min=0, max=1) as p:
-            p.set(0.05, message="finding classes used by the same filaments")
-            for d in phase.suggest_expansion(
-                params(), [c + 1 for c in selected], [c + 1 for c in others]
-            ):
-                c = d["candidate"] - 1
-                found.setdefault(pos_of[c], {}).update(
-                    share=d["share"], baseline=d["baseline"], filaments=d["filaments"]
-                )
-            if data_all() is not None and data_all()[0] is not None:
-                data, _ = data_all()
-                ab = abundance()
-                by_size = sorted(others, key=lambda c: -ab[c] if c < len(ab) else 0)
-                p.set(0.1, message="matching class averages turned by 180\u00b0")
-                for d in phase.suggest_counterparts(
-                    data,
-                    selected,
-                    by_size[:MAX_COUNTERPART_CANDIDATES],
-                    progress=lambda k, n: p.set(0.1 + 0.9 * k / max(n, 1)),
-                ):
-                    found.setdefault(pos_of[d["candidate"]], {}).update(
-                        corr=d["corr"], of=d["selected"] + 1
-                    )
-        labels = displayed_class_labels()
-        items = []
-        for pos, d in sorted(found.items()):
-            why = []
-            if "corr" in d:
-                why.append(f"\u21bb{d['corr']:.2f}")
-            if "share" in d:
-                why.append(f"\u25cf{100 * d['share']:.0f}%")
-            items.append(dict(pos=pos, text=f"{labels[pos]}  {' '.join(why)}"))
-        suggestions.set(
+        has_data = data_all() is not None and data_all()[0] is not None
+        suggest_task.invoke(
             dict(
-                seeds=set(sel_disp),
-                items=items,
-                n_candidates=len(others),
+                params=params(),
+                sel_disp=sel_disp,
+                ids=ids,
+                selected=selected,
+                others=[c for c in ids if c not in set(selected)],
+                data=data_all()[0] if has_data else None,
+                abundance=abundance() if has_data else None,
             )
         )
 
@@ -1288,13 +1367,18 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         return ui.tags.style(f"{', '.join(hidden)} {{ display: none; }}")
 
     @reactive.effect
-    async def _enable_phase_run():
+    def _enable_phase_run():
         n = len(input.select_classes_inner() or [])
-        phase_result()  # a finished run re-enables the button; disable it again
-        await session.send_custom_message(
-            "helicon-set-disabled",
-            {"id": session.ns("phase_run"), "disabled": n < MIN_PHASE_CLASSES},
-        )
+        if phase_task.status() == "running":
+            return  # the task button shows it busy
+        message = {"id": session.ns("phase_run"), "disabled": n < MIN_PHASE_CLASSES}
+
+        # sent after the flush: the task button's own "ready" update, which
+        # re-enables the button when a run ends, goes out with the flush
+        async def _send():
+            await session.send_custom_message("helicon-set-disabled", message)
+
+        session.on_flushed(_send, once=True)
 
     @render.ui
     def phase_summary():
@@ -1747,6 +1831,19 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def relion_ui():
         r = phase_result()
         req(r is not None)
+        if deployment.is_cloud():
+            # a hosted copy runs no external programs on visitors' data: the
+            # reconstruction would need a RELION project folder on the server
+            # and minutes of the server's CPUs per visitor
+            return _tip(
+                ui.tags.small(
+                    "relion_reconstruct: not available on the hosted web site",
+                    class_="text-muted",
+                ),
+                "Download the star file and run relion_reconstruct where RELION is "
+                "installed, or install helicon and run this tab locally "
+                "(https://jianglab.science.psu.edu/helicon/).",
+            )
         exe = relion.find_relion_reconstruct()
         if exe is None:
             return _tip(
@@ -1786,6 +1883,44 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             fill=False,
         )
 
+    def _relion_work(job, progress):
+        progress.set(
+            0,
+            message=f"relion_reconstruct: {len(job['subset']):,} segments",
+            detail="this can take a few minutes",
+        )
+        return relion.reconstruct(
+            job["subset"],
+            job["project_dir"],
+            cpu=max(1, int(helicon.available_cpu())),
+            csym=job["csym"],
+        )
+
+    def _relion_apply(job, result):
+        # a map from segments of an older pitch result is not shown
+        if phase_result() is not job["phase_result"]:
+            return
+        relion_map.set(result)
+
+    def _relion_error(job, e):
+        ui.modal_show(
+            ui.modal(
+                ui.tags.pre(str(e)[-3000:]),
+                title="relion_reconstruct failed",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    relion_task = helicon.shiny.background_task(
+        "relion_run",
+        _relion_work,
+        _relion_apply,
+        _relion_error,
+        session=session,
+        label="relion_reconstruct",
+    )
+
     @reactive.effect
     @reactive.event(input.relion_run)
     def run_relion():
@@ -1809,31 +1944,14 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         if not len(subset):
             ui.notification_show("No segment is in the selected ranges.", duration=5)
             return
-        try:
-            with ui.Progress(min=0, max=1) as p:
-                p.set(
-                    0,
-                    message=f"relion_reconstruct: {len(subset):,} segments",
-                    detail="this can take a few minutes",
-                )
-                result = relion.reconstruct(
-                    subset,
-                    input.relion_project_dir(),
-                    cpu=max(1, int(helicon.available_cpu())),
-                    csym=_imposed_csym(),
-                )
-        except Exception as e:
-            logger.error("relion_reconstruct failed: %s", e)
-            ui.modal_show(
-                ui.modal(
-                    ui.tags.pre(str(e)[-3000:]),
-                    title="relion_reconstruct failed",
-                    easy_close=True,
-                    footer=None,
-                )
+        relion_task.invoke(
+            dict(
+                phase_result=r,
+                subset=subset,
+                project_dir=input.relion_project_dir(),
+                csym=_imposed_csym(),
             )
-            return
-        relion_map.set(result)
+        )
 
     @render.ui
     def relion_display():
@@ -1904,68 +2022,87 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     def _clear_map_result():
         map_result.set(None)
 
+    def _map_work(job, progress):
+        r = job["phase_result"]
+        apix_orig = job["apix"]
+        progress.set(0, message="straightening the class averages")
+        prepared = maps.straighten_classes(
+            job["images"],
+            r.class_zdir,
+            target_apix=max(5.0, apix_orig),
+            apix=apix_orig,
+        )
+        progress.set(
+            1,
+            message=f"reconstructing from {len(prepared)} "
+            + ("unique classes" if r.merged_classes else "classes"),
+        )
+        return maps.reconstruct_map(
+            prepared,
+            np.rad2deg(r.phases),
+            r.period,
+            job["csym"],
+            job["rise"],
+            left_handed=job["left_handed"],
+            apix=max(5.0, apix_orig),
+            helical_sym_order=job["hsym"],
+            impose_csym=job["impose_csym"],
+            method="backprojection" if job["method"] == "backprojection" else "joint",
+            algorithm=dict(model="gauss") if job["method"] == "gauss" else None,
+            rounds=job["rounds"],
+            output_box=int(job["images"][0].shape[0]),
+            output_apix=apix_orig,
+            cpu=max(1, int(helicon.available_cpu())),
+        )
+
+    def _map_apply(job, result):
+        # a map from an older pitch result is not shown
+        if phase_result() is not job["phase_result"]:
+            return
+        map_result.set(result)
+
+    def _map_error(job, e):
+        ui.modal_show(
+            ui.modal(
+                f"The 3D map could not be reconstructed: {e}",
+                title="3D map error",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    map_task = helicon.shiny.background_task(
+        "map_run",
+        _map_work,
+        _map_apply,
+        _map_error,
+        progress_max=2,
+        session=session,
+        label="3D map from the class averages",
+    )
+
     @reactive.effect
     @reactive.event(input.map_run)
     def run_map():
         r = phase_result()
         req(r is not None)
-        csym = helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
         position = {int(c): i for i, c in enumerate(displayed_class_ids())}
         images = displayed_class_images()
         at = [position[int(c)] for c in map(lambda k: int(k) - 1, r.class_ids)]
-        apix_orig = float(data_all()[1])
-        try:
-            with ui.Progress(min=0, max=2) as p:
-                p.set(0, message="straightening the class averages")
-                prepared = maps.straighten_classes(
-                    [images[i] for i in at],
-                    r.class_zdir,
-                    target_apix=max(5.0, apix_orig),
-                    apix=apix_orig,
-                )
-                n_unique = len(prepared)
-                p.set(
-                    1,
-                    message=f"reconstructing from {n_unique} "
-                    + ("unique classes" if r.merged_classes else "classes"),
-                )
-                result = maps.reconstruct_map(
-                    prepared,
-                    np.rad2deg(r.phases),
-                    r.period,
-                    csym,
-                    float(input.rise()),
-                    left_handed=input.map_hand() == "left",
-                    apix=max(5.0, apix_orig),
-                    helical_sym_order=helicon.shiny.clamp_number(
-                        input.map_hsym(), 1, 1, 1000
-                    ),
-                    impose_csym=bool(input.map_csym()),
-                    method=(
-                        "backprojection"
-                        if input.map_method() == "backprojection"
-                        else "joint"
-                    ),
-                    algorithm=(
-                        dict(model="gauss") if input.map_method() == "gauss" else None
-                    ),
-                    rounds=2 if input.map_refine() else 1,
-                    output_box=int(images[at[0]].shape[0]),
-                    output_apix=apix_orig,
-                    cpu=max(1, int(helicon.available_cpu())),
-                )
-        except Exception as e:
-            logger.error("3D map from the class averages failed: %s", e)
-            ui.modal_show(
-                ui.modal(
-                    f"The 3D map could not be reconstructed: {e}",
-                    title="3D map error",
-                    easy_close=True,
-                    footer=None,
-                )
+        map_task.invoke(
+            dict(
+                phase_result=r,
+                images=[images[i] for i in at],
+                apix=float(data_all()[1]),
+                csym=helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12),
+                rise=float(input.rise()),
+                left_handed=input.map_hand() == "left",
+                hsym=helicon.shiny.clamp_number(input.map_hsym(), 1, 1, 1000),
+                impose_csym=bool(input.map_csym()),
+                method=input.map_method(),
+                rounds=2 if input.map_refine() else 1,
             )
-            return
-        map_result.set(result)
+        )
 
     def _map_classes_text(n_used):
         """The selected classes, and how many the map used after merging."""
