@@ -114,6 +114,30 @@ class TestStartFolder:
         assert fp.recent_folders(Proxy(Proxy(a))) is fp.recent_folders(a)
         assert fp.recent_folders(b) == []
 
+    def test_folders_of_earlier_visits_come_from_the_page(self):
+        class Input(dict):
+            def __getitem__(self, key):
+                value = dict.__getitem__(self, key)
+                return lambda: value
+
+        class Root:
+            def __init__(self, value=None):
+                self.input = Input()
+                if value is not None:
+                    self.input[fp._BROWSER_RECENT_INPUT] = value
+
+            def root_scope(self):
+                return self
+
+        assert fp.browser_folders(Root()) == []  # not sent yet
+        assert fp.browser_folders(Root(["/d/a", 3, "", "/d/b"])) == ["/d/a", "/d/b"]
+        assert fp.browser_folders(Root("not a list")) == []
+        many = [f"/d/{i}" for i in range(20)]
+        assert fp.browser_folders(Root(many)) == many[: fp._MAX_RECENT]
+
+    def test_this_sessions_folders_come_before_earlier_visits(self):
+        assert fp._merged(["/s"], ["/b", "/s", "/c"]) == ["/s", "/b", "/c"]
+
     def test_the_picker_refuses_on_a_host(self, monkeypatch):
         shown = []
         monkeypatch.setattr(fp.ui, "notification_show", lambda *a, **k: shown.append(a))
@@ -154,6 +178,9 @@ app = App(app_ui, server)
 def picker_app(tmp_path_factory):
     root = tmp_path_factory.mktemp("file_picker")
     job = _tree(root)
+    # a second place to pick from, for the browser's memory of folders
+    (root / "project" / "other").mkdir()
+    (root / "project" / "other" / "a_data.star").write_text("x")
     folder = root / "app"
     folder.mkdir()
     start = repr(str(job / "run_it025_data.star"))
@@ -274,6 +301,73 @@ class TestTheDialog:
         page.locator(".hfp-choose").click()
         page.wait_for_selector(".modal", state="detached")
         assert page.locator("#path").input_value() == str(job / "run_it010_data.star")
+
+
+def _names(page):
+    return page.locator(".hfp-row").evaluate_all("rs => rs.map(r => r.dataset.name)")
+
+
+class TestSortingAndMemory:
+    def test_columns_sort_both_ways(self, page, picker_app):
+        url, job = picker_app
+        _open(page, url)
+        page.locator("#browse-all_files").check()  # the .mrcs and .txt files too
+        page.wait_for_function(
+            "document.querySelectorAll('.hfp-row[data-name=\"note.txt\"]').length === 1"
+        )
+        size = page.locator("th.hfp-sort[data-sort=size]")
+        size.click()  # largest first
+        names = _names(page)
+        assert names[0] == ".."
+        # equal sizes fall back to the names, in the same direction
+        mrcs = sorted((n for n in names if n.endswith(".mrcs")), reverse=True)
+        assert names[1:5] == mrcs
+        assert size.get_attribute("aria-sort") == "descending"
+        size.click()  # and the other way
+        names = _names(page)
+        assert names[0] == ".." and names[-1].endswith(".mrcs")
+        assert size.get_attribute("aria-sort") == "ascending"
+        name = page.locator("th.hfp-sort[data-sort=name]")
+        name.click()
+        assert _names(page)[1:3] == ["note.txt", "run_it001_classes.mrcs"]
+        name.click()
+        assert _names(page)[1] == "run_it025_data.star"
+        assert name.get_attribute("aria-sort") == "descending"
+
+    def test_folders_stay_first(self, page, picker_app):
+        url, job = picker_app
+        _open(page, url)
+        page.locator(".hfp-list").focus()
+        page.keyboard.press("Backspace")  # to Class2D: two folders
+        page.wait_for_function(
+            f"document.querySelector('.hfp').dataset.cwd === {str(job.parent)!r}"
+        )
+        page.locator("th.hfp-sort[data-sort=name]").click()
+        assert _names(page) == ["..", "job012", "job010"]
+
+    def test_a_new_visit_opens_where_the_last_one_picked(self, page, picker_app):
+        url, job = picker_app
+        other = job.parents[1] / "other"
+        _open(page, url)
+        page.locator(".hfp-path").fill(str(other))
+        page.locator(".hfp-path").press("Enter")
+        page.wait_for_selector(".hfp-row[data-name='a_data.star']")
+        page.locator(".hfp-row[data-name='a_data.star']").dblclick()
+        page.wait_for_selector(".modal", state="detached")
+        # a new session, with nothing in the field to start from
+        page.reload()
+        page.wait_for_selector("#browse-open")
+        page.locator("#path").fill("")
+        page.locator("#path").press("Tab")
+        page.locator("#browse-open").click()
+        page.wait_for_selector(".hfp-row")
+        page.wait_for_function(
+            f"document.querySelector('.hfp').dataset.cwd === {str(other)!r}"
+        )
+        chips = page.locator(".hfp-chip").evaluate_all(
+            "cs => cs.map(c => c.getAttribute('title'))"
+        )
+        assert str(other) in chips
 
 
 class TestSourceModes:

@@ -132,6 +132,10 @@ _CSS = """
 .hfp-table td.hfp-size, .hfp-table th.hfp-size { width: 6em; text-align: right; }
 .hfp-table td.hfp-time, .hfp-table th.hfp-time { width: 10.5em; }
 .hfp-table td.hfp-size, .hfp-table td.hfp-time { color: var(--hfp-muted); font-variant-numeric: tabular-nums; }
+.hfp-table th.hfp-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.hfp-table th.hfp-sort:hover { color: var(--bs-body-color, #212529); }
+.hfp-table th.hfp-sort[aria-sort="ascending"]::after { content: " \\25B2"; font-size: .7em; }
+.hfp-table th.hfp-sort[aria-sort="descending"]::after { content: " \\25BC"; font-size: .7em; }
 .hfp-row:hover td { background: var(--hfp-hover); }
 .hfp-row.hfp-on td { background: var(--hfp-sel); }
 .hfp-row.hfp-on td:first-child { box-shadow: inset 3px 0 0 var(--hfp-accent); }
@@ -153,6 +157,37 @@ _CSS = """
              border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .hfp-field .hfp-browse { grid-area: btn; margin: 0; white-space: nowrap;
              border-top-right-radius: 0; border-bottom-right-radius: 0; }
+"""
+
+# The folders files were picked from, kept in the browser (localStorage) so a
+# new visit starts where the last one ended. They reach the server as one
+# page-level input, which every picker reads; the server keeps nothing of
+# them between sessions.
+_BROWSER_RECENT_INPUT = "helicon_file_picker_recent"
+_MEMORY_JS = """
+(function () {
+  if (window.__heliconPickerMemory) return;
+  window.__heliconPickerMemory = true;
+  var KEY = 'heliconFilePicker.recent', MAX = %d;
+  function load() {
+    try {
+      var v = JSON.parse(localStorage.getItem(KEY) || '[]');
+      return Array.isArray(v) ? v.filter(function (x) { return typeof x === 'string'; }).slice(0, MAX) : [];
+    } catch (e) { return []; }
+  }
+  function send() {
+    if (window.Shiny && Shiny.setInputValue) Shiny.setInputValue('%s', load());
+  }
+  window.__heliconPickerRemember = function (folder) {
+    if (!folder) return;
+    var v = load().filter(function (x) { return x !== folder; });
+    v.unshift(folder);
+    try { localStorage.setItem(KEY, JSON.stringify(v.slice(0, MAX))); } catch (e) {}
+    send();
+  };
+  if (window.Shiny && Shiny.shinyapp && Shiny.shinyapp.isConnected && Shiny.shinyapp.isConnected()) send();
+  else $(document).one('shiny:connected', send);
+})();
 """
 
 # One script for every picker on the page: it works by delegation, so it does
@@ -185,11 +220,57 @@ _JS = """
   function activate(r, row) {
     if (!row) return;
     if (row.dataset.kind === 'dir') send(r, {op: 'open', name: row.dataset.name});
-    else send(r, {op: 'choose', name: row.dataset.name});
+    else {
+      if (window.__heliconPickerRemember) window.__heliconPickerRemember(r.dataset.cwd);
+      send(r, {op: 'choose', name: row.dataset.name});
+    }
+  }
+  // Sorting by a column, in the browser: '..' stays on top and folders before
+  // files, as file managers do. The choice is kept for the next listing, and
+  // in the browser for the next visit.
+  var SORT_KEY = 'heliconFilePicker.sort';
+  function sortState() {
+    try {
+      var v = JSON.parse(localStorage.getItem(SORT_KEY) || 'null');
+      if (v && ['name', 'size', 'mtime'].indexOf(v.key) >= 0) return v;
+    } catch (e) {}
+    return {key: 'name', dir: 1};
+  }
+  function applySort(r) {
+    var body = r.querySelector('.hfp-table tbody');
+    if (!body) return;
+    var st = sortState(), names = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'});
+    var all = Array.from(body.querySelectorAll('.hfp-row'));
+    var up = all.filter(function (x) { return x.dataset.name === '..'; });
+    var rest = all.filter(function (x) { return x.dataset.name !== '..'; });
+    function num(x, k) { var v = parseFloat(x.dataset[k]); return isNaN(v) ? -Infinity : v; }
+    rest.sort(function (a, b) {
+      if (a.dataset.kind !== b.dataset.kind) return a.dataset.kind === 'dir' ? -1 : 1;
+      var c = 0;
+      if (st.key !== 'name') c = num(a, st.key) - num(b, st.key);
+      if (c === 0) c = names.compare(a.dataset.name, b.dataset.name);
+      return st.dir * c;
+    });
+    up.concat(rest).forEach(function (x) { body.appendChild(x); });
+    r.querySelectorAll('th.hfp-sort').forEach(function (th) {
+      th.setAttribute('aria-sort', th.dataset.sort === st.key ? (st.dir > 0 ? 'ascending' : 'descending') : 'none');
+    });
   }
   document.addEventListener('click', function (e) {
     var r = root(e.target);
     if (r) {
+      var th = e.target.closest('th.hfp-sort');
+      if (th) {
+        var st = sortState(), key = th.dataset.sort;
+        // the same column again turns the order around; a new one starts with
+        // names A-Z, and sizes and times largest and newest first
+        st = st.key === key ? {key: key, dir: -st.dir} : {key: key, dir: key === 'name' ? 1 : -1};
+        try { localStorage.setItem(SORT_KEY, JSON.stringify(st)); } catch (err) {}
+        var on = current(r);
+        applySort(r);
+        if (on) on.scrollIntoView({block: 'nearest'});
+        return;
+      }
       var row = e.target.closest('.hfp-row');
       if (row) { select(r, row, false); return; }
       var b = e.target.closest('[data-op]');
@@ -251,6 +332,7 @@ _JS = """
         var list = r.querySelector('.hfp-list');
         if (!list || list.dataset.drawn === list.dataset.stamp) return;
         list.dataset.drawn = list.dataset.stamp;
+        applySort(r);
         var f = r.querySelector('.hfp-filter'), filtering = f && f.value.trim() !== '';
         var want = list.dataset.select, row = null;
         if (want) r.querySelectorAll('.hfp-row').forEach(function (x) { if (x.dataset.name === want) row = x; });
@@ -290,6 +372,7 @@ def file_picker_button(label="Browse...", tooltip="Pick a file on this computer"
     return ui.TagList(
         ui.tags.style(_CSS),
         ui.tags.script(_JS),
+        ui.tags.script(_MEMORY_JS % (_MAX_RECENT, _BROWSER_RECENT_INPUT)),
         ui.input_action_button(
             "open",
             label,
@@ -333,7 +416,7 @@ def list_folder(folder, patterns=(), show_hidden=False, max_entries=5000):
     -------
     entries : list of dict
         ``name``, ``kind`` ("dir" or "file"), ``size`` (bytes, files only) and
-        ``mtime``, folders first, each group in natural order.
+        ``mtime`` (seconds), folders first, each group in natural order.
     truncated : int
         How many entries were left out over ``max_entries``.
 
@@ -353,12 +436,18 @@ def list_folder(folder, patterns=(), show_hidden=False, max_entries=5000):
             except OSError:
                 continue
             if is_dir:
-                dirs.append(name)
+                dirs.append(entry)
             elif not patterns or _matches(name, patterns):
                 files.append(entry)
-    dirs.sort(key=_natural_key)
+    dirs.sort(key=lambda e: _natural_key(e.name))
     files.sort(key=lambda e: _natural_key(e.name))
-    entries = [dict(name=d, kind="dir", size=None, mtime=None) for d in dirs]
+    entries = []
+    for e in dirs:
+        try:
+            mtime = e.stat().st_mtime
+        except OSError:
+            mtime = None
+        entries.append(dict(name=e.name, kind="dir", size=None, mtime=mtime))
     for e in files:
         try:
             st = e.stat()
@@ -443,6 +532,45 @@ def _remember(folder, recent):
     del recent[_MAX_RECENT:]
 
 
+def browser_folders(session):
+    """The folders this browser picked files from on earlier visits.
+
+    They are kept in the browser's local storage and sent once the page
+    connects, as a page-level input every picker reads.
+
+    Parameters
+    ----------
+    session : shiny.Session
+        The session, or a module session of it.
+
+    Returns
+    -------
+    list of str
+        Newest first, at most a handful; empty before the page has sent them.
+    """
+    root = session.root_scope() if hasattr(session, "root_scope") else session
+    with reactive.isolate():
+        try:
+            if _BROWSER_RECENT_INPUT not in root.input:
+                return []
+            value = root.input[_BROWSER_RECENT_INPUT]()
+        except Exception:
+            return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(f) for f in value if isinstance(f, str) and f][:_MAX_RECENT]
+
+
+def _merged(*lists):
+    """The lists one after another, without repeats."""
+    out = []
+    for items in lists:
+        for item in items:
+            if item not in out:
+                out.append(item)
+    return out
+
+
 def _server_files_refused():
     """True, after telling the user, when the app runs on a hosting service.
 
@@ -520,7 +648,8 @@ def file_picker_server(
     def _open():
         if _server_files_refused():
             return
-        folder, name = _start_folder(start, recent)
+        # this session's folders first, then those of earlier visits
+        folder, name = _start_folder(start, _merged(recent, browser_folders(session)))
         go(folder, name)
         ui.modal_show(
             ui.modal(
@@ -672,8 +801,9 @@ def file_picker_server(
     def places():
         cwd()
         seen, chips = set(), []
+        folders = _merged(recent, browser_folders(session))[:_MAX_RECENT]
         for label, folder in [("Home", Path.home()), ("Working folder", Path.cwd())] + [
-            (Path(f).name or f, Path(f)) for f in recent
+            (Path(f).name or f, Path(f)) for f in folders if Path(f).is_dir()
         ]:
             key = str(folder)
             if key in seen:
@@ -724,18 +854,19 @@ def file_picker_server(
             )
         for e in entries:
             name = html.escape(e["name"], quote=True)
-            if e["kind"] == "dir":
-                icon, size, when = _FOLDER_SVG, "", ""
-            else:
-                icon = _FILE_SVG
-                size = _size_text(e["size"]) if e["size"] is not None else ""
-                when = (
-                    time.strftime("%Y-%m-%d %H:%M", time.localtime(e["mtime"]))
-                    if e["mtime"]
-                    else ""
-                )
+            icon = _FOLDER_SVG if e["kind"] == "dir" else _FILE_SVG
+            size = _size_text(e["size"]) if e["size"] is not None else ""
+            when = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(e["mtime"]))
+                if e["mtime"]
+                else ""
+            )
+            # the raw numbers, for sorting in the browser
+            raw_size = "" if e["size"] is None else str(e["size"])
+            raw_time = "" if e["mtime"] is None else f'{e["mtime"]:.0f}'
             rows.append(
-                f'<tr class="hfp-row" data-kind="{e["kind"]}" data-name="{name}" title="{name}">'
+                f'<tr class="hfp-row" data-kind="{e["kind"]}" data-name="{name}" title="{name}"'
+                f' data-size="{raw_size}" data-mtime="{raw_time}">'
                 f'<td class="hfp-icon">{icon}</td><td>{name}</td>'
                 f'<td class="hfp-size">{size}</td><td class="hfp-time">{when}</td></tr>'
             )
@@ -752,8 +883,11 @@ def file_picker_server(
         if cut:
             notes.append(f"{cut:,} more not listed: type a filter to narrow it down.")
         table = (
-            '<table class="hfp-table"><thead><tr><th class="hfp-icon"></th><th>Name</th>'
-            '<th class="hfp-size">Size</th><th class="hfp-time">Modified</th></tr></thead>'
+            '<table class="hfp-table"><thead><tr><th class="hfp-icon"></th>'
+            '<th class="hfp-sort" data-sort="name" title="Sort by name (again: reverse)">Name</th>'
+            '<th class="hfp-size hfp-sort" data-sort="size" title="Sort by size (again: reverse)">Size</th>'
+            '<th class="hfp-time hfp-sort" data-sort="mtime" title="Sort by time (again: reverse)">Modified</th>'
+            "</tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table>"
         )
         return ui.div(
