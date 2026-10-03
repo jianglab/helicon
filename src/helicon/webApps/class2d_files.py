@@ -93,3 +93,74 @@ def needs_filling(current, path) -> bool:
     if here is None or there is None:
         return True
     return here.absolute().parent != there.absolute().parent
+
+
+def local_path(value) -> Path | None:
+    """A field's value as an existing local file: a path or a ``file://`` URL.
+
+    Parameters
+    ----------
+    value : str or Path
+        What a "server" field or a "url" field holds.
+
+    Returns
+    -------
+    Path or None
+        The absolute file, or None for a web URL or a missing file.
+    """
+    text = str(value or "").strip()
+    if text.lower().startswith("file://"):
+        from urllib.parse import unquote, urlparse
+
+        text = unquote(urlparse(text).path)
+    p = _local_file(text)
+    return p.absolute() if p is not None else None
+
+
+def project_folder(params_path, image=None) -> str:
+    """The RELION or cryoSPARC project a Class2D parameter file belongs to.
+
+    That is the folder the segments' image paths start from, which
+    relion_reconstruct needs. Looked for, in order: the folder (the project's,
+    or one above the parameter file) from which ``image`` exists; the project
+    root by its marker -- ``default_pipeline.star`` for RELION, ``project.json``
+    for cryoSPARC; and, without either, the usual depth of a job folder below
+    its project (RELION ``Class2D/job010/``, cryoSPARC ``J63/``).
+
+    Parameters
+    ----------
+    params_path : str or Path
+        The parameter file (``.star`` or ``.cs``), as a path or ``file://`` URL.
+    image : str, optional
+        One segment's image path, as the parameter file gives it (relative).
+
+    Returns
+    -------
+    str
+        The project folder, or "" when the file is not local.
+    """
+    # absolute, but symlinks left alone: cryoSPARC links imported data into its
+    # jobs, and resolving the links would leave the project
+    star = local_path(params_path)
+    if star is None:
+        return ""
+    root = None
+    for folder in star.parents:  # RELION: the project root holds the pipeline
+        if (folder / "default_pipeline.star").is_file():
+            root = folder
+            break
+    if root is None:
+        from helicon.lib import cryosparc_project
+
+        try:
+            root = cryosparc_project.find_project_root(star)
+        except OSError:
+            root = None
+    if image and not Path(image).is_absolute():
+        for folder in ([root] if root is not None else []) + list(star.parents):
+            if (folder / image).exists():
+                return str(folder)
+    if root is not None:
+        return str(root)
+    depth = 1 if star.suffix.lower() == ".cs" else 2
+    return str(star.parents[depth]) if len(star.parents) > depth else ""

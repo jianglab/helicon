@@ -104,3 +104,64 @@ class TestTheTabsUseIt:
         )
         assert mod.BOOKMARK_DEFAULTS["server_params"] == ("server_params", "")
         assert mod.BOOKMARK_DEFAULTS["server_classes"] == ("server_classes", "")
+
+
+class TestProjectFolder:
+    """The folder a parameter file's image paths start from, for
+    relion_reconstruct."""
+
+    def test_relion_project_by_its_pipeline(self, tmp_path):
+        job = tmp_path / "proj" / "Class2D" / "job010"
+        job.mkdir(parents=True)
+        (tmp_path / "proj" / "default_pipeline.star").write_text("x")
+        star = job / "run_it020_data.star"
+        star.write_text("x")
+        assert c2.project_folder(star) == str(tmp_path / "proj")
+        # also given as a file:// URL in the url mode
+        assert c2.project_folder(star.as_uri()) == str(tmp_path / "proj")
+
+    def test_the_folder_the_images_exist_from_wins(self, tmp_path):
+        # images extracted under another project, the parameters copied here
+        star = tmp_path / "a" / "b" / "c" / "run_data.star"
+        star.parent.mkdir(parents=True)
+        star.write_text("x")
+        image = "Extract/job005/mic1.mrcs"
+        (tmp_path / "a" / "Extract" / "job005").mkdir(parents=True)
+        (tmp_path / "a" / image).write_text("x")
+        assert c2.project_folder(star, image) == str(tmp_path / "a")
+
+    def test_cryosparc_project_by_its_marker(self, tmp_path):
+        project = tmp_path / "CS-tau"
+        job = project / "J63"
+        job.mkdir(parents=True)
+        (project / "project.json").write_text("{}")
+        (job / "job.json").write_text("{}")
+        cs = job / "J63_020_particles.cs"
+        cs.write_text("x")
+        assert c2.project_folder(cs) == str(project)
+
+    def test_without_markers_the_usual_depth(self, tmp_path):
+        star = tmp_path / "P" / "Class2D" / "job010" / "run_data.star"
+        star.parent.mkdir(parents=True)
+        star.write_text("x")
+        assert c2.project_folder(star) == str(tmp_path / "P")
+        cs = tmp_path / "Q" / "J9" / "J9_particles.cs"
+        cs.parent.mkdir(parents=True)
+        cs.write_text("x")
+        assert c2.project_folder(cs) == str(tmp_path / "Q")
+
+    def test_symlinked_files_stay_in_their_project(self, tmp_path):
+        # cryoSPARC links imported data into its jobs
+        elsewhere = tmp_path / "raw" / "J1_particles.cs"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text("x")
+        project = tmp_path / "CS-p"
+        (project / "J1").mkdir(parents=True)
+        (project / "project.json").write_text("{}")
+        link = project / "J1" / "J1_particles.cs"
+        link.symlink_to(elsewhere)
+        assert c2.project_folder(link) == str(project)
+
+    def test_web_urls_and_missing_files_give_nothing(self, tmp_path):
+        assert c2.project_folder("https://ftp.ebi.ac.uk/x_data.star") == ""
+        assert c2.project_folder(tmp_path / "missing_data.star") == ""

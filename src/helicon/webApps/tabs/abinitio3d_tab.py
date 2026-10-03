@@ -1866,22 +1866,17 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         image = str(p["rlnImageName"].iloc[0]).split("@")[-1]
         if Path(image).is_absolute():
             return str(Path(image).parent) if Path(image).exists() else ""
-        star = None
-        if (
-            input.input_mode_params() == "server"
-            and Path(input.server_params()).exists()
-        ):
-            star = Path(input.server_params()).resolve()
-        starts = [star.parent] if star is not None else []
-        starts.append(Path.cwd())
-        for start in starts:
-            for folder in [start, *start.parents]:
-                if (folder / image).exists():
-                    return str(folder)
-        if star is not None:
-            # a RELION job folder sits two levels below its project
-            # (Project/Class2D/job010/run_it025_data.star); a cryoSPARC job one
-            return str(star.parents[1 if star.suffix == ".cs" else 2])
+        # the parameter file on this computer: chosen in the server mode, or a
+        # path (or file:// URL) typed in the url mode
+        mode = input.input_mode_params()
+        found = class2d_files.project_folder(
+            _source(mode, input.url_params, input.server_params), image
+        )
+        if found:
+            return found
+        for folder in [Path.cwd(), *Path.cwd().parents]:
+            if (folder / image).exists():
+                return str(folder)
         return ""
 
     @render.ui
