@@ -25,6 +25,12 @@ app_ui = ui.page_fluid(
     helicon.shiny.slider("level", "Level", min=0, max=100, value=40, step=1),
     helicon.shiny.range_slider("same", "Same", min=0, max=100, value=(40, 40), step=1),
     helicon.shiny.slider("live", "Live", min=0, max=100, value=40, step=1, emit_while_sliding=True),
+    ui.div(
+        helicon.shiny.range_slider("hid", "Hid", min=0, max=10, value=(2, 8), step=1),
+        helicon.shiny.slider("hid1", "Hid1", min=0, max=10, value=5, step=1),
+        id="hidbox",
+        style="visibility: hidden;",
+    ),
     ui.input_action_button("jump", "Jump"),
     ui.output_text("shown"),
     ui.output_text("emitted"),
@@ -327,6 +333,33 @@ class TestEmission:
             "!document.querySelector('#shown').innerText.includes('level=10 ')"
         )
         assert "level=10 " not in _shown(page)
+
+
+class TestInAHiddenContainer:
+    """A page keeps the place of something not ready by hiding it with
+    visibility: hidden. The slider library sets its number labels visible
+    itself, which showed them alone; they follow their container now."""
+
+    SHOWN = """() => Array.from(document.querySelectorAll(
+        '#hidbox .irs-from, #hidbox .irs-to, #hidbox .irs-single, '
+        + '#hidbox .irs-min, #hidbox .irs-max'))
+        .filter(e => getComputedStyle(e).visibility === 'visible'
+                     && e.getBoundingClientRect().height > 0).length"""
+
+    def test_no_numbers_while_the_container_is_hidden(self, page: Page, slider_app):
+        page.goto(slider_app)
+        page.wait_for_selector("#hidbox .irs-from", state="attached")
+        page.wait_for_timeout(500)
+        assert page.evaluate(self.SHOWN) == 0
+
+    def test_the_numbers_come_with_the_container(self, page: Page, slider_app):
+        page.goto(slider_app)
+        page.wait_for_selector("#hidbox .irs-from", state="attached")
+        page.evaluate("document.getElementById('hidbox').style.visibility = 'visible'")
+        page.wait_for_timeout(300)
+        # the range's two ends and the single slider's value, each slider's min
+        # and max
+        assert page.evaluate(self.SHOWN) == 7
 
 
 class TestEndsEditing:

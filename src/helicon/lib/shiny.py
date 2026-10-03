@@ -295,6 +295,19 @@ def slider(
     )
 
 
+# ionRangeSlider shows and hides its number labels itself, by setting
+# ``visibility`` on each: a label it shows (``visibility: visible``) stays on
+# screen inside a container hidden with ``visibility: hidden``, which is how a
+# page keeps the place of something not ready yet -- the numbers of a hidden
+# slider showed alone. A shown label takes its container's visibility instead;
+# a label the slider hides itself (the two ends merged into one) stays hidden.
+_SLIDER_CSS = """
+.helicon-editable-slider .irs [style*="visibility: visible"] {
+  visibility: inherit !important;
+}
+"""
+
+
 def _editable_slider(
     id, label, min, max, value, step, width, emit_while_sliding, kwargs
 ):
@@ -314,6 +327,7 @@ def _editable_slider(
             **kwargs,
         ),
         core_ui.tags.script(_SLIDER_EDIT_JS),
+        core_ui.tags.style(_SLIDER_CSS),
         class_="helicon-editable-slider",
         **({"data-emit-while-sliding": "true"} if emit_while_sliding else {}),
     )
