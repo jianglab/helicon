@@ -1775,13 +1775,16 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         )
         cut = phase.poorly_fitting_cut(fit)
         if cut is not None:
+            # the chance level: a class below it is taken out. Drawn over the
+            # markers and the grid, so it is not lost among them
             fig.add_hline(
                 y=cut,
-                line=dict(color="#d62728", width=1, dash="dash"),
-                annotation_text="chance",
+                line=dict(color="#b2182b", width=2, dash="dash"),
+                layer="above",
+                annotation_text=f"chance level ({cut:.2f})",
                 # at the best-fitting end, clear of the poor classes
                 annotation_position="top left",
-                annotation_font=dict(size=10, color="#d62728"),
+                annotation_font=dict(size=10, color="#b2182b"),
             )
         fig.update_layout(
             template="plotly_white",
