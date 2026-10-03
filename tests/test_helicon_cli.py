@@ -1,13 +1,15 @@
 """Tests for the ``helicon`` CLI entrypoint (helicon.py).
 
-Covers the bare-``helicon`` → ``helicon display`` default (Option A):
-a graphical display + napari launches display; headless or missing
-napari falls through to the standard subcommand help.
+Covers the bare-``helicon`` default: with a graphical display it launches
+the web apps (Home tab), or ``display`` when shiny is missing but napari is
+installed; headless, or with neither installed, it falls through to the
+standard subcommand help.
 """
 
 import argparse
 import os
 import sys
+import types
 
 import pytest
 
@@ -59,86 +61,77 @@ class TestHasDisplay:
         assert helicon_mod._has_display() is False
 
 
-class TestMaybeLaunchDisplayDefault:
-    def test_no_args_launches_when_gui_available(
-        self, monkeypatch, restore_argv, clean_env
-    ):
+class TestDefaultCommand:
+    @pytest.fixture
+    def gui(self, monkeypatch, restore_argv, clean_env):
         monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(helicon, "has_shiny", lambda: True)
         monkeypatch.setattr(helicon, "has_napari", lambda: True)
         sys.argv = ["helicon"]
-        assert helicon_mod._maybe_launch_display_default() is True
-        assert "display" in sys.argv
 
-    def test_headless_does_not_launch(self, monkeypatch, restore_argv, clean_env):
-        monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(helicon, "has_napari", lambda: True)
-        sys.argv = ["helicon"]
-        assert helicon_mod._maybe_launch_display_default() is False
-        assert sys.argv == ["helicon"]
+    def test_no_args_launches_webapps(self, gui):
+        assert helicon_mod._default_command() == "webApps"
 
-    def test_no_napari_does_not_launch(self, monkeypatch, restore_argv, clean_env):
-        monkeypatch.setattr(sys, "platform", "darwin")
+    def test_no_shiny_launches_display(self, gui, monkeypatch):
+        monkeypatch.setattr(helicon, "has_shiny", lambda: False)
+        assert helicon_mod._default_command() == "display"
+
+    def test_neither_installed(self, gui, monkeypatch):
+        monkeypatch.setattr(helicon, "has_shiny", lambda: False)
         monkeypatch.setattr(helicon, "has_napari", lambda: False)
-        sys.argv = ["helicon"]
-        assert helicon_mod._maybe_launch_display_default() is False
-        assert sys.argv == ["helicon"]
+        assert helicon_mod._default_command() is None
 
-    def test_with_subcommand_does_not_launch(
-        self, monkeypatch, restore_argv, clean_env
-    ):
-        monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr(helicon, "has_napari", lambda: True)
+    def test_headless(self, gui, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert helicon_mod._default_command() is None
+
+    def test_with_subcommand(self, gui):
         sys.argv = ["helicon", "cryosparc"]
-        assert helicon_mod._maybe_launch_display_default() is False
-        assert sys.argv == ["helicon", "cryosparc"]
+        assert helicon_mod._default_command() is None
 
 
 class TestMainDispatch:
-    def test_bare_helicon_launches_display_when_gui(
-        self, monkeypatch, restore_argv, clean_env
-    ):
+    @pytest.fixture
+    def gui(self, monkeypatch, restore_argv, clean_env):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(helicon, "has_shiny", lambda: True)
+        monkeypatch.setattr(helicon, "has_napari", lambda: True)
+        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
+        sys.argv = ["helicon"]
+
+    @pytest.fixture
+    def called(self, monkeypatch):
         called = {}
 
-        def fake_display_main(args):
-            called["main"] = True
-            called["folder"] = args.folder
-
-        monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr(helicon, "has_napari", lambda: True)
-        monkeypatch.setattr("helicon.commands.display.main", fake_display_main)
-        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
-        sys.argv = ["helicon"]
-        helicon_mod.main()
-        assert called == {"main": True, "folder": None}
-
-    def test_bare_helicon_falls_through_when_headless(
-        self, monkeypatch, restore_argv, clean_env
-    ):
-        get_commands_called = {}
+        def fake_import_module(name):
+            # stands in for the command modules, so the tests need neither
+            # shiny nor napari installed
+            command = name.rsplit(".", 1)[-1]
+            return types.SimpleNamespace(
+                main=lambda args: called.__setitem__(command, vars(args))
+            )
 
         def fake_get_commands(**kwargs):
-            get_commands_called["called"] = True
+            called["help"] = True
 
+        monkeypatch.setattr(helicon_mod, "import_module", fake_import_module)
+        monkeypatch.setattr(helicon_mod, "_get_commands", fake_get_commands)
+        return called
+
+    def test_bare_helicon_launches_webapps(self, gui, called):
+        helicon_mod.main()
+        assert called == {"webApps": {}}
+
+    def test_bare_helicon_launches_display_without_shiny(
+        self, gui, called, monkeypatch
+    ):
+        monkeypatch.setattr(helicon, "has_shiny", lambda: False)
+        helicon_mod.main()
+        assert called == {"display": {"folder": None}}
+        assert sys.argv == ["helicon", "display"]
+
+    def test_bare_helicon_falls_through_when_headless(self, gui, called, monkeypatch):
         monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setattr(helicon, "has_napari", lambda: True)
-        monkeypatch.setattr(helicon_mod, "_get_commands", fake_get_commands)
-        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
-        sys.argv = ["helicon"]
         helicon_mod.main()
-        assert get_commands_called == {"called": True}
-
-    def test_bare_helicon_falls_through_when_no_napari(
-        self, monkeypatch, restore_argv, clean_env
-    ):
-        get_commands_called = {}
-
-        def fake_get_commands(**kwargs):
-            get_commands_called["called"] = True
-
-        monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr(helicon, "has_napari", lambda: False)
-        monkeypatch.setattr(helicon_mod, "_get_commands", fake_get_commands)
-        monkeypatch.setattr(helicon_mod, "_maybe_reexec_macos_display", lambda: None)
-        sys.argv = ["helicon"]
-        helicon_mod.main()
-        assert get_commands_called == {"called": True}
+        assert called == {"help": True}
+        assert sys.argv == ["helicon"]

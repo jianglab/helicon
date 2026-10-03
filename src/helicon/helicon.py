@@ -245,31 +245,40 @@ def _has_display() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def _maybe_launch_display_default() -> bool:
-    """When ``helicon`` is run with no subcommand, launch ``display``
-    if a GUI is available; otherwise fall through to the standard
-    subcommand help. Returns True if display was (or will be) launched.
+def _default_command() -> str | None:
+    """The command a bare ``helicon`` (no subcommand) runs.
+
+    The web apps, which open on their Home tab, when shiny is installed;
+    otherwise ``display`` when napari is. Neither on a host without a
+    graphical display, where the standard subcommand help is shown instead
+    (returns None), as there is no browser or window to open there.
     """
     if len(sys.argv) != 1:
-        return False
-    if not helicon.has_napari():
-        return False
+        return None
     if not _has_display():
-        return False
-    sys.argv = [sys.argv[0], "display"] + sys.argv[1:]
-    return True
+        return None
+    if helicon.has_shiny():
+        return "webApps"
+    if helicon.has_napari():
+        return "display"
+    return None
 
 
 def main():
-    launched_display = _maybe_launch_display_default()
+    default_command = _default_command()
+    if default_command == "display":
+        # inserted so the macOS relaunch below recognises a display launch
+        sys.argv = [sys.argv[0], "display"]
     _maybe_reexec_macos_display()
-    if launched_display:
+    if default_command is not None:
         from argparse import Namespace
-        from importlib import import_module
 
-        display_mod = import_module("helicon.commands.display")
+        if default_command == "webApps":
+            module, args = "helicon.commands.webApps", Namespace()
+        else:
+            module, args = "helicon.commands.display", Namespace(folder=None)
         try:
-            display_mod.main(Namespace(folder=None))
+            import_module(module).main(args)
         except HeliconExit:
             sys.exit(0)
         except HeliconError as e:

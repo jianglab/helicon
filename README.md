@@ -15,7 +15,7 @@ pip install "helicon[all] @ git+https://github.com/jianglab/helicon"
 
 ## Usage
 
-Run this command in a terminal to start the Helicon GUI:
+Run this command in a terminal to open the Helicon web apps on their Home tab:
 ```
 helicon
 ```
