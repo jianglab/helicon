@@ -118,6 +118,19 @@ def solve_equations(
         )
         return res.x.astype(np.float32), None
 
+    # No intercept unless asked for. An intercept is a constant added to every
+    # equation, but the volume is the coefficients alone -- the intercept is
+    # fitted, then thrown away -- so whatever it offsets stays in the map, and
+    # the images it is fitted to have a background of zero anyway. With few
+    # symmetry equations (a volume a few voxels long) elastic net paid a large
+    # negative intercept with a bright ring at the edge of the cylinder: in
+    # AbInitio3D's maps from class averages and in the z section of denovo3D's
+    # projection matching. Without it, on ten EMPIAR-10940 class averages, the
+    # elastic-net twist search hit the twist (1.20) for 7 of them against 5, a
+    # quarter faster, and the maps lost the ring (edge density 0.1 of the
+    # inner, against 0.2-0.3); their correlation with the deposited map
+    # (EMD-14046) was about 0.01 lower.
+    fit_intercept = bool(algorithm.get("fit_intercept", False))
     if (
         algorithm["model"] == "lreg"
     ):  # ordinary linear least square without regularization
@@ -128,15 +141,16 @@ def solve_equations(
             logger.warning(
                 "--algorithm=lreq with positive contraints uses very large amount memory!"
             )
-        model = LinearRegression(fit_intercept=True, positive=positive)
+        model = LinearRegression(fit_intercept=fit_intercept, positive=positive)
     elif algorithm["model"] == "lasso":
         from sklearn.linear_model import Lasso
 
         model = Lasso(
             alpha=algorithm.get("alpha", 1e-4),
-            fit_intercept=True,
+            fit_intercept=fit_intercept,
             positive=positive,
             selection="random",
+            random_state=0,  # the same map from the same images, every time
             tol=tol,
             max_iter=max_iter,
         )
@@ -146,9 +160,10 @@ def solve_equations(
         model = ElasticNet(
             alpha=algorithm.get("alpha", 1e-4),
             l1_ratio=algorithm.get("l1_ratio", 0.5),
-            fit_intercept=True,
+            fit_intercept=fit_intercept,
             positive=positive,
             selection="random",
+            random_state=0,  # the same map from the same images, every time
             tol=tol,
             max_iter=max_iter,
         )
@@ -157,7 +172,7 @@ def solve_equations(
 
         model = Ridge(
             alpha=algorithm.get("alpha", 1),
-            fit_intercept=True,
+            fit_intercept=fit_intercept,
             positive=positive,
             tol=tol,
             max_iter=max_iter,
@@ -169,7 +184,7 @@ def solve_equations(
         model = ARDRegression(
             alpha_1=algorithm.get("alpha", 1e-6),
             alpha_2=algorithm.get("alpha", 1e-6),
-            fit_intercept=True,
+            fit_intercept=fit_intercept,
             tol=tol,
             max_iter=max_iter,
         )

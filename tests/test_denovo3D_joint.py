@@ -431,6 +431,58 @@ class TestRankByProjectionMatching:
         assert len(params) == 11 and len(return_data) == 9
 
 
+class TestProjectionMatchingInParallel:
+    """The pairs are refined several at once; the answer must not depend on it."""
+
+    def _results(self, twists):
+        out = []
+        for t in twists:
+            for label in (3, 4):
+                params = ("img", "f.mrcs", label, 5.0, 5.0, t, 4.75, 1, 0.0, 0.0, 0.0)
+                rd = ("x", "y", "z", None, 32, 32, 126, 4, None)
+                out.append((0.5, rd, params))
+        return out
+
+    def _fake(self, monkeypatch):
+        import time
+
+        def fake_refine(images, seed, twist, *a, **k):
+            time.sleep(0.01 * (int(round(twist * 10)) % 3))  # finish out of order
+            return dict(
+                phis=np.zeros(len(images)),
+                placed=[dict(psi=0.0)] * len(images),
+                two_fold=False,
+                info=dict(score=1.0 - abs(twist - 1.2)),
+            )
+
+        monkeypatch.setattr(J, "joint_refine", fake_refine)
+        monkeypatch.setattr(J, "placement_composite", lambda *a, **k: (None, None))
+
+    def test_the_same_ranking_on_one_cpu_and_several(self, monkeypatch):
+        self._fake(monkeypatch)
+        results = self._results([0.9, 1.0, 1.1, 1.2, 1.3, 1.4])
+        images = [np.zeros((8, 8))] * 2
+        one, _ = J.rank_by_projection_matching(results, images, cpu=1)
+        many, _ = J.rank_by_projection_matching(results, images, cpu=4)
+        assert [r[2][5] for r in one] == [r[2][5] for r in many]
+        assert one[0][2][5] == 1.2
+
+    def test_progress_comes_before_each_pair_and_can_stop_the_rest(self, monkeypatch):
+        self._fake(monkeypatch)
+        results = self._results([0.9, 1.0, 1.1, 1.2, 1.3, 1.4])
+        calls = []
+
+        def progress(i, n, twist):
+            calls.append(i)
+            return i < 3  # stop before the fourth pair
+
+        ranked, _ = J.rank_by_projection_matching(
+            results, [np.zeros((8, 8))] * 2, progress=progress, cpu=2
+        )
+        assert calls == [0, 1, 2, 3]
+        assert len(ranked) == 3
+
+
 class TestCompositeAlignsToTheModel:
     """The composite and the model projection must share one canvas, or showing
     them together is misleading rather than useful."""

@@ -568,7 +568,10 @@ def _reconstruct_joint(
     from .denovo3d_align import _rotate, long_side_projection
     from .denovo3d_jointsolve import joint_reconstruct
 
-    algorithm = algorithm or dict(model="elasticnet", l1_ratio=0.5)
+    # no intercept: the images' background is zero, and an intercept let a
+    # thin volume trade a negative offset for a bright ring at its edge (see
+    # denovo3d_solver)
+    algorithm = algorithm or dict(model="elasticnet", l1_ratio=0.5, fit_intercept=False)
     ny, nx = images[0].shape
     apix2d = float(apix)
     apix3d = apix2d

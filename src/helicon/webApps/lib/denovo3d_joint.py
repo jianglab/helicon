@@ -599,6 +599,7 @@ def rank_by_projection_matching(
     log=None,
     progress=None,
     display_algorithm=None,
+    cpu=None,
 ):
     """Re-rank solver results by fitting one volume to all the images at once.
 
@@ -637,7 +638,8 @@ def rank_by_projection_matching(
     quadrupling of search time for an answer that, so far, agrees.
 
     ``progress``, if given, is called as ``progress(index, total, twist)``
-    before each pair and may return ``False`` to stop early.
+    before each pair and may return ``False`` to stop early. ``cpu`` pairs are
+    refined at once (default: the free CPUs).
 
     Returns ``(ranked, composites)``.
     """
@@ -653,13 +655,9 @@ def rank_by_projection_matching(
         return sorted(results, key=lambda x: x[0], reverse=True), {}
 
     ranked, composites = [], {}
-    for i, pair in enumerate(pairs):
-        # Report before the work, so a caller driving a progress bar sees the
-        # pair that is about to be refined rather than the one just finished,
-        # and can stop us by returning False. Each pair costs a full
-        # refinement, so a run with no way out is minutes long.
-        if progress is not None and progress(i, len(pairs), pair[0]) is False:
-            break
+
+    def one(pair):
+        """Refine one pair; its ranked entry and composite, or None if it failed."""
         group = by_pair[pair]
         representative = group[labels[0]]
         twist, rise, csym, apix2d, apix3d, geometry = geometry_from_result(
@@ -687,10 +685,10 @@ def rank_by_projection_matching(
                     twist,
                     rise,
                 )
-            continue
+            return None
 
         best = max(group.values(), key=lambda r: r[0])
-        ranked.append((float(out["info"]["score"]), best[1], best[2]))
+        entry = (float(out["info"]["score"]), best[1], best[2])
         try:
             composite, coverage = placement_composite(
                 images,
@@ -726,7 +724,7 @@ def rank_by_projection_matching(
                 import helicon
 
                 z_view = helicon.pad_to_size(z_view, shape=np.shape(model))
-            composites[pair] = dict(
+            picture = dict(
                 composite=composite,
                 model=model,
                 zview=z_view,
@@ -742,7 +740,55 @@ def rank_by_projection_matching(
                 apix2d=apix2d,
             )
         except Exception:  # pragma: no cover - a failed picture is not fatal
-            composites[pair] = None
+            picture = None
+        return entry, picture
+
+    # The pairs are independent: each is refined on one CPU, several at once
+    # (one at a time, 20 twists of five EMPIAR-10940 classes took 210 s). A
+    # pair is started only when a worker is free, so ``progress`` is still
+    # called just before each pair's work begins and can still stop the rest.
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    if cpu is None:
+        try:
+            import helicon
+
+            cpu = int(helicon.available_cpu())
+        except Exception:
+            cpu = 1
+    workers = max(1, min(int(cpu), len(pairs)))
+
+    def collect(future, pair):
+        done = future.result()
+        if done is not None:
+            ranked.append(done[0])
+            composites[pair] = done[1]
+
+    try:
+        from threadpoolctl import threadpool_limits
+
+        limits = threadpool_limits(limits=1) if workers > 1 else None
+    except Exception:
+        limits = None
+    try:
+        with ThreadPoolExecutor(workers) as pool:
+            running = {}
+            for i, pair in enumerate(pairs):
+                # Report before the work, so a caller driving a progress bar
+                # sees the pair that is about to be refined rather than the one
+                # just finished, and can stop us by returning False.
+                while len(running) >= workers:
+                    finished, _ = wait(running, return_when=FIRST_COMPLETED)
+                    for f in finished:
+                        collect(f, running.pop(f))
+                if progress is not None and progress(i, len(pairs), pair[0]) is False:
+                    break
+                running[pool.submit(one, pair)] = pair
+            for f in list(running):
+                collect(f, running.pop(f))
+    finally:
+        if limits is not None:
+            limits.restore_original_limits()
 
     ranked.sort(key=lambda x: x[0], reverse=True)
     return ranked, composites
