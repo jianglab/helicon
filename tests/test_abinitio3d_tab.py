@@ -95,9 +95,7 @@ class TestRegistration:
         assert app._TAB_MODULE_MAP["AbInitio3D"] == ("abinitio3d", abinitio3d_tab)
         src = Path(app.__file__).read_text()
         assert 'ui.nav_panel("AbInitio3D", abinitio3d_tab_ui("abinitio3d"))' in src
-        assert '"AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d", project)' in (
-            src
-        )
+        assert '"AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d")' in src
         # the navbar puts it right after Denovo3D
         assert src.index('ui.nav_panel("AbInitio3D"') > src.index(
             'ui.nav_panel("Denovo3D"'
@@ -321,7 +319,7 @@ class TestRankedFits:
         rank = src.index('ui.output_ui("class_fit_rank_plot")')
         assert ring < hist < rank
         # the same two columns as the scan and the ring above
-        row = src[hist : rank + 300]
+        row = src[hist : rank + 2000]
         assert "col_widths=(7, 5)" in row
 
     def test_rank_fit_and_size(self):
@@ -332,3 +330,65 @@ class TestRankedFits:
         assert "r.class_count" in plot  # size by segments
         assert "cmax=1.0" in plot and "1.05]" in plot  # the ring's fixed scale
         assert "phase.poorly_fitting_cut(fit)" in plot
+
+
+class TestResultsAppearInOrder:
+    """The controls under the plots wait for the plots."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_the_results_controls_wait_for_the_plots(self):
+        css = str(abinitio3d_tab._RESULTS_ORDER_CSS)
+        assert ":has(.ab-wait > .shiny-html-output:empty) .ab-after" in css
+        # opacity: a child cannot undo it, as the sliders' labels undid
+        # visibility
+        assert "opacity: 0" in css and "pointer-events: none" in css
+        src = self._src()
+        assert "_RESULTS_ORDER_CSS," in src
+        # every result has these three; the histogram may be empty, so it is
+        # not waited for
+        for name in ("phase_scan_plot", "phase_circle_plot", "class_fit_rank_plot"):
+            box = src[src.index(f'ui.output_ui("{name}")') :][:200]
+            assert 'class_="ab-plot-box ab-wait"' in box, name
+        box = src[src.index('ui.output_ui("filament_pitch_plot")') :][:200]
+        assert "ab-wait" not in box
+        # the controls that wait: both range sliders, the fit threshold with
+        # the download, and everything below the plots
+        assert src.count('class_="ab-after"') == 4
+
+
+class TestHiddenGalleryStillUpdates:
+    def test_the_class_gallery_is_drawn_while_hidden(self):
+        """Remove picked and the suggestions' Add buttons redraw it; with the
+        Parameters tab in front a suspended output made them do nothing."""
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        at = src.index("def select_classes_gallery")
+        assert "@output(suspend_when_hidden=False)" in src[at - 200 : at]
+
+
+class TestHiddenUntilThereIsSomethingToShow:
+    """The results and the suggestions start hidden in the page itself: hiding
+    them from the server left them on screen while the tab started."""
+
+    def test_the_page_starts_with_both_hidden(self):
+        from htmltools import TagList
+
+        html = TagList(abinitio3d_tab.abinitio3d_tab_ui("abinitio3d")).render()["html"]
+        rule = "#ab_results_box, #abinitio3d-ab_suggestions_box { display: none; }"
+        assert rule in html
+        # the rule is in the page before the output that shows them
+        assert html.index(rule) < html.index('id="abinitio3d-results_visibility"')
+
+    def test_the_server_only_shows_them(self):
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        body = src[src.index("def results_visibility") :]
+        body = body[: body.index("@render")]
+        assert "display: none" not in body
+        assert "display: block" in body and "display: flex" in body

@@ -422,9 +422,10 @@ def background_task(
 
     Parameters
     ----------
-    button_id : str
+    button_id : str or None
         The ``input_task_button`` that starts the task; it is disabled while
-        the task runs.
+        the task runs. None for a task started some other way (a dialog's
+        button, say).
     work : callable
         ``work(job, progress)``, run in a thread; returns the result.
         ``progress`` is a :class:`ThreadProgress`.
@@ -453,9 +454,7 @@ def background_task(
 
         session = require_active_session(None)
 
-    @core_ui.bind_task_button(button_id=button_id)
-    @reactive.extended_task
-    async def task(job):
+    async def run(job):
         progress = ThreadProgress(min=0, max=progress_max, session=session)
         try:
             return job, await asyncio.to_thread(work, job, progress)
@@ -465,6 +464,10 @@ def background_task(
             raise
         finally:
             progress.close()
+
+    task = reactive.extended_task(run)
+    if button_id is not None:
+        task = core_ui.bind_task_button(button_id=button_id)(task)
 
     @reactive.effect
     @reactive.event(task.status)

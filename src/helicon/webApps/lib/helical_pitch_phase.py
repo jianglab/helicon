@@ -69,6 +69,7 @@ finds a real spread of about 6-7% of the period between filaments.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -748,8 +749,11 @@ def synthetic_labels(pairs, period, n_classes, noise=0.3, rng=None):
 
 
 # The pairs handed to the processes of _estimate_periods; they inherit it when
-# forked rather than receiving a copy.
+# forked rather than receiving a copy. One estimate at a time uses it: the web
+# app runs each session's estimate in a thread of its own, and a second one
+# setting it before the first's processes were forked would hand them its pairs.
 _POOL_PAIRS = []
+_POOL_PAIRS_LOCK = threading.Lock()
 
 
 def _estimate_one(task):
@@ -789,21 +793,20 @@ def _estimate_periods(pairs, tasks):
     the number of processes.
     """
     workers = _pool_workers(pairs, len(tasks))
-    if workers == 1:
-        _POOL_PAIRS[:] = [pairs]
-        try:
-            return [_estimate_one(t) for t in tasks]
-        finally:
-            _POOL_PAIRS.clear()
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
 
-    _POOL_PAIRS[:] = [pairs]
-    try:
-        with ProcessPoolExecutor(workers, mp_context=mp.get_context("fork")) as pool:
-            return list(pool.map(_estimate_one, tasks))
-    finally:
-        _POOL_PAIRS.clear()
+    with _POOL_PAIRS_LOCK:
+        _POOL_PAIRS[:] = [pairs]
+        try:
+            if workers == 1:
+                return [_estimate_one(t) for t in tasks]
+            with ProcessPoolExecutor(
+                workers, mp_context=mp.get_context("fork")
+            ) as pool:
+                return list(pool.map(_estimate_one, tasks))
+        finally:
+            _POOL_PAIRS.clear()
 
 
 def calibrate_period(
@@ -1313,6 +1316,92 @@ def class_fit(pairs, phases, period, min_separation=0.25, prior=0.05):
         return np.where(den > 0, num / den * (n / (n + n0)), np.nan)
 
 
+def candidate_fit(
+    params, result, candidates, min_separation=0.25, prior=0.05, max_sep=None
+):
+    """The fit unselected classes would have on the ring of a result.
+
+    Each candidate is placed on the ring by its segment pairs with the classes
+    of the fit, on the filaments they share: a pair at offset d puts it at the
+    other class's azimuth plus (or minus) 2 pi d / P. Its fit is then scored
+    as :func:`class_fit` scores the classes of the fit -- the mean agreement of
+    those pairs, pairs closer than ``min_separation`` of a repeat left out,
+    shrunk by the evidence -- so it reads on the same scale: about the fit the
+    class would get if it were added. Pairs with a class not in the fit (one
+    merged into another, say) do not count.
+
+    Parameters
+    ----------
+    params : pandas.DataFrame
+        The Class2D parameters the result was computed from.
+    result : PhasePitchResult
+    candidates : sequence of int
+        Class numbers.
+    min_separation, prior : float, optional
+        As for :func:`class_fit`.
+    max_sep : float, optional
+        Longest pair separation used, in A. Defaults to the longest repeat the
+        result's scan searched.
+
+    Returns
+    -------
+    dict
+        Class number -> predicted fit; NaN for a class without such pairs.
+    """
+    placed = [int(c) for c in result.class_ids]
+    cands = [int(c) for c in candidates if int(c) not in set(placed)]
+    out = {c: float("nan") for c in cands}
+    if not cands:
+        return out
+    if max_sep is None:
+        max_sep = float(np.max(result.scan_periods))
+    try:
+        pairs = prepare_pairs(params, class_ids=placed + cands, max_sep=max_sep)
+    except ValueError:
+        return out
+    period = float(result.period_raw)
+    row = {int(c): i for i, c in enumerate(pairs.class_ids)}
+    phase = np.full(pairs.n_classes, np.nan)
+    for c, ph in zip(placed, result.phases):
+        if c in row:
+            phase[row[c]] = ph
+    placed_row = np.isfinite(phase)
+    a, b = pairs.seg_class[pairs.I], pairs.seg_class[pairs.J]
+    far = np.abs(pairs.D) >= min_separation * period
+    w = pairs.W
+    ang = 2 * np.pi * pairs.D / period
+    # The pairs were collected anew, with the candidates in: the direction
+    # along the filaments is whichever the classes of the fit agree with.
+    both = placed_row[a] & placed_row[b] & far
+    with np.errstate(invalid="ignore"):
+        agree = np.sum(w[both] * np.cos(ang[both] - (phase[a[both]] - phase[b[both]])))
+    if agree < 0:
+        ang = -ang
+    evidence = np.asarray(result.class_evidence, dtype=float)
+    n0 = (
+        prior * float(np.median(evidence[evidence > 0]))
+        if evidence is not None and np.any(evidence > 0)
+        else 0.0
+    )
+    for c in cands:
+        k = row.get(c)
+        if k is None:
+            continue
+        # with the candidate first in a pair: phi_c - phi_b = ang; second:
+        # phi_a - phi_c = ang
+        m1 = (a == k) & placed_row[b] & far
+        m2 = (b == k) & placed_row[a] & far
+        where = np.concatenate([phase[b[m1]] + ang[m1], phase[a[m2]] - ang[m2]])
+        weight = np.concatenate([w[m1], w[m2]])
+        n = len(where)
+        if n == 0 or weight.sum() <= 0:
+            continue
+        phi = np.angle(np.sum(weight * np.exp(1j * where)))
+        mean = float(np.sum(weight * np.cos(where - phi)) / weight.sum())
+        out[c] = mean * n / (n + n0)
+    return out
+
+
 def class_evidence(pairs, period, min_separation=0.25):
     """Each class's number of pairs ``min_separation`` periods or more apart.
 
@@ -1329,9 +1418,10 @@ def class_evidence(pairs, period, min_separation=0.25):
 
 TOO_FEW = "too few informative segment pairs to judge"
 AT_CHANCE = "fits the ring no better than chance"
+BELOW_THRESHOLD = "fit below the threshold"
 
 
-def diagnose_classes(result, prior=0.05):
+def diagnose_classes(result, prior=0.05, threshold=None):
     """The classes to take out of a fit, each with the reason.
 
     * ``TOO_FEW``: a class with fewer informative pairs (:func:`class_evidence`)
@@ -1340,6 +1430,8 @@ def diagnose_classes(result, prior=0.05):
       on filaments with few others of the selection;
     * ``AT_CHANCE``: a class flagged by :func:`poorly_fitting` -- its segments do
       not sit at one azimuth on the ring: junk, or another type;
+    * ``BELOW_THRESHOLD``: with ``threshold`` given, a class whose fit is
+      below it (:func:`fit_threshold` suggests one);
     * ``"180-degree copy of class N"``: a class merged into a flagged class as
       its turned counterpart, which goes with it.
 
@@ -1366,6 +1458,10 @@ def diagnose_classes(result, prior=0.05):
                 out[c] = TOO_FEW
     for c in poorly_fitting(ids, result.class_fit):
         out.setdefault(c, AT_CHANCE)
+    if threshold is not None:
+        for c, f in zip(ids, np.asarray(result.class_fit, dtype=float)):
+            if np.isfinite(f) and f < threshold:
+                out.setdefault(c, BELOW_THRESHOLD)
     for gone, kept in (result.merged_into or {}).items():
         if int(kept) in out and int(gone) not in out:
             out[int(gone)] = f"180\u00b0 copy of class {int(kept)}"
@@ -1389,6 +1485,45 @@ def poorly_fitting(class_ids, fit, level=0.1, relative=0.25):
         return []
     fit = np.asarray(fit, dtype=float)
     return [int(c) for c, f in zip(class_ids, fit) if not np.isfinite(f) or f < cut]
+
+
+def fit_threshold(fit, min_drop=0.15, min_kept=3, level=0.1, relative=0.25):
+    """A fit below which classes are taken out, where the ranked fits break.
+
+    The classes of one type fit the ring about equally well, and those of
+    other types, or junk, clearly less: going down the fits from the best, the
+    first drop larger than ``min_drop`` (with at least ``min_kept`` classes
+    above it) separates them, and the threshold is placed in the middle of
+    that drop. Without such a drop it is the chance level
+    (:func:`poorly_fitting_cut`), and it is never below it.
+
+    The fits are on a fixed scale (1: every segment at its class's azimuth),
+    so one ``min_drop`` holds for any data set.
+
+    Parameters
+    ----------
+    fit : sequence of float
+        The class fits (:func:`class_fit`); NaN for a class without one.
+    min_drop : float, optional
+        Smallest drop taken as a break. Defaults to 0.15.
+    min_kept : int, optional
+        Fewest classes kept above the threshold. Defaults to 3.
+    level, relative : float, optional
+        As for :func:`poorly_fitting_cut`.
+
+    Returns
+    -------
+    float or None
+        The threshold; None with fewer than three classes with a fit.
+    """
+    chance = poorly_fitting_cut(fit, level, relative)
+    if chance is None:
+        return None
+    f = np.sort(np.asarray(fit, dtype=float)[np.isfinite(fit)])[::-1]
+    for i in range(max(min_kept, 1), len(f)):
+        if f[i - 1] - f[i] > min_drop:
+            return max(chance, float(f[i - 1] + f[i]) / 2.0)
+    return chance
 
 
 def poorly_fitting_cut(fit, level=0.1, relative=0.25):
@@ -1599,6 +1734,8 @@ def _register_prepared(images, indices, max_width):
 
 
 _POOL_IMAGES = {}
+# held while _POOL_IMAGES is in use, for the reason given at _POOL_PAIRS_LOCK
+_POOL_IMAGES_LOCK = threading.Lock()
 
 
 def _register_chunk(args):
@@ -1637,16 +1774,22 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
 
-    _POOL_IMAGES.clear()
-    _POOL_IMAGES.update(prepared)
     size = max(1, len(todo) // (workers * 4))
     chunks = [(todo[k : k + size], turn, refine) for k in range(0, len(todo), size)]
     out = []
-    with ProcessPoolExecutor(workers, mp_context=mp.get_context("fork")) as pool:
-        for k, part in enumerate(pool.map(_register_chunk, chunks)):
-            out.extend(part)
-            if progress is not None:
-                progress(min(len(todo), (k + 1) * size), len(todo))
+    with _POOL_IMAGES_LOCK:
+        _POOL_IMAGES.clear()
+        _POOL_IMAGES.update(prepared)
+        try:
+            with ProcessPoolExecutor(
+                workers, mp_context=mp.get_context("fork")
+            ) as pool:
+                for k, part in enumerate(pool.map(_register_chunk, chunks)):
+                    out.extend(part)
+                    if progress is not None:
+                        progress(min(len(todo), (k + 1) * size), len(todo))
+        finally:
+            _POOL_IMAGES.clear()
     return out
 
 

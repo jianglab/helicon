@@ -14,7 +14,6 @@ import plotly.io as pio
 from shiny import reactive, render, ui
 from shiny import module
 
-from ..lib.shared_state import ProjectState
 
 BOOKMARK_DEFAULTS = {
     "mode": ("radio", "Helical\u21d22D"),
@@ -671,7 +670,7 @@ def helical_lattice_tab_ui():
 
 
 @module.server
-def helical_lattice_tab_server(input, output, session, project: ProjectState):
+def helical_lattice_tab_server(input, output, session):
     @output
     @render.ui
     def conditional_inputs():
@@ -883,17 +882,6 @@ def helical_lattice_tab_server(input, output, session, project: ProjectState):
                     _fig_to_html(fig3),
                 ),
             )
-
-    # ── Shared state propagation ──────────────────────────────────
-
-    @reactive.effect
-    def _propagate_to_shared_state():
-        """Push lattice-derived helical params to shared project state."""
-        twist, rise, csym, diameter = _get_params()
-        project.twist.set(float(twist))
-        project.rise.set(float(rise))
-        project.csym.set(int(csym))
-        project.diameter.set(float(diameter))
 
     def _get_params():
         if input.radio() == "2D\u21d2Helical":

@@ -16,7 +16,6 @@ import helicon
 from shiny import reactive, ui, module, req, render
 
 from .. import bookmark, class2d_files, deployment
-from ..lib.shared_state import ProjectState
 
 from ..lib import helical_pitch_compute as compute
 
@@ -317,8 +316,12 @@ def helical_pitch_tab_ui():
   function install(gd) {
     if (!gd || !gd._fullLayout || !gd.layout) return;
     if (S.has(gd)) return;
-    // Check for pre-created hidden vline shapes (plot_histogram multi_crosshair)
-    var n = (gd.layout.shapes || []).length;
+    // Only plots made with plot_histogram(multi_crosshair=True), whose hidden
+    // vline shapes are named for it: any other plot's shapes (a threshold
+    // line, say) would otherwise be replaced by the crosshair on mouse-over
+    var n = (gd.layout.shapes || []).filter(function (s) {
+      return s.name === 'hp-crosshair';
+    }).length;
     if (n === 0) return;
     S.add(gd);
     // Use native DOM events + Plotly axis mapping so the crosshair survives
@@ -336,7 +339,7 @@ def helical_pitch_tab_ui():
         var x = hx * (i + 1);
         u.shapes.push({type:'line', x0:x, x1:x, y0:0, y1:1, yref:'paper',
           line:{width:i===0?3:2, dash:i===0?'solid':'dash', color:'green'},
-          visible: x <= xa.range[1]});
+          visible: x <= xa.range[1], name: 'hp-crosshair'});
       }
       if (u.shapes.length) Plotly.relayout(gd, u);
     });
@@ -345,7 +348,7 @@ def helical_pitch_tab_ui():
       for (var i = 0; i < n; i++)
         u.shapes.push({type:'line', x0:0, x1:0, y0:0, y1:1, yref:'paper',
           line:{width:i===0?3:2, dash:i===0?'solid':'dash', color:'green'},
-          visible:false});
+          visible:false, name: 'hp-crosshair'});
       Plotly.relayout(gd, u);
     });
   }
@@ -363,7 +366,7 @@ def helical_pitch_tab_ui():
 
 
 @module.server
-def helical_pitch_tab_server(input, output, session, project: ProjectState):
+def helical_pitch_tab_server(input, output, session):
     # the Class2D parameters as read, and as used: with tube ids that hold
     # several filaments split (helicon.split_distinct_filaments)
     params_raw = reactive.value(None)

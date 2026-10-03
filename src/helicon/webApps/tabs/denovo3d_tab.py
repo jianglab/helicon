@@ -27,7 +27,6 @@ from shiny import reactive, render, req, ui, module
 from shiny.types import SilentException
 
 from .. import deployment
-from ..lib.shared_state import ProjectState
 
 from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register
 from ..lib import helix_transform
@@ -683,7 +682,7 @@ def denovo3d_tab_ui():
 
 
 @module.server
-def denovo3d_tab_server(input, output, session, project: ProjectState):
+def denovo3d_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(
@@ -1970,9 +1969,10 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 " pitch, which is what the twist search needs.",
                 style="font-size: 90%; color: #555;",
             ),
-            ui.input_action_button(
+            ui.input_task_button(
                 "dn_auto_stitch",
                 label="Auto Stitch",
+                label_busy="Stitching...",
                 class_="btn-primary",
                 style="max-width: 200px; margin-top: 6px;",
             ),
@@ -3024,6 +3024,131 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         stitched_image_links.set([])
         autostitch_report.set({})
 
+    # Auto Stitch registers every pair of images: seconds to minutes. The
+    # registration and the composite run in a worker thread (background_task),
+    # so the event loop every session shares stays free.
+
+    def _auto_stitch_work(job, progress):
+        images, originals, auto = job["images"], job["originals"], job["auto"]
+        # Every pair is registered twice (polarity, then rotation and shifts)
+        # and every image once per refinement round, so the count is knowable
+        # up front and the bar can be honest about how far along it is.
+        n_jobs = denovo3d_register.n_registration_jobs(len(images))
+        done = [0]
+
+        def _tick(label):
+            done[0] += 1
+            # the bar runs 0-1: its length is set before the count is known
+            progress.set(
+                done[0] / max(n_jobs, 1),
+                message=f"Registering: {done[0]}/{n_jobs}",
+                detail=label,
+            )
+
+        progress.set(0, message=f"Registering: 0/{n_jobs}", detail="starting ...")
+        _stitched, transforms, diagnostics = denovo3d_register.auto_stitch(
+            images,
+            rot_range=2.0,
+            dy_range=3.0,
+            coarse_step=0.5,
+            progress=_tick,
+        )
+
+        # Compose with the auto-transform and resample the originals once.
+        composed = []
+        for (r, sy), t in zip(auto, transforms):
+            c = denovo3d_register.compose_transforms(r, sy, t)
+            c["connected"] = t.get("connected", True)
+            c["dx"] = t["dx"] + c.pop("extra_dx", 0.0)
+            composed.append(c)
+        placed = [
+            dict(
+                psi=0.0,
+                dy=0.0,
+                dx=c["dx"],
+                connected=c["connected"],
+                flip_x=False,
+                flip_y=False,
+            )
+            for c in composed
+        ]
+        oriented = [
+            denovo3d_register.apply_composed(im, c)
+            for im, c in zip(originals, composed)
+        ]
+        stitched, _coverage = denovo3d_register.composite(oriented, placed)
+        if stitched is None:
+            return None
+
+        # Convert into what the manual sliders mean. Their x value is a
+        # correction from an end-to-end tiled layout, not an absolute position,
+        # so the tiled offset has to come back out.
+        width = int(np.shape(originals[0])[1]) if len(originals) else 0
+        placed_dx = [c["dx"] for c in composed if c["connected"]]
+        base = min(placed_dx) if placed_dx else 0.0
+        transferred = []
+        for i, (c, t) in enumerate(zip(composed, transforms)):
+            transferred.append(
+                dict(
+                    flip_x=bool(t.get("flip_x", False)),
+                    flip_y=bool(t.get("flip_y", False)),
+                    rotation=float(c["rotation"]),
+                    shift_y=float(c["shift_y"]),
+                    shift_x=float(c["dx"] - base - i * width),
+                    connected=bool(c["connected"]),
+                )
+            )
+        report = dict(diagnostics)
+        report.update(
+            n_images=len(images),
+            n_possible=len(images) * (len(images) - 1) // 2,
+        )
+        result = np.asarray(stitched, dtype=np.float32)
+        if result.std() > 0:
+            result = (result - result.mean()) / result.std()
+            result = result / max(abs(result.max()), 1e-6)
+        return transferred, report, result
+
+    def _auto_stitch_apply(job, out):
+        if out is None:
+            logger.warning("automatic stitching produced no image")
+            return
+        transferred, report, result = out
+        autostitch_transforms.set(transferred)
+        autostitch_report.set(report)
+        logger.info(
+            "auto stitch: %d/%d pairs, %d placed, span %.2fx, trustworthy=%s",
+            report.get("n_pairs", 0),
+            report["n_possible"],
+            report.get("n_connected", 0),
+            report.get("span_gain", 1.0),
+            report.get("trustworthy"),
+        )
+        stitched_image_displayed.set([result])
+        stitched_image_labels.set([""])
+        stitched_image_links.set([""])
+
+    def _auto_stitch_error(job, e):
+        logger.error("automatic stitching failed", exc_info=e)
+        ui.modal_show(
+            ui.modal(
+                "Automatic registration failed; see the log for details.",
+                title="Auto Stitch",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    auto_stitch_task = helicon.shiny.background_task(
+        "dn_auto_stitch",
+        _auto_stitch_work,
+        _auto_stitch_apply,
+        _auto_stitch_error,
+        progress_max=1,
+        session=session,
+        label="Auto Stitch",
+    )
+
     @reactive.effect
     @reactive.event(input.dn_auto_stitch)
     def _auto_stitch_images():
@@ -3067,112 +3192,9 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             )
             for i in range(len(images))
         ]
-
-        # Every pair is registered twice (polarity, then rotation and shifts)
-        # and every image once per refinement round, so the count is knowable up
-        # front and the bar can be honest about how far along it is.
-        n_jobs = denovo3d_register.n_registration_jobs(len(images))
-        with ui.Progress(min=0, max=n_jobs) as p:
-            done = [0]
-
-            def _tick(label):
-                done[0] += 1
-                p.set(
-                    done[0],
-                    message=f"Registering: {done[0]}/{n_jobs}",
-                    detail=label,
-                )
-
-            p.set(0, message=f"Registering: 0/{n_jobs}", detail="starting ...")
-            try:
-                _stitched, transforms, diagnostics = denovo3d_register.auto_stitch(
-                    images,
-                    rot_range=2.0,
-                    dy_range=3.0,
-                    coarse_step=0.5,
-                    progress=_tick,
-                )
-            except Exception:
-                logger.error("automatic stitching failed", exc_info=True)
-                ui.modal_show(
-                    ui.modal(
-                        "Automatic registration failed; see the log for details.",
-                        title="Auto Stitch",
-                        easy_close=True,
-                        footer=None,
-                    )
-                )
-                return
-
-        # Compose with the auto-transform and resample the originals once.
-        composed = []
-        for (r, sy), t in zip(auto, transforms):
-            c = denovo3d_register.compose_transforms(r, sy, t)
-            c["connected"] = t.get("connected", True)
-            c["dx"] = t["dx"] + c.pop("extra_dx", 0.0)
-            composed.append(c)
-        placed = [
-            dict(
-                psi=0.0,
-                dy=0.0,
-                dx=c["dx"],
-                connected=c["connected"],
-                flip_x=False,
-                flip_y=False,
-            )
-            for c in composed
-        ]
-        oriented = [
-            denovo3d_register.apply_composed(im, c)
-            for im, c in zip(originals, composed)
-        ]
-        stitched, _coverage = denovo3d_register.composite(oriented, placed)
-        if stitched is None:
-            logger.warning("automatic stitching produced no image")
-            return
-
-        # Convert into what the manual sliders mean. Their x value is a
-        # correction from an end-to-end tiled layout, not an absolute position,
-        # so the tiled offset has to come back out.
-        width = int(np.shape(originals[0])[1]) if len(originals) else 0
-        placed_dx = [c["dx"] for c in composed if c["connected"]]
-        base = min(placed_dx) if placed_dx else 0.0
-        transferred = []
-        for i, (c, t) in enumerate(zip(composed, transforms)):
-            transferred.append(
-                dict(
-                    flip_x=bool(t.get("flip_x", False)),
-                    flip_y=bool(t.get("flip_y", False)),
-                    rotation=float(c["rotation"]),
-                    shift_y=float(c["shift_y"]),
-                    shift_x=float(c["dx"] - base - i * width),
-                    connected=bool(c["connected"]),
-                )
-            )
-        autostitch_transforms.set(transferred)
-
-        report = dict(diagnostics)
-        report.update(
-            n_images=len(images),
-            n_possible=len(images) * (len(images) - 1) // 2,
+        auto_stitch_task.invoke(
+            dict(images=list(images), originals=originals, auto=auto)
         )
-        autostitch_report.set(report)
-        logger.info(
-            "auto stitch: %d/%d pairs, %d placed, span %.2fx, trustworthy=%s",
-            diagnostics.get("n_pairs", 0),
-            report["n_possible"],
-            diagnostics.get("n_connected", 0),
-            diagnostics.get("span_gain", 1.0),
-            diagnostics.get("trustworthy"),
-        )
-
-        result = np.asarray(stitched, dtype=np.float32)
-        if result.std() > 0:
-            result = (result - result.mean()) / result.std()
-            result = result / max(abs(result.max()), 1e-6)
-        stitched_image_displayed.set([result])
-        stitched_image_labels.set([""])
-        stitched_image_links.set([""])
 
     @reactive.effect
     @reactive.event(input.dn_perform_stitching)
@@ -3458,9 +3480,16 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 )
 
                 from time import time
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from concurrent.futures import ThreadPoolExecutor
 
-                with ThreadPoolExecutor(max_workers=cpu) as executor:
+                # The tasks run in threads, and their results are awaited on
+                # the event loop: concurrent.futures.as_completed would block
+                # it between results (seconds each), and with it every other
+                # session. Leaving the pool does not wait for running tasks
+                # either, which a "with" block would after a Stop.
+                executor = ThreadPoolExecutor(max_workers=cpu)
+                waiting = []
+                try:
                     future_tasks = [
                         executor.submit(denovo3d_pipeline.process_one_task, *task)
                         for task in tasks
@@ -3470,19 +3499,18 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     n_discarded = 0
                     update_interval = max(1, len(tasks) // 20)
 
-                    for completed_task in as_completed(future_tasks):
-                        await asyncio.sleep(0)
+                    waiting = [asyncio.wrap_future(f) for f in future_tasks]
+                    for completed_task in asyncio.as_completed(waiting):
+                        try:
+                            result, error = await completed_task, None
+                        except Exception:
+                            result, error = None, traceback.format_exc()
                         if abort_ref[0] is True:
                             log.warning("User aborted the denovo3D run early.")
-                            executor.shutdown(wait=False, cancel_futures=True)
                             break
 
-                        try:
-                            result = completed_task.result()
-                        except Exception:
-                            log.error(
-                                "Task raised an exception:\n%s", traceback.format_exc()
-                            )
+                        if error is not None:
+                            log.error("Task raised an exception:\n%s", error)
                             n_discarded += 1
                             continue
                         if result is None:
@@ -3508,6 +3536,10 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
 
                     t_final = time()
                     log.info("reconstruction time: %s", t_final - t0)
+                finally:
+                    for w in waiting:
+                        w.cancel()  # those not awaited (after a Stop)
+                    executor.shutdown(wait=False, cancel_futures=True)
 
             if n_discarded:
                 log.info(
@@ -3661,7 +3693,7 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
             that were not displayed, and any re-solve that failed, are left as
             they were.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor
 
         redo, slot = _display_redraw_plan(tasks, results, ranked, top_n, display_model)
         if not redo:
@@ -3673,25 +3705,28 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
         results = list(results)
         with ui.Progress(min=0, max=len(redo)) as p:
             p.set(message=f"Reconstructing with {display_model}", detail="for display")
-            with ThreadPoolExecutor(max_workers=cpu) as executor:
+            # awaited on the event loop, as in the search above
+            executor = ThreadPoolExecutor(max_workers=cpu)
+            waiting = []
+            try:
                 futures = [
                     executor.submit(denovo3d_pipeline.process_one_task, *t)
                     for t in redo
                 ]
                 done = 0
-                for completed_task in as_completed(futures):
-                    await asyncio.sleep(0)
+                waiting = [asyncio.wrap_future(f) for f in futures]
+                for completed_task in asyncio.as_completed(waiting):
+                    try:
+                        result, error = await completed_task, None
+                    except Exception:
+                        result, error = None, traceback.format_exc()
                     if abort_ref[0] is True:
-                        executor.shutdown(wait=False, cancel_futures=True)
                         break
                     done += 1
                     p.set(done, message=f"Reconstructed {done}/{len(redo)}")
-                    try:
-                        result = completed_task.result()
-                    except Exception:
+                    if error is not None:
                         log.error(
-                            "Display reconstruction raised an exception:\n%s",
-                            traceback.format_exc(),
+                            "Display reconstruction raised an exception:\n%s", error
                         )
                         continue
                     if result is None:
@@ -3700,6 +3735,10 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                     if i is not None:
                         # Score and parameters from the search, images from here.
                         results[i] = (results[i][0], result[1], results[i][2])
+            finally:
+                for w in waiting:
+                    w.cancel()  # those not awaited (after a Stop)
+                executor.shutdown(wait=False, cancel_futures=True)
         return results
 
     @reactive.effect

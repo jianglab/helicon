@@ -527,6 +527,7 @@ def plot_histogram(
                     line_dash="solid" if i == 0 else "dash",
                     line_color="green",
                     visible=False,
+                    name="hp-crosshair",  # the page's crosshair script moves these
                 )
 
             def update_vline(trace, points, state):

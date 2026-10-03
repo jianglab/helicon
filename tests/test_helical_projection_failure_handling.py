@@ -101,9 +101,12 @@ class TestTheTabWarnsAndSurvives:
 
     def test_the_search_reports_failures_with_their_reason(self):
         source = self._source()
-        body = source[source.index("def _compare_projections") :]
-        assert "errors[m_info.label] = str(e)" in body
-        assert "Some maps could not be searched" in body
+        # the search runs in a background task: its work collects the
+        # failures, and what it hands back to the session reports them
+        work = source[source.index("def _compare_work") :]
+        assert "errors[m_info.label] = str(e)" in work
+        apply = source[source.index("def _compare_apply") :]
+        assert "Some maps could not be searched" in apply
 
     def test_the_warning_is_a_modal_the_user_can_dismiss(self):
         source = self._source()
@@ -140,14 +143,16 @@ class TestMapsWithoutATwist:
     def test_they_are_skipped_without_a_dialog(self):
         from helicon.webApps.tabs import helical_projection_tab as tab
 
-        body = inspect.getsource(tab)
-        body = body[body.index("def _compare_projections") :]
+        source = inspect.getsource(tab)
+        start = source[source.index("def _compare_projections") :]
+        assert "compute.has_twist" in start
+        # reported when the results come back, in the background task's apply
+        body = source[source.index("def _compare_apply") :]
         body = body[: body.index("map_side_projections_with_alignments.set(good)")]
-        assert "compute.has_twist" in body
         assert "ui.notification_show" in body
         assert "no helical twist" in body
         # the old blocking "Twist value error" dialog is gone
-        assert "Twist value error" not in body
+        assert "Twist value error" not in source
 
     def test_a_selection_with_no_twists_at_all_says_so(self):
         from helicon.webApps.tabs import helical_projection_tab as tab

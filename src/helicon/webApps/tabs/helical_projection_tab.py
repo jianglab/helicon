@@ -20,7 +20,6 @@ import plotly.express as px
 
 
 from .. import deployment
-from ..lib.shared_state import ProjectState
 from ..lib import helical_projection_compute as compute
 from ..lib import helix_transform
 from ..lib import map_gauss_fit
@@ -390,7 +389,7 @@ def helical_projection_tab_ui():
 
 
 @module.server
-def helical_projection_tab_server(input, output, session, project: ProjectState):
+def helical_projection_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(
@@ -640,9 +639,9 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     @reactive.event(input.input_mode_maps)
     def create_input_map_files_ui():
         mode = input.input_mode_maps()
-        twist_val = project.twist() if project.twist() else 179.402
-        rise_val = project.rise() if project.rise() else 2.378
-        csym_val = project.csym() if project.csym() else 1
+        # the example map's (EMD-14046); the tabs share nothing, so another
+        # tab's helical parameters never land on this tab's map
+        twist_val, rise_val, csym_val = 179.402, 2.378, 1
         if mode == "upload":
             return ui.div(
                 ui.input_file(
@@ -797,7 +796,7 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         n_maps = len(maps())
         if n_maps:
             buttons.append(
-                ui.input_action_button(
+                ui.input_task_button(
                     "generate_xyz_projections",
                     "Generate x/y/z projections (%d map%s)"
                     % (n_maps, "" if n_maps == 1 else "s"),
@@ -850,7 +849,6 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         images_all.set(data)
         image_size.set(min(data.shape))
         image_apix.set(apix)
-        project.apix.set(apix)
 
     @reactive.effect
     @reactive.event(input.input_mode_images, input.url_images)
@@ -888,7 +886,6 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         images_all.set(data)
         image_size.set(min(data.shape))
         image_apix.set(apix)
-        project.apix.set(apix)
 
     @reactive.effect
     @reactive.event(images_all, input.ignore_blank)
@@ -1227,9 +1224,9 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         req(input.input_mode_maps() == "upload")
         fi = input.upload_map()
         req(fi)
-        twist = input.twist() if input.twist() is not None else (project.twist() or 0)
-        rise = input.rise() if input.rise() is not None else (project.rise() or 0)
-        csym = input.csym() if input.csym() is not None else (project.csym() or 1)
+        twist = input.twist() if input.twist() is not None else 0
+        rise = input.rise() if input.rise() is not None else 0
+        csym = input.csym() if input.csym() is not None else 1
         m_info = compute.MapInfo(
             filename=fi[0]["datapath"],
             twist=twist,
@@ -1264,9 +1261,9 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
     def _use_map(url_val):
         """The map from a URL or a server file, with the helical parameters set."""
         label = url_val.split("/")[-1].split(".")[0]
-        twist = input.twist() if input.twist() is not None else (project.twist() or 0)
-        rise = input.rise() if input.rise() is not None else (project.rise() or 0)
-        csym = input.csym() if input.csym() is not None else (project.csym() or 1)
+        twist = input.twist() if input.twist() is not None else 0
+        rise = input.rise() if input.rise() is not None else 0
+        csym = input.csym() if input.csym() is not None else 1
         m_info = compute.MapInfo(
             url=url_val, twist=twist, rise=rise, csym=csym, label=label
         )
@@ -1457,37 +1454,38 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
         ui.modal_remove()
         make_map_xyz_projections()
 
-    def make_map_xyz_projections():
-        map_xyz_projections.set([])
-        images = []
-        image_labels = []
-        failures = []
-        xyz_tag = "".join([s.upper() for s in input.map_projection_xyz_choices()])
-        map_xyz_projection_title.set("Map %s projections:" % xyz_tag)
-        with ui.Progress(min=0, max=len(maps())) as p:
-            p.set(
-                message="Generating x/y/z projections",
+    # Downloading and projecting maps takes seconds to minutes each: it runs
+    # in a worker thread (background_task), so the event loop every session
+    # shares stays free.
+
+    def _xyz_work(job, progress):
+        images, labels, failures = [], [], []
+        maps_ = job["maps"]
+        for mi, m in enumerate(maps_):
+            progress.set(
+                mi / max(len(maps_), 1),
+                message="%d/%d: x/y/z projecting %s" % (mi + 1, len(maps_), m.label),
                 detail="This may take a while ...",
             )
-            for mi, m in enumerate(maps()):
-                p.set(
-                    mi,
-                    message="%d/%d: x/y/z projecting %s"
-                    % (mi + 1, len(maps()), m.label),
+            try:
+                tmp_images, tmp_labels = compute.get_one_map_xyz_projects(
+                    map_info=m,
+                    length_z=job["length_z"],
+                    map_projection_xyz_choices=job["choices"],
                 )
-                try:
-                    tmp_images, tmp_labels = compute.get_one_map_xyz_projects(
-                        map_info=m,
-                        length_z=input.length_z(),
-                        map_projection_xyz_choices=input.map_projection_xyz_choices(),
-                    )
-                    images += tmp_images
-                    image_labels += tmp_labels
-                    map_xyz_projection_labels.set(image_labels)
-                    map_xyz_projections.set(images)
-                except Exception as e:
-                    logger.error("Failed to get XYZ projections for %s: %s", m.label, e)
-                    failures.append("%s: %s" % (m.label, e))
+                images += tmp_images
+                labels += tmp_labels
+            except Exception as e:
+                logger.error("Failed to get XYZ projections for %s: %s", m.label, e)
+                failures.append("%s: %s" % (m.label, e))
+        return images, labels, failures
+
+    def _xyz_apply(job, out):
+        if list(maps()) != list(job["maps"]):
+            return  # the selection changed meanwhile
+        images, labels, failures = out
+        map_xyz_projection_labels.set(labels)
+        map_xyz_projections.set(images)
         if failures:
             warn(
                 "Some maps could not be projected",
@@ -1496,7 +1494,168 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                 failures,
             )
 
+    def _xyz_error(job, e):
+        warn("The x/y/z projections failed", str(e), [])
+
+    xyz_task = helicon.shiny.background_task(
+        "generate_xyz_projections",
+        _xyz_work,
+        _xyz_apply,
+        _xyz_error,
+        session=session,
+        label="x/y/z projections",
+    )
+
+    def make_map_xyz_projections():
+        map_xyz_projections.set([])
+        xyz_tag = "".join([s.upper() for s in input.map_projection_xyz_choices()])
+        map_xyz_projection_title.set("Map %s projections:" % xyz_tag)
+        xyz_task.invoke(
+            dict(
+                maps=list(maps()),
+                length_z=input.length_z(),
+                choices=list(input.map_projection_xyz_choices()),
+            )
+        )
+
     # -- Compare projections --
+
+    # The search projects and matches every selected map: minutes for a large
+    # selection. It runs in a worker thread (background_task), so the event
+    # loop every session shares stays free; the inputs are read when it
+    # starts.
+
+    def _compare_work(job, progress):
+        query_imgs, query_apix = job["query_imgs"], job["query_apix"]
+        active_maps, scale_range = job["maps"], job["scale_range"]
+        errors = {}
+
+        # In gaussian mode the queries become gaussians too, once for the whole
+        # search: every map is then matched by an integral over mixtures rather
+        # than by correlating images. If a query cannot be fitted -- a blank
+        # image, or one whose background leaves nothing above it -- the search
+        # falls back to the pixel aligner rather than refusing to run.
+        query_fits = None
+        if job["projection_method"] == "gaussian":
+            try:
+                query_fits = map_gauss_fit.fit_queries(query_imgs, query_apix)
+            except Exception as e:
+                logger.warning("Could not fit the query images to gaussians: %s", e)
+                query_fits = None
+        results = []
+        progress.set(
+            0, message="Generating side projections", detail="This may take a while ..."
+        )
+        t0 = time()
+        # Sized by memory as well as by cores: each map in flight holds a
+        # volume of its own, so a pool of one-per-core asks for several
+        # gigabytes at once on a many-core machine.
+        n_workers = compute.projection_workers(len(active_maps))
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(
+                    compute.symmetrize_project_align_one_map,
+                    m,
+                    query_imgs,
+                    job["query_lbls"],
+                    query_apix,
+                    job["rescale"],
+                    job["length_xy_factor"],
+                    job["match_sf"],
+                    0,
+                    scale_range,
+                    job["projection_method"],
+                    query_fits,
+                ): m
+                for m in active_maps
+            }
+            for f in as_completed(futures):
+                # a map that fails is one map missing from the results, which
+                # the warning on return reports
+                try:
+                    m_info, res = f.result()
+                except Exception as e:
+                    m_info, res = futures[f], None
+                    logger.error("Failed to search %s: %s", m_info.label, e)
+                    errors[m_info.label] = str(e)
+                t1 = time()
+                results.append((m_info, res))
+                n_done = len(results)
+                remaining = (len(futures) - n_done) / max(n_done, 1) * (t1 - t0)
+                progress.set(
+                    n_done / max(len(active_maps), 1),
+                    message="%d/%d: symmetrizing/projecting/matching %s"
+                    % (n_done, len(active_maps), m_info.label),
+                    detail="%s remaining" % helicon.timedelta2string(remaining),
+                )
+        failed = [m_info.label for m_info, res in results if res is None]
+        good = [res for _, res in results if res is not None]
+        # The gaussian search finds the right map as often as the pixel route
+        # and much faster, but it does not vary scale, and sometimes the pixel
+        # aligner's placement fits the projection visibly better. Sometimes it
+        # fits far worse. So the matches a user actually looks at are offered
+        # the pixel placement and keep whichever sits better on the projection
+        # -- see refine_placement_for_display. The scores keep their ranking so
+        # the list stays internally comparable.
+        #
+        # Including a single result: one map selected is precisely when the
+        # placement is studied rather than the ranking, and requiring more
+        # than one left that case showing the unscaled placement.
+        if query_fits is not None and len(good):
+            n_polish = max(1, POLISHED_PAIRS_FOR_DISPLAY // max(1, len(query_imgs)))
+            order = sorted(range(len(good)), key=lambda i: -good[i][4])
+            order = order[: min(n_polish, len(order))]
+            for n, i in enumerate(order):
+                progress.set(
+                    n / len(order),
+                    message="Placing the top matches",
+                    detail="for display",
+                )
+                try:
+                    good[i] = compute.refine_placement_for_display(
+                        good[i], query_imgs, scale_range
+                    )
+                except Exception as e:
+                    logger.warning("Could not re-place %s: %s", good[i][8], e)
+        return good, failed, errors
+
+    def _compare_apply(job, out):
+        good, failed, errors = out
+        no_twist = job["no_twist"]
+        if no_twist:
+            # Skipped quietly: a toast that fades, not a dialog to dismiss --
+            # and shown now rather than when the search began, so it is on
+            # screen when the user turns to the results instead of during a
+            # minute of progress bar.
+            ui.notification_show(
+                "Skipped %d map%s with no helical twist"
+                % (len(no_twist), "" if len(no_twist) == 1 else "s"),
+                duration=15,
+                type="warning",
+            )
+        if failed:
+            warn(
+                "Some maps could not be searched",
+                "No side projection could be made for these maps, so they are "
+                "not in the results below.",
+                [
+                    "%s: %s" % (label, errors[label]) if label in errors else label
+                    for label in failed
+                ],
+            )
+        map_side_projections_with_alignments.set(good)
+
+    def _compare_error(job, e):
+        warn("The search failed", str(e), [])
+
+    compare_task = helicon.shiny.background_task(
+        "compare_projections",
+        _compare_work,
+        _compare_apply,
+        _compare_error,
+        session=session,
+        label="Compare projections",
+    )
 
     @reactive.effect
     @reactive.event(input.compare_projections)
@@ -1522,120 +1681,20 @@ def helical_projection_tab_server(input, output, session, project: ProjectState)
                 no_twist,
             )
             return
-        errors = {}
-
-        # In gaussian mode the queries become gaussians too, once for the whole
-        # search: every map is then matched by an integral over mixtures rather
-        # than by correlating images. If a query cannot be fitted -- a blank
-        # image, or one whose background leaves nothing above it -- the search
-        # falls back to the pixel aligner rather than refusing to run.
-        query_fits = None
-        if projection_method == "gaussian":
-            try:
-                query_fits = map_gauss_fit.fit_queries(query_imgs, query_apix)
-            except Exception as e:
-                logger.warning("Could not fit the query images to gaussians: %s", e)
-                query_fits = None
-        results = []
-        with ui.Progress(min=0, max=len(active_maps)) as p:
-            p.set(
-                message="Generating side projections",
-                detail="This may take a while ...",
+        compare_task.invoke(
+            dict(
+                maps=active_maps,
+                no_twist=no_twist,
+                query_imgs=query_imgs,
+                query_lbls=query_lbls,
+                query_apix=query_apix,
+                rescale=rescale,
+                length_xy_factor=length_xy_factor,
+                match_sf=match_sf,
+                projection_method=projection_method,
+                scale_range=scale_range,
             )
-            t0 = time()
-            # Sized by memory as well as by cores: each map in flight holds a
-            # volume of its own, so a pool of one-per-core asks for several
-            # gigabytes at once on a many-core machine.
-            n_workers = compute.projection_workers(len(active_maps))
-            with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                futures = {
-                    executor.submit(
-                        compute.symmetrize_project_align_one_map,
-                        m,
-                        query_imgs,
-                        query_lbls,
-                        query_apix,
-                        rescale,
-                        length_xy_factor,
-                        match_sf,
-                        0,
-                        scale_range,
-                        projection_method,
-                        query_fits,
-                    ): m
-                    for m in active_maps
-                }
-                for f in as_completed(futures):
-                    # f.result() re-raises whatever the worker raised, and an
-                    # exception escaping a reactive effect disconnects the
-                    # browser. A map that fails is one map missing from the
-                    # results, which is what the warning below reports.
-                    try:
-                        m_info, res = f.result()
-                    except Exception as e:
-                        m_info, res = futures[f], None
-                        logger.error("Failed to search %s: %s", m_info.label, e)
-                        errors[m_info.label] = str(e)
-                    t1 = time()
-                    results.append((m_info, res))
-                    n_done = len(results)
-                    remaining = (len(futures) - n_done) / max(n_done, 1) * (t1 - t0)
-                    p.set(
-                        n_done,
-                        message="%d/%d: symmetrizing/projecting/matching %s"
-                        % (n_done, len(active_maps), m_info.label),
-                        detail="%s remaining" % helicon.timedelta2string(remaining),
-                    )
-        failed = [m_info.label for m_info, res in results if res is None]
-        good = [res for _, res in results if res is not None]
-        if no_twist:
-            # Skipped quietly: a toast that fades, not a dialog to dismiss --
-            # and shown now rather than when the search began, so it is on
-            # screen when the user turns to the results instead of during a
-            # minute of progress bar.
-            ui.notification_show(
-                "Skipped %d map%s with no helical twist"
-                % (len(no_twist), "" if len(no_twist) == 1 else "s"),
-                duration=15,
-                type="warning",
-            )
-        if failed:
-            warn(
-                "Some maps could not be searched",
-                "No side projection could be made for these maps, so they are "
-                "not in the results below.",
-                [
-                    "%s: %s" % (label, errors[label]) if label in errors else label
-                    for label in failed
-                ],
-            )
-        # The gaussian search finds the right map as often as the pixel route
-        # and much faster, but it does not vary scale, and sometimes the pixel
-        # aligner's placement fits the projection visibly better. Sometimes it
-        # fits far worse. So the matches a user actually looks at are offered
-        # the pixel placement and keep whichever sits better on the projection
-        # -- see refine_placement_for_display. The scores keep their ranking so
-        # the list stays internally comparable.
-        #
-        # Including a single result: one map selected is precisely when the
-        # placement is studied rather than the ranking, and requiring more
-        # than one left that case showing the unscaled placement.
-        if query_fits is not None and len(good):
-            n_polish = max(1, POLISHED_PAIRS_FOR_DISPLAY // max(1, len(query_imgs)))
-            order = sorted(range(len(good)), key=lambda i: -good[i][4])
-            order = order[: min(n_polish, len(order))]
-            with ui.Progress(min=0, max=len(order)) as p:
-                p.set(message="Placing the top matches", detail="for display")
-                for n, i in enumerate(order):
-                    try:
-                        good[i] = compute.refine_placement_for_display(
-                            good[i], query_imgs, scale_range
-                        )
-                    except Exception as e:
-                        logger.warning("Could not re-place %s: %s", good[i][8], e)
-                    p.set(n + 1)
-
-        map_side_projections_with_alignments.set(good)
+        )
 
     @reactive.effect
     @reactive.event(

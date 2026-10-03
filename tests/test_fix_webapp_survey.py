@@ -50,16 +50,6 @@ class TestErrorModal:
         assert b.closed == [err] and a.closed == []
 
 
-class TestProjectStatePerSession:
-    def test_no_module_level_state_and_instances_are_separate(self):
-        from helicon.webApps.lib import shared_state
-
-        assert not hasattr(shared_state, "project")
-        one, two = shared_state.ProjectState(), shared_state.ProjectState()
-        assert one.twist is not two.twist
-        assert one._data is not two._data
-
-
 class TestPublicHosts:
     @pytest.mark.parametrize(
         "host",

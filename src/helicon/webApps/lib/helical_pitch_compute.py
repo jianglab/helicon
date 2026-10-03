@@ -374,6 +374,9 @@ def plot_histogram(
                     line_dash="solid" if i == 0 else "dash",
                     line_color="green",
                     visible=False,
+                    # the page script moves only shapes of this name: other
+                    # plots on the page keep their own lines
+                    name="hp-crosshair",
                 )
 
             # Spikes disabled: multi-crosshair handled via JS injection in _fig_to_html

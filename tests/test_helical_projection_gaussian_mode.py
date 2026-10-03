@@ -208,7 +208,7 @@ class TestTheDisplayedPlacementIsScaleCorrected:
         from helicon.webApps.tabs import helical_projection_tab as tab
 
         body = inspect.getsource(tab)
-        body = body[body.index("def _compare_projections") :]
+        body = body[body.index("def _compare_work") :]  # the search's work
         assert "if query_fits is not None and len(good):" in body
         assert "len(good) > 1" not in body
 

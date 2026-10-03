@@ -17,7 +17,6 @@ from shiny import reactive, ui, module, req, render
 from shinywidgets import render_plotly, render_widget, output_widget
 
 from .. import deployment
-from ..lib.shared_state import ProjectState
 
 from ..lib import whereismyclass_compute as compute
 
@@ -229,7 +228,7 @@ def where_is_my_class_tab_ui():
 
 
 @module.server
-def where_is_my_class_tab_server(input, output, session, project: ProjectState):
+def where_is_my_class_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(

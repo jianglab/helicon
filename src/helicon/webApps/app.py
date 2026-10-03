@@ -1,7 +1,7 @@
 """Helicon Lab — unified Shiny web app for helical structure analysis.
 
-Integrates eight tools into a single tabbed interface with shared
-project state for cross-tab data flow, behind a Home tab that places each
+Integrates eight tools into a single tabbed interface -- each tab
+independent of the others, sharing no data -- behind a Home tab that places each
 tool on a helical data processing workflow diagram (alongside launchers for
 related apps that run outside this one, such as ``helicon procart``):
 
@@ -16,9 +16,8 @@ related apps that run outside this one, such as ``helicon procart``):
 
 Architecture: uses Shiny's classic ``App()`` API with modules so that
 each tool is an independent ``@module.ui`` + ``@module.server`` pair
-that can be composed into the parent navset.  A
-``ProjectState`` (defined in ``shared_state.py``), one per browser
-session, holds reactive values that enable cross-tab data flow.
+that can be composed into the parent navset. The tabs share no data: a
+value set in one (a twist, a map) never changes another.
 
 This is the only Shiny web app in helicon; the individual apps
 (denovo3D, whereIsMyClass) were consolidated into this app.
@@ -93,7 +92,6 @@ from starlette.routing import Route
 from shiny import App, reactive, ui
 
 from helicon.lib.shiny import encode_query_params
-from helicon.webApps.lib.shared_state import ProjectState
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +107,7 @@ def _web_theme(request: Request) -> str:
 # ── Tab module imports ────────────────────────────────────────────
 # Each tab module provides:
 #   - <name>_tab_ui(id)   → ui components for the tab
-#   - <name>_tab_server(input, output, session, project)   → reactive logic
+#   - <name>_tab_server(input, output, session)   → reactive logic
 
 from helicon.webApps.tabs.helical_lattice_tab import (
     helical_lattice_tab_ui,
@@ -715,10 +713,6 @@ def server(input, output, session):
     # Unhandled exceptions also show a popup in this session's browser.
     install_error_modal(session)
 
-    # Cross-tab state belongs to this browser session only, so one visitor's
-    # twist/rise/map never shows up in another visitor's tabs.
-    project = ProjectState()
-
     # Home has no reactive work besides starting non-integrated apps, and it
     # is the default tab, so it is wired up eagerly rather than lazily.
     home_tab_server(input, session)
@@ -734,19 +728,17 @@ def server(input, output, session):
         "WhereIsMyClass": (
             (lambda: None)
             if deployment.is_cloud()
-            else (lambda: where_is_my_class_tab_server("where_is_my_class", project))
+            else (lambda: where_is_my_class_tab_server("where_is_my_class"))
         ),
         "HelicalProjection": lambda: helical_projection_tab_server(
-            "helical_projection", project
+            "helical_projection"
         ),
-        "HILL": lambda: hill_tab_server("hill", project),
-        "HelicalPitch": lambda: helical_pitch_tab_server("helical_pitch", project),
-        "Denovo3D": lambda: denovo3d_tab_server("denovo3d", project),
-        "AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d", project),
-        "HelicalLattice": lambda: helical_lattice_tab_server(
-            "helical_lattice", project
-        ),
-        "HI3D": lambda: hi3d_tab_server("hi3d", project),
+        "HILL": lambda: hill_tab_server("hill"),
+        "HelicalPitch": lambda: helical_pitch_tab_server("helical_pitch"),
+        "Denovo3D": lambda: denovo3d_tab_server("denovo3d"),
+        "AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d"),
+        "HelicalLattice": lambda: helical_lattice_tab_server("helical_lattice"),
+        "HI3D": lambda: hi3d_tab_server("hi3d"),
     }
     _started: set[str] = set()
 
@@ -767,7 +759,6 @@ def server(input, output, session):
         tab = input.helicon_tab()
         if tab:
             _start_tab(tab)
-            project.active_tab.set(tab)
 
 
 # ── App object ────────────────────────────────────────────────────

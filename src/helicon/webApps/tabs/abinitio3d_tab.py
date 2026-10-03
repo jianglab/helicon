@@ -19,9 +19,9 @@ import plotly.io as pio
 
 import helicon
 from shiny import reactive, ui, module, req, render
+from shiny.module import resolve_id
 
-from .. import class2d_files, deployment
-from ..lib.shared_state import ProjectState
+from .. import bookmark, class2d_files, deployment
 
 from ..lib import helical_pitch_compute as compute
 from ..lib import helical_pitch_map as maps
@@ -56,6 +56,8 @@ BOOKMARK_DEFAULTS = {
     "n_boot": ("phase_n_boot", 20),
     "split": ("split_axis_distance", 50),
     "two_rounds": ("map_refine", False),
+    # suggested from the class fits of each result
+    "fit_cut": ("fit_threshold", 0.1, bookmark.DERIVED),
 }
 
 
@@ -116,6 +118,7 @@ _SELECT_ALL_JS = """
 _SHORT_REASON = {
     phase.TOO_FEW: "too few pairs",
     phase.AT_CHANCE: "off the ring",
+    phase.BELOW_THRESHOLD: "below the threshold",
 }
 
 # The pitch results, and everything that works from them, stay hidden until
@@ -141,6 +144,22 @@ if (!window.__heliconSetDisabled) {
 """
 )
 
+
+# The results' controls (the sliders under the plots, the download, the map
+# settings) wait for the plots: the plots are drawn on the server after a
+# result arrives, and until the three every result has (repeat scan, ring,
+# ranked fits) have come the controls stay invisible -- keeping their places,
+# so nothing moves when they appear. By opacity, not visibility: the sliders'
+# library sets its number labels visible itself, which showed them early. The per-filament histogram is not waited
+# for: it is empty when no filament has a repeat of its own.
+_RESULTS_ORDER_CSS = ui.tags.style(
+    f"""
+#{_RESULTS_BOX}:has(.ab-wait > .shiny-html-output:empty) .ab-after {{
+  opacity: 0;
+  pointer-events: none;
+}}
+"""
+)
 
 # The smallest-twist box and the Estimate pitch button on one row, the box
 # narrow and both aligned at the bottom.
@@ -439,7 +458,9 @@ def abinitio3d_tab_ui():
                             "selected class turned 180\u00b0 (\u21bb, with the "
                             "correlation), and those on the same filaments as the "
                             "selected classes (\u25cf, the share of the filaments "
-                            "having the class that are mostly selected classes).",
+                            "having the class that are mostly selected classes). "
+                            "Listed best first by the fit each would get on the "
+                            "current ring (fit, on the scale of the ranked fits).",
                         ),
                         ui.div(
                             ui.output_ui("suggested_gallery"),
@@ -499,117 +520,166 @@ def abinitio3d_tab_ui():
                     # takes no room, and is never hidden itself, so that it keeps
                     # running: it hides the results below until there are some
                     ui.div(
+                        # hidden until results_visibility, drawn after this,
+                        # shows them
+                        ui.tags.style(
+                            f"#{_RESULTS_BOX}, #{resolve_id(_SUGGESTIONS_BOX)} "
+                            "{ display: none; }"
+                        ),
                         ui.output_ui("results_visibility"),
+                        _RESULTS_ORDER_CSS,
                         style="height: 0; margin: 0; padding: 0;",
                     ),
                     ui.div(
                         ui.layout_columns(
-                            ui.div(ui.output_ui("phase_scan_plot"), style=_PLOT_BOX),
-                            ui.div(ui.output_ui("phase_circle_plot"), style=_PLOT_BOX),
+                            ui.div(
+                                ui.output_ui("phase_scan_plot"),
+                                style=_PLOT_BOX,
+                                class_="ab-plot-box ab-wait",
+                            ),
+                            ui.div(
+                                ui.output_ui("phase_circle_plot"),
+                                style=_PLOT_BOX,
+                                class_="ab-plot-box ab-wait",
+                            ),
                             col_widths=(7, 5),
                             fill=False,
                         ),
                         ui.layout_columns(
+                            # the histogram, and below it the two ranges that
+                            # select filaments from it, one under the other
                             ui.div(
-                                ui.output_ui("filament_pitch_plot"), style=_PLOT_BOX
+                                ui.div(
+                                    ui.output_ui("filament_pitch_plot"),
+                                    style=_PLOT_BOX,
+                                    class_="ab-plot-box",
+                                ),
+                                ui.div(
+                                    helicon.shiny.range_slider(
+                                        "pitch_band",
+                                        ui.span(
+                                            "Repeat (\u00c5)",
+                                            _info(
+                                                "The filaments whose own repeat is in this "
+                                                "range are downloaded and reconstructed. "
+                                                "Double-click a number to type it."
+                                            ),
+                                        ),
+                                        min=0,
+                                        max=1000,
+                                        value=(0, 1000),
+                                        step=1,
+                                    ),
+                                    class_="ab-after",
+                                ),
+                                ui.div(
+                                    helicon.shiny.range_slider(
+                                        "length_range",
+                                        ui.span(
+                                            "Length (\u00c5)",
+                                            _info(
+                                                "The filaments whose length is in this "
+                                                "range; double-click a number to type it."
+                                            ),
+                                        ),
+                                        min=0,
+                                        max=10000,
+                                        value=(0, 10000),
+                                        step=10,
+                                    ),
+                                    class_="ab-after",
+                                ),
                             ),
                             # below the ring: the same fits, ranked
                             ui.div(
-                                ui.output_ui("class_fit_rank_plot"), style=_PLOT_BOX
+                                ui.div(
+                                    ui.output_ui("class_fit_rank_plot"),
+                                    style=_PLOT_BOX,
+                                    class_="ab-plot-box ab-wait",
+                                ),
+                                ui.div(
+                                    helicon.shiny.slider(
+                                        "fit_threshold",
+                                        ui.span(
+                                            "Fit threshold",
+                                            _info(
+                                                "Classes whose fit is below this are "
+                                                "picked to remove (the orange line). It "
+                                                "starts in the first clear drop of the "
+                                                "ranked fits below the best ones, and "
+                                                "never below the \u2248 junk line (red, "
+                                                "dashed). Double-click the number to "
+                                                "type it."
+                                            ),
+                                        ),
+                                        min=0.0,
+                                        max=1.0,
+                                        value=0.1,
+                                        step=0.01,
+                                    ),
+                                    # what the two sliders select, to take away
+                                    ui.output_ui("pitch_band_download"),
+                                    class_="ab-after",
+                                ),
                             ),
                             col_widths=(7, 5),
                             fill=False,
                         ),
-                        ui.layout_columns(
-                            ui.div(
-                                helicon.shiny.range_slider(
-                                    "pitch_band",
+                        ui.div(
+                            ui.output_ui("relion_ui"),
+                            ui.output_ui("relion_display"),
+                            ui.hr(),
+                            ui.layout_columns(
+                                ui.input_numeric(
+                                    "rot_fold",
                                     ui.span(
-                                        "Repeat (\u00c5)",
+                                        "C symmetry",
                                         _info(
-                                            "The filaments whose own repeat is in this "
-                                            "range are downloaded and reconstructed. "
-                                            "Double-click a number to type it."
+                                            "The pitch is C \u00d7 the repeat. It sets the "
+                                            "twist and the rlnAngleRot of the star file, "
+                                            "and the 3D maps."
                                         ),
                                     ),
-                                    min=0,
-                                    max=1000,
-                                    value=(0, 1000),
+                                    min=1,
+                                    max=12,
+                                    value=1,
                                     step=1,
+                                    update_on="blur",
                                 ),
-                            ),
-                            ui.div(
-                                helicon.shiny.range_slider(
-                                    "length_range",
+                                ui.input_radio_buttons(
+                                    "map_hand",
                                     ui.span(
-                                        "Length (\u00c5)",
+                                        "Hand",
                                         _info(
-                                            "The filaments whose length is in this "
-                                            "range; double-click a number to type it."
+                                            "Twist < 0 for a left-handed helix (RELION's "
+                                            "sign). The images cannot tell: the two choices "
+                                            "give mirror images."
                                         ),
                                     ),
-                                    min=0,
-                                    max=10000,
-                                    value=(0, 10000),
-                                    step=10,
+                                    {"left": "Left", "right": "Right"},
+                                    selected="left",
+                                    inline=True,
                                 ),
-                            ),
-                            col_widths=(6, 6),
-                            fill=False,
-                        ),
-                        ui.output_ui("pitch_band_download"),
-                        ui.output_ui("relion_ui"),
-                        ui.output_ui("relion_display"),
-                        ui.hr(),
-                        ui.layout_columns(
-                            ui.input_numeric(
-                                "rot_fold",
-                                ui.span(
-                                    "C symmetry",
-                                    _info(
-                                        "The pitch is C \u00d7 the repeat. It sets the "
-                                        "twist and the rlnAngleRot of the star file, "
-                                        "and the 3D maps."
+                                _tip(
+                                    ui.input_task_button(
+                                        "map_run",
+                                        "3D map from classes",
+                                        style="width: 100%;",
                                     ),
+                                    "The class averages are placed at their azimuths on "
+                                    "the ring and assembled into one helical map: shown "
+                                    "as the averages tiled at those azimuths, the map's "
+                                    "side projection over ~1.2 pitches, and its central z "
+                                    "section.",
                                 ),
-                                min=1,
-                                max=12,
-                                value=1,
-                                step=1,
-                                update_on="blur",
+                                col_widths=(3, 4, 5),
+                                style="align-items: flex-end;",
+                                fill=False,
                             ),
-                            ui.input_radio_buttons(
-                                "map_hand",
-                                ui.span(
-                                    "Hand",
-                                    _info(
-                                        "Twist < 0 for a left-handed helix (RELION's "
-                                        "sign). The images cannot tell: the two choices "
-                                        "give mirror images."
-                                    ),
-                                ),
-                                {"left": "Left", "right": "Right"},
-                                selected="left",
-                                inline=True,
-                            ),
-                            _tip(
-                                ui.input_task_button(
-                                    "map_run",
-                                    "3D map from classes",
-                                    style="width: 100%;",
-                                ),
-                                "The class averages are placed at their azimuths on "
-                                "the ring and assembled into one helical map: shown "
-                                "as the averages tiled at those azimuths, the map's "
-                                "side projection over ~1.2 pitches, and its central z "
-                                "section.",
-                            ),
-                            col_widths=(3, 4, 5),
-                            style="align-items: flex-end;",
-                            fill=False,
+                            ui.output_ui("map_display"),
+                            ui.output_ui("map_download"),
+                            class_="ab-after",
                         ),
-                        ui.output_ui("map_display"),
-                        ui.output_ui("map_download"),
                         id=_RESULTS_BOX,
                     ),
                 ),
@@ -654,7 +724,7 @@ def _mrc_bytes(volume, apix):
 
 
 @module.server
-def abinitio3d_tab_server(input, output, session, project: ProjectState):
+def abinitio3d_tab_server(input, output, session):
     # the Class2D parameters as read, and as used: with tube ids that hold
     # several filaments split (helicon.split_distinct_filaments)
     params_raw = reactive.value(None)
@@ -980,6 +1050,11 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             )
         return parts
 
+    # Drawn even while hidden: Remove picked and the suggestions' Add buttons
+    # change the selection by redrawing this gallery, and with the Parameters
+    # tab in front of it a hidden output waited -- so the buttons did nothing
+    # until the Inputs tab was shown again.
+    @output(suspend_when_hidden=False)
     @render.ui
     def select_classes_gallery():
         gallery_version()
@@ -1264,6 +1339,16 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 found.setdefault(pos_of[d["candidate"]], {}).update(
                     corr=d["corr"], of=d["selected"] + 1
                 )
+        r = job["phase_result"]
+        if r is not None and found:
+            # the fit each would get on the ring of the current estimate, on
+            # the same scale as the ranked fits
+            progress.set(0.95, message="placing the suggestions on the ring")
+            fits = phase.candidate_fit(
+                job["params"], r, [job["ids"][pos] + 1 for pos in found]
+            )
+            for pos, d in found.items():
+                d["fit"] = fits.get(job["ids"][pos] + 1, float("nan"))
         return found
 
     def _suggest_apply(job, found):
@@ -1274,13 +1359,26 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
             return
         labels = displayed_class_labels()
         items = []
-        for pos, d in sorted(found.items()):
+
+        def best_fit_first(item):
+            fit = item[1].get("fit", float("nan"))
+            return (0, -fit) if np.isfinite(fit) else (1, item[0])
+
+        for pos, d in sorted(found.items(), key=best_fit_first):
             why = []
+            if np.isfinite(d.get("fit", float("nan"))):
+                why.append(f"fit {d['fit']:.2f}")
             if "corr" in d:
                 why.append(f"\u21bb{d['corr']:.2f}")
             if "share" in d:
                 why.append(f"\u25cf{100 * d['share']:.0f}%")
-            items.append(dict(pos=pos, text=f"{labels[pos]}  {' '.join(why)}"))
+            items.append(
+                dict(
+                    pos=pos,
+                    text=f"{labels[pos]}  {' '.join(why)}",
+                    fit=d.get("fit", float("nan")),
+                )
+            )
         suggestions.set(
             dict(
                 seeds=set(job["sel_disp"]),
@@ -1336,6 +1434,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 others=[c for c in ids if c not in set(selected)],
                 data=data_all()[0] if has_data else None,
                 abundance=abundance() if has_data else None,
+                # the current estimate, to place the suggestions on its ring
+                phase_result=phase_result(),
             )
         )
 
@@ -1344,27 +1444,52 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         r = suggestions()
         if r is None:
             return None
-        if not r["items"]:
+        items, n_below = _shown_suggestions()
+        below = (
+            f" ({n_below} more would fit below the fit threshold)" if n_below else ""
+        )
+        if not items:
             return ui.tags.small(
-                f"None of the {r['n_candidates']} other classes stands out.",
+                f"None of the {r['n_candidates']} other classes stands out" + below,
                 class_="text-muted",
             )
         images = displayed_class_images()
         return _gallery(
             "suggested_pick",
-            [images[d["pos"]] for d in r["items"]],
-            [d["text"] for d in r["items"]],
-            label=f"{len(r['items'])} suggested | "
-            + _counts_text(
-                int(displayed_class_ids()[d["pos"]]) + 1 for d in r["items"]
-            ),
+            [images[d["pos"]] for d in items],
+            [d["text"] for d in items],
+            label=f"{len(items)} suggested | "
+            + _counts_text(int(displayed_class_ids()[d["pos"]]) + 1 for d in items)
+            + below,
             selection=True,
         )
 
+    @reactive.calc
+    def _shown_suggestions():
+        """The suggestions to offer, and how many are held back.
+
+        A class whose predicted fit is below the Fit threshold would be picked
+        to remove as soon as it was added -- it would lower the ring's
+        agreement rather than add to it -- so it is not offered; moving the
+        threshold brings it back. One without a predicted fit (no pairs with
+        the classes of the fit) is offered, last.
+        """
+        r = suggestions()
+        if r is None:
+            return [], 0
+        threshold = input.fit_threshold()
+        if threshold is None:
+            return list(r["items"]), 0
+        shown = [
+            d
+            for d in r["items"]
+            if not np.isfinite(d.get("fit", np.nan)) or d["fit"] >= float(threshold)
+        ]
+        return shown, len(r["items"]) - len(shown)
+
     @render.ui
     def suggested_buttons():
-        r = suggestions()
-        if r is None or not r["items"]:
+        if not _shown_suggestions()[0]:
             return None
         return ui.layout_columns(
             ui.input_action_button(
@@ -1382,9 +1507,9 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         )
 
     def _add_suggested(indices):
-        r = suggestions()
-        req(r is not None and r["items"])
-        add = [r["items"][i]["pos"] for i in indices if i < len(r["items"])]
+        items = _shown_suggestions()[0]  # as the gallery shows them
+        req(items)
+        add = [items[i]["pos"] for i in indices if i < len(items)]
         if not add:
             ui.notification_show("Pick the suggested classes to add first.", duration=4)
             return
@@ -1393,7 +1518,7 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
     @reactive.effect
     @reactive.event(input.suggested_add_all)
     def add_all_suggested():
-        _add_suggested(range(len(suggestions()["items"])))
+        _add_suggested(range(len(_shown_suggestions()[0])))
 
     @reactive.effect
     @reactive.event(input.suggested_add_picked)
@@ -1402,7 +1527,30 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
 
     def _poorly_fitting(r):
         """Selected classes to take out, with the reason for each."""
-        return phase.diagnose_classes(r)
+        threshold = input.fit_threshold()
+        return phase.diagnose_classes(
+            r, threshold=None if threshold is None else float(threshold)
+        )
+
+    first_result = [True]
+
+    @reactive.effect
+    @reactive.event(phase_result)
+    def _suggest_fit_threshold():
+        # each new result starts from where its own ranked fits break; a
+        # bookmarked threshold is kept for the first result (the slider is
+        # hidden until there is one, so only a bookmark can have moved it)
+        r = phase_result()
+        if r is None:
+            return
+        if first_result[0]:
+            first_result[0] = False
+            default = BOOKMARK_DEFAULTS["fit_cut"][1]
+            if input.fit_threshold() not in (None, default):
+                return
+        value = phase.fit_threshold(r.class_fit)
+        if value is not None:
+            ui.update_slider("fit_threshold", value=round(value, 2))
 
     MIN_PHASE_CLASSES = 3
 
@@ -1421,15 +1569,18 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
 
     @render.ui
     def results_visibility():
-        hidden = []
-        if phase_result() is None:
-            hidden.append(f"#{_RESULTS_BOX}")
-        if not ring_drawn():
+        # Both start hidden in the page itself (_START_HIDDEN_CSS): hiding them
+        # from here instead left them on screen while the tab started, before
+        # this had run. This only shows them, once there is something to show.
+        shown = []
+        if phase_result() is not None:
+            shown.append(f"#{_RESULTS_BOX} {{ display: block; }}")
+        if ring_drawn():
             # a card's id is namespaced like an input's
-            hidden.append(f"#{session.ns(_SUGGESTIONS_BOX)}")
-        if not hidden:
+            shown.append(f"#{session.ns(_SUGGESTIONS_BOX)} {{ display: flex; }}")
+        if not shown:
             return None
-        return ui.tags.style(f"{', '.join(hidden)} {{ display: none; }}")
+        return ui.tags.style("\n".join(shown))
 
     @reactive.effect
     def _enable_phase_run():
@@ -1566,7 +1717,8 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                     "(dim on the ring plot) -- junk, or another type. 'Too few "
                     "informative segment pairs': fewer than 5% of a typical "
                     "class's pairs a quarter repeat or more apart, too little to "
-                    "tell either way. A 180\u00b0 copy goes "
+                    "tell either way. 'Below the threshold': a fit under the Fit "
+                    "threshold set below the ranked fits. A 180\u00b0 copy goes "
                     "with the class it was merged into. They are picked in the "
                     "Selected classes gallery; press Remove picked to drop them.",
                 )
@@ -1781,10 +1933,20 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
                 y=cut,
                 line=dict(color="#b2182b", width=2, dash="dash"),
                 layer="above",
-                annotation_text=f"chance level ({cut:.2f})",
+                annotation_text=f"\u2248 junk ({cut:.2f})",
                 # at the best-fitting end, clear of the poor classes
                 annotation_position="top left",
                 annotation_font=dict(size=10, color="#b2182b"),
+            )
+        threshold = input.fit_threshold()
+        if threshold is not None:
+            fig.add_hline(
+                y=float(threshold),
+                line=dict(color="#ff7f0e", width=2),
+                layer="above",
+                annotation_text=f"threshold ({float(threshold):.2f})",
+                annotation_position="top left",
+                annotation_font=dict(size=10, color="#d95f02"),
             )
         fig.update_layout(
             template="plotly_white",

@@ -100,7 +100,7 @@ class TestStartFolder:
             fp._remember(f, recent)
         assert recent == ["/c", "/a", "/b"]
 
-    def test_recent_folders_are_kept_per_session(self):
+    def test_recent_folders_are_kept_per_session_and_tab(self):
         class Root:
             pass
 
@@ -109,10 +109,25 @@ class TestStartFolder:
                 self._root_session = root
 
         a, b = Root(), Root()
-        fp._remember("/data/a", fp.recent_folders(Proxy(a)))
-        assert fp.recent_folders(a) == ["/data/a"]
-        assert fp.recent_folders(Proxy(Proxy(a))) is fp.recent_folders(a)
-        assert fp.recent_folders(b) == []
+        fp._remember("/data/a", fp.recent_folders(Proxy(a), "hill"))
+        assert fp.recent_folders(a, "hill") == ["/data/a"]
+        assert fp.recent_folders(Proxy(Proxy(a)), "hill") is fp.recent_folders(
+            a, "hill"
+        )
+        # another session, or another tab of the same one, has its own
+        assert fp.recent_folders(b, "hill") == []
+        assert fp.recent_folders(a, "abinitio3d") == []
+
+    def test_a_pickers_tab_is_the_first_part_of_its_id(self):
+        class Session:
+            def __init__(self, prefix):
+                self.prefix = prefix
+
+            def ns(self, name):
+                return f"{self.prefix}-{name}"
+
+        assert fp.picker_scope(Session("abinitio3d-params_browse")) == "abinitio3d"
+        assert fp.picker_scope(Session("browse")) == "browse"
 
     def test_folders_of_earlier_visits_come_from_the_page(self):
         class Input(dict):
@@ -129,11 +144,15 @@ class TestStartFolder:
             def root_scope(self):
                 return self
 
-        assert fp.browser_folders(Root()) == []  # not sent yet
-        assert fp.browser_folders(Root(["/d/a", 3, "", "/d/b"])) == ["/d/a", "/d/b"]
-        assert fp.browser_folders(Root("not a list")) == []
-        many = [f"/d/{i}" for i in range(20)]
-        assert fp.browser_folders(Root(many)) == many[: fp._MAX_RECENT]
+        assert fp.browser_folders(Root(), "hill") == []  # not sent yet
+        sent = {"hill": ["/d/a", 3, "", "/d/b"], "hi3d": ["/d/c"]}
+        assert fp.browser_folders(Root(sent), "hill") == ["/d/a", "/d/b"]
+        # each tab its own
+        assert fp.browser_folders(Root(sent), "hi3d") == ["/d/c"]
+        assert fp.browser_folders(Root(sent), "abinitio3d") == []
+        assert fp.browser_folders(Root("not a dict"), "hill") == []
+        many = {"hill": [f"/d/{i}" for i in range(20)]}
+        assert fp.browser_folders(Root(many), "hill") == many["hill"][: fp._MAX_RECENT]
 
     def test_this_sessions_folders_come_before_earlier_visits(self):
         assert fp._merged(["/s"], ["/b", "/s", "/c"]) == ["/s", "/b", "/c"]

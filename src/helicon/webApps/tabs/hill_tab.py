@@ -21,8 +21,6 @@ from shinywidgets import output_widget, render_widget
 from bokeh.models import CustomJS
 from bokeh.resources import Resources
 
-from ..lib.shared_state import ProjectState
-
 
 def bokeh_dependency():
     """Return HTMLDependency for Bokeh with widget bundle via CDN."""
@@ -567,7 +565,7 @@ def hill_tab_ui():
 
 
 @module.server
-def hill_tab_server(input, output, session, project: ProjectState):
+def hill_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(

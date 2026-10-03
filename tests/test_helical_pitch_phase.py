@@ -516,6 +516,21 @@ class TestClassDiagnosis:
             7: "180° copy of class 5",
         }
 
+    def test_a_threshold_takes_out_the_classes_below_it(self):
+        fit = [0.8, 0.82, 0.79, 0.81, 0.43, 0.3, 0.02, 0.6]
+        evidence = [100] * 8
+        r = self._result(fit, evidence, merged_into={8: 6})
+        out = ph.diagnose_classes(r, threshold=0.5)
+        # the chance level still names its own; the threshold adds the rest,
+        # and a merged copy goes with its class
+        assert out == {
+            7: ph.AT_CHANCE,
+            5: ph.BELOW_THRESHOLD,
+            6: ph.BELOW_THRESHOLD,
+            8: "180° copy of class 6",
+        }
+        assert ph.diagnose_classes(r) == {7: ph.AT_CHANCE}
+
     def test_good_classes_are_left_alone(self):
         r = self._result([0.8, 0.7, 0.75, 0.9], [100, 50, 80, 120])
         assert ph.diagnose_classes(r) == {}
@@ -650,3 +665,82 @@ class TestPoorlyFittingCut:
 
     def test_too_few_fits(self):
         assert ph.poorly_fitting_cut([0.5, np.nan]) is None
+
+
+class TestFitThreshold:
+    """Where the ranked class fits break."""
+
+    def test_in_the_first_clear_drop_below_the_best(self):
+        # one type at 0.73-0.84, then the rest: not the deeper drop further down
+        fit = [0.84, 0.83, 0.83, 0.81, 0.76, 0.73, 0.30, 0.23, 0.16, -0.28]
+        assert ph.fit_threshold(fit) == pytest.approx((0.73 + 0.30) / 2)
+        fit = [0.84, 0.80, 0.75, 0.73, 0.43, 0.30, 0.20]
+        assert ph.fit_threshold(fit) == pytest.approx((0.73 + 0.43) / 2)
+
+    def test_the_chance_level_without_a_break(self):
+        fit = [0.8, 0.78, 0.75, 0.7, 0.66, 0.6]
+        assert ph.fit_threshold(fit) == pytest.approx(ph.poorly_fitting_cut(fit))
+
+    def test_at_least_three_classes_are_kept(self):
+        # a drop after the best two is not taken
+        fit = [0.9, 0.88, 0.5, 0.48, 0.47, 0.45]
+        assert ph.fit_threshold(fit) == pytest.approx(ph.poorly_fitting_cut(fit))
+
+    def test_never_below_the_chance_level(self):
+        fit = [0.3, 0.29, 0.28, 0.27, 0.05, 0.04]
+        chance = ph.poorly_fitting_cut(fit)
+        assert ph.fit_threshold(fit) >= chance
+
+    def test_order_and_missing_fits_do_not_matter(self):
+        fit = [0.30, 0.84, np.nan, 0.73, 0.83, 0.23]
+        assert ph.fit_threshold(fit) == pytest.approx((0.73 + 0.30) / 2)
+        assert ph.fit_threshold([0.5, np.nan]) is None
+
+
+class TestCandidateFit:
+    """The fit a class not in the estimate would get on its ring."""
+
+    @pytest.fixture(scope="class")
+    def two_types(self):
+        # classes 1-12 of one filament type, 101-112 of another sharing none of
+        # their filaments, and junk classes 201-203 scattered over the first
+        a = make_params(n_fil=120, period=300.0, seed=21)
+        b = make_params(
+            n_fil=120, period=420.0, class_offset=100, tube_offset=100, seed=22
+        )
+        df = pd.concat([a, b], ignore_index=True)
+        rng = np.random.default_rng(23)
+        first = np.flatnonzero(df["rlnClassNumber"] <= 12)
+        junk = rng.choice(first, size=len(first) // 10, replace=False)
+        df.loc[junk, "rlnClassNumber"] = 201 + rng.integers(0, 3, len(junk))
+        return df
+
+    def test_a_class_of_the_type_predicts_its_own_fit(self, two_types):
+        import dataclasses
+
+        keep = list(range(1, 13))
+        r = ph.analyze(two_types, class_ids=keep, n_boot=2)
+        ids = [int(c) for c in r.class_ids]
+        i = ids.index(5)
+        others = [j for j in range(len(ids)) if j != i]
+        without = dataclasses.replace(
+            r,
+            class_ids=np.asarray(ids)[others],
+            phases=np.asarray(r.phases)[others],
+        )
+        predicted = ph.candidate_fit(two_types, without, [5])[5]
+        assert predicted == pytest.approx(r.class_fit[i], abs=0.05)
+        assert predicted > 0.5
+
+    def test_junk_and_other_types_predict_low(self, two_types):
+        keep = [c for c in range(1, 13) if c != 5]
+        r = ph.analyze(two_types, class_ids=keep, n_boot=2)
+        fits = ph.candidate_fit(two_types, r, [5, 201, 202, 203, 101])
+        assert fits[5] > 0.5
+        assert all(fits[c] < 0.3 for c in (201, 202, 203))
+        # no filaments in common with the fit: nothing to place it by
+        assert np.isnan(fits[101])
+
+    def test_classes_already_in_the_fit_are_not_candidates(self, two_types):
+        r = ph.analyze(two_types, class_ids=list(range(1, 13)), n_boot=2)
+        assert ph.candidate_fit(two_types, r, [3, 4]) == {}

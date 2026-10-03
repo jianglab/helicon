@@ -160,29 +160,38 @@ _CSS = """
 """
 
 # The folders files were picked from, kept in the browser (localStorage) so a
-# new visit starts where the last one ended. They reach the server as one
-# page-level input, which every picker reads; the server keeps nothing of
-# them between sessions.
+# new visit starts where the last one ended -- per tab: the web app's tabs share
+# nothing, not even where their files were. They reach the server as one
+# page-level input, {tab: [folders]}, which every picker reads its own tab's
+# list from; the server keeps nothing of them between sessions.
 _BROWSER_RECENT_INPUT = "helicon_file_picker_recent"
 _MEMORY_JS = """
 (function () {
   if (window.__heliconPickerMemory) return;
   window.__heliconPickerMemory = true;
-  var KEY = 'heliconFilePicker.recent', MAX = %d;
-  function load() {
+  var PREFIX = 'heliconFilePicker.recent.', MAX = %d;
+  function load(scope) {
     try {
-      var v = JSON.parse(localStorage.getItem(KEY) || '[]');
+      var v = JSON.parse(localStorage.getItem(PREFIX + scope) || '[]');
       return Array.isArray(v) ? v.filter(function (x) { return typeof x === 'string'; }).slice(0, MAX) : [];
     } catch (e) { return []; }
   }
   function send() {
-    if (window.Shiny && Shiny.setInputValue) Shiny.setInputValue('%s', load());
+    var all = {};
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf(PREFIX) === 0) all[k.slice(PREFIX.length)] = load(k.slice(PREFIX.length));
+      }
+    } catch (e) {}
+    if (window.Shiny && Shiny.setInputValue) Shiny.setInputValue('%s', all);
   }
-  window.__heliconPickerRemember = function (folder) {
+  window.__heliconPickerRemember = function (folder, scope) {
     if (!folder) return;
-    var v = load().filter(function (x) { return x !== folder; });
+    scope = scope || '';
+    var v = load(scope).filter(function (x) { return x !== folder; });
     v.unshift(folder);
-    try { localStorage.setItem(KEY, JSON.stringify(v.slice(0, MAX))); } catch (e) {}
+    try { localStorage.setItem(PREFIX + scope, JSON.stringify(v.slice(0, MAX))); } catch (e) {}
     send();
   };
   if (window.Shiny && Shiny.shinyapp && Shiny.shinyapp.isConnected && Shiny.shinyapp.isConnected()) send();
@@ -221,7 +230,7 @@ _JS = """
     if (!row) return;
     if (row.dataset.kind === 'dir') send(r, {op: 'open', name: row.dataset.name});
     else {
-      if (window.__heliconPickerRemember) window.__heliconPickerRemember(r.dataset.cwd);
+      if (window.__heliconPickerRemember) window.__heliconPickerRemember(r.dataset.cwd, r.dataset.scope);
       send(r, {op: 'choose', name: row.dataset.name});
     }
   }
@@ -459,27 +468,51 @@ def list_folder(folder, patterns=(), show_hidden=False, max_entries=5000):
     return entries[:max_entries], truncated
 
 
-def recent_folders(session):
-    """The recently used folders of one browser session, newest first.
+def picker_scope(session):
+    """The tab a picker belongs to: the first part of its module id.
+
+    ``abinitio3d-params_browse`` belongs to ``abinitio3d``. The tabs keep their
+    remembered folders apart.
 
     Parameters
     ----------
     session : shiny.Session
-        The session, or a module proxy of it (they share the list).
+        The picker's module session.
+
+    Returns
+    -------
+    str
+    """
+    try:
+        name = str(session.ns("x"))
+    except Exception:
+        return ""
+    return name.split("-", 1)[0] if "-" in name else ""
+
+
+def recent_folders(session, scope=""):
+    """The recently used folders of one browser session and tab, newest first.
+
+    Parameters
+    ----------
+    session : shiny.Session
+        The session, or a module proxy of it (they share the lists).
+    scope : str, optional
+        The tab (see :func:`picker_scope`); each has a list of its own.
 
     Returns
     -------
     list of str
-        The session's own list, changed in place by :func:`_remember`.
+        The list itself, changed in place by :func:`_remember`.
     """
     root = session
     while getattr(root, "_root_session", None) is not None:
         root = root._root_session
-    recent = getattr(root, _RECENT_ATTR, None)
-    if recent is None:
-        recent = []
-        setattr(root, _RECENT_ATTR, recent)
-    return recent
+    lists = getattr(root, _RECENT_ATTR, None)
+    if lists is None:
+        lists = {}
+        setattr(root, _RECENT_ATTR, lists)
+    return lists.setdefault(scope, [])
 
 
 def _start_folder(start, recent=()):
@@ -532,16 +565,18 @@ def _remember(folder, recent):
     del recent[_MAX_RECENT:]
 
 
-def browser_folders(session):
-    """The folders this browser picked files from on earlier visits.
+def browser_folders(session, scope=""):
+    """The folders this browser picked files from in one tab on earlier visits.
 
     They are kept in the browser's local storage and sent once the page
-    connects, as a page-level input every picker reads.
+    connects, as a page-level input of every tab's list.
 
     Parameters
     ----------
     session : shiny.Session
         The session, or a module session of it.
+    scope : str, optional
+        The tab (see :func:`picker_scope`).
 
     Returns
     -------
@@ -556,6 +591,9 @@ def browser_folders(session):
             value = root.input[_BROWSER_RECENT_INPUT]()
         except Exception:
             return []
+    if not isinstance(value, dict):
+        return []
+    value = value.get(scope, [])
     if not isinstance(value, (list, tuple)):
         return []
     return [str(f) for f in value if isinstance(f, str) and f][:_MAX_RECENT]
@@ -621,7 +659,8 @@ def file_picker_server(
         The absolute path of the file chosen, set each time one is chosen.
     """
     patterns = tuple(patterns or ())
-    recent = recent_folders(session)
+    scope = picker_scope(session)
+    recent = recent_folders(session, scope)
     chosen = reactive.value(None)
     cwd = reactive.value(Path.cwd())
     preselect = reactive.value(None)
@@ -649,7 +688,9 @@ def file_picker_server(
         if _server_files_refused():
             return
         # this session's folders first, then those of earlier visits
-        folder, name = _start_folder(start, _merged(recent, browser_folders(session)))
+        folder, name = _start_folder(
+            start, _merged(recent, browser_folders(session, scope))
+        )
         go(folder, name)
         ui.modal_show(
             ui.modal(
@@ -707,6 +748,7 @@ def file_picker_server(
             ),
             class_="hfp",
             data_act=session.ns("act"),
+            data_scope=scope,
             data_cwd=str(cwd()),
         )
 
@@ -801,7 +843,7 @@ def file_picker_server(
     def places():
         cwd()
         seen, chips = set(), []
-        folders = _merged(recent, browser_folders(session))[:_MAX_RECENT]
+        folders = _merged(recent, browser_folders(session, scope))[:_MAX_RECENT]
         for label, folder in [("Home", Path.home()), ("Working folder", Path.cwd())] + [
             (Path(f).name or f, Path(f)) for f in folders if Path(f).is_dir()
         ]:

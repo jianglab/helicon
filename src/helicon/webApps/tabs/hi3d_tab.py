@@ -17,7 +17,6 @@ import helicon
 from shiny import reactive, render, ui, module, req
 
 from .. import bookmark, deployment
-from ..lib.shared_state import ProjectState
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +399,7 @@ def hi3d_tab_ui():
 
 
 @module.server
-def hi3d_tab_server(input, output, session, project: ProjectState):
+def hi3d_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(
@@ -753,8 +752,6 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
         map_apix.set(apix_val)
         map_crs.set(crs)
         apix_from_file.set(apix_val)
-        project.input_map.set(d)
-        project.input_map_apix.set(apix_val)
         nz, ny, nx = d.shape
         map_info_text.set(f"{nx}×{ny}×{nz} voxels | {apix_val:.4g} Å/voxel")
         # Radial range: where the density actually is, not the whole box.
@@ -1192,9 +1189,6 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
                         rise_val.set(trc1[1])
                         csym_val.set(int(trc1[2]))
                     fitted.set(True)
-                    project.twist.set(round(twist_val(), 3))
-                    project.rise.set(round(rise_val(), 3))
-                    project.csym.set(int(csym_val()))
                 except Exception as e:
                     logger.error("Fit failed: %s", e)
                     fitted.set(False)
@@ -1394,9 +1388,6 @@ def hi3d_tab_server(input, output, session, project: ProjectState):
             csym_val.set(c)
             ui.update_numeric("hi3d_twist_manual", value=round(t_opt, 2))
             ui.update_numeric("hi3d_rise_manual", value=round(r_opt, 2))
-            project.twist.set(round(t_opt, 3))
-            project.rise.set(round(r_opt, 3))
-            project.csym.set(c)
         except Exception as e:
             logger.error("Refine failed: %s", e)
 
