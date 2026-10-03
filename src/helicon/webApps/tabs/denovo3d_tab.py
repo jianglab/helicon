@@ -2037,8 +2037,10 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 helicon.shiny.range_slider(
                     "dn_twist_range",
                     "min \u2013 max",
-                    min=0,
-                    max=180,
+                    # the twists of most filaments; double-click an end of the
+                    # slider to type a wider bound
+                    min=0.1,
+                    max=2.0,
                     value=(0.1, 2.0),
                     step=0.01,
                     width="230px",
@@ -2075,8 +2077,8 @@ def denovo3d_tab_server(input, output, session, project: ProjectState):
                 helicon.shiny.range_slider(
                     "dn_rise_range",
                     "min \u2013 max",
-                    min=0,
-                    max=100,
+                    min=0.1,
+                    max=10.0,
                     value=(4.75, 4.75),
                     step=0.01,
                     width="230px",
