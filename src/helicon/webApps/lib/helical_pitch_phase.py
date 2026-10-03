@@ -1384,12 +1384,27 @@ def poorly_fitting(class_ids, fit, level=0.1, relative=0.25):
     list of int
         Class numbers, as in ``class_ids``.
     """
+    cut = poorly_fitting_cut(fit, level, relative)
+    if cut is None:
+        return []
+    fit = np.asarray(fit, dtype=float)
+    return [int(c) for c, f in zip(class_ids, fit) if not np.isfinite(f) or f < cut]
+
+
+def poorly_fitting_cut(fit, level=0.1, relative=0.25):
+    """The fit below which :func:`poorly_fitting` flags a class.
+
+    Returns
+    -------
+    float or None
+        ``min(level, relative * median fit)``; None with fewer than three
+        classes with a fit.
+    """
     fit = np.asarray(fit, dtype=float)
     ok = np.isfinite(fit)
     if ok.sum() < 3:
-        return []
-    cut = min(level, relative * float(np.median(fit[ok])))
-    return [int(c) for c, f in zip(class_ids, fit) if not np.isfinite(f) or f < cut]
+        return None
+    return min(level, relative * float(np.median(fit[ok])))
 
 
 def largest_phase_gap(phases, weight=None):

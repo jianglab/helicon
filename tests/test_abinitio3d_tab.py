@@ -303,3 +303,32 @@ class TestRingColours:
         plot = src[src.index("def phase_circle_plot") :]
         plot = plot[: plot.index("@render.")]
         assert "cmin=0.0" in plot and "cmax=1.0" in plot
+
+
+class TestRankedFits:
+    """The class fits of the ring, ranked, below the ring and beside the
+    per-filament histogram."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_it_sits_below_the_ring_right_of_the_histogram(self):
+        src = self._src()
+        ring = src.index('ui.output_ui("phase_circle_plot")')
+        hist = src.index('ui.output_ui("filament_pitch_plot")')
+        rank = src.index('ui.output_ui("class_fit_rank_plot")')
+        assert ring < hist < rank
+        # the same two columns as the scan and the ring above
+        row = src[hist : rank + 300]
+        assert "col_widths=(7, 5)" in row
+
+    def test_rank_fit_and_size(self):
+        src = self._src()
+        plot = src[src.index("def class_fit_rank_plot") :]
+        plot = plot[: plot.index("@render.")]
+        assert "np.argsort(-np.nan_to_num(fit" in plot  # best first
+        assert "r.class_count" in plot  # size by segments
+        assert "cmax=1.0" in plot and "1.05]" in plot  # the ring's fixed scale
+        assert "phase.poorly_fitting_cut(fit)" in plot

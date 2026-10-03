@@ -633,3 +633,20 @@ class TestFilamentCurves:
         grid = np.array([700.0])
         got = ph._filament_curves(fi, 2, d, w, dphi, grid)
         assert np.allclose(got, self._direct(fi, 2, d, w, dphi, grid), atol=1e-6)
+
+
+class TestPoorlyFittingCut:
+    def test_the_lower_of_the_level_and_a_quarter_of_the_median(self):
+        assert ph.poorly_fitting_cut([0.8, 0.8, 0.8]) == pytest.approx(0.1)
+        assert ph.poorly_fitting_cut([0.2, 0.2, 0.2]) == pytest.approx(0.05)
+
+    def test_it_is_the_cut_poorly_fitting_uses(self):
+        fit = [0.8, 0.75, 0.09, 0.11, np.nan, -0.3]
+        cut = ph.poorly_fitting_cut(fit)
+        ids = list(range(1, 7))
+        assert ph.poorly_fitting(ids, fit) == [
+            c for c, f in zip(ids, fit) if not np.isfinite(f) or f < cut
+        ]
+
+    def test_too_few_fits(self):
+        assert ph.poorly_fitting_cut([0.5, np.nan]) is None

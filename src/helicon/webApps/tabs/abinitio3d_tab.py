@@ -509,7 +509,17 @@ def abinitio3d_tab_ui():
                             col_widths=(7, 5),
                             fill=False,
                         ),
-                        ui.div(ui.output_ui("filament_pitch_plot"), style=_PLOT_BOX),
+                        ui.layout_columns(
+                            ui.div(
+                                ui.output_ui("filament_pitch_plot"), style=_PLOT_BOX
+                            ),
+                            # below the ring: the same fits, ranked
+                            ui.div(
+                                ui.output_ui("class_fit_rank_plot"), style=_PLOT_BOX
+                            ),
+                            col_widths=(7, 5),
+                            fill=False,
+                        ),
                         ui.layout_columns(
                             ui.div(
                                 helicon.shiny.range_slider(
@@ -1699,6 +1709,95 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         )
         return _fig_to_html(fig)
 
+    @render.ui
+    def class_fit_rank_plot():
+        """The class fits of the ring, ranked: how they are spread.
+
+        The ring shows where each class sits; this shows the fits themselves,
+        best first, on the same fixed scale and colours, each marker's area
+        following the class's number of segments, the classes to take out
+        outlined in red (a class without a fit as a cross at 0) and the line
+        below which a fit is taken as chance.
+        """
+        r = phase_result()
+        req(r is not None)
+        import plotly.graph_objects as go
+
+        ids = [int(c) for c in r.class_ids]
+        fit = np.asarray(r.class_fit, dtype=float)
+        members = np.asarray(
+            r.class_count if r.class_count is not None else r.class_weight,
+            dtype=float,
+        )
+        order = np.argsort(-np.nan_to_num(fit, nan=-1.0), kind="stable")
+        f = np.nan_to_num(fit[order], nan=0.0)
+        m = members[order]
+        # area by the number of segments
+        size = 6 + 24 * np.sqrt(m) / max(float(np.sqrt(m).max()), 1e-12)
+        poor = _poorly_fitting(r)
+        reasons = [poor.get(ids[i], "") for i in order]
+        text = [str(ids[i]) for i in order]
+        no_fit = ~np.isfinite(fit[order])
+        hover = [
+            f"class {c}<br>"
+            + ("no fit" if missing else f"fit {v:.2f}")
+            + f"<br>{int(n):,} segments"
+            + (f"<br>\u2717 {_SHORT_REASON.get(why, why)}" if why else "")
+            for c, v, n, why, missing in zip(text, f, m, reasons, no_fit)
+        ]
+        rank = np.arange(1, len(order) + 1)
+        fig = go.Figure(
+            go.Scatter(
+                x=rank,
+                y=f,
+                mode="markers+text" if input.ring_labels() else "markers",
+                text=text,
+                textposition="top center",
+                hovertext=hover,
+                hoverinfo="text",
+                marker=dict(
+                    size=size,
+                    color=f,
+                    colorscale="Viridis",
+                    cmin=0.0,
+                    cmax=1.0,
+                    # a class without a fit is drawn at 0 as a cross
+                    symbol=["x" if missing else "circle" for missing in no_fit],
+                    line=dict(
+                        color=[
+                            "#d62728" if why else "rgba(0,0,0,0.3)" for why in reasons
+                        ],
+                        width=[2.5 if why else 0.5 for why in reasons],
+                    ),
+                ),
+                showlegend=False,
+            )
+        )
+        cut = phase.poorly_fitting_cut(fit)
+        if cut is not None:
+            fig.add_hline(
+                y=cut,
+                line=dict(color="#d62728", width=1, dash="dash"),
+                annotation_text="chance",
+                # at the best-fitting end, clear of the poor classes
+                annotation_position="top left",
+                annotation_font=dict(size=10, color="#d62728"),
+            )
+        fig.update_layout(
+            template="plotly_white",
+            title_text="Class fits, ranked",
+            title_x=0.5,
+            title_font=dict(size=12),
+            xaxis=dict(title="Rank", range=[0.3, len(order) + 0.7]),
+            # the same fixed scale as the ring's colours
+            # fixed at the top, as the ring's colours; down to the worst fit,
+            # which can be below 0 (a class against the ring)
+            yaxis=dict(title="Fit", range=[min(-0.05, float(f.min()) - 0.07), 1.05]),
+            margin=dict(t=40, b=50, l=50, r=20),
+            hovermode="closest",
+        )
+        return _fig_to_html(fig)
+
     def _length_range():
         lo, hi = input.length_range() or (None, None)
         return lo, hi
@@ -1750,15 +1849,16 @@ def abinitio3d_tab_server(input, output, session, project: ProjectState):
         fig.update_layout(
             template="plotly_white",
             title_text=(
+                # two lines: it shares its row with the ranked fits
                 f"Per-filament repeat \u00b7 {len(pitches)} filaments, "
-                f"{spans.min():,.0f}\u2013{spans.max():,.0f} \u00c5 long "
-                f"(+{n_all - len(pitches)} without a clear repeat)"
+                f"{spans.min():,.0f}\u2013{spans.max():,.0f} \u00c5 long"
+                f"<br><sup>+{n_all - len(pitches)} without a clear repeat</sup>"
             ),
             title_x=0.5,
             title_font=dict(size=12),
             xaxis_title="Repeat distance (Å)",
             yaxis_title="# of filaments",
-            margin=dict(t=50, b=50, l=50, r=20),
+            margin=dict(t=62, b=50, l=50, r=20),
         )
         return _fig_to_html(fig)
 
