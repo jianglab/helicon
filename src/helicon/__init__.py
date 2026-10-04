@@ -1,6 +1,5 @@
-__version__ = "2026.09"
-
 import numpy as np
+
 
 # NumPy 2.x removed several names that numba still references
 # during JIT compilation. Alias them for compatibility.
@@ -230,6 +229,11 @@ _LAZY_FROM_GAUSS = (
 
 
 def __getattr__(name):
+    if name == "__version__":
+        # looked up on first use, not at import: in a git checkout it runs git
+        from ._versioninfo import version_info
+
+        return version_info()["version"]
     if name == "shiny":
         # helicon.shiny (the web-app widgets) pulls in the shiny package, which
         # takes seconds to import, so it is loaded on first use rather than with

@@ -14,6 +14,8 @@ cli_commands = [
     "images2star",
     "proc3d",
     "trueFSC",
+    "update",
+    "webCalEM",
 ]
 napari_commands = [
     "display",
@@ -142,9 +144,9 @@ def _get_commands(
     doc_str: str = "",
 ) -> None:
     parser = HeliconArgumentParser(description=doc_str, allow_abbrev=True)
-    parser.add_argument(
-        "--version", action="version", version="helicon " + helicon.__version__
-    )
+    from helicon._versioninfo import describe
+
+    parser.add_argument("--version", action="version", version="helicon " + describe())
 
     subparsers = parser.add_subparsers(
         title="Choose a command", parser_class=HeliconArgumentParser
