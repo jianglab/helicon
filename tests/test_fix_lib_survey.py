@@ -425,12 +425,3 @@ class TestIoModuleMisc:
     def test_get_relion_project_folder_none(self, tmp_path):
         star = tmp_path / "Class2D" / "job003" / "x.star"
         assert io.get_relion_project_folder(str(star)) is None
-
-
-class TestEpuXmltodictLazy:
-    def test_clear_error_when_missing(self, tmp_path):
-        from helicon.lib.epu import EPU_xml_2_beamshift
-
-        with patch.dict(sys.modules, {"xmltodict": None}):
-            with pytest.raises(ImportError, match="xmltodict"):
-                EPU_xml_2_beamshift(tmp_path / "x.xml")

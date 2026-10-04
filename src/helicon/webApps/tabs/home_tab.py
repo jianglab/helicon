@@ -44,7 +44,7 @@ class HomeApp:
     description: str
     cx: int  # chip centre in diagram coordinates
     cy: int
-    icon: str | None = None  # image path under www/, e.g. "icons/hill.png"
+    icon: str | None = None  # image under helicon/resources/, e.g. "icon.svg"
     # Not integrated in this web app: ``command`` is a helicon subcommand to
     # start in a new window; ``url`` is its hosted site, opened instead when
     # there is no command or the server is not on the user's machine.

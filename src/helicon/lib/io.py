@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging, math, os
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 import numpy as np
@@ -1664,17 +1665,20 @@ def cistem2dataframe(
     pd.DataFrame
         DataFrame with relion-convention column names.
     """
-    import sqlalchemy
+    import sqlite3
 
     if dbFile.find("@") == -1:
         iter = -1
     else:
         iter, dbFile = dbFile.split("@")
         iter = int(iter)
-    db = sqlalchemy.create_engine("sqlite:///%s" % (dbFile))
-    refinement_list = pd.read_sql_table("REFINEMENT_LIST", db).set_index(
-        "REFINEMENT_ID"
-    )
+
+    def read_table(name):
+        # a whole table, as a DataFrame
+        with closing(sqlite3.connect(dbFile)) as db:
+            return pd.read_sql_query(f'SELECT * FROM "{name}"', db)
+
+    refinement_list = read_table("REFINEMENT_LIST").set_index("REFINEMENT_ID")
     if iter < 0:
         refinement_id = refinement_list.index.max() + 1 + iter
     else:
@@ -1683,9 +1687,9 @@ def cistem2dataframe(
         refinement_id, "REFINEMENT_PACKAGE_ASSET_ID"
     ]
 
-    refinement_package_asset_table = pd.read_sql_table(
-        "REFINEMENT_PACKAGE_ASSETS", db
-    ).set_index("REFINEMENT_PACKAGE_ASSET_ID")
+    refinement_package_asset_table = read_table("REFINEMENT_PACKAGE_ASSETS").set_index(
+        "REFINEMENT_PACKAGE_ASSET_ID"
+    )
     stack_filename = str(
         refinement_package_asset_table.loc[
             refinement_package_asset_id, "STACK_FILENAME"
@@ -1695,14 +1699,10 @@ def cistem2dataframe(
     refinement_input_table_name = "REFINEMENT_PACKAGE_CONTAINED_PARTICLES_%s" % (
         refinement_package_asset_id
     )
-    input_table = pd.read_sql_table(refinement_input_table_name, db).set_index(
-        "POSITION_IN_STACK"
-    )
+    input_table = read_table(refinement_input_table_name).set_index("POSITION_IN_STACK")
 
     if "PARENT_IMAGE_ASSET_ID" in input_table:
-        image_asset_table = pd.read_sql_table("IMAGE_ASSETS", db).set_index(
-            "IMAGE_ASSET_ID"
-        )
+        image_asset_table = read_table("IMAGE_ASSETS").set_index("IMAGE_ASSET_ID")
 
         input_table_group = input_table.groupby("PARENT_IMAGE_ASSET_ID")
         for image_asset_id, mgraphParticles in input_table_group:
@@ -1713,7 +1713,7 @@ def cistem2dataframe(
             ]
 
     refinement_result_table_name = "REFINEMENT_RESULT_%s_%s" % (refinement_id, 1)
-    result_cistem = pd.read_sql_table(refinement_result_table_name, db).set_index(
+    result_cistem = read_table(refinement_result_table_name).set_index(
         "POSITION_IN_STACK"
     )
 

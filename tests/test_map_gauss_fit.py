@@ -327,3 +327,86 @@ class TestTheFitIsReferencedToTheSolvent:
 
         params = inspect.signature(mgf.gaussians_for_map).parameters
         assert params["reference_to_background"].default is True
+
+
+class TestScrewExpand:
+    @staticmethod
+    def _unit(n=5, seed=1):
+        rng = np.random.default_rng(seed)
+        return mgf.MapGaussians(
+            amplitudes=rng.uniform(0.5, 2.0, n).astype(np.float32),
+            centers=np.column_stack(
+                [rng.normal(0, 15, n), rng.normal(0, 15, n), rng.uniform(-2, 2, n)]
+            ).astype(np.float32),
+            sigma=2.0,
+            apix=1.0,
+        )
+
+    def test_every_copy_is_a_screw_step_of_the_unit(self):
+        fit = self._unit()
+        twist, rise = -1.2, 4.75
+        centers, amps = fit.screw_expand(twist, rise, 1, zmin=-50, zmax=50)
+        # the copy n steps up is the unit turned by n twists and raised n rises
+        for n in (-3, 0, 7):
+            a = np.deg2rad(twist * n)
+            x, y, z = fit.centers.T
+            expected = np.column_stack(
+                [
+                    np.cos(a) * x - np.sin(a) * y,
+                    np.sin(a) * x + np.cos(a) * y,
+                    z + n * rise,
+                ]
+            )
+            for c, amp in zip(expected, fit.amplitudes):
+                d = np.linalg.norm(centers - c, axis=1)
+                assert d.min() < 1e-3
+                assert amps[d.argmin()] == pytest.approx(amp)
+
+    def test_the_window_holds_all_copies_and_only_them(self):
+        fit = self._unit()
+        rise = 4.75
+        centers, amps = fit.screw_expand(30.0, rise, 1, zmin=-50, zmax=50)
+        assert len(centers) == len(amps)
+        assert ((centers[:, 2] > -50) & (centers[:, 2] < 50)).all()
+        # each gaussian of the unit has 100/rise copies, give or take one
+        assert abs(len(centers) - len(fit) * 100 / rise) <= len(fit)
+
+    def test_cyclic_symmetry_multiplies_the_copies(self):
+        fit = self._unit()
+        c1, _ = fit.screw_expand(-81.1, 19.4, 1, zmin=-60, zmax=60)
+        c3, _ = fit.screw_expand(-81.1, 19.4, 3, zmin=-60, zmax=60)
+        assert len(c3) == 3 * len(c1)
+        # turning by a third of a circle maps the C3 set onto itself
+        a = 2 * np.pi / 3
+        turned = c3 @ np.array(
+            [[np.cos(a), np.sin(a), 0], [-np.sin(a), np.cos(a), 0], [0, 0, 1]]
+        )
+        from scipy.spatial import cKDTree
+
+        assert cKDTree(c3).query(turned)[0].max() < 1e-3
+
+    def test_rise_must_be_positive(self):
+        with pytest.raises(ValueError):
+            self._unit().screw_expand(1.0, 0.0, 1, zmin=-10, zmax=10)
+
+    def test_it_matches_the_torch_expansion(self):
+        pytest.importorskip("torch")
+        from scipy.spatial import cKDTree
+
+        fit = self._unit(n=20)
+        for twist, rise, csym in [(-1.2, 4.75, 1), (179.4, 2.378, 1), (30, 10, 2)]:
+            ours, amps = fit.screw_expand(twist, rise, csym, zmin=-80, zmax=80)
+            ref = fit.to_set().apply_helical_symmetry(
+                twist=twist,
+                rise=rise,
+                csym=csym,
+                zmin=-80,
+                zmax=80,
+                min_dist_sigma=0,
+            )
+            ref_centers = ref.centers.detach().cpu().numpy()
+            assert len(ours) == len(ref_centers)
+            d, i = cKDTree(ref_centers).query(ours)
+            assert d.max() < 1e-2
+            ref_amps = ref.amplitudes.detach().cpu().numpy()
+            assert np.allclose(amps, ref_amps[i], rtol=1e-5)

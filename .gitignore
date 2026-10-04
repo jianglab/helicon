@@ -36,3 +36,4 @@ tests/output/
 .freebuff/
 .claude/
 output/
+/src/helicon/_version.py

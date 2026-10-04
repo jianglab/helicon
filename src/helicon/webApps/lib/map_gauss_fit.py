@@ -22,6 +22,8 @@ adaptive fit won only where the budget was far too small for the map
 
 from dataclasses import dataclass
 
+import math
+
 import numpy as np
 
 import helicon
@@ -53,6 +55,54 @@ class MapGaussians:
 
     def __len__(self):
         return len(self.amplitudes)
+
+    def screw_expand(self, twist, rise, csym, zmin, zmax):
+        """The copies of the asymmetric unit by the helical symmetry, in a window.
+
+        Copy ``n`` of the screw is turned by ``n * twist`` about the helical
+        axis and moved ``n * rise`` along it, each in ``csym`` copies turned by
+        ``360 / csym``; those whose centre lies strictly between ``zmin`` and
+        ``zmax`` are kept. The same as ``IsotropicGaussianSet
+        .apply_helical_symmetry`` with ``min_dist_sigma=0``, in numpy: this is
+        all the web apps need of torch, which is too large a dependency for it.
+
+        Parameters
+        ----------
+        twist, rise : float
+            Helical parameters, in degrees and Angstroms (rise > 0).
+        csym : int
+            Cyclic symmetry about the helical axis.
+        zmin, zmax : float
+            The window along the axis, in Angstroms.
+
+        Returns
+        -------
+        centers : np.ndarray
+            ``(K, 3)`` centres as ``(x, y, z)``, float32.
+        amplitudes : np.ndarray
+            ``(K,)`` amplitudes, float32.
+        """
+        rise = float(rise)
+        if rise <= 0:
+            raise ValueError("Rise must be positive")
+        centers = np.asarray(self.centers, dtype=np.float64)
+        amplitudes = np.asarray(self.amplitudes, dtype=np.float32)
+        z = centers[:, 2]
+        n = np.arange(
+            math.floor((zmin - z.max()) / rise), math.ceil((zmax - z.min()) / rise) + 1
+        )
+        n_flat = np.repeat(n, int(csym)).astype(np.float64)
+        i_flat = np.tile(np.arange(int(csym)), len(n)).astype(np.float64)
+        angles = np.deg2rad(float(twist)) * n_flat + 2 * np.pi * i_flat / int(csym)
+        cos, sin = np.cos(angles)[:, None], np.sin(angles)[:, None]
+        x, y = centers[:, 0][None, :], centers[:, 1][None, :]
+        out = np.stack(
+            [cos * x - sin * y, sin * x + cos * y, z[None, :] + rise * n_flat[:, None]],
+            -1,
+        ).reshape(-1, 3)
+        amps = np.tile(amplitudes, len(n_flat))
+        inside = (zmin < out[:, 2]) & (out[:, 2] < zmax)
+        return out[inside].astype(np.float32), amps[inside]
 
     def to_set(self, device: str = "cpu"):
         """Build the torch :class:`IsotropicGaussianSet` this describes."""
@@ -375,20 +425,14 @@ def side_projection(
     np.ndarray
         The projection, shaped ``(ny, length)``.
     """
-    gaussians = fit.to_set()
     z_half = length * apix / 2
     pad = cutoff_sigma * fit.sigma
-    symmetrized = gaussians.apply_helical_symmetry(
-        twist=float(twist),
-        rise=float(rise),
-        csym=int(csym),
-        zmin=-z_half - pad,
-        zmax=z_half + pad,
-        min_dist_sigma=0.0,
+    centers, amplitudes = fit.screw_expand(
+        twist, rise, csym, zmin=-z_half - pad, zmax=z_half + pad
     )
     return _splat_and_blur(
-        symmetrized.centers.cpu().numpy(),
-        symmetrized.amplitudes.cpu().numpy(),
+        centers,
+        amplitudes,
         int(length),
         int(ny),
         float(apix),
@@ -453,20 +497,13 @@ def projection_mixture(
     ImageGaussians
         Centres as ``(y, x)`` in Angstroms from the window's centre.
     """
-    gaussians = fit.to_set()
     z_half = length * apix / 2
     y_half = ny * apix / 2
     pad = cutoff_sigma * fit.sigma
-    symmetrized = gaussians.apply_helical_symmetry(
-        twist=float(twist),
-        rise=float(rise),
-        csym=int(csym),
-        zmin=-z_half - pad,
-        zmax=z_half + pad,
-        min_dist_sigma=0.0,
+    centers3d, amplitudes = fit.screw_expand(
+        twist, rise, csym, zmin=-z_half - pad, zmax=z_half + pad
     )
-    centers3d = symmetrized.centers.cpu().numpy()
-    amplitudes = symmetrized.amplitudes.cpu().numpy().astype(np.float64)
+    amplitudes = amplitudes.astype(np.float64)
 
     # the line integral along x, which is all projecting does to an isotropic
     # gaussian, and the (y, x) of the image is the (y, z) of the volume

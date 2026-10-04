@@ -1,4 +1,1 @@
-recursive-include src/helicon/resources *.png
-include src/helicon/resources/*.png
-include src/helicon/resources/*.svg
-recursive-include src/helicon/webApps/www *
+recursive-include src/helicon/resources *.png *.svg

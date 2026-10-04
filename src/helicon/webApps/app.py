@@ -465,6 +465,9 @@ def _page(theme: str, initial_theme: str, active_tab: str):
         ),
         ui.head_content(
             ui.tags.title("Helicon"),
+            # the vector icon (26 KB) where the browser takes one, the PNG
+            # (900 KB) where it does not
+            ui.tags.link(rel="icon", type="image/svg+xml", href="icon.svg"),
             ui.tags.link(rel="icon", type="image/png", href="icon.png"),
             ui.tags.script(
                 f"""
@@ -767,7 +770,9 @@ app = App(
     app_ui,
     server,
     bookmark_store="url",
-    static_assets=Path(__file__).parent / "www",
+    # helicon's own resources folder: the icons the desktop viewer uses too,
+    # kept once rather than copied into a folder of the web app's
+    static_assets=Path(__file__).parents[1] / "resources",
 )
 
 # Insert at the front: Starlette matches routes in order and
