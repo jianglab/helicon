@@ -33,6 +33,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QMessageBox,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
 )
 from PySide6.QtGui import (
     QPalette,
@@ -64,11 +67,13 @@ _DEFAULT_THEME = "System"
 # Tuple: (menu label, shiny tab name or None, streamlit subcommand module or
 # None, picker kind or None). A shiny tab is opened in the consolidated
 # Helicon Lab web app without an input file; a streamlit module is launched via
-# its subcommand ``main``. The picker kind selects a file picker that lets the
-# user choose an input before launching the tool: "map" requires one .mrc,
+# its subcommand ``main`` (WebCalEM is no streamlit app: its command only opens
+# the hosted page in the browser). The picker kind selects a file picker that
+# lets the user choose an input before launching the tool: "map" requires one .mrc,
 # "two_maps" requires two half-map .mrc files, and "star" opens the tool's
 # own in-panel file selector with no pre-set input.
 _APP_LAUNCH_TABLE = [
+    ("WebCalEM", None, "helicon.commands.webCalEM", None),
     ("Images2Star", None, None, "star"),
     ("Proc3D", None, None, "map"),
     ("WhereIsMyClass", "WhereIsMyClass", None, None),
@@ -284,6 +289,175 @@ def _add_recent_folder(path: str) -> None:
     cur = cur[:5]
     settings = QSettings("helicon", "display")
     settings.setValue("recent_folders", cur)
+
+
+def _bookmark_key(path: str) -> str:
+    """The form in which a folder is stored as a bookmark."""
+    return str(Path(path).expanduser().resolve())
+
+
+def _get_bookmarks() -> list[str]:
+    """Return the bookmarked folders, in the order they were added.
+
+    Persisted via QSettings like the recent folders. Unlike those, a folder
+    that cannot be found is kept: it may be on a disk or network share that is
+    only mounted now and then.
+    """
+    settings = QSettings("helicon", "display")
+    raw = settings.value("bookmarks", [], type=list)
+    out = []
+    for p in raw:
+        p = str(p)
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _save_bookmarks(paths: list[str]) -> None:
+    QSettings("helicon", "display").setValue("bookmarks", list(paths))
+
+
+def _is_bookmarked(path: str) -> bool:
+    return _bookmark_key(path) in _get_bookmarks()
+
+
+def _add_bookmark(path: str) -> None:
+    """Bookmark ``path`` (at the end of the list, once)."""
+    key = _bookmark_key(path)
+    marks = _get_bookmarks()
+    if key not in marks:
+        _save_bookmarks(marks + [key])
+
+
+def _remove_bookmark(path: str) -> None:
+    """Remove the bookmark of ``path``, if there is one."""
+    key = _bookmark_key(path)
+    marks = _get_bookmarks()
+    if key in marks:
+        _save_bookmarks([p for p in marks if p != key])
+
+
+def _move_bookmark(path: str, offset: int) -> None:
+    """Move the bookmark of ``path`` ``offset`` places (negative is earlier)."""
+    key = _bookmark_key(path)
+    marks = _get_bookmarks()
+    if key not in marks:
+        return
+    i = marks.index(key)
+    j = min(max(i + offset, 0), len(marks) - 1)
+    marks.insert(j, marks.pop(i))
+    _save_bookmarks(marks)
+
+
+def _clear_bookmarks() -> None:
+    """Remove every bookmark."""
+    _save_bookmarks([])
+
+
+def _confirm_clear_bookmarks(parent) -> bool:
+    """Ask before all the bookmarks are removed."""
+    answer = QMessageBox.question(
+        parent,
+        "Clear All Bookmarks",
+        "Remove all bookmarks? This cannot be undone.",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
+
+class _BookmarksDialog(QDialog):
+    """Put the bookmarks in order, remove some, or clear them all.
+
+    The order can be changed by dragging an entry or with the Move buttons;
+    every change is saved at once.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Bookmarks")
+        self.resize(560, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Drag the bookmarks to put them in order."))
+        self._list = QListWidget()
+        self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._list.model().rowsMoved.connect(self._save_order)
+        self._list.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self._list)
+
+        buttons = QHBoxLayout()
+        self._up = QPushButton("Move Up")
+        self._up.clicked.connect(partial(self.move_selected, -1))
+        self._down = QPushButton("Move Down")
+        self._down.clicked.connect(partial(self.move_selected, 1))
+        self._remove = QPushButton("Remove")
+        self._remove.clicked.connect(self.remove_selected)
+        self._clear = QPushButton("Clear All")
+        self._clear.clicked.connect(self.clear_all)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        for b in (self._up, self._down, self._remove, self._clear):
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self._reload()
+
+    def paths(self) -> list[str]:
+        """The bookmarks as listed, in the order shown."""
+        return [
+            self._list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._list.count())
+        ]
+
+    def _reload(self, select: str | None = None) -> None:
+        self._list.blockSignals(True)
+        self._list.clear()
+        for path in _get_bookmarks():
+            label = path if Path(path).is_dir() else f"{path}  (not available)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self._list.addItem(item)
+            if path == select:
+                self._list.setCurrentItem(item)
+        self._list.blockSignals(False)
+        self._update_buttons()
+
+    def _selected(self) -> str | None:
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _update_buttons(self) -> None:
+        row = self._list.currentRow()
+        n = self._list.count()
+        self._up.setEnabled(row > 0)
+        self._down.setEnabled(0 <= row < n - 1)
+        self._remove.setEnabled(row >= 0)
+        self._clear.setEnabled(n > 0)
+
+    def _save_order(self, *args) -> None:
+        """Keep what a drag and drop did."""
+        _save_bookmarks(self.paths())
+
+    def move_selected(self, offset: int) -> None:
+        path = self._selected()
+        if path is not None:
+            _move_bookmark(path, offset)
+            self._reload(select=path)
+
+    def remove_selected(self) -> None:
+        path = self._selected()
+        if path is not None:
+            row = self._list.currentRow()
+            _remove_bookmark(path)
+            marks = _get_bookmarks()
+            self._reload(select=marks[min(row, len(marks) - 1)] if marks else None)
+
+    def clear_all(self) -> None:
+        if _confirm_clear_bookmarks(self):
+            _clear_bookmarks()
+            self._reload()
 
 
 _DIGIT_RUN = re.compile(r"(\d+)")
@@ -1298,6 +1472,7 @@ class FolderBrowserWidget(QMainWindow):
 
         self._menu_bar = self.menuBar()
         self._file_menu = self._menu_bar.addMenu("File")
+        self._bookmarks_menu = self._menu_bar.addMenu("Bookmarks")
         self._apps_menu = self._menu_bar.addMenu("Apps")
 
         self._open_folder_action = QAction("Open Folder…", self)
@@ -1313,6 +1488,10 @@ class FolderBrowserWidget(QMainWindow):
         self._apps_menu.addAction(self._open_terminal_action)
 
         self._configure_relion_action = QAction("Configure RELION…", self)
+        # On macOS, Qt moves an action whose text contains "config" (or
+        # "settings", "options", ...) into the application menu as
+        # "Preferences…", so it would vanish from this menu.
+        self._configure_relion_action.setMenuRole(QAction.MenuRole.NoRole)
         self._configure_relion_action.triggered.connect(self._configure_relion)
         self._apps_menu.addAction(self._configure_relion_action)
         self._relion_processes = {}
@@ -1327,6 +1506,14 @@ class FolderBrowserWidget(QMainWindow):
             action.triggered.connect(self._on_launch_app)
             self._apps_menu.addAction(action)
             self._app_actions[label] = action
+
+        self._bookmark_toggle_action = QAction("Bookmark This Folder", self)
+        self._bookmark_toggle_action.setShortcut(QKeySequence("Ctrl+D"))
+        self._bookmark_toggle_action.triggered.connect(self._toggle_bookmark)
+        # filled each time the menu opens (the model does not exist yet); the
+        # window owns the action, so Ctrl+D works with the menu closed
+        self._bookmarks_menu.aboutToShow.connect(self._refresh_bookmarks_menu)
+        self.addAction(self._bookmark_toggle_action)
 
         self._recent_menu = self._file_menu.addMenu("Recent Folders")
         self._recent_menu.aboutToShow.connect(self._refresh_recent_menu)
@@ -2065,6 +2252,67 @@ class FolderBrowserWidget(QMainWindow):
         self._refresh_recent_menu()
         self._populate_file_info_async()
 
+    def _toggle_bookmark(self) -> None:
+        """Bookmark the folder shown, or remove its bookmark if it has one."""
+        path = self._model._root_path
+        if _is_bookmarked(path):
+            _remove_bookmark(path)
+        else:
+            _add_bookmark(path)
+        self._refresh_bookmarks_menu()
+
+    def _refresh_bookmarks_menu(self) -> None:
+        """Fill the Bookmarks menu: the toggle, then one entry per bookmark."""
+        menu = self._bookmarks_menu
+        menu.clear()
+        here = self._model._root_path
+        self._bookmark_toggle_action.setText(
+            "Remove Bookmark of This Folder"
+            if _is_bookmarked(here)
+            else "Bookmark This Folder"
+        )
+        menu.addAction(self._bookmark_toggle_action)
+        menu.addSeparator()
+        marks = _get_bookmarks()
+        if not marks:
+            menu.addAction("No bookmarks yet").setEnabled(False)
+            return
+        for path in marks:
+            action = menu.addAction(path)
+            if Path(path).is_dir():
+                action.triggered.connect(partial(self._on_bookmark_selected, path))
+            else:
+                action.setText(f"{path}  (not available)")
+                action.setEnabled(False)
+        menu.addSeparator()
+        remove_menu = menu.addMenu("Remove Bookmark")
+        for path in marks:
+            action = remove_menu.addAction(path)
+            action.triggered.connect(partial(self._on_bookmark_removed, path))
+        menu.addAction("Manage Bookmarks…").triggered.connect(self._manage_bookmarks)
+        menu.addAction("Clear All Bookmarks").triggered.connect(
+            self._clear_all_bookmarks
+        )
+
+    def _on_bookmark_selected(self, path: str) -> None:
+        """Go to a bookmarked folder."""
+        if Path(path).is_dir():
+            self._navigate_to(path)
+
+    def _manage_bookmarks(self) -> None:
+        """Open the dialog to reorder or remove the bookmarks."""
+        _BookmarksDialog(self).exec()
+        self._refresh_bookmarks_menu()
+
+    def _clear_all_bookmarks(self) -> None:
+        if _confirm_clear_bookmarks(self):
+            _clear_bookmarks()
+            self._refresh_bookmarks_menu()
+
+    def _on_bookmark_removed(self, path: str) -> None:
+        _remove_bookmark(path)
+        self._refresh_bookmarks_menu()
+
     def _refresh_recent_combo(self) -> None:
         self._recent_combo.blockSignals(True)
         self._recent_combo.clear()
@@ -2512,6 +2760,17 @@ class FolderBrowserWidget(QMainWindow):
             lambda: QApplication.clipboard().setText(Path(file_path).name)
         )
         menu.addAction(copy_name_action)
+
+        if Path(file_path).is_dir():
+            menu.addSeparator()
+            marked = _is_bookmarked(file_path)
+            bookmark_action = QAction(
+                "Remove Bookmark" if marked else "Bookmark This Folder", self._tree
+            )
+            bookmark_action.triggered.connect(
+                lambda: (_remove_bookmark if marked else _add_bookmark)(file_path)
+            )
+            menu.addAction(bookmark_action)
 
         menu.exec_(self._tree.viewport().mapToGlobal(pos))
 

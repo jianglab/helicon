@@ -2406,6 +2406,7 @@ class TestFolderBrowser(object):
 
         assert [action.text() for action in widget._menu_bar.actions()] == [
             "File",
+            "Bookmarks",
             "Apps",
             "View",
             "Help",
