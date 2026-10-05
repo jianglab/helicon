@@ -69,11 +69,14 @@ finds a real spread of about 6-7% of the period between filaments.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # Below this fraction of pair weight beyond the estimated period, the estimate
 # cannot be told from half the true period (see estimate_period).
@@ -628,8 +631,16 @@ def estimate_period(
     periods=None,
     length_scale=800.0,
     refine_fraction=0.03,
+    gate=None,
 ):
     """Coarse scan over all periods, then a fine scan about the best one.
+
+    ``gate``, if given, is a function of the candidate periods that returns a factor
+    for each (0 to 1); the coarse scores are multiplied by it, so that a period it
+    gives 0 cannot win. :meth:`helical_pitch_pixel.SelfSimilarity.gate` is one: a
+    class average that does not repeat at a candidate period rules it out. The fine
+    scan is not gated. The result then also has ``ungated_period``, the period the
+    coarse scan would have chosen without the gate.
 
     Returns a dict with ``period`` (A), ``score``, the coarse ``periods`` and
     ``scores``, ``phases`` (radians, per class) at the best period, and
@@ -657,6 +668,10 @@ def estimate_period(
     if periods is None:
         periods = np.arange(100.0, pairs.max_sep + 0.1, 2.0)
     scores, _ = phase_scan(hist, centers, periods, length_scale)
+    ungated_p0, _ = _peak(scores, periods)
+    ungated_scores = scores
+    if gate is not None:
+        scores = scores * np.asarray(gate(periods), dtype=float)
     p0, _ = _peak(scores, periods)
     fine = np.arange(p0 * (1 - refine_fraction), p0 * (1 + refine_fraction), 0.25)
     fs, fph = phase_scan(hist, centers, fine, length_scale)
@@ -672,6 +687,8 @@ def estimate_period(
         phases=fph[k],
         support=support,
         double_ratio=float(s2[0] / fs[k]) if fs[k] > 0 else 0.0,
+        ungated_period=float(ungated_p0),
+        ungated_scores=np.asarray(ungated_scores),
     )
 
 
@@ -772,12 +789,20 @@ def _estimate_one(task):
 def _pool_workers(pairs, n_tasks):
     """Processes for ``n_tasks`` period fits: the free CPUs, as memory allows.
 
-    Each fit bins every pair on its own, which takes about 40 bytes a pair.
+    Each fit bins every pair on its own and builds the histogram of every pair of
+    classes at every separation (``K * K * bins`` numbers, which with a few hundred
+    classes is gigabytes), together with copies of it. Measured on 100 classes and
+    7.8 million pairs, the largest worker was 1.5 GB resident; the estimate here,
+    about 250 bytes a pair and four times the histogram, errs high, since too many
+    workers get one killed for lack of memory (and the fit fails) while too few
+    only take longer.
     """
     try:
         import helicon
 
-        gb = max(0.1, 40.0 * len(pairs.D) / 1024**3)
+        bins = int(2 * pairs.max_sep / 5.0) + 1
+        hist_gb = float(pairs.n_classes) ** 2 * bins * 8 / 1024**3
+        gb = max(0.1, 0.3 + 250.0 * len(pairs.D) / 1024**3 + 4.0 * hist_gb)
         cpu = min(int(helicon.available_cpu()), int(helicon.available_cpu(gb)))
     except Exception:
         cpu = 1
@@ -795,16 +820,28 @@ def _estimate_periods(pairs, tasks):
     workers = _pool_workers(pairs, len(tasks))
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
 
     with _POOL_PAIRS_LOCK:
         _POOL_PAIRS[:] = [pairs]
         try:
             if workers == 1:
                 return [_estimate_one(t) for t in tasks]
-            with ProcessPoolExecutor(
-                workers, mp_context=mp.get_context("fork")
-            ) as pool:
-                return list(pool.map(_estimate_one, tasks))
+            try:
+                with ProcessPoolExecutor(
+                    workers, mp_context=mp.get_context("fork")
+                ) as pool:
+                    return list(pool.map(_estimate_one, tasks))
+            except BrokenProcessPool:
+                # a worker was killed (typically out of memory with many classes,
+                # or a fork that a library does not survive): the fits are
+                # independent, so do them here, one at a time, rather than fail
+                logger.warning(
+                    "a worker process of the period fits was terminated; "
+                    "repeating the %d fits one at a time",
+                    len(tasks),
+                )
+                return [_estimate_one(t) for t in tasks]
         finally:
             _POOL_PAIRS.clear()
 
@@ -1317,7 +1354,13 @@ def class_fit(pairs, phases, period, min_separation=0.25, prior=0.05):
 
 
 def candidate_fit(
-    params, result, candidates, min_separation=0.25, prior=0.05, max_sep=None
+    params,
+    result,
+    candidates,
+    min_separation=0.25,
+    prior=0.05,
+    max_sep=None,
+    placement=False,
 ):
     """The fit unselected classes would have on the ring of a result.
 
@@ -1342,23 +1385,33 @@ def candidate_fit(
     max_sep : float, optional
         Longest pair separation used, in A. Defaults to the longest repeat the
         result's scan searched.
+    placement : bool, optional
+        Also return where each candidate sits on the ring, for checking it
+        against the class averages (:func:`helical_pitch_pixel.candidate_agreement`).
 
     Returns
     -------
     dict
         Class number -> predicted fit; NaN for a class without such pairs.
+    dict
+        Only with ``placement``: class number -> ``(phase, zdir)``, the azimuth
+        on the ring (radians) and the direction of the axial coordinate in the
+        average's own frame (degrees, as ``PhasePitchResult.class_zdir``); only
+        for the candidates that were placed.
     """
     placed = [int(c) for c in result.class_ids]
     cands = [int(c) for c in candidates if int(c) not in set(placed)]
     out = {c: float("nan") for c in cands}
+    where_on_ring = {}
+    ret = lambda: (out, where_on_ring) if placement else out
     if not cands:
-        return out
+        return ret()
     if max_sep is None:
         max_sep = float(np.max(result.scan_periods))
     try:
         pairs = prepare_pairs(params, class_ids=placed + cands, max_sep=max_sep)
     except ValueError:
-        return out
+        return ret()
     period = float(result.period_raw)
     row = {int(c): i for i, c in enumerate(pairs.class_ids)}
     phase = np.full(pairs.n_classes, np.nan)
@@ -1377,6 +1430,14 @@ def candidate_fit(
         agree = np.sum(w[both] * np.cos(ang[both] - (phase[a[both]] - phase[b[both]])))
     if agree < 0:
         ang = -ang
+    # the axial direction of each average, turned like the ring's own if the new
+    # collection of pairs happens to run the other way along the filaments
+    zdir = -pairs.class_axis + np.where(pairs.class_sign < 0, 180.0, 0.0)
+    if placement and result.class_zdir is not None:
+        old = {c: z for c, z in zip(placed, np.asarray(result.class_zdir, float))}
+        diff = [np.deg2rad(zdir[row[c]] - old[c]) for c in placed if c in row]
+        if diff and np.sum(np.cos(diff)) < 0:
+            zdir = zdir + 180.0
     evidence = np.asarray(result.class_evidence, dtype=float)
     n0 = (
         prior * float(np.median(evidence[evidence > 0]))
@@ -1399,7 +1460,8 @@ def candidate_fit(
         phi = np.angle(np.sum(weight * np.exp(1j * where)))
         mean = float(np.sum(weight * np.cos(where - phi)) / weight.sum())
         out[c] = mean * n / (n + n0)
-    return out
+        where_on_ring[c] = (float(phi), zdir[k])
+    return ret()
 
 
 def class_evidence(pairs, period, min_separation=0.25):
@@ -1419,9 +1481,10 @@ def class_evidence(pairs, period, min_separation=0.25):
 TOO_FEW = "too few informative segment pairs to judge"
 AT_CHANCE = "fits the ring no better than chance"
 BELOW_THRESHOLD = "fit below the threshold"
+PIXELS_DISAGREE = "pixels disagree with the ring"
 
 
-def diagnose_classes(result, prior=0.05, threshold=None):
+def diagnose_classes(result, prior=0.05, threshold=None, agreement_threshold=None):
     """The classes to take out of a fit, each with the reason.
 
     * ``TOO_FEW``: a class with fewer informative pairs (:func:`class_evidence`)
@@ -1432,6 +1495,9 @@ def diagnose_classes(result, prior=0.05, threshold=None):
       not sit at one azimuth on the ring: junk, or another type;
     * ``BELOW_THRESHOLD``: with ``threshold`` given, a class whose fit is
       below it (:func:`fit_threshold` suggests one);
+    * ``PIXELS_DISAGREE``: with ``agreement_threshold`` above 0, a class whose
+      pixel agreement (``result.pixel_check.agreement``) is below it; a class with
+      no registered pair is not judged;
     * ``"180-degree copy of class N"``: a class merged into a flagged class as
       its turned counterpart, which goes with it.
 
@@ -1462,6 +1528,12 @@ def diagnose_classes(result, prior=0.05, threshold=None):
         for c, f in zip(ids, np.asarray(result.class_fit, dtype=float)):
             if np.isfinite(f) and f < threshold:
                 out.setdefault(c, BELOW_THRESHOLD)
+    check = getattr(result, "pixel_check", None)
+    agreement = None if check is None else check.agreement
+    if agreement_threshold and agreement is not None:
+        for c, a in zip(ids, np.asarray(agreement, dtype=float)):
+            if np.isfinite(a) and a < agreement_threshold:
+                out.setdefault(c, PIXELS_DISAGREE)
     for gone, kept in (result.merged_into or {}).items():
         if int(kept) in out and int(gone) not in out:
             out[int(gone)] = f"180\u00b0 copy of class {int(kept)}"
@@ -1774,6 +1846,8 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
 
+    from concurrent.futures.process import BrokenProcessPool
+
     size = max(1, len(todo) // (workers * 4))
     chunks = [(todo[k : k + size], turn, refine) for k in range(0, len(todo), size)]
     out = []
@@ -1781,13 +1855,29 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
         _POOL_IMAGES.clear()
         _POOL_IMAGES.update(prepared)
         try:
-            with ProcessPoolExecutor(
-                workers, mp_context=mp.get_context("fork")
-            ) as pool:
-                for k, part in enumerate(pool.map(_register_chunk, chunks)):
-                    out.extend(part)
+            try:
+                with ProcessPoolExecutor(
+                    workers, mp_context=mp.get_context("fork")
+                ) as pool:
+                    for k, part in enumerate(pool.map(_register_chunk, chunks)):
+                        out.extend(part)
+                        if progress is not None:
+                            progress(min(len(todo), (k + 1) * size), len(todo))
+            except BrokenProcessPool:
+                logger.warning(
+                    "a worker process of the registrations was terminated; "
+                    "registering the %d pairs one at a time",
+                    len(todo),
+                )
+                out = []
+                for k, (i, j) in enumerate(todo):
                     if progress is not None:
-                        progress(min(len(todo), (k + 1) * size), len(todo))
+                        progress(k, len(todo))
+                    out.append(
+                        R.register_pair(
+                            prepared[i], prepared[j], flips=turn, refine=refine
+                        )
+                    )
         finally:
             _POOL_IMAGES.clear()
     return out
@@ -2124,6 +2214,8 @@ class PhasePitchResult:
     phase_gap: float = 0.0
     groups: list = field(default_factory=list)
     group_periods: list = field(default_factory=list)
+    # the scan before the class averages' self-similarity gate (None: not gated)
+    scan_scores_ungated: np.ndarray = None
     refined_path: bool = False
     n_filaments: int = 0
     n_pairs: int = 0
@@ -2137,6 +2229,11 @@ class PhasePitchResult:
     class_tilt: np.ndarray = None
     class_across: np.ndarray = None
     class_count: np.ndarray = None
+    # set by the caller (helical_pitch_pixel.class_pixel_check), which has the images
+    pixel_check: object = None
+    # the repeat the scan would have chosen if the class averages had not ruled it
+    # out (None if they did not change it)
+    vetoed_period: float = None
 
 
 def analyze(
@@ -2147,9 +2244,19 @@ def analyze(
     progress=None,
     counterparts=None,
     image_apix=None,
+    class_images=None,
     **kw,
 ):
     """Pitch, its uncertainty, class phases and per-filament spread in one call.
+
+    ``class_images`` (class number -> class average, with ``image_apix``) lets a class
+    average that does not repeat at half a candidate repeat rule that candidate out
+    (:class:`helical_pitch_pixel.SelfSimilarity`): when classes are missing from the
+    ring the segments alone can put the remaining ones on a ring of half the size,
+    and the averages show that the half is not a repeat. Measured on EMPIAR-10940 with
+    classes removed at random (3 of 20 runs were at half the repeat), it put all
+    three right and made no good run worse; it did not help when a whole arc of the
+    ring was removed. ``PhasePitchResult.vetoed_period`` is the repeat it replaced.
 
     ``progress``, if given, is called with a short message before each stage.
 
@@ -2202,14 +2309,33 @@ def analyze(
         pairs = prepare_pairs(used, class_ids=class_ids, **kw)
     if len(pairs.D) == 0:
         raise ValueError("no same-polarity segment pairs in the selected filaments")
+    gate = None
+    if class_images is not None:
+        try:
+            from . import helical_pitch_pixel as pixel
+
+            ids = [int(c) for c in pairs.class_ids]
+            similarity = pixel.self_similarity(
+                [class_images[c] for c in ids],
+                list(range(len(ids))),
+                float(image_apix or 1.0),
+            )
+            gate = similarity.gate
+        except Exception as e:  # a check: never in the way of the estimate
+            logger.warning("self-similarity of the class averages failed: %s", e)
     step(f"scanning repeats up to {pairs.max_sep:.0f} \u00c5")
-    est = estimate_period(pairs, length_scale=length_scale)
+    est = estimate_period(pairs, length_scale=length_scale, gate=gate)
     step("syncing filament directions")
     est, flipped = sync_filament_directions(pairs, est, length_scale=length_scale)
     if flipped.any():
         # the sync refits near the period only; the full scan, harmonics and
         # all, is what the display and the half-repeat check should see
-        est = estimate_period(pairs, length_scale=length_scale)
+        est = estimate_period(pairs, length_scale=length_scale, gate=gate)
+    vetoed = None
+    if gate is not None:
+        before = est.get("ungated_period")
+        if before is not None and abs(before / est["period"] - 1.0) > 0.1:
+            vetoed = float(before)
     step("calibrating on this dataset's segment geometry")
     cal = calibrate_period(pairs, est["period"], length_scale=length_scale)
     step("resampling filaments")
@@ -2282,6 +2408,7 @@ def analyze(
         calibration=cal,
         scan_periods=est["periods"],
         scan_scores=est["scores"],
+        scan_scores_ungated=est.get("ungated_scores") if gate is not None else None,
         phases=phases,
         class_ids=pairs.class_ids,
         class_weight=weight,
@@ -2316,4 +2443,5 @@ def analyze(
         class_tilt=pairs.class_tilt,
         class_across=pairs.class_across,
         class_count=pairs.class_count,
+        vetoed_period=vetoed,
     )

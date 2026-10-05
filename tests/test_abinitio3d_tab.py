@@ -322,14 +322,35 @@ class TestRankedFits:
         row = src[hist : rank + 2000]
         assert "col_widths=(7, 5)" in row
 
-    def test_rank_fit_and_size(self):
+    def test_the_fallback_ranks_the_fits_best_first_sized_by_segments(self):
         src = self._src()
-        plot = src[src.index("def class_fit_rank_plot") :]
-        plot = plot[: plot.index("@render.")]
+        plot = src[src.index("def _rank_figure") : src.index("def _agreement_figure")]
         assert "np.argsort(-np.nan_to_num(fit" in plot  # best first
         assert "r.class_count" in plot  # size by segments
         assert "cmax=1.0" in plot and "1.05]" in plot  # the ring's fixed scale
         assert "phase.poorly_fitting_cut(fit)" in plot
+
+    def test_the_plot_is_the_fit_against_the_pixel_agreement(self):
+        src = self._src()
+        plot = src[
+            src.index("def _agreement_figure") : src.index("def class_fit_rank_plot")
+        ]
+        assert "x=x," in plot and "y=y," in plot
+        assert 'title="Pixel agreement"' in plot and 'title="Fit"' in plot
+        assert "r.class_count" in plot  # size by segments
+        assert "cmin=0.0" in plot and "cmax=1.0" in plot  # the fixed colour scale
+        assert "range=[-0.04, 1.06]" in plot  # the 0 to 1 agreement axis
+        assert "phase.poorly_fitting_cut(fit)" in plot  # the chance level
+        assert "fit_threshold" in plot  # the threshold line
+        assert "good classes" in plot  # where the good ones are
+
+    def test_without_the_check_the_ranked_fits_are_shown(self):
+        src = self._src()
+        pick = src[src.index("def class_fit_rank_plot") :]
+        pick = pick[: pick.index("def _length_range")]
+        assert "_agreement_figure(r, agreement)" in pick
+        assert "_rank_figure(r)" in pick
+        assert "np.isfinite(agreement)" in pick
 
 
 class TestResultsAppearInOrder:
@@ -355,9 +376,9 @@ class TestResultsAppearInOrder:
             assert 'class_="ab-plot-box ab-wait"' in box, name
         box = src[src.index('ui.output_ui("filament_pitch_plot")') :][:200]
         assert "ab-wait" not in box
-        # the controls that wait: both range sliders, the fit threshold with
-        # the download, and everything below the plots
-        assert src.count('class_="ab-after"') == 4
+        # the controls that wait: both range sliders with the download, the two
+        # thresholds, and everything below the plots
+        assert src.count('class_="ab-after"') == 3
 
 
 class TestHiddenGalleryStillUpdates:
@@ -392,3 +413,210 @@ class TestHiddenUntilThereIsSomethingToShow:
         body = body[: body.index("@render")]
         assert "display: none" not in body
         assert "display: block" in body and "display: flex" in body
+
+
+class TestClassAverageCheck:
+    """The ring against the registered class averages (helical_pitch_pixel)."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_it_runs_after_the_pitch_estimate_and_never_breaks_it(self):
+        src = self._src()
+        work = src[src.index("def _phase_work") : src.index("def _phase_apply")]
+        assert "result.pixel_check = _pixel_check(job, result, progress)" in work
+        check = work[work.index("def _pixel_check") :]
+        assert "pixel.class_pixel_check(" in check
+        # a diagnostic: a failure is logged, the result is still shown
+        assert "except Exception" in check and "return None" in check
+
+    def test_the_images_are_always_passed_to_it(self):
+        src = self._src()
+        call = src[src.index("phase_task.invoke(") :]
+        call = call[: call.index("\n        )\n")]
+        assert "images=list(displayed_class_images())," in call
+        assert "ids=list(displayed_class_ids())," in call
+
+    def test_the_gallery_marks_the_classes_that_disagree(self):
+        src = self._src()
+        gallery = src[src.index("def accepted_gallery") :]
+        gallery = gallery[: gallery.index("@reactive")]
+        assert "\\u25c6" in gallery
+
+    def test_the_agreement_comes_from_the_check(self):
+        src = self._src()
+        assert "check.agreement" in src[src.index("def class_fit_rank_plot") :][:900]
+
+    def test_nothing_is_removed_because_of_it(self):
+        # the flag is shown; the classes to take out come only from the segments
+        src = self._src()
+        poor = src[src.index("def _poorly_fitting") : src.index("first_result =")]
+        assert "pixel" not in poor.split("def _pixel_flags")[0]
+
+    def test_a_class_with_too_few_segments_is_not_called_sound_by_the_pixels(self):
+        src = self._src()
+        kept = src[src.index("kept = [") :]
+        kept = kept[: kept.index("]\n") + 1]
+        assert "phase.AT_CHANCE" in kept and "phase.BELOW_THRESHOLD" in kept
+        assert "TOO_FEW" not in kept
+
+
+class TestTypesGrouping:
+    """The classes grouped by how their averages look (helical_pitch_types)."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_the_card_sits_with_the_selection_and_the_suggestions(self):
+        src = self._src()
+        sug = src.index("id=_SUGGESTIONS_BOX")
+        card = src.index('ui.card_header("Types")')
+        assert sug < card
+        assert (
+            'ui.input_task_button(\n                                "types_run"' in src
+        )
+
+    def test_the_grouping_runs_in_the_background(self):
+        src = self._src()
+        assert 'helicon.shiny.background_task(\n        "types_run"' in src
+        work = src[src.index("def _types_work") : src.index("def _types_apply")]
+        assert "types.class_similarity(" in work
+
+    def test_a_result_is_dropped_when_other_data_were_loaded_meanwhile(self):
+        src = self._src()
+        apply_ = src[src.index("def _types_apply") : src.index("def _types_error")]
+        assert 'params() is not job["params"]' in apply_
+
+    def test_the_comparison_is_forgotten_with_the_data(self):
+        src = self._src()
+        forget = src[src.index("def _forget_types") : src.index("def _types_work")]
+        assert "types_state.set(None)" in forget
+
+    def test_the_cut_is_a_bookmarked_input_at_its_default(self):
+        assert abinitio3d_tab.BOOKMARK_DEFAULTS["types_cut"] == ("types_cut", 0.15)
+
+    def test_the_cut_slider_is_part_of_the_card_not_of_what_needs_the_cut(self):
+        # a slider drawn by the output that needs its value never gets drawn: the
+        # groups wait for the cut, and the cut for the groups
+        src = self._src()
+        card = src.index('ui.card_header("Types")')
+        slider = src.index('"types_cut"', card)
+        controls = src.index('ui.output_ui("types_controls")', card)
+        assert slider < controls
+        assert 'helicon.shiny.slider(\n                            "types_cut"' in src
+        dynamic = src[src.index("def types_controls") : src.index("def _chosen_group")]
+        assert "types_cut" not in dynamic
+
+    def test_moving_the_cut_does_not_redraw_the_slider(self):
+        # the controls follow the comparison, not the cut: read the groups isolated
+        src = self._src()
+        controls = src[src.index("def types_controls") : src.index("def _chosen_group")]
+        assert "reactive.isolate()" in controls
+        assert "update_select" in src[src.index("def _types_choices") :][:400]
+
+    def test_the_group_replaces_or_adds_to_the_selection(self):
+        src = self._src()
+        assert (
+            "_set_selection(positions)" in src[src.index("def use_type_group") :][:300]
+        )
+        add = src[src.index("def add_type_group") :][:400]
+        assert "input.select_classes_inner()" in add and "_set_selection(" in add
+
+    def test_nothing_is_selected_or_estimated_without_the_user(self):
+        # the grouping only offers; the selection changes on Use / Add group
+        src = self._src()
+        apply_ = src[src.index("def _types_apply") : src.index("def _types_error")]
+        assert "_set_selection" not in apply_
+
+
+class TestVetoOfAHalfRepeat:
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_the_class_averages_are_given_to_the_pitch_estimate(self):
+        src = self._src()
+        work = src[src.index("def _phase_work") : src.index("def _pixel_check")]
+        assert "class_images=" in work
+
+    def test_a_repeat_that_was_ruled_out_is_said_so(self):
+        src = self._src()
+        assert "r.vetoed_period is not None" in src
+        assert "ruled out as the repeat" in src
+
+
+class TestPixelAgreementThreshold:
+    """The second removal threshold, on the pixel agreement of each class."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_it_is_off_by_default_and_bookmarked(self):
+        assert abinitio3d_tab.BOOKMARK_DEFAULTS["agree_cut"] == ("agree_threshold", 0.0)
+        src = self._src()
+        slider = src[src.index('"agree_threshold",\n') :]
+        assert "value=0.0" in slider[:1500]
+
+    def test_it_is_drawn_as_a_vertical_line_and_the_hover_counts_pairs(self):
+        src = self._src()
+        plot = src[
+            src.index("def _agreement_figure") : src.index(
+                "@render.ui\n    def class_fit_rank_plot"
+            )
+        ]
+        assert "add_vline" in plot and "agree_threshold" in plot
+        assert "registered pairs" in plot and "not judged" in plot
+
+    def test_it_is_passed_to_the_diagnosis_with_a_label(self):
+        src = self._src()
+        assert "agreement_threshold=" in src
+        assert (
+            abinitio3d_tab._SHORT_REASON[abinitio3d_tab.phase.PIXELS_DISAGREE]
+            == "pixels disagree"
+        )
+
+    def test_the_download_is_right_of_the_two_range_sliders(self):
+        src = self._src()
+        band = src.index('"pitch_band",')
+        length = src.index('"length_range",')
+        download = src.index('ui.output_ui("pitch_band_download")')
+        assert band < length < download
+        assert "col_widths=(7, 5)" in src[download : download + 200]
+
+    def test_the_plots_column_is_the_wider_one(self):
+        assert "col_widths=(4, 8)" in self._src()
+
+
+class TestSuggestionsAndAgreement:
+    """Suggest classes holds back what either threshold would remove."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def test_the_shown_suggestions_follow_both_thresholds(self):
+        src = self._src()
+        shown = src[src.index("def _shown_suggestions") :]
+        shown = shown[: shown.index("@render.ui")]
+        assert "input.fit_threshold()" in shown and "input.agree_threshold()" in shown
+        assert 'd["agree"] >= agreement' in shown
+
+    def test_the_agreement_is_predicted_from_the_placement_on_the_ring(self):
+        src = self._src()
+        work = src[src.index("def _suggest_agreement") :]
+        work = work[: work.index("def _suggest_apply")]
+        assert "pixel.candidate_agreement" in work and "check.sign" in work
+        assert "placement=True" in src
+
+    def test_a_failing_check_leaves_the_suggestions_standing(self):
+        src = self._src()
+        work = src[src.index("def _suggest_agreement") :]
+        assert "except Exception" in work[: work.index("def _suggest_apply")]

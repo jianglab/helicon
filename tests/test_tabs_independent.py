@@ -44,7 +44,7 @@ class TestWorkerScratchIsNotShared:
     worker processes read must be its own."""
 
     def _pairs(self, period, seed):
-        from tests.test_helical_pitch_phase import make_params
+        from test_helical_pitch_phase import make_params
 
         return ph.prepare_pairs(make_params(n_fil=60, period=period, seed=seed))
 

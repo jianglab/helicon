@@ -26,6 +26,8 @@ from .. import bookmark, class2d_files, deployment
 from ..lib import helical_pitch_compute as compute
 from ..lib import helical_pitch_map as maps
 from ..lib import helical_pitch_phase as phase
+from ..lib import helical_pitch_pixel as pixel
+from ..lib import helical_pitch_types as types
 from ..lib import helical_pitch_relion as relion
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,10 @@ _urls = {
     )
 }
 _url_key = "empiar-10940_job010"
+
+# The suggestions whose pixel agreement is predicted: the best-fitting ones, as each
+# is registered against every class of the ring.
+MAX_AGREEMENT_CANDIDATES = 40
 
 BOOKMARK_DEFAULTS = {
     "mode_params": ("input_mode_params", "url"),
@@ -50,6 +56,8 @@ BOOKMARK_DEFAULTS = {
     "rise": ("rise", 4.75),
     "min_twist": ("min_twist", 0.3),
     "merge_counterparts": ("merge_counterparts", True),
+    "types_cut": ("types_cut", 0.15),
+    "agree_cut": ("agree_threshold", 0.0),
     "csym": ("rot_fold", 1),
     "hand": ("map_hand", "left"),
     "map_method": ("map_method", "joint"),
@@ -119,6 +127,7 @@ _SHORT_REASON = {
     phase.TOO_FEW: "too few pairs",
     phase.AT_CHANCE: "off the ring",
     phase.BELOW_THRESHOLD: "below the threshold",
+    phase.PIXELS_DISAGREE: "pixels disagree",
 }
 
 # The pitch results, and everything that works from them, stay hidden until
@@ -460,7 +469,10 @@ def abinitio3d_tab_ui():
                             "selected classes (\u25cf, the share of the filaments "
                             "having the class that are mostly selected classes). "
                             "Listed best first by the fit each would get on the "
-                            "current ring (fit, on the scale of the ranked fits).",
+                            "current ring (fit, on the scale of the ranked fits), "
+                            "with the pixel agreement its average would have "
+                            "(pixels) for the best-fitting ones. Those below the "
+                            "Fit or Pixel agreement threshold are held back.",
                         ),
                         ui.div(
                             ui.output_ui("suggested_gallery"),
@@ -468,6 +480,50 @@ def abinitio3d_tab_ui():
                         ),
                         ui.output_ui("suggested_buttons"),
                         id=_SUGGESTIONS_BOX,
+                    ),
+                    ui.card(
+                        ui.card_header("Types"),
+                        _tip(
+                            ui.input_task_button(
+                                "types_run",
+                                label="Group classes by type",
+                                class_="btn-outline-secondary",
+                            ),
+                            "Groups the classes by how their averages look: every "
+                            "pair of averages is registered along the filament, "
+                            "and the classes whose averages correlate well "
+                            "(0.85 or better on average, with the default cut) "
+                            "make a group. Different helical types look "
+                            "different, and the filaments of a type use its "
+                            "classes. It does not use the repeat, which "
+                            "different types can share. Select one group at a "
+                            "time, then estimate its pitch.",
+                        ),
+                        helicon.shiny.slider(
+                            "types_cut",
+                            ui.span(
+                                "Cut",
+                                _info(
+                                    "Classes are grouped while their averages "
+                                    "correlate at least 1 - cut on average: a "
+                                    "smaller cut makes more, tighter groups. "
+                                    "0.10 to 0.20 separated the PHF and SF "
+                                    "classes of EMPIAR-10230, and 0.25 joined "
+                                    "them: how different the types look sets the "
+                                    "right value, so look at the groups."
+                                ),
+                            ),
+                            min=0.05,
+                            max=0.4,
+                            value=0.15,
+                            step=0.01,
+                        ),
+                        ui.output_ui("types_controls"),
+                        ui.div(
+                            ui.output_ui("types_gallery"),
+                            style="max-height: 32vh; overflow-y: auto;",
+                        ),
+                        ui.output_ui("types_buttons"),
                     ),
                 ),
                 # one block that scrolls: a card body is a flex container that
@@ -554,39 +610,44 @@ def abinitio3d_tab_ui():
                                     style=_PLOT_BOX,
                                     class_="ab-plot-box",
                                 ),
-                                ui.div(
-                                    helicon.shiny.range_slider(
-                                        "pitch_band",
-                                        ui.span(
-                                            "Repeat (\u00c5)",
-                                            _info(
-                                                "The filaments whose own repeat is in this "
-                                                "range are downloaded and reconstructed. "
-                                                "Double-click a number to type it."
+                                # the two ranges that select filaments from it
+                                # on the left, what they select to take away
+                                # on the right
+                                ui.layout_columns(
+                                    ui.div(
+                                        helicon.shiny.range_slider(
+                                            "pitch_band",
+                                            ui.span(
+                                                "Repeat (\u00c5)",
+                                                _info(
+                                                    "The filaments whose own repeat is in this "
+                                                    "range are downloaded and reconstructed. "
+                                                    "Double-click a number to type it."
+                                                ),
                                             ),
+                                            min=0,
+                                            max=1000,
+                                            value=(0, 1000),
+                                            step=1,
                                         ),
-                                        min=0,
-                                        max=1000,
-                                        value=(0, 1000),
-                                        step=1,
-                                    ),
-                                    class_="ab-after",
-                                ),
-                                ui.div(
-                                    helicon.shiny.range_slider(
-                                        "length_range",
-                                        ui.span(
-                                            "Length (\u00c5)",
-                                            _info(
-                                                "The filaments whose length is in this "
-                                                "range; double-click a number to type it."
+                                        helicon.shiny.range_slider(
+                                            "length_range",
+                                            ui.span(
+                                                "Length (\u00c5)",
+                                                _info(
+                                                    "The filaments whose length is in this "
+                                                    "range; double-click a number to type it."
+                                                ),
                                             ),
+                                            min=0,
+                                            max=10000,
+                                            value=(0, 10000),
+                                            step=10,
                                         ),
-                                        min=0,
-                                        max=10000,
-                                        value=(0, 10000),
-                                        step=10,
                                     ),
+                                    ui.output_ui("pitch_band_download"),
+                                    col_widths=(7, 5),
+                                    fill=False,
                                     class_="ab-after",
                                 ),
                             ),
@@ -617,8 +678,24 @@ def abinitio3d_tab_ui():
                                         value=0.1,
                                         step=0.01,
                                     ),
-                                    # what the two sliders select, to take away
-                                    ui.output_ui("pitch_band_download"),
+                                    helicon.shiny.slider(
+                                        "agree_threshold",
+                                        ui.span(
+                                            "Pixel agreement threshold",
+                                            _info(
+                                                "Classes whose registered averages agree "
+                                                "with the ring less than this are picked "
+                                                "to remove (the purple line). 0 (the "
+                                                "default) picks none. A class with no "
+                                                "registered pair is not judged. Estimate "
+                                                "the pitch again after removing."
+                                            ),
+                                        ),
+                                        min=0.0,
+                                        max=1.0,
+                                        value=0.0,
+                                        step=0.01,
+                                    ),
                                     class_="ab-after",
                                 ),
                             ),
@@ -683,7 +760,7 @@ def abinitio3d_tab_ui():
                         id=_RESULTS_BOX,
                     ),
                 ),
-                col_widths=(5, 7),
+                col_widths=(4, 8),
             ),
             style="overflow-y: auto; height: 100%;",
         ),
@@ -1139,15 +1216,37 @@ def abinitio3d_tab_server(input, output, session):
                 job["class_ids"], job["ids"], job["images"]
             )
             progress.inc(1, message=f"{len(counterparts)} pair(s) of classes")
-        return phase.analyze(
+        result = phase.analyze(
             job["params"],
             class_ids=job["class_ids"],
             n_boot=job["n_boot"],
             progress=lambda msg: progress.inc(1, message=msg),
             counterparts=counterparts,
             image_apix=job["apix"],
+            # a class average that does not repeat at half a candidate repeat rules
+            # that candidate out (the segments alone cannot, when views are missing)
+            class_images={int(c) + 1: im for c, im in zip(job["ids"], job["images"])},
             max_sep=job["max_repeat"],
         )
+        result.pixel_check = _pixel_check(job, result, progress)
+        return result
+
+    def _pixel_check(job, result, progress):
+        """The ring against the registered class averages; None if it cannot be made."""
+        try:
+            progress.inc(1, message="comparing with the registered class averages")
+            position = {int(c): i for i, c in enumerate(job["ids"])}
+            at = [position[int(c) - 1] for c in result.class_ids]
+            return pixel.class_pixel_check(
+                [job["images"][i] for i in at],
+                result.class_zdir,
+                result.phases,
+                result.period,
+                job["apix"],
+            )
+        except Exception as e:  # a diagnostic: never in the way of the result
+            logger.warning("class-average check of the ring failed: %s", e)
+            return None
 
     def _phase_apply(job, result):
         # a result belongs to the selection it was computed from
@@ -1192,7 +1291,7 @@ def abinitio3d_tab_server(input, output, session):
         _phase_work,
         _phase_apply,
         _phase_error,
-        progress_max=8,
+        progress_max=9,
         session=session,
         label="Class-azimuth pitch estimate",
     )
@@ -1250,8 +1349,9 @@ def abinitio3d_tab_server(input, output, session):
                 n_boot=helicon.shiny.clamp_number(input.phase_n_boot(), 20, 2, 200),
                 merge=merge,
                 max_repeat=_max_repeat(),
-                ids=list(displayed_class_ids()) if merge else None,
-                images=list(displayed_class_images()) if merge else None,
+                # also read for the check of the ring against the registered averages
+                ids=list(displayed_class_ids()),
+                images=list(displayed_class_images()),
                 apix=float(data_all()[1]),
             )
         )
@@ -1265,8 +1365,14 @@ def abinitio3d_tab_server(input, output, session):
         # the classes to take out come up picked, ready to remove, each
         # labelled with the reason
         poor = _poorly_fitting(r) if r is not None else {}
+        flags = _pixel_flags(r) if r is not None else {}
         labels = [
-            f"{lab} \u2717 {_SHORT_REASON.get(poor[c], poor[c])}" if c in poor else lab
+            (
+                f"{lab} \u2717 {_SHORT_REASON.get(poor[c], poor[c])}"
+                if c in poor
+                else lab
+            )
+            + (" \u25c6" if flags.get(c, (0.0, False))[1] else "")
             for lab, c in zip(selected_image_labels(), numbers)
         ]
         return _gallery(
@@ -1344,12 +1450,48 @@ def abinitio3d_tab_server(input, output, session):
             # the fit each would get on the ring of the current estimate, on
             # the same scale as the ranked fits
             progress.set(0.95, message="placing the suggestions on the ring")
-            fits = phase.candidate_fit(
-                job["params"], r, [job["ids"][pos] + 1 for pos in found]
+            fits, placed = phase.candidate_fit(
+                job["params"],
+                r,
+                [job["ids"][pos] + 1 for pos in found],
+                placement=True,
             )
             for pos, d in found.items():
                 d["fit"] = fits.get(job["ids"][pos] + 1, float("nan"))
+            _suggest_agreement(job, r, found, placed)
         return found
+
+    def _suggest_agreement(job, r, found, placed):
+        """Add the pixel agreement each suggestion would have to ``found``."""
+        check = getattr(r, "pixel_check", None)
+        if check is None or job.get("images") is None:
+            return
+        try:
+            position = {int(c): i for i, c in enumerate(job["ids"])}
+            ring = [position[int(c) - 1] for c in r.class_ids]
+            # the best-fitting candidates first, as many as are worth the time
+            order = sorted(
+                (pos for pos in found if job["ids"][pos] + 1 in placed),
+                key=lambda pos: -np.nan_to_num(found[pos]["fit"], nan=-1.0),
+            )[:MAX_AGREEMENT_CANDIDATES]
+            if not order:
+                return
+            cls = [job["ids"][pos] + 1 for pos in order]
+            agree = pixel.candidate_agreement(
+                [job["images"][i] for i in ring],
+                r.class_zdir,
+                r.phases,
+                r.period,
+                check.sign,
+                job["apix"],
+                [job["images"][pos] for pos in order],
+                [placed[c][1] for c in cls],
+                [placed[c][0] for c in cls],
+            )
+            for pos, a in zip(order, agree):
+                found[pos]["agree"] = float(a)
+        except Exception as e:  # a check: the suggestions stand without it
+            logger.warning("pixel agreement of the suggestions failed: %s", e)
 
     def _suggest_apply(job, found):
         # suggestions for a selection or data set no longer shown are dropped
@@ -1368,6 +1510,8 @@ def abinitio3d_tab_server(input, output, session):
             why = []
             if np.isfinite(d.get("fit", float("nan"))):
                 why.append(f"fit {d['fit']:.2f}")
+            if np.isfinite(d.get("agree", float("nan"))):
+                why.append(f"pixels {d['agree']:.2f}")
             if "corr" in d:
                 why.append(f"\u21bb{d['corr']:.2f}")
             if "share" in d:
@@ -1377,6 +1521,7 @@ def abinitio3d_tab_server(input, output, session):
                     pos=pos,
                     text=f"{labels[pos]}  {' '.join(why)}",
                     fit=d.get("fit", float("nan")),
+                    agree=d.get("agree", float("nan")),
                 )
             )
         suggestions.set(
@@ -1436,6 +1581,8 @@ def abinitio3d_tab_server(input, output, session):
                 abundance=abundance() if has_data else None,
                 # the current estimate, to place the suggestions on its ring
                 phase_result=phase_result(),
+                images=list(displayed_class_images()),
+                apix=float(data_all()[1]) if has_data else None,
             )
         )
 
@@ -1446,7 +1593,9 @@ def abinitio3d_tab_server(input, output, session):
             return None
         items, n_below = _shown_suggestions()
         below = (
-            f" ({n_below} more would fit below the fit threshold)" if n_below else ""
+            f" ({n_below} more would be picked to remove by a threshold)"
+            if n_below
+            else ""
         )
         if not items:
             return ui.tags.small(
@@ -1468,22 +1617,29 @@ def abinitio3d_tab_server(input, output, session):
     def _shown_suggestions():
         """The suggestions to offer, and how many are held back.
 
-        A class whose predicted fit is below the Fit threshold would be picked
-        to remove as soon as it was added -- it would lower the ring's
-        agreement rather than add to it -- so it is not offered; moving the
+        A class whose predicted fit is below the Fit threshold, or whose
+        predicted pixel agreement is below the Pixel agreement threshold, would
+        be picked to remove as soon as it was added -- it would lower the ring's
+        agreement rather than add to it -- so it is not offered; moving a
         threshold brings it back. One without a predicted fit (no pairs with
-        the classes of the fit) is offered, last.
+        the classes of the fit) is offered, last, and one without a pixel
+        agreement is not judged by that threshold.
         """
         r = suggestions()
         if r is None:
             return [], 0
         threshold = input.fit_threshold()
-        if threshold is None:
+        agreement = float(input.agree_threshold() or 0.0)
+        if threshold is None and not agreement:
             return list(r["items"]), 0
+        threshold = -np.inf if threshold is None else float(threshold)
+        # a candidate without a predicted fit, or without a pixel agreement
+        # (not checked, or no registered pair), is not judged by that one
         shown = [
             d
             for d in r["items"]
-            if not np.isfinite(d.get("fit", np.nan)) or d["fit"] >= float(threshold)
+            if (not np.isfinite(d.get("fit", np.nan)) or d["fit"] >= threshold)
+            and (not np.isfinite(d.get("agree", np.nan)) or d["agree"] >= agreement)
         ]
         return shown, len(r["items"]) - len(shown)
 
@@ -1525,12 +1681,268 @@ def abinitio3d_tab_server(input, output, session):
     def add_picked_suggested():
         _add_suggested(input.suggested_pick() or [])
 
+    # ── types: the classes grouped by how their averages look ──
+
+    # {"params": the table it was computed for, "classes": class numbers,
+    #  "similarity": (K, K) registered correlations}
+    types_state = reactive.value(None)
+
+    @reactive.effect
+    @reactive.event(params)
+    def _forget_types():
+        types_state.set(None)
+
+    def _types_work(job, progress):
+        position = {int(c): i for i, c in enumerate(job["ids"])}
+        counts = job["abundance"]
+        floor = max(100, int(0.002 * int(np.sum(counts))))
+        classes = [
+            int(c) + 1
+            for c in job["ids"]
+            if counts[int(c)] >= floor
+            and job["images"][position[int(c)]].max()
+            > job["images"][position[int(c)]].min()
+        ]
+        if len(classes) < 3:
+            raise ValueError(
+                f"only {len(classes)} class(es) have {floor:,} segments or more; "
+                "at least three are needed"
+            )
+        progress.set(0, message=f"registering the averages of {len(classes)} classes")
+        similarity = types.class_similarity(
+            [job["images"][position[c - 1]] for c in classes],
+            list(range(len(classes))),
+            job["apix"],
+            progress=lambda k, n: progress.set(
+                int(100 * k / max(n, 1)), message=f"registered {k:,} of {n:,} pairs"
+            ),
+        )
+        return dict(classes=classes, similarity=similarity, floor=floor)
+
+    def _types_apply(job, result):
+        if params() is not job["params"]:
+            return  # other data have been loaded meanwhile
+        types_state.set(dict(result, params=job["params"]))
+
+    def _types_error(job, e):
+        ui.modal_show(
+            ui.modal(
+                f"The classes could not be grouped: {e}",
+                title="Grouping error",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    types_task = helicon.shiny.background_task(
+        "types_run",
+        _types_work,
+        _types_apply,
+        _types_error,
+        progress_max=100,
+        session=session,
+        label="Class types",
+    )
+
+    @reactive.effect
+    @reactive.event(input.types_run)
+    def run_types():
+        req(params() is not None)
+        req(data_all() is not None and data_all()[0] is not None)
+        types_task.invoke(
+            dict(
+                params=params(),
+                ids=[int(c) for c in displayed_class_ids()],
+                images=list(displayed_class_images()),
+                abundance=np.asarray(abundance()),
+                apix=float(data_all()[1]),
+            )
+        )
+
+    @reactive.calc
+    def _type_groups():
+        """The groups at the current cut: a list of dicts, largest first, then the
+        classes in no group; None before the classes have been compared."""
+        state = types_state()
+        if state is None:
+            return None
+        cut = helicon.shiny.clamp_number(input.types_cut(), 0.15, 0.02, 0.6, float)
+        labels = types.pixel_groups(state["similarity"], cut)
+        classes = np.asarray(state["classes"])
+        counts = np.asarray(abundance())
+        counts_c = np.array([counts[c - 1] for c in classes], dtype=float)
+        total = max(float(counts_c.sum()), 1.0)
+        # filaments: the group most of whose segments they have (60% or more)
+        found = []
+        usage, _ = types.usage_matrix(params(), classes.tolist())
+        n_groups = int(labels.max()) + 1
+        if n_groups:
+            voted, _ = types.assign_filaments(usage, labels, n_groups, 0.6)
+        else:
+            voted = np.zeros(0, dtype=int)
+        for g in range(n_groups):
+            m = labels == g
+            found.append(
+                dict(
+                    label=f"Group {g + 1}",
+                    classes=[int(c) for c in classes[m]],
+                    segments=int(counts_c[m].sum()),
+                    share=float(counts_c[m].sum() / total),
+                    filaments=int(np.sum(voted == g)),
+                )
+            )
+        m = labels < 0
+        if m.any():
+            found.append(
+                dict(
+                    label="Not grouped",
+                    classes=[int(c) for c in classes[m]],
+                    segments=int(counts_c[m].sum()),
+                    share=float(counts_c[m].sum() / total),
+                    filaments=None,
+                )
+            )
+        return found
+
+    def _group_text(g):
+        fil = "" if g["filaments"] is None else f", {g['filaments']:,} filaments"
+        return (
+            f"{g['label']}: {len(g['classes'])} classes, {g['segments']:,} segments "
+            f"({100 * g['share']:.0f}%){fil}"
+        )
+
+    @reactive.effect
+    def _types_choices():
+        groups = _type_groups()
+        if groups is None:
+            return
+        ui.update_select(
+            "types_group",
+            choices={str(i): _group_text(g) for i, g in enumerate(groups)},
+            selected="0",
+        )
+
+    @render.ui
+    def types_controls():
+        # drawn once for each comparison of the classes, not at each move of the
+        # cut; the groups are then followed by update_select
+        state = types_state()
+        if state is None:
+            return None
+        with reactive.isolate():
+            groups = _type_groups()
+        return ui.TagList(
+            ui.p(
+                f"{len(state['classes'])} classes with {state['floor']:,} segments "
+                "or more are compared",
+                class_="small text-muted",
+                style="margin-bottom: 4px;",
+            ),
+            ui.input_select(
+                "types_group",
+                None,
+                {str(i): _group_text(g) for i, g in enumerate(groups)},
+                width="100%",
+            ),
+        )
+
+    def _chosen_group():
+        groups = _type_groups()
+        if groups is None:
+            return None
+        try:
+            return groups[int(input.types_group() or 0)]
+        except (ValueError, IndexError):
+            return groups[0] if groups else None
+
+    @render.ui
+    def types_gallery():
+        g = _chosen_group()
+        if g is None:
+            return None
+        position = {int(c): i for i, c in enumerate(displayed_class_ids())}
+        images = displayed_class_images()
+        pos = [position[c - 1] for c in g["classes"] if c - 1 in position]
+        labels = displayed_class_labels()
+        return _gallery(
+            "types_pick",
+            [images[i] for i in pos],
+            [labels[i] for i in pos],
+            label=_group_text(g),
+            selection=True,
+        )
+
+    @render.ui
+    def types_buttons():
+        if _chosen_group() is None:
+            return None
+        return ui.layout_columns(
+            _tip(
+                ui.input_action_button(
+                    "types_use",
+                    "Use group",
+                    class_="btn-sm btn-outline-primary",
+                ),
+                "Select the classes of this group (picked ones if some are "
+                "picked) and no others, ready for Estimate pitch",
+            ),
+            _tip(
+                ui.input_action_button(
+                    "types_add",
+                    "Add group",
+                    class_="btn-sm btn-outline-primary",
+                ),
+                "Add the classes of this group to those selected",
+            ),
+            col_widths=(6, 6),
+            fill=False,
+        )
+
+    def _type_positions():
+        g = _chosen_group()
+        req(g is not None)
+        position = {int(c): i for i, c in enumerate(displayed_class_ids())}
+        classes = g["classes"]
+        picked = input.types_pick() or []
+        if picked:
+            classes = [classes[i] for i in picked if i < len(classes)]
+        return [position[c - 1] for c in classes if c - 1 in position]
+
+    @reactive.effect
+    @reactive.event(input.types_use)
+    def use_type_group():
+        positions = _type_positions()
+        req(positions)
+        _set_selection(positions)
+
+    @reactive.effect
+    @reactive.event(input.types_add)
+    def add_type_group():
+        positions = _type_positions()
+        req(positions)
+        _set_selection(list(input.select_classes_inner() or []) + positions)
+
     def _poorly_fitting(r):
         """Selected classes to take out, with the reason for each."""
         threshold = input.fit_threshold()
+        agreement = input.agree_threshold()
         return phase.diagnose_classes(
-            r, threshold=None if threshold is None else float(threshold)
+            r,
+            threshold=None if threshold is None else float(threshold),
+            agreement_threshold=None if not agreement else float(agreement),
         )
+
+    def _pixel_flags(r):
+        """Class number -> (offset residual in A, disagrees); {} without a check."""
+        check = getattr(r, "pixel_check", None)
+        if check is None:
+            return {}
+        gone = check.disagree()
+        return {
+            int(c): (float(v), bool(g))
+            for c, v, g in zip(r.class_ids, check.residual, gone)
+            if np.isfinite(v)
+        }
 
     first_result = [True]
 
@@ -1723,6 +2135,57 @@ def abinitio3d_tab_server(input, output, session):
                     "Selected classes gallery; press Remove picked to drop them.",
                 )
             )
+        if r.vetoed_period is not None:
+            warnings.append(
+                (
+                    f"{r.vetoed_period:.0f} \u00c5 ruled out as the repeat",
+                    "The segments alone fit a repeat of "
+                    f"{r.vetoed_period:.0f} \u00c5 best, but the class averages "
+                    "do not repeat at it (an average and itself shifted by that "
+                    "distance do not match), so it is not the repeat. This "
+                    "happens when views are missing from the selection: the "
+                    "classes that are left can be placed on a ring of half the "
+                    "size. The estimate is the best repeat the averages allow.",
+                )
+            )
+        flags = _pixel_flags(r)
+        if flags:
+            ids = [int(c) for c in r.class_ids]
+            differ = [c for c in ids if flags.get(c, (0.0, False))[1]]
+            if differ:
+                warnings.append(
+                    (
+                        f"{len(differ)} class(es) \u25c6 differ from their registered "
+                        "averages: " + ", ".join(map(str, differ)),
+                        "Independent of the segments' labels and positions: the "
+                        "class averages, registered against each other along the "
+                        "filament, put these classes more than "
+                        f"{100 * pixel.DISAGREE_FRACTION:.0f}% of a repeat from "
+                        "where their segments put them. A mixture of views, "
+                        "another helical type, or segments assigned to the wrong "
+                        "class. Marked \u25c6 in the gallery and on the ranked "
+                        "fits; nothing is removed because of it.",
+                    )
+                )
+            # only a class the segments judge by their positions (not one with too
+            # few of them to judge, nor a turned copy that went with another)
+            kept = [
+                c
+                for c, why in poor.items()
+                if why in (phase.AT_CHANCE, phase.BELOW_THRESHOLD)
+                and flags.get(int(c), (0.0, True))[1] is False
+            ]
+            if kept:
+                warnings.append(
+                    (
+                        f"{len(kept)} flagged class(es) look right in the pixels: "
+                        + ", ".join(map(str, kept)),
+                        "Their segments do not fit the ring, but their averages sit "
+                        "where the ring puts them, so the class may be sound with "
+                        "its segments poorly assigned. Look at them before taking "
+                        "them out.",
+                    )
+                )
         if len(r.groups) > 1:
             parts = "; ".join(
                 f"{len(g)} classes \u2192 {p:.1f} \u00c5"
@@ -1803,8 +2266,28 @@ def abinitio3d_tab_server(input, output, session):
                 showlegend=False,
             )
         )
-        _add_marker(fig, r.period_raw, 0.0, float(np.max(r.scan_scores)))
+        top = float(np.max(r.scan_scores))
+        ungated = getattr(r, "scan_scores_ungated", None)
+        if ungated is not None:
+            # the gate by the class averages' self-similarity zeroes the repeats
+            # they rule out; the scan without it stays in view, so that the
+            # short repeats the gate removed are not missing from the plot
+            fig.data[0].name = "with the class-average check"
+            fig.add_trace(
+                go.Scatter(
+                    x=periods,
+                    y=ungated,
+                    mode="lines",
+                    name="segments only",
+                    line=dict(color="#aaaaaa", width=1.5, dash="dot"),
+                    hoverinfo="skip",
+                )
+            )
+            fig.update_traces(showlegend=True, selector=dict(mode="lines"))
+            top = max(top, float(np.max(ungated)))
+        _add_marker(fig, r.period_raw, 0.0, top)
         fig.update_layout(
+            legend=dict(x=1.0, xanchor="right", y=1.0, font=dict(size=10)),
             template="plotly_white",
             title_text="Repeat scan",
             title_x=0.5,
@@ -1861,8 +2344,7 @@ def abinitio3d_tab_server(input, output, session):
         )
         return _fig_to_html(fig)
 
-    @render.ui
-    def class_fit_rank_plot():
+    def _rank_figure(r):
         """The class fits of the ring, ranked: how they are spread.
 
         The ring shows where each class sits; this shows the fits themselves,
@@ -1871,8 +2353,6 @@ def abinitio3d_tab_server(input, output, session):
         outlined in red (a class without a fit as a cross at 0) and the line
         below which a fit is taken as chance.
         """
-        r = phase_result()
-        req(r is not None)
         import plotly.graph_objects as go
 
         ids = [int(c) for c in r.class_ids]
@@ -1887,14 +2367,26 @@ def abinitio3d_tab_server(input, output, session):
         # area by the number of segments
         size = 6 + 24 * np.sqrt(m) / max(float(np.sqrt(m).max()), 1e-12)
         poor = _poorly_fitting(r)
+        flags = _pixel_flags(r)
         reasons = [poor.get(ids[i], "") for i in order]
         text = [str(ids[i]) for i in order]
         no_fit = ~np.isfinite(fit[order])
+        disagree = [flags.get(ids[i], (0.0, False))[1] for i in order]
+
+        def _pixel_line(c):
+            if int(c) not in flags:
+                return ""
+            res, bad = flags[int(c)]
+            return f"<br>registered averages {res:.0f} \u00c5 from the ring" + (
+                " \u25c6 disagree" if bad else ""
+            )
+
         hover = [
             f"class {c}<br>"
             + ("no fit" if missing else f"fit {v:.2f}")
             + f"<br>{int(n):,} segments"
             + (f"<br>\u2717 {_SHORT_REASON.get(why, why)}" if why else "")
+            + _pixel_line(c)
             for c, v, n, why, missing in zip(text, f, m, reasons, no_fit)
         ]
         rank = np.arange(1, len(order) + 1)
@@ -1914,7 +2406,10 @@ def abinitio3d_tab_server(input, output, session):
                     cmin=0.0,
                     cmax=1.0,
                     # a class without a fit is drawn at 0 as a cross
-                    symbol=["x" if missing else "circle" for missing in no_fit],
+                    symbol=[
+                        "x" if missing else "diamond" if bad else "circle"
+                        for missing, bad in zip(no_fit, disagree)
+                    ],
                     line=dict(
                         color=[
                             "#d62728" if why else "rgba(0,0,0,0.3)" for why in reasons
@@ -1925,6 +2420,18 @@ def abinitio3d_tab_server(input, output, session):
                 showlegend=False,
             )
         )
+        if any(disagree):
+            fig.add_annotation(
+                text="\u25c6 pixels disagree",
+                xref="paper",
+                yref="paper",
+                x=1.0,
+                y=0.97,
+                xanchor="right",
+                yanchor="top",
+                showarrow=False,
+                font=dict(size=10, color="#555"),
+            )
         cut = phase.poorly_fitting_cut(fit)
         if cut is not None:
             # the chance level: a class below it is taken out. Drawn over the
@@ -1961,7 +2468,160 @@ def abinitio3d_tab_server(input, output, session):
             margin=dict(t=40, b=50, l=50, r=20),
             hovermode="closest",
         )
-        return _fig_to_html(fig)
+        return fig
+
+    def _agreement_figure(r, agreement):
+        """Class fit against the agreement of the registered class averages.
+
+        The good classes are at the top right: they fit the ring by their segments
+        (up) and the registered averages put them where the ring does (right).
+        Bad classes, other types and junk are elsewhere: left (the pixels disagree),
+        down (the segments do), or both. Each marker's area follows the class's
+        number of segments, the classes to take out are outlined in red, and the
+        fit threshold and the chance level are the same horizontal lines as before.
+        """
+        import plotly.graph_objects as go
+
+        ids = [int(c) for c in r.class_ids]
+        fit = np.asarray(r.class_fit, dtype=float)
+        agree = np.asarray(agreement, dtype=float)
+        members = np.asarray(
+            r.class_count if r.class_count is not None else r.class_weight,
+            dtype=float,
+        )
+        size = 6 + 24 * np.sqrt(members) / max(float(np.sqrt(members).max()), 1e-12)
+        poor = _poorly_fitting(r)
+        reasons = [poor.get(c, "") for c in ids]
+        no_fit = ~np.isfinite(fit)
+        no_pixels = ~np.isfinite(agree)
+        check = getattr(r, "pixel_check", None)
+        pairs = (
+            np.zeros(len(ids), dtype=int)
+            if check is None or check.pairs is None
+            else np.asarray(check.pairs)
+        )
+        y = np.nan_to_num(fit, nan=0.0)
+        x = np.nan_to_num(agree, nan=0.0)
+        hover = [
+            f"class {c}<br>"
+            + ("no fit" if nf else f"fit {f:.2f}")
+            + "<br>"
+            + (
+                "no registered pair: not judged"
+                if npx
+                else f"pixel agreement {a:.2f} ({int(k)} registered pairs)"
+            )
+            + f"<br>{int(n):,} segments"
+            + (f"<br>\u2717 {_SHORT_REASON.get(why, why)}" if why else "")
+            for c, f, a, n, k, why, nf, npx in zip(
+                ids, y, x, members, pairs, reasons, no_fit, no_pixels
+            )
+        ]
+        fig = go.Figure(
+            go.Scatter(
+                x=x,
+                y=y,
+                mode="markers+text" if input.ring_labels() else "markers",
+                text=[str(c) for c in ids],
+                textposition="top center",
+                hovertext=hover,
+                hoverinfo="text",
+                marker=dict(
+                    size=size,
+                    color=y,
+                    colorscale="Viridis",
+                    cmin=0.0,
+                    cmax=1.0,
+                    symbol=[
+                        "x" if nf or npx else "circle"
+                        for nf, npx in zip(no_fit, no_pixels)
+                    ],
+                    line=dict(
+                        color=[
+                            "#d62728" if why else "rgba(0,0,0,0.3)" for why in reasons
+                        ],
+                        width=[2.5 if why else 0.5 for why in reasons],
+                    ),
+                ),
+                showlegend=False,
+            )
+        )
+        cut = phase.poorly_fitting_cut(fit)
+        if cut is not None:
+            fig.add_hline(
+                y=cut,
+                line=dict(color="#b2182b", width=2, dash="dash"),
+                layer="above",
+                annotation_text=f"\u2248 junk ({cut:.2f})",
+                annotation_position="top left",
+                annotation_font=dict(size=10, color="#b2182b"),
+            )
+        threshold = input.fit_threshold()
+        if threshold is not None:
+            fig.add_hline(
+                y=float(threshold),
+                line=dict(color="#ff7f0e", width=2),
+                layer="above",
+                annotation_text=f"threshold ({float(threshold):.2f})",
+                annotation_position="top left",
+                annotation_font=dict(size=10, color="#d95f02"),
+            )
+        cut_x = input.agree_threshold()
+        if cut_x:
+            fig.add_vline(
+                x=float(cut_x),
+                line=dict(color="#7b3294", width=2),
+                layer="above",
+                annotation_text=f"agreement ({float(cut_x):.2f})",
+                annotation_position="bottom right",
+                annotation_font=dict(size=10, color="#7b3294"),
+            )
+        fig.add_annotation(
+            text="good classes",
+            xref="paper",
+            yref="paper",
+            x=1.0,
+            y=1.0,
+            xanchor="right",
+            yanchor="top",
+            showarrow=False,
+            font=dict(size=10, color="#555"),
+        )
+        fig.update_layout(
+            template="plotly_white",
+            title_text="Class fit and pixel agreement",
+            title_x=0.5,
+            title_font=dict(size=12),
+            # both on their fixed 0 to 1 scales (the fit down to the worst class,
+            # which can be below 0)
+            xaxis=dict(
+                title="Pixel agreement",
+                range=[-0.04, 1.06],
+            ),
+            yaxis=dict(
+                title="Fit",
+                range=[min(-0.05, float(y.min()) - 0.07), 1.05],
+            ),
+            margin=dict(t=40, b=50, l=50, r=20),
+            hovermode="closest",
+        )
+        return fig
+
+    @render.ui
+    def class_fit_rank_plot():
+        """The class fit against the agreement of the registered class averages.
+
+        With the class-average check of the ring (helical_pitch_pixel) the classes
+        are plotted by it and their fit: the good ones at the top right. Without it
+        (too few registered pairs, or the check failed) the fits ranked, best first.
+        """
+        r = phase_result()
+        req(r is not None)
+        check = getattr(r, "pixel_check", None)
+        agreement = None if check is None else check.agreement
+        if agreement is not None and np.any(np.isfinite(agreement)):
+            return _fig_to_html(_agreement_figure(r, agreement))
+        return _fig_to_html(_rank_figure(r))
 
     def _length_range():
         lo, hi = input.length_range() or (None, None)

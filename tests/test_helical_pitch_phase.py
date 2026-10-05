@@ -741,6 +741,38 @@ class TestCandidateFit:
         # no filaments in common with the fit: nothing to place it by
         assert np.isnan(fits[101])
 
+    def test_the_placement_is_the_azimuth_and_axis_direction_it_would_get(
+        self, two_types
+    ):
+        keep = [c for c in range(1, 13) if c != 5]
+        r = ph.analyze(two_types, class_ids=keep, n_boot=2)
+        full = ph.analyze(two_types, class_ids=list(range(1, 13)), n_boot=2)
+        fits, placed = ph.candidate_fit(two_types, r, [5, 101], placement=True)
+        assert set(placed) == {5}  # 101 has nothing to be placed by
+        phi, zdir = placed[5]
+        i = [int(c) for c in full.class_ids].index(5)
+        d = np.angle(np.exp(1j * (phi - full.phases[i])))
+        # the two rings differ by a rotation, found from the shared classes
+        shared = [int(c) for c in r.class_ids]
+        rot = np.angle(
+            np.sum(
+                np.exp(
+                    1j
+                    * (
+                        np.array(
+                            [
+                                full.phases[[int(x) for x in full.class_ids].index(c)]
+                                for c in shared
+                            ]
+                        )
+                        - np.asarray(r.phases)
+                    )
+                )
+            )
+        )
+        assert abs(np.angle(np.exp(1j * (d + rot)))) < 0.5
+        assert np.isfinite(zdir)
+
     def test_classes_already_in_the_fit_are_not_candidates(self, two_types):
         r = ph.analyze(two_types, class_ids=list(range(1, 13)), n_boot=2)
         assert ph.candidate_fit(two_types, r, [3, 4]) == {}
