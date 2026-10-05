@@ -187,9 +187,11 @@ def save_filament_start_end(
             {
                 "rlnCoordinateX": xy[:, 0].round(2),
                 "rlnCoordinateY": xy[:, 1].round(2),
-                "rlnClassNumber": -999,
-                "rlnAnglePsi": -999.0,
-                "rlnAutopickFigureOfMerit": -999.0,
+                # initialized to 0 as RELION AutoPick does: RELION Extract
+                # fails on the unset value (-999) of rlnAnglePsi
+                "rlnClassNumber": 0,
+                "rlnAnglePsi": 0.0,
+                "rlnAutopickFigureOfMerit": 0.0,
             }
         )
         coord_file = folder / subpath

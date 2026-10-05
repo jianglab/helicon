@@ -363,6 +363,10 @@ class TestSaveStartEnd:
             "rlnAnglePsi",
             "rlnAutopickFigureOfMerit",
         ]
+        # RELION Extract fails on unset (-999) values: initialized to 0 as AutoPick does
+        assert (
+            m1[["rlnClassNumber", "rlnAnglePsi", "rlnAutopickFigureOfMerit"]] == 0
+        ).all(axis=None)
         # the joined filament spans file a tube 1 and file b tube 1, in the
         # start->end direction of the larger piece (file a)
         assert _segments(m1) == [
