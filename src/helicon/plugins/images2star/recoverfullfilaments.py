@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import logging
+import re
+from pathlib import PurePosixPath
 import helicon
 from helicon.lib.exceptions import HeliconError
 import numpy as np
@@ -12,15 +14,96 @@ logger = logging.getLogger(__name__)
 
 option_name = "recoverFullFilaments"
 
+MATCH_MODES = ("image", "ends", "coords")
+
 
 def add_args(parser):
     parser.add_argument(
         "--recoverFullFilaments",
-        metavar="minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]",
+        metavar=(
+            "minFraction=<0.5>[:forcePickJob=<0|1>][:fullStarFile=<filename>]"
+            "[:matchBy=<image|ends|coords>][:maxDistance=<pixels>]"
+        ),
         type=str,
-        help="recover the whole filaments if current filament has >=minFraction of the segments in the whole filament",
+        help=(
+            "recover the whole filaments if current filament has >=minFraction of the segments "
+            "in the whole filament. matchBy selects how the particles are matched to the "
+            "filaments of the full star file: image (default) by rlnImageName, requiring the "
+            "particles to be a subset of the full star file; ends (default if forcePickJob=1) "
+            "by the start and end particles of each filament lying on a filament of the full "
+            "star file; coords by the nearest particle (within maxDistance pixels, default to "
+            "the inter-box distance of the full star file) on the same micrograph, for "
+            "particles extracted separately from the full star file, e.g. from multiple "
+            "picking jobs whose filaments were joined into the full star file "
+            "(images2star --joinFilaments --saveStartEnd). In the coords mode, the fraction "
+            "of a filament is that of its particles matched by any particle"
+        ),
         default="",
     )
+
+
+def _job_folder(image_name: str) -> PurePosixPath | None:
+    """The RELION job folder (e.g. ``Extract/job012``) of a particle image."""
+    p = PurePosixPath(str(image_name).split("@")[-1].replace("\\", "/"))
+    folders = [q for q in p.parents if re.fullmatch(r"job\d+", q.name)]
+    return folders[-1] if folders else None
+
+
+def _match_by_coordinates(data, data2, mgraph_attr, max_distance):
+    """Match each particle to the nearest particle of the full filaments.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        The particles, with ``mgraph_attr``, ``rlnCoordinateX`` and
+        ``rlnCoordinateY``.
+    data2 : pd.DataFrame
+        The particles of the full filaments, with ``mgraph_attr``,
+        ``rlnHelicalTubeID``, ``rlnCoordinateX`` and ``rlnCoordinateY``.
+    mgraph_attr : str
+        Column with the micrograph of each particle, comparable between
+        ``data`` and ``data2``.
+    max_distance : float
+        Largest distance (pixels) of a particle from its match.
+
+    Returns
+    -------
+    tuple[list, int]
+        ``(n_matched, n_full, indices)`` of each full filament with matched
+        particles, where ``n_matched`` counts its distinct particles matched
+        by any particle in ``data`` and ``indices`` are the positions of its
+        particles in ``data2``; and the number of particles in ``data``
+        without a match.
+    """
+    from scipy.spatial import cKDTree
+
+    matched = np.zeros(len(data2), dtype=bool)
+    n_unmatched = 0
+    rows2 = data2.groupby(mgraph_attr, sort=False).indices
+    for mgraph_name, rows in data.groupby(mgraph_attr, sort=False).indices.items():
+        if mgraph_name not in rows2:
+            n_unmatched += len(rows)
+            continue
+        xy2 = (
+            data2[["rlnCoordinateX", "rlnCoordinateY"]]
+            .iloc[rows2[mgraph_name]]
+            .astype(float)
+            .values
+        )
+        xy = data[["rlnCoordinateX", "rlnCoordinateY"]].iloc[rows].astype(float).values
+        dist, nearest = cKDTree(xy2).query(xy, distance_upper_bound=max_distance)
+        found = np.isfinite(dist)
+        n_unmatched += int((~found).sum())
+        matched[rows2[mgraph_name][nearest[found]]] = True
+
+    helices = []
+    for rows in data2.groupby(
+        [mgraph_attr, "rlnHelicalTubeID"], sort=False
+    ).indices.values():
+        n = int(matched[rows].sum())
+        if n:
+            helices.append((n, len(rows), list(rows)))
+    return helices, n_unmatched
 
 
 def handle(data, args, index_d, param):
@@ -49,13 +132,29 @@ def handle(data, args, index_d, param):
         else:
             param_dict = {}
 
+        forcePickJob = param_dict.get("forcePickJob", None)
+        matchBy = param_dict.get("matchBy", "ends" if forcePickJob else "image")
+        if matchBy not in MATCH_MODES:
+            raise HeliconError(
+                f"--recoverFullFilaments: matchBy={matchBy} is not one of {'|'.join(MATCH_MODES)}"
+            )
+        if forcePickJob is None:
+            # coordinate matching needs the filaments extracted from picked coordinates
+            forcePickJob = int(matchBy != "image")
+
         required_attrs = "rlnImageName rlnHelicalTubeID".split()
-
-        forcePickJob = param_dict.get("forcePickJob", 0)
-        if forcePickJob:
+        if matchBy == "ends":
             required_attrs += "rlnMicrographName rlnCoordinateX rlnCoordinateY rlnHelicalTrackLengthAngst".split()
+        elif matchBy == "coords":
+            required_attrs += "rlnMicrographName rlnCoordinateX rlnCoordinateY".split()
+        # the particles to match by coordinates need not be from the same filaments
+        required_attrs_input = [
+            p
+            for p in required_attrs
+            if not (matchBy == "coords" and p == "rlnHelicalTubeID")
+        ]
 
-        missing_attrs = [p for p in required_attrs if p not in data]
+        missing_attrs = [p for p in required_attrs_input if p not in data]
         assert (
             missing_attrs == []
         ), f"\tERROR: requried parameters {' '.join(missing_attrs)} are not available"
@@ -179,30 +278,60 @@ def handle(data, args, index_d, param):
             missing_attrs == []
         ), f"\tERROR: {fullStarFile} does not have the requried parameters {' '.join(missing_attrs)}"
 
-        if len(data) > len(data2):
+        if matchBy != "coords" and len(data) > len(data2):
             raise HeliconError(
                 f"ERROR: --recoverFullFilament option requires that {fullStarFile} ({len(data2)}) has the same number or more particles (>={len(data)})"
             )
 
-        folders = [
-            p
-            for p in Path(data["rlnImageName"].iloc[0].split("@")[-1]).parents
-            if str(p).find("/job") != -1
-        ]
-        folder_current = folders[-1]
-        folders = [
-            p
-            for p in Path(data2["rlnImageName"].iloc[0].split("@")[-1]).parents
-            if str(p).find("/job") != -1
-        ]
-        folder_new = folders[-1]
+        folder_current = _job_folder(data["rlnImageName"].iloc[0])
+        folder_new = _job_folder(data2["rlnImageName"].iloc[0])
 
         n0 = len(data)
         helices = []
 
         from helicon import convert_dataframe_file_path
 
-        if forcePickJob:
+        if matchBy == "coords":
+            mgraph_attr = "rlnMicrographName_abs"
+            data.loc[:, mgraph_attr] = convert_dataframe_file_path(
+                data, "rlnMicrographName", to="abs"
+            )
+            data2.loc[:, mgraph_attr] = convert_dataframe_file_path(
+                data2, "rlnMicrographName", to="abs"
+            )
+            missing_micrographs = set(data[mgraph_attr]) - set(data2[mgraph_attr])
+            if missing_micrographs:
+                logger.warning(
+                    "%d micrographs are not in %s. Their particles are not matched:\n\t%s",
+                    len(missing_micrographs),
+                    fullStarFile,
+                    "\n\t".join(sorted(missing_micrographs)),
+                )
+            maxDistance = param_dict.get("maxDistance", None)
+            if maxDistance is None:
+                maxDistance = helicon.estimate_inter_box_distance(
+                    data2, [mgraph_attr, "rlnHelicalTubeID"]
+                )
+                if not maxDistance:
+                    raise HeliconError(
+                        f"--recoverFullFilaments: cannot estimate the inter-box distance of {fullStarFile}. Please specify it with maxDistance=<pixels>"
+                    )
+                if args.verbose > 1:
+                    logger.info(
+                        f"\tmaxDistance set to the inter-box distance: {maxDistance:.1f} pixels"
+                    )
+            helices, n_unmatched = _match_by_coordinates(
+                data, data2, mgraph_attr, float(maxDistance)
+            )
+            if n_unmatched:
+                logger.warning(
+                    "%d/%d particles have no particle of %s within %.1f pixels",
+                    n_unmatched,
+                    n0,
+                    fullStarFile,
+                    float(maxDistance),
+                )
+        elif matchBy == "ends":
             data.loc[:, "rlnMicrographName_abs"] = convert_dataframe_file_path(
                 data, "rlnMicrographName", to="abs"
             )
@@ -310,21 +439,20 @@ def handle(data, args, index_d, param):
                             fullStarFile,
                         )
         else:
-            if not (set(data[["rlnImageName"]]).issubset(set(data2[["rlnImageName"]]))):
+            images_abs = convert_dataframe_file_path(data, "rlnImageName", to="abs")
+            images2_abs = convert_dataframe_file_path(data2, "rlnImageName", to="abs")
+            n_missing = int((~images_abs.isin(set(images2_abs))).sum())
+            if n_missing:
                 raise HeliconError(
-                    f"ERROR: --recoverFullFilament option requires that {fullStarFile} contains identical set or a superset of particles"
+                    f"ERROR: --recoverFullFilament option requires that {fullStarFile} contains identical set or a superset of particles. {n_missing}/{len(data)} particles are not in {fullStarFile}. Use matchBy=coords to match the particles by their coordinates instead"
                 )
 
-            data.loc[:, "rlnImageName_abs"] = (
-                convert_dataframe_file_path(data, "rlnImageName", to="abs")
-                .str.split("@", expand=True)
-                .iloc[:, -1]
-            )
-            data2.loc[:, "rlnImageName_abs"] = (
-                convert_dataframe_file_path(data2, "rlnImageName", to="abs")
-                .str.split("@", expand=True)
-                .iloc[:, -1]
-            )
+            data.loc[:, "rlnImageName_abs"] = images_abs.str.split(
+                "@", expand=True
+            ).iloc[:, -1]
+            data2.loc[:, "rlnImageName_abs"] = images2_abs.str.split(
+                "@", expand=True
+            ).iloc[:, -1]
             groups = data.groupby(["rlnImageName_abs", "rlnHelicalTubeID"], sort=False)
             groups2 = data2.groupby(
                 ["rlnImageName_abs", "rlnHelicalTubeID"], sort=False
@@ -359,12 +487,20 @@ def handle(data, args, index_d, param):
                 indices = list(groups2_dict[group_name].index)
                 helices.append((n, n2, indices))
 
+        if not helices:
+            raise HeliconError(
+                f"--recoverFullFilaments: no filament of {fullStarFile} matches the particles"
+            )
+
         minFraction = float(param_dict.get("minFraction", -1))
         if not (0 <= minFraction <= 1):
             n1 = sum([helix[0] for helix in helices])
             n2 = sum([helix[1] for helix in helices])
-            ng = sum([helix[0] for helix in helices if n1 / n2 >= 0.5])
-            minFraction = min(0.5, max(0, (n1 - ng) / (n2 - 2 * ng)))
+            ng = sum([helix[0] for helix in helices if helix[0] / helix[1] >= 0.5])
+            denominator = n2 - 2 * ng
+            minFraction = (
+                min(0.5, max(0, (n1 - ng) / denominator)) if denominator > 0 else 0.5
+            )
             if args.verbose > 1:
                 logger.info(f"\tminFraction set to {minFraction:.2f}")
 
