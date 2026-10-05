@@ -94,6 +94,8 @@ def save_filament_start_end(
     micrograph are written as consecutive rows of
     ``<folder>/<micrograph>_manualpick.star``, and the coordinate list file
     ``<folder>/manualpick.star`` maps each micrograph to its coordinate file.
+    Its ``data_general`` block sets ``rlnMicrographPickType`` to ``startend``,
+    as RELION 5.1 and later require.
     The coordinate list file can be the input coordinates of a RELION Extract
     job with ``Coordinates are start-end only?`` = Yes, which re-extracts the
     filaments with a new inter-box distance. Filaments with a single particle
@@ -187,10 +189,9 @@ def save_filament_start_end(
             {
                 "rlnCoordinateX": xy[:, 0].round(2),
                 "rlnCoordinateY": xy[:, 1].round(2),
-                # initialized to 0 as RELION AutoPick does: RELION Extract
-                # fails on the unset value (-999) of rlnAnglePsi
+                # initialized as RELION AutoPick does
                 "rlnClassNumber": 0,
-                "rlnAnglePsi": 0.0,
+                "rlnAnglePsi": -999.0,
                 "rlnAutopickFigureOfMerit": 0.0,
             }
         )
@@ -204,7 +205,15 @@ def save_filament_start_end(
     coord_list = pd.DataFrame(
         coord_list, columns=["rlnMicrographName", "rlnMicrographCoordinates"]
     )
-    starfile.write({"coordinate_files": coord_list}, coord_list_file, overwrite=True)
+    # RELION 5.1+ requires the pick type of the coordinates
+    starfile.write(
+        {
+            "general": {"rlnMicrographPickType": "startend"},
+            "coordinate_files": coord_list,
+        },
+        coord_list_file,
+        overwrite=True,
+    )
 
     if verbose:
         logger.info(

@@ -348,7 +348,11 @@ class TestSaveStartEnd:
             "startend",
         ]
         _run(monkeypatch, argv)
-        coord_list = starfile.read(tmp_path / "startend" / "manualpick.star")
+        star = starfile.read(tmp_path / "startend" / "manualpick.star")
+        # the RELION 5.1+ pick type block comes first
+        assert list(star) == ["general", "coordinate_files"]
+        assert star["general"] == {"rlnMicrographPickType": "startend"}
+        coord_list = star["coordinate_files"]
         assert coord_list["rlnMicrographName"].tolist() == ["m1.mrc", "m2.mrc"]
         files = coord_list["rlnMicrographCoordinates"].tolist()
         assert [Path(f).name for f in files] == [
@@ -363,10 +367,9 @@ class TestSaveStartEnd:
             "rlnAnglePsi",
             "rlnAutopickFigureOfMerit",
         ]
-        # RELION Extract fails on unset (-999) values: initialized to 0 as AutoPick does
-        assert (
-            m1[["rlnClassNumber", "rlnAnglePsi", "rlnAutopickFigureOfMerit"]] == 0
-        ).all(axis=None)
+        # initialized as RELION AutoPick does
+        assert (m1[["rlnClassNumber", "rlnAutopickFigureOfMerit"]] == 0).all(axis=None)
+        assert (m1["rlnAnglePsi"] == -999).all()
         # the joined filament spans file a tube 1 and file b tube 1, in the
         # start->end direction of the larger piece (file a)
         assert _segments(m1) == [
@@ -408,7 +411,9 @@ class TestSaveStartEnd:
                 "External/job011",
             ],
         )
-        coord_list = starfile.read(tmp_path / "External/job011/manualpick.star")
+        coord_list = starfile.read(tmp_path / "External/job011/manualpick.star")[
+            "coordinate_files"
+        ]
         assert coord_list["rlnMicrographName"].tolist() == [mgraph]
         assert coord_list["rlnMicrographCoordinates"].tolist() == [
             "External/job011/Movies/m1_manualpick.star"
