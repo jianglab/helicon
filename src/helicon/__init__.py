@@ -40,6 +40,7 @@ from .lib.analysis import (
     estimate_helicalTube_length,
     estimate_inter_box_distance,
     filament_pieces_overlap,
+    filament_start_end,
     join_collinear_filaments,
     split_distinct_filaments,
 )

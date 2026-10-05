@@ -1,5 +1,6 @@
 import argparse
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -8,7 +9,12 @@ import starfile
 
 import helicon
 from helicon.commands import images2star
-from helicon.lib.exceptions import HeliconValueError
+from helicon.plugins.images2star import savestartend
+from helicon.lib.exceptions import (
+    HeliconError,
+    HeliconFileExistsError,
+    HeliconValueError,
+)
 
 
 def _filament(mgraph, tube, start, end, step=50.0, stack="a.mrcs", first=1):
@@ -266,3 +272,162 @@ class TestImages2starJoinFilaments:
                 ],
             )
         assert not (tmp_path / "out.star").exists()
+
+
+def _segments(coords):
+    """Start-end pairs of a RELION start-end coordinate table, as sorted tuples."""
+    xy = coords[["rlnCoordinateX", "rlnCoordinateY"]].values.reshape(-1, 4)
+    return sorted(tuple(np.round(r, 2)) for r in xy)
+
+
+class TestFilamentStartEnd:
+    def test_direction_follows_track_length(self):
+        data = pd.concat(
+            [
+                _filament("m1", 1, (100, 100), (500, 400)),
+                # picked from the right to the left, listed in reverse order
+                _filament("m1", 2, (800, 0), (400, 0)).iloc[::-1],
+                _filament("m1", 3, (0, 900), (0, 1000)).iloc[[0]],
+            ],
+            ignore_index=True,
+        )
+        lines = helicon.filament_start_end(data)
+        assert lines["rlnHelicalTubeID"].tolist() == [1, 2, 3]
+        np.testing.assert_allclose(
+            lines[["startX", "startY", "endX", "endY"]].values[:2],
+            [[100, 100, 500, 400], [800, 0, 400, 0]],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(lines["length"][:2], [500, 400])
+        assert lines["n"].tolist() == [11, 9, 1]
+        np.testing.assert_allclose(lines["maxOffset"], 0, atol=1e-6)
+
+    def test_direction_without_track_length(self):
+        data = _filament("m1", 1, (800, 0), (400, 0)).drop(
+            columns="rlnHelicalTrackLengthAngst"
+        )
+        lines = helicon.filament_start_end(data)
+        np.testing.assert_allclose(
+            lines[["startX", "startY", "endX", "endY"]].values, [[800, 0, 400, 0]]
+        )
+
+    def test_best_fit_line(self):
+        data = _filament("m1", 1, (0, 0), (400, 0))
+        data.loc[data.index % 2 == 1, "rlnCoordinateY"] = 4.0
+        lines = helicon.filament_start_end(data)
+        assert lines["startY"].iloc[0] == pytest.approx(lines["endY"].iloc[0])
+        # 5 particles at y=0 and 4 at y=4: the line is at y=16/9
+        assert lines["startY"].iloc[0] == pytest.approx(16 / 9)
+        assert lines["maxOffset"].iloc[0] == pytest.approx(4 - 16 / 9)
+
+
+class TestSaveStartEnd:
+    @pytest.mark.parametrize(
+        "micrograph, subpath",
+        [
+            ("MotionCorr/job002/Movies/m1.mrc", "Movies/m1_manualpick.star"),
+            ("/data/proj/MotionCorr/job002/a/b/m1.mrc", "a/b/m1_manualpick.star"),
+            ("micrographs/m1.mrc", "m1_manualpick.star"),
+        ],
+    )
+    def test_coordinate_file_subpath(self, micrograph, subpath):
+        assert str(savestartend._start_end_file_subpath(micrograph)) == subpath
+
+    def test_join_and_save(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        TestImages2starJoinFilaments()._inputs(tmp_path)
+        argv = [
+            "a.star",
+            "b.star",
+            "out.star",
+            "--ignoreBadParticlePath",
+            "2",
+            "--verbose",
+            "0",
+            "--saveStartEnd",
+            "startend",
+        ]
+        _run(monkeypatch, argv)
+        coord_list = starfile.read(tmp_path / "startend" / "manualpick.star")
+        assert coord_list["rlnMicrographName"].tolist() == ["m1.mrc", "m2.mrc"]
+        files = coord_list["rlnMicrographCoordinates"].tolist()
+        assert [Path(f).name for f in files] == [
+            "m1_manualpick.star",
+            "m2_manualpick.star",
+        ]
+        m1 = starfile.read(files[0])
+        assert m1.columns.tolist() == [
+            "rlnCoordinateX",
+            "rlnCoordinateY",
+            "rlnClassNumber",
+            "rlnAnglePsi",
+            "rlnAutopickFigureOfMerit",
+        ]
+        # the joined filament spans file a tube 1 and file b tube 1, in the
+        # start->end direction of the larger piece (file a)
+        assert _segments(m1) == [
+            (100, 100, 800, 100),
+            (100, 900, 500, 900),
+            (1000, 100, 1000, 500),
+            (1000, 700, 1000, 900),
+        ]
+        assert _segments(starfile.read(files[1])) == [(100, 100, 500, 100)]
+
+        # an existing coordinate list is not overwritten without --force
+        with pytest.raises(HeliconFileExistsError, match="manualpick.star"):
+            _run(monkeypatch, argv[:2] + ["out2.star"] + argv[3:])
+        _run(monkeypatch, argv[:2] + ["out2.star"] + argv[3:] + ["--force", "1"])
+
+    def test_relion_project_paths(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "default_pipeline.star").write_text("")
+        (tmp_path / "Select/job010").mkdir(parents=True)
+        mgraph = "MotionCorr/job002/Movies/m1.mrc"
+        particles = pd.concat(
+            [
+                _filament(mgraph, 1, (100, 100), (500, 100)),
+                _filament(mgraph, 2, (0, 0), (0, 100), first=50).iloc[[0]],
+            ],
+            ignore_index=True,
+        )
+        _write_star(tmp_path / "a.star", particles)
+        _run(
+            monkeypatch,
+            [
+                "a.star",
+                "Select/job010/particles.star",
+                "--ignoreBadParticlePath",
+                "2",
+                "--verbose",
+                "0",
+                "--saveStartEnd",
+                "External/job011",
+            ],
+        )
+        coord_list = starfile.read(tmp_path / "External/job011/manualpick.star")
+        assert coord_list["rlnMicrographName"].tolist() == [mgraph]
+        assert coord_list["rlnMicrographCoordinates"].tolist() == [
+            "External/job011/Movies/m1_manualpick.star"
+        ]
+        # the single-particle filament has no start-end line
+        coords = starfile.read(tmp_path / "External/job011/Movies/m1_manualpick.star")
+        assert _segments(coords) == [(100, 100, 500, 100)]
+
+    def test_requires_helical_tube_id(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        particles = _filament("m1.mrc", 1, (0, 0), (200, 0))
+        _write_star(tmp_path / "a.star", particles.drop(columns="rlnHelicalTubeID"))
+        with pytest.raises(HeliconError, match="rlnHelicalTubeID"):
+            _run(
+                monkeypatch,
+                [
+                    "a.star",
+                    "out.star",
+                    "--ignoreBadParticlePath",
+                    "2",
+                    "--verbose",
+                    "0",
+                    "--saveStartEnd",
+                    "startend",
+                ],
+            )

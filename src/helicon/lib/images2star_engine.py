@@ -36,6 +36,7 @@ GUI_EXCLUDED_OPERATIONS = frozenset(
         "minStack",
         "process",
         "recoverFullFilaments",
+        "saveStartEnd",
         "splitByMicrograph",
         "summary2D",
         # Handled outside the engine (path conversion happens at save time).

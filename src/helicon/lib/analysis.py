@@ -158,6 +158,7 @@ __all__ = [
     "estimate_helicalTube_length",
     "estimate_inter_box_distance",
     "filament_pieces_overlap",
+    "filament_start_end",
     "join_collinear_filaments",
     "reset_inter_segment_distance",
 ]
@@ -1595,6 +1596,78 @@ def join_collinear_filaments(
         for a, s in scales.items():
             data.iloc[rows, data.columns.get_loc(a)] = proj * s
     return data[keep].reset_index(drop=True)
+
+
+def filament_start_end(
+    data: pd.DataFrame,
+    filament_attrs: list[str] | None = None,
+) -> pd.DataFrame:
+    """Start and end points of the straight line through each helical filament.
+
+    The line of a filament is the principal axis of its particle coordinates,
+    and its start and end points are the projections of the two extreme
+    particles onto that line. The line runs in the direction of increasing
+    ``rlnHelicalTrackLengthAngst`` (or ``rlnHelicalTrackLength``) if present,
+    otherwise from the first to the last particle of the filament in ``data``.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Particle data with ``rlnCoordinateX``, ``rlnCoordinateY`` and
+        ``filament_attrs`` columns.
+    filament_attrs : list of str, optional
+        Columns that identify a filament. Defaults to
+        ``["rlnMicrographName", "rlnHelicalTubeID"]``.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per filament, sorted by ``filament_attrs``, with the
+        ``filament_attrs`` columns and ``startX``, ``startY``, ``endX``,
+        ``endY`` (pixels), ``length`` (pixels), ``n`` (number of particles)
+        and ``maxOffset``, the largest distance (pixels) of a particle from
+        the line.
+    """
+    import pandas as pd
+
+    filament_attrs = list(filament_attrs or ["rlnMicrographName", "rlnHelicalTubeID"])
+    track_attr = next(
+        (
+            a
+            for a in ["rlnHelicalTrackLengthAngst", "rlnHelicalTrackLength"]
+            if a in data
+        ),
+        None,
+    )
+    rows = []
+    for key, particles in data.groupby(filament_attrs, sort=True):
+        pts = particles[["rlnCoordinateX", "rlnCoordinateY"]].astype(float).values
+        center = pts.mean(axis=0)
+        axis = _principal_axis(pts)
+        proj = (pts - center) @ axis
+        if track_attr is not None:
+            order = particles[track_attr].astype(float).values
+        else:
+            order = np.arange(len(pts), dtype=float)
+        if len(pts) > 1 and np.dot(proj - proj.mean(), order - order.mean()) < 0:
+            axis, proj = -axis, -proj
+        start = center + proj.min() * axis
+        end = center + proj.max() * axis
+        offset = (pts - center) @ np.array([-axis[1], axis[0]])
+        if not isinstance(key, tuple):
+            key = (key,)
+        rows.append(
+            (
+                *key,
+                *start,
+                *end,
+                proj.max() - proj.min(),
+                len(pts),
+                np.abs(offset).max(),
+            )
+        )
+    columns = filament_attrs + "startX startY endX endY length n maxOffset".split()
+    return pd.DataFrame(rows, columns=columns)
 
 
 from .alignment import align_images  # noqa: F401
