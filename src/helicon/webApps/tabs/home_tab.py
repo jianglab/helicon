@@ -13,7 +13,7 @@ arrows. Clicking it opens the app in one of three ways:
   server as a detached process and opens in a new browser window;
 - an app with only a hosted site opens that site in a new browser tab.
 
-A button above the diagram starts the helicon file browser (``helicon
+A chip above the diagram starts the helicon file explorer/display (``helicon
 display``) the same detached way; it is shown only when the server is on the
 user's machine, since its window opens on the server's desktop.
 """
@@ -477,6 +477,26 @@ _CSS = """
 .helicon-home .hh-external {
     fill: var(--hh-muted); font-size: 13px; text-anchor: middle;
 }
+/* The file explorer/display launcher above the diagram: an HTML copy of an
+   app chip, so it sizes like the SVG chips at full width. */
+.helicon-home button.hh-app {
+    display: inline-flex; align-items: center; gap: 9px;
+    height: 48px; margin: 0 !important; padding: 0 12px 0 7px !important;
+    background: var(--hh-chip-bg); color: var(--hh-text);
+    border: 1.5px solid var(--hh-chip-border); border-radius: 10px;
+    font: inherit; font-size: 13px; font-weight: 600; line-height: 1;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+.helicon-home button.hh-app:hover,
+.helicon-home button.hh-app:focus-visible {
+    border-color: var(--hh-app); box-shadow: inset 0 0 0 1px var(--hh-app);
+}
+.helicon-home button.hh-app .hh-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 8px; flex: none;
+    background: var(--hh-app); color: #ffffff; font-weight: 700;
+}
+.helicon-home button.hh-app .hh-external { color: var(--hh-muted); font-weight: 400; }
 .helicon-home .hh-tooltip {
     position: absolute; z-index: 10; max-width: 260px; pointer-events: none;
     padding: 8px 10px !important; border-radius: 6px;
@@ -494,8 +514,15 @@ _CSS = """
 # subcommand it starts opens its window in front of that user.
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 
-# Started by the "Open file browser" button rather than by a diagram app.
+# Started by the file explorer/display button rather than by a diagram app.
 _DISPLAY_COMMAND = "display"
+_DISPLAY_NAME = "File explorer/display"
+_DISPLAY_LABEL = "Open file explorer/display"
+_DISPLAY_COLOR = "#475569"
+_DISPLAY_DESC = (
+    "Browse a folder and view its images, maps, STAR files and more in a "
+    "new window."
+)
 
 # Delegated on document so it does not depend on when the tab is rendered.
 _JS = (
@@ -503,7 +530,7 @@ _JS = (
     + """
 (function() {
     var local = _HH_LOCAL_HOSTS.indexOf(location.hostname) >= 0;
-    // The file browser opens on the server's desktop, so only offer it there.
+    // The file explorer/display opens on the server's desktop, so only offer it there.
     document.querySelectorAll('.helicon-home .hh-toolbar')
         .forEach(function(bar) { bar.hidden = !local; });
     function appOf(el) { return el && el.closest ? el.closest('.helicon-home .hh-app') : null; }
@@ -535,7 +562,7 @@ _JS = (
         tip.hidden = false;
         setHot(app, true);
         var box = home.getBoundingClientRect();
-        var r = app.querySelector('.hh-chip').getBoundingClientRect();
+        var r = (app.querySelector('.hh-chip') || app).getBoundingClientRect();
         var left = r.left - box.left + home.scrollLeft + r.width / 2 - tip.offsetWidth / 2;
         left = Math.max(4, Math.min(left, home.clientWidth - tip.offsetWidth - 4));
         // Open away from the diagram's middle, where most arrows run.
@@ -567,11 +594,6 @@ _JS = (
         if (app) hideTip(app);
     });
     document.addEventListener('click', function(e) {
-        var display = e.target.closest && e.target.closest('.helicon-home .hh-display');
-        if (display && local) {
-            Shiny.setInputValue('home_launch', display.dataset.command, {priority: 'event'});
-            return;
-        }
         var app = appOf(e.target);
         if (app) { hideTip(app); launch(app); }
     });
@@ -600,12 +622,19 @@ def home_tab_ui():
             None
             if deployment.is_cloud()
             else ui.div(
+                # Launched by the same script as the diagram's apps.
                 ui.tags.button(
-                    "Open file browser",
+                    ui.span("FE", class_="hh-icon"),
+                    ui.span(_DISPLAY_LABEL, class_="hh-app-name"),
+                    ui.span("↗", class_="hh-external"),
                     type="button",
-                    class_="btn btn-sm btn-outline-secondary hh-display",
-                    title="Browse a folder and view its images, maps, STAR files and "
-                    f"more in a new window (helicon {_DISPLAY_COMMAND})",
+                    class_="hh-app",
+                    style=f"--hh-app: {_DISPLAY_COLOR}",
+                    aria_label=f"{_DISPLAY_LABEL}: {_DISPLAY_DESC}",
+                    data_name=_DISPLAY_NAME,
+                    data_desc=_DISPLAY_DESC,
+                    data_hint="Click to open in a new window "
+                    f"(helicon {_DISPLAY_COMMAND})",
                     data_command=_DISPLAY_COMMAND,
                 ),
                 class_="hh-toolbar",
@@ -630,7 +659,7 @@ def home_tab_ui():
 _COMMAND_APPS = {a.command: a for a in HOME_APPS if a.command}
 # Every command Home may start, by the name its notifications use.
 _COMMAND_NAMES = {c: a.name for c, a in _COMMAND_APPS.items()}
-_COMMAND_NAMES[_DISPLAY_COMMAND] = "the file browser"
+_COMMAND_NAMES[_DISPLAY_COMMAND] = "the file explorer/display"
 _RELAUNCH_SECS = 5.0  # ignore a repeat click (e.g. a double click) this soon
 _WATCH_START_SECS = 30  # an exit this soon after starting is reported (an abort
 # that writes a core dump of a large process can take 15 s or more)
@@ -682,7 +711,7 @@ def client_is_local(session) -> bool:
 
 def home_tab_server(input, session) -> None:
     """Start the subcommand of a Home app that is not integrated here, or the
-    file browser."""
+    file explorer/display."""
     last_launch: dict[str, float] = {}
 
     @reactive.effect
@@ -717,7 +746,7 @@ def home_tab_server(input, session) -> None:
         # process would exit at once without any window.
         if command == _DISPLAY_COMMAND and not helicon.has_napari():
             ui.notification_show(
-                "The file browser needs napari and PySide6 "
+                "The file explorer/display needs napari and PySide6 "
                 '(pip install "helicon[gui]").',
                 type="warning",
                 duration=15,
