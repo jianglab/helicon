@@ -1,0 +1,239 @@
+"""Tests for the grouping of classes into helical types (helical_pitch_types).
+
+Two helices of the same repeat but different structure: the class averages of one
+are windows of its side view, so they register on each other well, and not so
+well on those of the other. Filaments use the classes of their own type.
+"""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+from joint_pixel import synthetic as syn  # noqa: E402
+
+from helicon.webApps.lib import helical_pitch_types as ty  # noqa: E402
+
+PERIOD, K, APIX = 400.0, 6, 4.0
+
+
+@pytest.fixture(scope="module")
+def two_types():
+    a, _ = syn.class_averages(PERIOD, K, apix=APIX, noise=0.03, structure_seed=0)
+    b, _ = syn.class_averages(PERIOD, K, apix=APIX, noise=0.03, structure_seed=7)
+    return a + b  # classes 0..K-1 are type A, K..2K-1 type B
+
+
+@pytest.fixture(scope="module")
+def similarity(two_types):
+    # these synthetic structures differ only a little, and the body of the filament
+    # hides it from the plain correlation, so the modulation is compared
+    return ty.class_similarity(two_types, list(range(2 * K)), APIX, modulation=True)
+
+
+class TestClassSimilarity:
+    def test_it_is_a_symmetric_matrix_with_ones_on_the_diagonal(self, similarity):
+        assert similarity.shape == (2 * K, 2 * K)
+        assert np.allclose(similarity, similarity.T)
+        assert np.allclose(np.diag(similarity), 1.0)
+        assert similarity.min() >= 0.0 and similarity.max() <= 1.0
+
+    def test_classes_of_one_structure_look_more_alike_than_those_of_two(
+        self, similarity
+    ):
+        same = np.concatenate(
+            [
+                similarity[:K, :K][np.triu_indices(K, 1)],
+                similarity[K:, K:][np.triu_indices(K, 1)],
+            ]
+        )
+        different = similarity[:K, K:].ravel()
+        assert same.mean() > different.mean() + 0.1
+        assert same.min() > different.max() - 0.05  # nearly separable
+
+
+class TestModulation:
+    def test_removing_the_axial_mean_widens_the_gap_but_is_not_the_default(
+        self, two_types
+    ):
+        import inspect
+
+        assert (
+            inspect.signature(ty.class_similarity).parameters["modulation"].default
+            is False
+        )
+        plain = ty.class_similarity(two_types, list(range(2 * K)), APIX)
+        mod = ty.class_similarity(two_types, list(range(2 * K)), APIX, modulation=True)
+        upper = np.triu_indices(K, 1)
+        gap_plain = plain[:K, :K][upper].mean() - plain[:K, K:].mean()
+        gap_mod = mod[:K, :K][upper].mean() - mod[:K, K:].mean()
+        # the body of the filament correlates between any two averages
+        assert gap_mod > gap_plain
+
+
+class TestSuggestedCut:
+    def test_it_goes_between_the_two_scales_of_distance(self):
+        S = np.eye(8)
+        S[:4, :4] = 0.93
+        S[4:, 4:] = 0.9
+        S[:4, 4:] = S[4:, :4] = 0.5
+        np.fill_diagonal(S, 1.0)
+        cut = ty.suggest_cut(S)
+        assert 0.1 < cut < 0.5
+        g = ty.pixel_groups(S, cut, min_classes=2)
+        assert len(set(g[:4])) == 1 and len(set(g[4:])) == 1 and g[0] != g[4]
+
+    def test_with_too_few_merges_it_returns_the_default(self):
+        assert ty.suggest_cut(np.eye(2), default=0.3) == 0.3
+
+
+class TestPixelGroups:
+    def test_two_structures_make_two_groups(self, similarity):
+        # the right cut depends on how different the structures are: these differ
+        # little, so 0.2; the default of 0.15 is for the plain correlation of
+        # real types (PHF and SF)
+        g = ty.pixel_groups(similarity, cut=0.2, min_classes=2)
+        assert len(set(g[:K])) == 1 and len(set(g[K:])) == 1
+        assert set(g[:K]) != set(g[K:])
+
+    def test_the_default_cut_is_that_which_worked_on_real_types(
+        self,
+    ):
+        import inspect
+
+        assert inspect.signature(ty.pixel_groups).parameters["cut"].default == 0.15
+
+    def test_a_cut_that_is_too_loose_joins_them(self, similarity):
+        g = ty.pixel_groups(similarity, cut=0.9, min_classes=2)
+        assert len(set(g)) == 1
+
+    def test_a_small_group_is_left_unassigned(self):
+        S = np.eye(5)
+        S[:4, :4] = 0.95
+        np.fill_diagonal(S, 1.0)
+        g = ty.pixel_groups(S, cut=0.15, min_classes=3)
+        assert list(g) == [0, 0, 0, 0, -1]
+
+    def test_the_largest_group_is_numbered_first(self):
+        S = np.eye(7)
+        S[:2, :2] = 0.95
+        S[2:, 2:] = 0.95
+        np.fill_diagonal(S, 1.0)
+        g = ty.pixel_groups(S, cut=0.15, min_classes=2)
+        assert list(g[2:]) == [0] * 5 and list(g[:2]) == [1, 1]
+
+
+class TestFilamentTypes:
+    @pytest.fixture(scope="class")
+    def usage(self):
+        # 100 filaments of each type use their own classes, 30% of segments in
+        # any class at random (poor assignments)
+        rng = np.random.default_rng(0)
+        parts = []
+        for t in (0, 1):
+            df = syn.class2d_table(PERIOD, K, n_fil=100, length=800.0, seed=t + 1)
+            df["rlnClassNumber"] += t * K
+            df["rlnMicrographName"] = f"{'AB'[t]}_" + df["rlnMicrographName"]
+            parts.append(df)
+        df = pd.concat(parts, ignore_index=True)
+        bad = rng.random(len(df)) < 0.3
+        df.loc[bad, "rlnClassNumber"] = rng.integers(1, 2 * K + 1, int(bad.sum()))
+        U, keys = ty.usage_matrix(df, list(range(1, 2 * K + 1)))
+        truth = np.array([0 if k[0].startswith("A_") else 1 for k in keys])
+        return U, truth
+
+    def test_the_usage_matrix_counts_the_segments(self, usage):
+        U, truth = usage
+        assert U.shape == (200, 2 * K)
+        assert U.sum() == pytest.approx(200 * 41)
+
+    def test_most_poorly_assigned_segments_do_not_change_the_filament(self, usage):
+        U, truth = usage
+        groups = np.array([0] * K + [1] * K)
+        lab, share = ty.assign_filaments(U, groups, 2, min_share=0.6)
+        called = lab >= 0
+        assert called.mean() > 0.95
+        assert np.mean(lab[called] == truth[called]) > 0.97
+
+    def test_a_filament_without_a_majority_is_left_out(self):
+        U = np.array([[5.0, 5.0], [9.0, 1.0]])
+        lab, share = ty.assign_filaments(U, np.array([0, 1]), 2, min_share=0.6)
+        assert list(lab) == [-1, 0]
+        assert share[1] == pytest.approx(0.9)
+
+    def test_classes_in_no_group_do_not_vote(self):
+        U = np.array([[2.0, 8.0, 100.0]])
+        lab, share = ty.assign_filaments(U, np.array([0, 1, -1]), 2, min_share=0.6)
+        assert lab[0] == 1 and share[0] == pytest.approx(0.8)
+
+
+class TestUsageSimilarity:
+    def test_classes_used_by_the_same_filaments_are_alike(self):
+        U = np.array([[5, 5, 0, 0], [4, 6, 0, 0], [0, 0, 5, 5], [0, 0, 6, 4.0]])
+        C = ty.usage_similarity(U)
+        assert C[0, 1] > 0.9 and C[2, 3] > 0.9
+        assert C[0, 2] == pytest.approx(0.0)
+
+
+class TestNeighbourFrequency:
+    @pytest.fixture(scope="class")
+    def params(self):
+        # filaments of type A use classes 1-4, those of type B classes 5-8;
+        # segments every 20 A, classes advancing along the filament
+        rows = []
+        rng = np.random.default_rng(0)
+        for f in range(60):
+            t = f % 2
+            for i in range(40):
+                rows.append(
+                    dict(
+                        rlnMicrographName=f"m{f // 10}.mrc",
+                        rlnHelicalTubeID=f % 10 + 1,
+                        rlnHelicalTrackLengthAngst=20.0 * i,
+                        rlnClassNumber=1 + 4 * t + (i // 3 + rng.integers(0, 2)) % 4,
+                    )
+                )
+        df = pd.DataFrame(rows)
+        # the two types must not share a filament: make the ids distinct
+        df["rlnHelicalTubeID"] = df["rlnHelicalTubeID"] + 100 * (
+            df["rlnClassNumber"] > 4
+        )
+        return df
+
+    def test_classes_of_one_type_meet_on_filaments_and_those_of_two_do_not(
+        self, params
+    ):
+        lift = ty.neighbour_lift(params, list(range(1, 9)), window=400.0)
+        assert lift.shape == (8, 8)
+        assert np.allclose(lift, lift.T)
+        assert lift[:4, :4].mean() > 1.0
+        assert lift[:4, 4:].max() == pytest.approx(0.0)
+
+    def test_it_counts_neighbours_within_the_window_only(self, params):
+        near = ty.neighbour_lift(params, list(range(1, 9)), window=20.0)
+        far = ty.neighbour_lift(params, list(range(1, 9)), window=800.0)
+        assert np.count_nonzero(near[:4, :4]) <= np.count_nonzero(far[:4, :4])
+
+    def test_a_class_absent_from_the_data_has_no_neighbours(self, params):
+        lift = ty.neighbour_lift(params, [1, 2, 99], window=400.0)
+        assert np.all(lift[2] == 0.0) and np.all(lift[:, 2] == 0.0)
+
+    def test_weight_zero_is_the_similarity_alone(self):
+        S = np.array([[1.0, 0.9], [0.9, 1.0]])
+        lift = np.array([[0.0, 0.2], [0.2, 0.0]])
+        assert np.allclose(ty.neighbour_affinity(S, lift, weight=0.0), S)
+
+    def test_classes_that_never_meet_are_pulled_apart(self):
+        S = np.full((2, 2), 0.9)
+        met = ty.neighbour_affinity(S, np.full((2, 2), 1.5), weight=0.3)
+        never = ty.neighbour_affinity(S, np.zeros((2, 2)), weight=0.3)
+        assert met[0, 1] > never[0, 1] + 0.2
+
+    def test_the_lift_saturates(self):
+        S = np.full((2, 2), 0.5)
+        a = ty.neighbour_affinity(S, np.full((2, 2), 1.5), 0.3, saturation=1.5)
+        b = ty.neighbour_affinity(S, np.full((2, 2), 50.0), 0.3, saturation=1.5)
+        assert np.allclose(a, b)
