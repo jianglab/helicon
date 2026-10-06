@@ -214,6 +214,17 @@ def setPixelSize(
 def get_relion_project_folder(starFile: str) -> str | None:
     """Extract the RELION project folder from a STAR file path.
 
+    RELION marks the root of a project with an empty ``.gui_projectdir``, which its
+    job folders do not have: the nearest folder above the file that has it. Where
+    there is none (a project made without the GUI), ``default_pipeline.star``
+    stands in. RELION 5 also keeps a copy of that file in every job folder, so the
+    nearest folder that has it is a job folder, not the root: the root is the folder
+    two above the file (``<root>/<JobType>/<jobNNN>/<file>``) when that has it, else
+    the outermost folder above the file that has it. Symlinks are not followed
+    first: a job folder can be a link into another place, and the project is the
+    one the link is in. If nothing is found that way, the file's real location is
+    tried.
+
     Parameters
     ----------
     starFile : str
@@ -224,11 +235,16 @@ def get_relion_project_folder(starFile: str) -> str | None:
     str or None
         Absolute path to the project folder, or None if it cannot be determined.
     """
-    # A RELION project root holds default_pipeline.star; its job folders
-    # (e.g. Class2D/job003) only hold job_pipeline.star.
-    for folder in Path(starFile).resolve().parents:
-        if (folder / "default_pipeline.star").is_file():
-            return str(folder)
+    for path in (Path(starFile).absolute(), Path(starFile).resolve()):
+        parents = list(path.parents)
+        for folder in parents:
+            if (folder / ".gui_projectdir").is_file():
+                return str(folder)
+        if len(parents) > 2 and (parents[2] / "default_pipeline.star").is_file():
+            return str(parents[2])
+        found = [f for f in parents if (f / "default_pipeline.star").is_file()]
+        if found:
+            return str(found[-1])
     return None
 
 

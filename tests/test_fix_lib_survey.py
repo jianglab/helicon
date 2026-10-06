@@ -425,3 +425,70 @@ class TestIoModuleMisc:
     def test_get_relion_project_folder_none(self, tmp_path):
         star = tmp_path / "Class2D" / "job003" / "x.star"
         assert io.get_relion_project_folder(str(star)) is None
+
+
+class TestRelionProjectFolderMarker:
+    """The project root of a file in a job folder (RELION 5 copies the pipeline
+    file into every job folder)."""
+
+    def test_the_gui_marker_is_the_signature(self, tmp_path):
+        from helicon.lib import io
+
+        (tmp_path / ".gui_projectdir").touch()
+        job = tmp_path / "Class2D" / "job010"
+        job.mkdir(parents=True)
+        (job / "default_pipeline.star").touch()
+        (job / "run_it020_data.star").touch()
+        assert io.get_relion_project_folder(str(job / "run_it020_data.star")) == str(
+            tmp_path.resolve()
+        )
+
+    def test_a_job_folders_copy_of_the_pipeline_file_is_not_the_root(self, tmp_path):
+        from helicon.lib import io
+
+        (tmp_path / "default_pipeline.star").touch()
+        job = tmp_path / "Class2D" / "job010"
+        job.mkdir(parents=True)
+        (job / "default_pipeline.star").touch()
+        (job / "x.star").touch()
+        assert io.get_relion_project_folder(str(job / "x.star")) == str(tmp_path)
+
+    def test_a_job_folder_that_is_a_link_stays_in_its_project(self, tmp_path):
+        from helicon.lib import io
+
+        project = tmp_path / "project"
+        (project / "Class2D").mkdir(parents=True)
+        (project / ".gui_projectdir").touch()
+        archive = tmp_path / "archive" / "job010"
+        archive.mkdir(parents=True)
+        (archive / "default_pipeline.star").touch()
+        (archive / "x.star").touch()
+        (project / "Class2D" / "job010").symlink_to(archive)
+        assert io.get_relion_project_folder(
+            str(project / "Class2D" / "job010" / "x.star")
+        ) == str(project)
+
+    def test_a_file_that_is_a_link_into_a_project_is_found_by_its_real_place(
+        self, tmp_path
+    ):
+        from helicon.lib import io
+
+        project = tmp_path / "project"
+        job = project / "Class2D" / "job010"
+        job.mkdir(parents=True)
+        (project / ".gui_projectdir").touch()
+        (job / "x.star").touch()
+        elsewhere = tmp_path / "links"
+        elsewhere.mkdir()
+        (elsewhere / "x.star").symlink_to(job / "x.star")
+        assert io.get_relion_project_folder(str(elsewhere / "x.star")) == str(
+            project.resolve()
+        )
+
+    def test_without_a_project_there_is_none(self, tmp_path):
+        from helicon.lib import io
+
+        star = tmp_path / "a" / "x.star"
+        star.parent.mkdir()
+        star.touch()
+        assert io.get_relion_project_folder(str(star)) is None

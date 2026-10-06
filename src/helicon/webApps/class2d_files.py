@@ -117,13 +117,30 @@ def local_path(value) -> Path | None:
     return p.absolute() if p is not None else None
 
 
+def relion_project_root(star) -> str:
+    """The RELION project root of a file in one of its job folders, or "".
+
+    See :func:`helicon.lib.io.get_relion_project_folder`: the folder with
+    ``.gui_projectdir``, else the one with ``default_pipeline.star`` that is not a
+    job folder.
+
+    Parameters
+    ----------
+    star : str or Path
+        A file in a job folder, such as the Class2D ``run_it020_data.star``.
+    """
+    from helicon.lib.io import get_relion_project_folder
+
+    return get_relion_project_folder(str(star)) or ""
+
+
 def project_folder(params_path, image=None) -> str:
     """The RELION or cryoSPARC project a Class2D parameter file belongs to.
 
     That is the folder the segments' image paths start from, which
     relion_reconstruct needs. Looked for, in order: the folder (the project's,
     or one above the parameter file) from which ``image`` exists; the project
-    root by its marker -- ``default_pipeline.star`` for RELION, ``project.json``
+    root by its marker -- ``.gui_projectdir`` for RELION, ``project.json``
     for cryoSPARC; and, without either, the usual depth of a job folder below
     its project (RELION ``Class2D/job010/``, cryoSPARC ``J63/``).
 
@@ -144,11 +161,9 @@ def project_folder(params_path, image=None) -> str:
     star = local_path(params_path)
     if star is None:
         return ""
-    root = None
-    for folder in star.parents:  # RELION: the project root holds the pipeline
-        if (folder / "default_pipeline.star").is_file():
-            root = folder
-            break
+    # RELION: the project root, by its .gui_projectdir (not a job folder, which in
+    # RELION 5 also holds a copy of default_pipeline.star)
+    root = Path(relion_project_root(star)) if relion_project_root(star) else None
     if root is None:
         from helicon.lib import cryosparc_project
 
