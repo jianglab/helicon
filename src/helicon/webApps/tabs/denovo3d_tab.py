@@ -26,7 +26,7 @@ import helicon
 from shiny import reactive, render, req, ui, module
 from shiny.types import SilentException
 
-from .. import deployment
+from .. import deployment, map_viewers
 
 from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register
 from ..lib import helix_transform
@@ -2105,10 +2105,8 @@ def denovo3d_tab_server(input, output, session):
             style="width: 115px; height: 115px;",
         )
 
-    @render.download(
-        filename="helicon_denovo3d_reconstructed_map.mrc",
-    )
-    def dn_download_map():
+    def _dn_map_for_download():
+        """The reconstructed map and its voxel size, as downloaded."""
         req(len(reconstruction_results()) == 1)
         result = reconstruction_results()[0]
         imgs = all_images()
@@ -2123,7 +2121,7 @@ def denovo3d_tab_server(input, output, session):
             input_image_shape = imgs.data[image_index].shape
 
         compact_apix = _input_or("dn_apix", apix_rv()) * max(1, input.dn_binning())
-        rec3d_map, apix = _prepare_download_map(
+        return _prepare_download_map(
             result,
             match_input_box=input.dn_match_input_box(),
             input_image_shape=input_image_shape,
@@ -2132,12 +2130,26 @@ def denovo3d_tab_server(input, output, session):
             cpu=input.dn_cpu(),
         )
 
+    @render.download(
+        filename="helicon_denovo3d_reconstructed_map.mrc",
+    )
+    def dn_download_map():
+        rec3d_map, apix = _dn_map_for_download()
+
         with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
             with mrcfile.new(temp.name, overwrite=True) as mrc:
                 mrc.set_data(rec3d_map)
                 mrc.voxel_size = apix
             with open(temp.name, "rb") as file:
                 yield file.read()
+
+    def _dn_map_if_any():
+        try:
+            return _dn_map_for_download()
+        except (SilentException, ValueError):
+            return None
+
+    map_viewers.register(input, session, "dn_map_view", _dn_map_if_any, "denovo3d_map")
 
     @render.ui
     def dn_download_map_section():
@@ -2146,7 +2158,7 @@ def denovo3d_tab_server(input, output, session):
         req(res[0][1][3] is not None)
         from htmltools import tags
 
-        return ui.div(
+        return map_viewers.button_row(
             tags.a(
                 "Download reconstructed map",
                 id=session.ns("dn_download_map"),
@@ -2154,7 +2166,11 @@ def denovo3d_tab_server(input, output, session):
                 href="",
                 target="_blank",
             ),
-            style="display: flex; justify-content: center; margin-top: 10px;",
+            session,
+            "dn_map_view",
+            justify="center",
+            style="margin-top: 10px;",
+            button_class="btn-primary",
         )
 
     # ── Render: scores plot ──────────────────────────────────────────

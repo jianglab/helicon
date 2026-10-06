@@ -21,7 +21,7 @@ import helicon
 from shiny import reactive, ui, module, req, render
 from shiny.module import resolve_id
 
-from .. import bookmark, class2d_files, deployment
+from .. import bookmark, class2d_files, deployment, map_viewers
 
 from ..lib import helical_pitch_compute as compute
 from ..lib import helical_pitch_map as maps
@@ -2829,7 +2829,9 @@ def abinitio3d_tab_server(input, output, session):
             )
 
         return ui.tooltip(
-            band_ui,
+            map_viewers.download_link(
+                session, "download_pitch_band", _download_label(subset, "Download")
+            ),
             ui.HTML(
                 "A RELION star file of the segments in the selected classes, with "
                 'their estimated <span style="font-family: monospace; color: #ffd479;">rlnAngleRot</span>, <span style="font-family: monospace; color: #ffd479;">rlnAngleTilt</span> '
@@ -3197,6 +3199,18 @@ def abinitio3d_tab_server(input, output, session):
             )
         )
 
+    map_viewers.register(
+        input,
+        session,
+        "relion_view",
+        lambda: (
+            None
+            if relion_map() is None
+            else (relion_map()["volume"], relion_map()["apix"])
+        ),
+        "abinitio3d_relion_map",
+    )
+
     @render.ui
     def relion_display():
         m = relion_map()
@@ -3255,7 +3269,17 @@ def abinitio3d_tab_server(input, output, session):
             # from memory
             yield _mrc_bytes(m["volume"], m["apix"])
 
-        return ui.div(_fig_to_html(fig), btn)
+        return ui.div(
+            _fig_to_html(fig),
+            map_viewers.button_row(
+                map_viewers.download_link(
+                    session, "download_relion_map", "Download map (.mrc)"
+                ),
+                session,
+                "relion_view",
+                button_class="btn-primary",
+            ),
+        )
 
     # ── a 3D map from the class averages ──
 
@@ -3436,4 +3460,21 @@ def abinitio3d_tab_server(input, output, session):
                     mrc.voxel_size = m["apix_out"]
                 yield Path(path).read_bytes()
 
-        return btn
+        return map_viewers.button_row(
+            map_viewers.download_link(session, "download_map", "Download map (.mrc)"),
+            session,
+            "map_view",
+            button_class="btn-primary",
+        )
+
+    map_viewers.register(
+        input,
+        session,
+        "map_view",
+        lambda: (
+            None
+            if map_result() is None
+            else (map_result()["volume_out"], map_result()["apix_out"])
+        ),
+        "abinitio3d_class_map",
+    )
