@@ -56,7 +56,8 @@ BOOKMARK_DEFAULTS = {
     "rise": ("rise", 4.75),
     "min_twist": ("min_twist", 0.3),
     "merge_counterparts": ("merge_counterparts", True),
-    "types_cut": ("types_cut", 0.15),
+    # starts at what the default cut of the tree gives, from the classes
+    "types_n": ("types_n", 1, bookmark.DERIVED),
     "agree_cut": ("agree_threshold", 0.0),
     "csym": ("rot_fold", 1),
     "hand": ("map_hand", "left"),
@@ -69,16 +70,31 @@ BOOKMARK_DEFAULTS = {
 }
 
 
+# Plotly sizes a figure once, to its box as the page is first laid out, and after
+# that only when the window is resized. The box changes without that (a scrollbar
+# appears, the results are shown, the columns are re-flowed), which left a figure
+# larger than its box and its left and bottom edges cut off. This resizes the
+# figure whenever its box does.
+_RESIZE_WITH_BOX = (
+    "var gd = document.getElementById('{plot_id}');"
+    "if (gd && window.ResizeObserver && gd.parentElement) {"
+    "  new ResizeObserver(function() {"
+    # a plot in a box that is not shown (the results wait) cannot be resized
+    "    if (gd.offsetWidth > 0) { try { Plotly.Plots.resize(gd); } catch (e) {} }"
+    "  }).observe(gd.parentElement);"
+    "}"
+)
+
+
 def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
     """Convert a plotly figure to responsive HTML for rendering via render.ui."""
-    postscript = ""
     html = pio.to_html(
         fig,
         full_html=False,
         include_plotlyjs=True,
         div_id=plot_id,
         config={"responsive": True, "displayModeBar": False},
-        post_script=postscript,
+        post_script=_RESIZE_WITH_BOX,
     )
     return ui.HTML(html)
 
@@ -492,7 +508,6 @@ def abinitio3d_tab_ui():
                             "Groups the classes by how their averages look: every "
                             "pair of averages is registered along the filament, "
                             "and the classes whose averages correlate well "
-                            "(0.85 or better on average, with the default cut) "
                             "make a group. Different helical types look "
                             "different, and the filaments of a type use its "
                             "classes. It does not use the repeat, which "
@@ -500,23 +515,25 @@ def abinitio3d_tab_ui():
                             "time, then estimate its pitch.",
                         ),
                         helicon.shiny.slider(
-                            "types_cut",
+                            "types_n",
                             ui.span(
-                                "Cut",
+                                "Groups",
                                 _info(
-                                    "Classes are grouped while their averages "
-                                    "correlate at least 1 - cut on average: a "
-                                    "smaller cut makes more, tighter groups. "
-                                    "0.10 to 0.20 separated the PHF and SF "
-                                    "classes of EMPIAR-10230, and 0.25 joined "
-                                    "them: how different the types look sets the "
-                                    "right value, so look at the groups."
+                                    "How many groups of classes. It starts at the "
+                                    "number that cutting the tree where the "
+                                    "averages of a group correlate 0.85 on average "
+                                    "gives (the earlier default). Fewer groups join "
+                                    "the most alike ones; more split them. Classes "
+                                    "in a group of fewer than three are not "
+                                    "grouped (junk, or a view of their own). How "
+                                    "different the types look sets the right "
+                                    "number, so look at the groups."
                                 ),
                             ),
-                            min=0.05,
-                            max=0.4,
-                            value=0.15,
-                            step=0.01,
+                            min=1,
+                            max=8,
+                            value=1,
+                            step=1,
                         ),
                         ui.output_ui("types_controls"),
                         ui.div(
@@ -768,6 +785,12 @@ def abinitio3d_tab_ui():
             "<i><p style='margin:2px 0'>Developed by the <a href='https://jianglab.science.psu.edu/helicon' target='_blank'>Jiang Lab</a>. Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
         ),
     )
+
+
+def _box_text(shape):
+    """The size of a map: ``N\u00b3`` for a cube, else ``nx \u00d7 ny \u00d7 nz``."""
+    nz, ny, nx = (int(n) for n in shape)
+    return f"{nx}\u00b3" if nx == ny == nz else f"{nx} \u00d7 {ny} \u00d7 {nz}"
 
 
 def _mrc_bytes(volume, apix):
@@ -1717,7 +1740,12 @@ def abinitio3d_tab_server(input, output, session):
                 int(100 * k / max(n, 1)), message=f"registered {k:,} of {n:,} pairs"
             ),
         )
-        return dict(classes=classes, similarity=similarity, floor=floor)
+        return dict(
+            classes=classes,
+            similarity=similarity,
+            floor=floor,
+            default_n=types.default_n_groups(similarity),
+        )
 
     def _types_apply(job, result):
         if params() is not job["params"]:
@@ -1759,15 +1787,32 @@ def abinitio3d_tab_server(input, output, session):
             )
         )
 
+    types_first = [True]
+
+    @reactive.effect
+    @reactive.event(types_state)
+    def _default_types_n():
+        # each comparison starts at the number the default cut gives; a bookmarked
+        # number is kept for the first one (the card is static, so only a bookmark
+        # can have moved the slider before there is a comparison)
+        state = types_state()
+        if state is None:
+            return
+        if types_first[0]:
+            types_first[0] = False
+            if input.types_n() not in (None, BOOKMARK_DEFAULTS["types_n"][1]):
+                return
+        ui.update_slider("types_n", value=int(state["default_n"]))
+
     @reactive.calc
     def _type_groups():
-        """The groups at the current cut: a list of dicts, largest first, then the
-        classes in no group; None before the classes have been compared."""
+        """The groups at the current number: a list of dicts, largest first, then
+        the classes in no group; None before the classes have been compared."""
         state = types_state()
         if state is None:
             return None
-        cut = helicon.shiny.clamp_number(input.types_cut(), 0.15, 0.02, 0.6, float)
-        labels = types.pixel_groups(state["similarity"], cut)
+        n = int(helicon.shiny.clamp_number(input.types_n(), 1, 1, 8, float))
+        labels, _ = types.pixel_groups_n(state["similarity"], n)
         classes = np.asarray(state["classes"])
         counts = np.asarray(abundance())
         counts_c = np.array([counts[c - 1] for c in classes], dtype=float)
@@ -2782,27 +2827,63 @@ def abinitio3d_tab_server(input, output, session):
         relion_map.set(None)
 
     def _relion_project_guess():
-        """The directory the segments' image paths resolve from, if it can be found."""
+        """The RELION project folder of the parameter file, if it can be found."""
         if deployment.is_cloud():  # no looking at the server's files
             return ""
         p = params()
-        if p is None or "rlnImageName" not in p:
+        if p is None:
+            return ""
+        # the parameter file on this computer: chosen in the server mode, or a
+        # path (or file:// URL) typed in the url mode
+        mode = input.input_mode_params()
+        source = _source(mode, input.url_params, input.server_params)
+        star = class2d_files.local_path(source)
+        if star is not None:
+            # the project root, two folders above the star file (../..), which has
+            # default_pipeline.star; the paths in the star file (stacks, or
+            # micrographs) start from there
+            root = class2d_files.relion_project_root(star)
+            if root:
+                return root
+        if "rlnImageName" not in p:
             return ""
         image = str(p["rlnImageName"].iloc[0]).split("@")[-1]
         if Path(image).is_absolute():
             return str(Path(image).parent) if Path(image).exists() else ""
-        # the parameter file on this computer: chosen in the server mode, or a
-        # path (or file:// URL) typed in the url mode
-        mode = input.input_mode_params()
-        found = class2d_files.project_folder(
-            _source(mode, input.url_params, input.server_params), image
-        )
+        found = class2d_files.project_folder(source, image)
         if found:
             return found
         for folder in [Path.cwd(), *Path.cwd().parents]:
             if (folder / image).exists():
                 return str(folder)
         return ""
+
+    # the pixel size the previous time the size boxes were set, to keep the physical
+    # extent when the pixel size is changed
+    relion_prev_apix = reactive.value(None)
+
+    def _relion_default_geometry():
+        """Pixel size and box of the stored segment images (those of the class
+        averages), or None."""
+        found = data_all()
+        images = displayed_class_images()
+        if found is None or found[0] is None or not len(images):
+            return None
+        return float(found[1]), int(images[0].shape[0])
+
+    @reactive.effect
+    @reactive.event(input.relion_apix)
+    def _rescale_relion_boxes():
+        # the boxes are in pixels: a new pixel size keeps what they cover
+        new, old = input.relion_apix(), relion_prev_apix()
+        if new is None or not old or new <= 0 or abs(new - old) < 1e-9:
+            return
+        relion_prev_apix.set(float(new))
+        for name in ("relion_diameter", "relion_length"):
+            value = input[name]()
+            if value:
+                size = int(round(value * old / new / 2.0)) * 2
+                ui.update_numeric(name, value=max(2, size))
 
     @render.ui
     def relion_ui():
@@ -2828,12 +2909,21 @@ def abinitio3d_tab_server(input, output, session):
                 "relion_reconstruct is not on this server's PATH; download the star "
                 "file and reconstruct it where RELION is installed.",
             )
+        return ui.TagList(_relion_project_row(exe), ui.output_ui("relion_fused_ui"))
+
+    def _relion_project_row(exe):
         return ui.layout_columns(
             ui.input_text(
                 "relion_project_dir",
                 ui.span(
                     "RELION project",
-                    _info("The directory the image paths in the star file start from"),
+                    _info(
+                        "The directory the paths in the star file start from: the "
+                        "particle stacks (to reconstruct from the stored segment "
+                        "images) or the micrographs (to cut the segments from them "
+                        "at another pixel size or box); only the ones used need to "
+                        "be there"
+                    ),
                 ),
                 value=_relion_project_guess(),
                 width="100%",
@@ -2860,6 +2950,137 @@ def abinitio3d_tab_server(input, output, session):
             fill=False,
         )
 
+    @reactive.calc
+    def _fused_state():
+        """Whether the segments can be cut from the micrographs: ``"yes"``, ``"no
+        micrographs"`` (this RELION can, but they are not under the project folder)
+        or ``"no"``. A calc, so what depends on it is redrawn when it changes, not
+        at each edit of the project folder."""
+        exe = relion.find_relion_reconstruct()
+        if exe is None or deployment.is_cloud():
+            return "no"
+        if not relion.fused_extract_available(exe):
+            return "no"
+        if _relion_default_geometry() is None:
+            return "no"
+        found = relion.micrographs_found(params(), input.relion_project_dir())
+        return "yes" if found else "no micrographs"
+
+    @render.ui
+    def relion_fused_ui():
+        state = _fused_state()
+        if state == "no":
+            return None
+        if state == "no micrographs":
+            return ui.p(
+                "To reconstruct at another pixel size and box, the micrographs of "
+                "the segments (and their coordinates) have to be under the RELION "
+                "project folder.",
+                class_="small text-muted",
+                style="margin: 2px 0 0 0;",
+            )
+        geometry = _relion_default_geometry()
+        relion_prev_apix.set(geometry[0])
+        return ui.TagList(
+            ui.layout_columns(
+                ui.input_numeric(
+                    "relion_apix",
+                    ui.span(
+                        "Pixel size (\u00c5)",
+                        _info(
+                            "The pixel size of the reconstruction. The segments "
+                            "are cut from the micrographs at this pixel size, so "
+                            "it can be finer than the class averages' "
+                            f"({geometry[0]:.3f} \u00c5). Changing it keeps the "
+                            "area the two sizes cover."
+                        ),
+                    ),
+                    value=round(geometry[0], 4),
+                    min=0.1,
+                    step=0.01,
+                    update_on="blur",
+                    width="100%",
+                ),
+                ui.input_numeric(
+                    "relion_diameter",
+                    ui.span(
+                        "Diameter (px)",
+                        _info(
+                            "The width of the reconstruction across the filament, "
+                            "in pixels of this pixel size: the map is this wide "
+                            "in x and y."
+                        ),
+                    ),
+                    value=geometry[1],
+                    min=2,
+                    step=2,
+                    update_on="blur",
+                    width="100%",
+                ),
+                ui.input_numeric(
+                    "relion_length",
+                    ui.span(
+                        "Length (px)",
+                        _info(
+                            "The length of each segment along the filament, in "
+                            "pixels of this pixel size; the map is this long "
+                            "(z)."
+                        ),
+                    ),
+                    value=geometry[1],
+                    min=2,
+                    step=2,
+                    update_on="blur",
+                    width="100%",
+                ),
+                col_widths=(4, 4, 4),
+                fill=False,
+            ),
+            ui.output_ui("relion_fused_note"),
+        )
+
+    def _relion_fused_request():
+        """The ``fused`` argument of relion.reconstruct for the boxes set now, or
+        None when they are those of the stored segment images (reconstruct from
+        them) or there are no boxes."""
+        if _fused_state() != "yes":
+            return None
+        geometry = _relion_default_geometry()
+        apix, diameter, length = (
+            input.relion_apix(),
+            input.relion_diameter(),
+            input.relion_length(),
+        )
+        if geometry is None or not (apix and diameter and length):
+            return None
+        apix = float(helicon.shiny.clamp_number(apix, geometry[0], 0.1, 100.0, float))
+        diameter = int(helicon.shiny.clamp_number(diameter, geometry[1], 2, 4096))
+        length = int(helicon.shiny.clamp_number(length, geometry[1], 2, 4096))
+        if (
+            abs(apix - geometry[0]) < 1e-6
+            and diameter == geometry[1]
+            and length == geometry[1]
+        ):
+            return None
+        return dict(angpix=apix, diameter=diameter, length=length)
+
+    @render.ui
+    def relion_fused_note():
+        fused = _relion_fused_request()
+        if fused is None:
+            text = (
+                "From the stored segment images, at the class averages' pixel size "
+                "and box."
+            )
+        else:
+            a, d, n = fused["angpix"], fused["diameter"], fused["length"]
+            text = (
+                f"Cut from the micrographs at {a:g} \u00c5/pixel: {d * a:.0f} \u00c5 "
+                f"wide, {n * a:.0f} \u00c5 long; the map is {d} \u00d7 {d} \u00d7 {n} "
+                "pixels."
+            )
+        return ui.p(text, class_="small text-muted", style="margin: 2px 0 0 0;")
+
     def _relion_work(job, progress):
         progress.set(
             0,
@@ -2871,6 +3092,7 @@ def abinitio3d_tab_server(input, output, session):
             job["project_dir"],
             cpu=max(1, int(helicon.available_cpu())),
             csym=job["csym"],
+            fused=job["fused"],
         )
 
     def _relion_apply(job, result):
@@ -2921,12 +3143,21 @@ def abinitio3d_tab_server(input, output, session):
         if not len(subset):
             ui.notification_show("No segment is in the selected ranges.", duration=5)
             return
+        fused = _relion_fused_request()
+        if fused is not None and "rlnCoordinateX" not in subset:
+            ui.notification_show(
+                "Cutting the segments from the micrographs needs rlnCoordinateX "
+                "and rlnCoordinateY in the star file.",
+                duration=6,
+            )
+            return
         relion_task.invoke(
             dict(
                 phase_result=r,
                 subset=subset,
                 project_dir=input.relion_project_dir(),
                 csym=_imposed_csym(),
+                fused=fused,
             )
         )
 
@@ -2970,7 +3201,7 @@ def abinitio3d_tab_server(input, output, session):
                 "relion_reconstruct"
                 + (f" (MPI \u00d7{m['mpi']})" if m.get("mpi") else "")
                 + f" \u00b7 {m['n_segments']:,} segments \u00b7 "
-                f"{volume.shape[-1]}\u00b3 at {m['apix']:.3f} \u00c5 \u00b7 C{m['csym']}"
+                f"{_box_text(volume.shape)} at {m['apix']:.3f} \u00c5 \u00b7 C{m['csym']}"
             ),
             title_x=0.5,
             title_font=dict(size=12),

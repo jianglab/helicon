@@ -496,23 +496,40 @@ class TestTypesGrouping:
         forget = src[src.index("def _forget_types") : src.index("def _types_work")]
         assert "types_state.set(None)" in forget
 
-    def test_the_cut_is_a_bookmarked_input_at_its_default(self):
-        assert abinitio3d_tab.BOOKMARK_DEFAULTS["types_cut"] == ("types_cut", 0.15)
+    def test_the_number_of_groups_is_a_bookmarked_input_that_follows_the_classes(self):
+        d = abinitio3d_tab.BOOKMARK_DEFAULTS
+        assert d["types_n"][:2] == ("types_n", 1)
+        assert d["types_n"][2] is abinitio3d_tab.bookmark.DERIVED
+        assert "types_cut" not in d
 
-    def test_the_cut_slider_is_part_of_the_card_not_of_what_needs_the_cut(self):
+    def test_the_number_slider_is_part_of_the_card_not_of_what_needs_it(self):
         # a slider drawn by the output that needs its value never gets drawn: the
-        # groups wait for the cut, and the cut for the groups
+        # groups wait for the number, and the number for the groups
         src = self._src()
         card = src.index('ui.card_header("Types")')
-        slider = src.index('"types_cut"', card)
+        slider = src.index('"types_n"', card)
         controls = src.index('ui.output_ui("types_controls")', card)
         assert slider < controls
-        assert 'helicon.shiny.slider(\n                            "types_cut"' in src
+        assert 'helicon.shiny.slider(\n                            "types_n"' in src
         dynamic = src[src.index("def types_controls") : src.index("def _chosen_group")]
-        assert "types_cut" not in dynamic
+        assert "types_n" not in dynamic
 
-    def test_moving_the_cut_does_not_redraw_the_slider(self):
-        # the controls follow the comparison, not the cut: read the groups isolated
+    def test_the_groups_are_those_of_the_number_asked_for(self):
+        src = self._src()
+        groups = src[src.index("def _type_groups") : src.index("def _group_text")]
+        assert 'types.pixel_groups_n(state["similarity"], n)' in groups
+        assert "input.types_n()" in groups
+
+    def test_each_comparison_starts_at_the_number_of_the_default_cut(self):
+        src = self._src()
+        work = src[src.index("def _types_work") : src.index("def _types_apply")]
+        assert "types.default_n_groups(similarity)" in work
+        effect = src[src.index("def _default_types_n") :][:900]
+        assert 'ui.update_slider("types_n"' in effect
+        assert "types_first" in effect  # a bookmarked number is kept at first
+
+    def test_moving_the_number_does_not_redraw_the_slider(self):
+        # the controls follow the comparison, not the number: read the groups isolated
         src = self._src()
         controls = src[src.index("def types_controls") : src.index("def _chosen_group")]
         assert "reactive.isolate()" in controls
@@ -620,3 +637,285 @@ class TestSuggestionsAndAgreement:
         src = self._src()
         work = src[src.index("def _suggest_agreement") :]
         assert "except Exception" in work[: work.index("def _suggest_apply")]
+
+
+class TestPlotsFollowTheirBox:
+    """A figure is resized when its box changes, so its edges are not cut off."""
+
+    def test_the_html_resizes_the_figure_with_its_box(self):
+        import plotly.graph_objects as go
+
+        html = str(
+            abinitio3d_tab._fig_to_html(go.Figure(go.Scatter(x=[0, 1], y=[0, 1])))
+        )
+        assert "ResizeObserver" in html and "Plotly.Plots.resize" in html
+        # the placeholder is filled with the figure's own id
+        assert "{plot_id}" not in html
+
+
+class TestFusedReconstruction:
+    """The reconstruction can cut the segments from the micrographs, at another
+    pixel size and in another box, when relion_reconstruct has --fused_extract."""
+
+    def _src(self):
+        import inspect
+
+        return inspect.getsource(abinitio3d_tab)
+
+    def _fused_ui(self):
+        src = self._src()
+        return src[
+            src.index("def _fused_state") : src.index("def _relion_fused_request")
+        ]
+
+    def test_the_boxes_need_the_program_the_micrographs_and_the_coordinates(self):
+        ui_src = self._fused_ui()
+        state = ui_src[: ui_src.index("def relion_fused_ui")]
+        assert "relion.fused_extract_available(exe)" in state
+        assert "relion.micrographs_found(params(), input.relion_project_dir())" in state
+        # nothing is drawn without them: the layout is what it was
+        assert 'if state == "no":\n            return None' in ui_src
+        for name in ("relion_apix", "relion_diameter", "relion_length"):
+            assert f'"{name}"' in ui_src
+
+    def test_the_boxes_come_and_go_with_the_micrographs_not_with_each_keystroke(self):
+        ui_src = self._fused_ui()
+        # a calc: what depends on it is redrawn only when its value changes
+        src = self._src()
+        before = src[: src.index("def _fused_state")].rstrip()
+        assert before.endswith("@reactive.calc")
+        assert "no micrographs" in ui_src  # a hint when only they are missing
+
+    def test_the_defaults_are_the_class_averages_pixel_size_and_box(self):
+        src = self._src()
+        geometry = src[src.index("def _relion_default_geometry") :][:500]
+        assert "found[1]" in geometry and "images[0].shape[0]" in geometry
+        ui_src = self._fused_ui()
+        assert "value=round(geometry[0], 4)" in ui_src
+        assert ui_src.count("value=geometry[1]") == 2
+
+    def test_the_defaults_reconstruct_from_the_stored_images_as_before(self):
+        src = self._src()
+        request = src[
+            src.index("def _relion_fused_request") : src.index("def relion_fused_note")
+        ]
+        assert 'if _fused_state() != "yes"' in request
+        assert "return None" in request
+        assert "abs(apix - geometry[0]) < 1e-6" in request
+        assert (
+            "diameter == geometry[1]" in request and "length == geometry[1]" in request
+        )
+        run = src[src.index("def run_relion") : src.index("def relion_display")]
+        assert "fused=fused" in run
+        work = src[src.index("def _relion_work") : src.index("def _relion_apply")]
+        assert 'fused=job["fused"]' in work
+
+    def test_a_new_pixel_size_keeps_the_area_the_boxes_cover(self):
+        src = self._src()
+        effect = src[src.index("def _rescale_relion_boxes") :][:900]
+        assert (
+            "input.relion_apix"
+            in src[src.index("def _rescale_relion_boxes") - 120 :][:200]
+        )
+        assert "old / new" in effect and "ui.update_numeric(name" in effect
+
+    def test_the_segments_need_their_coordinates(self):
+        src = self._src()
+        run = src[src.index("def run_relion") : src.index("def relion_display")]
+        assert '"rlnCoordinateX" not in subset' in run
+
+    def test_a_cuboid_map_is_titled_with_its_three_sizes(self):
+        assert abinitio3d_tab._box_text((4, 4, 4)) == "4³"
+        assert abinitio3d_tab._box_text((8, 4, 4)) == "4 × 4 × 8"
+
+
+class TestProjectFolderGuess:
+    def test_it_is_the_folder_with_the_pipeline_file_above_the_star_file(self):
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        guess = src[
+            src.index("def _relion_project_guess") : src.index("relion_prev_apix =")
+        ]
+        assert "class2d_files.relion_project_root(star)" in guess
+        # tried before anything that looks for the stacks
+        assert guess.index("relion_project_root") < guess.index("rlnImageName")
+
+    def test_the_root_is_two_folders_above_the_star_file(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        (tmp_path / "default_pipeline.star").touch()
+        job = tmp_path / "Class2D" / "job010"
+        job.mkdir(parents=True)
+        (job / "default_pipeline.star").touch()  # RELION 5: each job has a copy
+        star = job / "run_it020_data.star"
+        star.touch()
+        assert class2d_files.relion_project_root(star) == str(tmp_path)
+
+    def test_no_stacks_or_micrographs_are_needed_to_find_it(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        (tmp_path / "default_pipeline.star").touch()
+        star = tmp_path / "Select" / "job005" / "particles.star"
+        star.parent.mkdir(parents=True)
+        star.touch()
+        assert class2d_files.relion_project_root(star) == str(tmp_path)
+
+    def test_a_job_folder_that_is_a_link_stays_in_its_project(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        project = tmp_path / "project"
+        (project / "Class2D").mkdir(parents=True)
+        (project / "default_pipeline.star").touch()
+        elsewhere = tmp_path / "archive" / "job010"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "default_pipeline.star").touch()
+        (project / "Class2D" / "job010").symlink_to(elsewhere)
+        star = project / "Class2D" / "job010" / "run_it020_data.star"
+        (elsewhere / "run_it020_data.star").touch()
+        assert class2d_files.relion_project_root(star) == str(project)
+
+    def test_a_file_at_another_depth_gets_the_outermost_pipeline_folder(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        (tmp_path / "default_pipeline.star").touch()
+        deep = tmp_path / "Extract" / "job001" / "sub" / "p.star"
+        deep.parent.mkdir(parents=True)
+        (deep.parent.parent / "default_pipeline.star").touch()
+        deep.touch()
+        assert class2d_files.relion_project_root(deep) == str(tmp_path)
+
+    def test_a_file_outside_a_project_gives_nothing(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        star = tmp_path / "a" / "b" / "c.star"
+        star.parent.mkdir(parents=True)
+        star.touch()
+        assert class2d_files.relion_project_root(star) == ""
+
+    def test_a_stack_or_a_micrograph_is_enough_to_reconstruct(self, tmp_path):
+        import pandas as pd
+        import pytest
+
+        from helicon.webApps.lib import helical_pitch_relion as relion
+
+        mic = tmp_path / "MotionCorr" / "m.mrc"
+        mic.parent.mkdir()
+        mic.touch()
+        seg = pd.DataFrame(
+            dict(
+                rlnImageName=["1@Extract/none/a.mrcs"],  # no stacks in this project
+                rlnMicrographName=["MotionCorr/m.mrc"],
+                rlnCoordinateX=[1.0],
+                rlnCoordinateY=[1.0],
+                rlnAnglePsiPrior=[0.0],
+                rlnAnglePsi=[0.0],
+            )
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(relion, "find_relion_reconstruct", lambda: "/bin/true")
+            mp.setattr(relion, "fused_extract_available", lambda exe=None: True)
+            mp.setattr(relion, "find_relion_reconstruct_mpi", lambda: None)
+
+            def reached(*a, **k):
+                raise RuntimeError("reached relion")
+
+            mp.setattr(relion.subprocess, "run", reached)
+            with pytest.raises(RuntimeError, match="reached relion"):
+                relion.reconstruct(
+                    seg, str(tmp_path), fused=dict(angpix=2, length=64, diameter=64)
+                )
+        # the stored-image route still needs the stack
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(relion, "find_relion_reconstruct", lambda: "/bin/true")
+            with pytest.raises(FileNotFoundError, match="image paths"):
+                relion.reconstruct(seg, str(tmp_path))
+
+
+class TestProjectRootMarker:
+    """RELION marks a project root with an empty .gui_projectdir."""
+
+    def test_the_root_is_the_folder_with_the_gui_marker(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        (tmp_path / ".gui_projectdir").touch()
+        job = tmp_path / "Class2D" / "job010"
+        job.mkdir(parents=True)
+        (job / "default_pipeline.star").touch()  # RELION 5: each job has a copy
+        star = job / "run_it020_data.star"
+        star.touch()
+        assert class2d_files.relion_project_root(star) == str(tmp_path)
+
+    def test_the_marker_wins_whatever_the_depth(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        (tmp_path / ".gui_projectdir").touch()
+        deep = tmp_path / "Extract" / "job001" / "sub" / "p.star"
+        deep.parent.mkdir(parents=True)
+        (deep.parent.parent / "default_pipeline.star").touch()
+        deep.touch()
+        assert class2d_files.relion_project_root(deep) == str(tmp_path)
+
+    def test_the_marker_is_found_through_a_linked_job_folder(self, tmp_path):
+        from helicon.webApps import class2d_files
+
+        project = tmp_path / "project"
+        (project / "Class2D").mkdir(parents=True)
+        (project / ".gui_projectdir").touch()
+        archive = tmp_path / "archive" / "job010"
+        archive.mkdir(parents=True)
+        (archive / "run_it020_data.star").touch()
+        (project / "Class2D" / "job010").symlink_to(archive)
+        star = project / "Class2D" / "job010" / "run_it020_data.star"
+        assert class2d_files.relion_project_root(star) == str(project)
+
+
+class TestMicrographsFound:
+    def _segments(self, tmp_path, **kw):
+        import pandas as pd
+
+        mic = tmp_path / "MotionCorr" / "m.mrc"
+        mic.parent.mkdir(exist_ok=True)
+        mic.touch()
+        cols = dict(
+            rlnMicrographName=["MotionCorr/m.mrc"],
+            rlnCoordinateX=[1.0],
+            rlnCoordinateY=[1.0],
+            rlnAnglePsiPrior=[0.0],
+        )
+        cols.update(kw)
+        return pd.DataFrame(cols)
+
+    def test_the_micrograph_is_under_the_project(self, tmp_path):
+        from helicon.webApps.lib import helical_pitch_relion as relion
+
+        assert relion.micrographs_found(self._segments(tmp_path), str(tmp_path))
+
+    def test_not_under_another_folder(self, tmp_path):
+        from helicon.webApps.lib import helical_pitch_relion as relion
+
+        other = tmp_path / "other"
+        other.mkdir()
+        assert not relion.micrographs_found(self._segments(tmp_path), str(other))
+
+    def test_an_absolute_micrograph_path_needs_no_project(self, tmp_path):
+        from helicon.webApps.lib import helical_pitch_relion as relion
+
+        seg = self._segments(tmp_path)
+        seg["rlnMicrographName"] = str(tmp_path / "MotionCorr" / "m.mrc")
+        assert relion.micrographs_found(seg, str(tmp_path / "anywhere"))
+
+    def test_without_a_project_folder_or_coordinates_there_is_nothing_to_cut_from(
+        self, tmp_path
+    ):
+        from helicon.webApps.lib import helical_pitch_relion as relion
+
+        seg = self._segments(tmp_path)
+        assert not relion.micrographs_found(seg, "")
+        assert not relion.micrographs_found(
+            seg.drop(columns="rlnCoordinateX"), str(tmp_path)
+        )
+        assert not relion.micrographs_found(
+            seg.drop(columns="rlnAnglePsiPrior"), str(tmp_path)
+        )
+        assert not relion.micrographs_found(None, str(tmp_path))
