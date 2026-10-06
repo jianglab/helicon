@@ -16,7 +16,7 @@ import helicon
 from shiny import reactive, ui, module, req, render
 from shinywidgets import render_plotly, render_widget, output_widget
 
-from .. import deployment
+from .. import class2d_files, deployment
 
 from ..lib import whereismyclass_compute as compute
 
@@ -414,9 +414,21 @@ def where_is_my_class_tab_server(input, output, session):
             abundance.set(compute.get_class_abundance(df, n))
         except Exception:
             logger.error("Failed to get class abundance", exc_info=True)
+            names = (
+                (
+                    input.wimc_server_star()
+                    if input.wimc_input_mode() == helicon.shiny.SERVER
+                    else input.wimc_url_star()
+                ),
+                str(filepath_classes() or ""),
+            )
+            try:
+                numbers = df["rlnClassNumber"].astype(int)
+                counts = (int(numbers.nunique()), n, int(numbers.max()))
+            except Exception:
+                counts = (None, n, None)
             m = ui.modal(
-                "Failed to get class abundance from the provided Class2D parameter "
-                "and image files. Make sure that the two files are for the same Class2D job",
+                class2d_files.abundance_error_message(*names, *counts),
                 title="Information error",
                 easy_close=True,
                 footer=None,

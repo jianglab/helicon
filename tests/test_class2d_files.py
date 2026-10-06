@@ -165,3 +165,122 @@ class TestProjectFolder:
     def test_web_urls_and_missing_files_give_nothing(self, tmp_path):
         assert c2.project_folder("https://ftp.ebi.ac.uk/x_data.star") == ""
         assert c2.project_folder(tmp_path / "missing_data.star") == ""
+
+
+class TestPairProblem:
+    """Files of one Class2D job are named alike; a pair that is not is named."""
+
+    def test_the_files_of_one_relion_job_are_a_pair(self):
+        assert (
+            c2.pair_problem(
+                "/p/Class2D/job010/run_it020_data.star",
+                "/p/Class2D/job010/run_it020_classes.mrcs",
+            )
+            is None
+        )
+
+    def test_a_url_and_a_local_file_of_the_same_job_are_a_pair(self):
+        assert (
+            c2.pair_problem(
+                "/p/Class2D/job010/run_it020_data.star",
+                "https://ftp.example.org/x/Class2D/job010/run_it020_classes.mrcs",
+            )
+            is None
+        )
+
+    def test_the_job_and_the_iteration_that_differ_are_named(self):
+        why = c2.pair_problem(
+            "/p/Class2D/job012/run_it025_data.star",
+            "https://ftp.example.org/x/Class2D/job010/run_it020_classes.mrcs",
+        )
+        assert "iterations differ (run_it025 and run_it020)" in why
+        assert "folders differ (Class2D/job012 and Class2D/job010)" in why
+
+    def test_only_the_iteration_can_differ(self):
+        why = c2.pair_problem(
+            "/p/Class2D/job010/run_it025_data.star",
+            "/p/Class2D/job010/run_it020_classes.mrcs",
+        )
+        assert "iterations differ" in why and "folders differ" not in why
+
+    def test_relion_and_cryosparc_files_are_not_a_pair(self):
+        why = c2.pair_problem("run_it025_data.star", "J63_020_class_averages.mrc")
+        assert "RELION" in why and "cryoSPARC" in why
+
+    def test_cryosparc_jobs_that_differ_are_named(self):
+        why = c2.pair_problem(
+            "J63/J63_020_particles.cs", "J64/J64_020_class_averages.mrc"
+        )
+        assert "J63_020 and J64_020" in why and "J63 and J64" in why
+        assert "J63_020_particles.cs" in why  # the example is cryoSPARC's
+
+    def test_the_files_of_one_cryosparc_job_are_a_pair(self):
+        assert (
+            c2.pair_problem(
+                "J63/J63_020_particles.cs", "J63/J63_020_class_averages.mrc"
+            )
+            is None
+        )
+
+    def test_uploads_are_judged_by_their_names(self):
+        assert c2.pair_problem("run_it025_data.star", "run_it025_classes.mrcs") is None
+        assert c2.pair_problem("run_it025_data.star", "run_it020_classes.mrcs")
+
+    def test_a_file_named_otherwise_is_reported_as_not_named_alike(self):
+        why = c2.pair_problem("run_it025_data.star", "my_classes.mrcs")
+        assert "names differ (run_it025 and my)" in why
+
+    def test_a_name_that_follows_no_pattern_cannot_be_judged(self):
+        assert c2.pair_problem("run_it025_data.star", "classes.mrc") is None
+        assert c2.pair_problem("", "run_it020_classes.mrcs") is None
+        assert c2.pair_problem(None, None) is None
+
+
+class TestAbundanceErrorMessage:
+    def test_it_gives_the_class_counts_and_the_pair_problem(self):
+        text = c2.abundance_error_message(
+            "/p/Class2D/job012/run_it025_data.star",
+            "/p/Class2D/job010/run_it020_classes.mrcs",
+            n_param_classes=100,
+            n_image_classes=80,
+            highest_class=100,
+        )
+        assert text.startswith("Failed to get class abundance")
+        assert "100 classes (numbered up to 100); the image file has 80" in text
+        assert "do not look like a pair" in text
+        assert text.endswith("for the same Class2D job.")
+
+    def test_without_a_pair_problem_only_the_counts_are_added(self):
+        text = c2.abundance_error_message(
+            "run_it020_data.star",
+            "run_it020_classes.mrcs",
+            n_param_classes=3,
+            n_image_classes=2,
+            highest_class=3,
+        )
+        assert "the image file has 2" in text and "pair" not in text
+
+    def test_without_counts_it_is_the_old_message(self):
+        text = c2.abundance_error_message("a.star", "b.mrcs")
+        assert text == (
+            "Failed to get class abundance from the provided Class2D parameter and "
+            "image files. Make sure that the two files are for the same Class2D job."
+        )
+
+
+class TestTabsGiveTheCounts:
+    def test_the_three_tabs_use_the_message(self):
+        import inspect
+
+        from helicon.webApps.tabs import (
+            abinitio3d_tab,
+            helical_pitch_tab,
+            where_is_my_class_tab,
+        )
+
+        for tab in (abinitio3d_tab, helical_pitch_tab, where_is_my_class_tab):
+            src = inspect.getsource(tab)
+            assert "class2d_files.abundance_error_message(" in src, tab.__name__
+            assert (
+                "Make sure that the two files are for the same Class2D job" not in src
+            )

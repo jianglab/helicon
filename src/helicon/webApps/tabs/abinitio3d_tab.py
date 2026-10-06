@@ -986,6 +986,40 @@ def abinitio3d_tab_server(input, output, session):
         """The path or URL the mode reads from."""
         return (server_input() if mode == "server" else url_input()).strip()
 
+    def _class2d_file_names():
+        """What the parameter file and the class averages are called: a path, a
+        URL, or the name of an upload."""
+
+        def name(mode, url_input, server_input, upload_input):
+            if mode == "upload":
+                info = upload_input()
+                return info[0]["name"] if info else ""
+            return _source(mode, url_input, server_input)
+
+        return (
+            name(
+                input.input_mode_params(),
+                input.url_params,
+                input.server_params,
+                input.upload_params,
+            ),
+            name(
+                input.input_mode_classes(),
+                input.url_classes,
+                input.server_classes,
+                input.upload_classes,
+            ),
+        )
+
+    def _class_counts(df, n_images):
+        """``(classes in the parameters, classes in the images, highest class
+        number)``, the numbers the failure message gives."""
+        try:
+            numbers = df["rlnClassNumber"].astype(int)
+            return int(numbers.nunique()), int(n_images), int(numbers.max())
+        except Exception:
+            return None, int(n_images), None
+
     # Browse... in the server mode: pick the files on this computer
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(
@@ -1071,8 +1105,10 @@ def abinitio3d_tab_server(input, output, session):
             logger.error("Failed to get class abundance: %s", e)
             ui.modal_show(
                 ui.modal(
-                    "Failed to get class abundance from the provided Class2D parameter and image files. "
-                    "Make sure that the two files are for the same Class2D job",
+                    class2d_files.abundance_error_message(
+                        *_class2d_file_names(),
+                        *_class_counts(df, n),
+                    ),
                     title="Information error",
                     easy_close=True,
                     footer=None,
