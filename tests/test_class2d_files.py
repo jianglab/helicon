@@ -190,11 +190,11 @@ class TestPairProblem:
 
     def test_the_job_and_the_iteration_that_differ_are_named(self):
         why = c2.pair_problem(
-            "/p/Class2D/job012/run_it025_data.star",
+            "/p/Class2D/job007/run_it025_data.star",
             "https://ftp.example.org/x/Class2D/job010/run_it020_classes.mrcs",
         )
         assert "iterations differ (run_it025 and run_it020)" in why
-        assert "folders differ (Class2D/job012 and Class2D/job010)" in why
+        assert "folders differ (Class2D/job007 and Class2D/job010)" in why
 
     def test_only_the_iteration_can_differ(self):
         why = c2.pair_problem(
@@ -239,7 +239,7 @@ class TestPairProblem:
 class TestAbundanceErrorMessage:
     def test_it_gives_the_class_counts_and_the_pair_problem(self):
         text = c2.abundance_error_message(
-            "/p/Class2D/job012/run_it025_data.star",
+            "/p/Class2D/job007/run_it025_data.star",
             "/p/Class2D/job010/run_it020_classes.mrcs",
             n_param_classes=100,
             n_image_classes=80,
