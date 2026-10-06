@@ -105,16 +105,193 @@ BOOKMARK_DEFAULTS = {
 # ---------------------------------------------------------------------------
 
 
-def _fig_to_html(fig):
-    """Convert a plotly figure to responsive HTML for render.ui."""
+# A click on a point that carries customdata (twist, rise) is sent to the app as an
+# input of the given id. ``{plot_id}`` is filled with the figure's own id by Plotly.
+_CLICK_TO_INPUT = (
+    "var gd = document.getElementById('{plot_id}');"
+    "if (gd && window.Shiny) {"
+    "  gd.on('plotly_click', function (ev) {"
+    "    var p = ev.points && ev.points[0];"
+    "    if (!p || !p.customdata) return;"
+    "    Shiny.setInputValue('%s', {twist: p.customdata[0], rise: p.customdata[1],"
+    "      nonce: Date.now()}, {priority: 'event'});"
+    "  });"
+    "}"
+)
+
+
+def _fig_to_html(fig, click_input=None):
+    """Convert a plotly figure to responsive HTML for render.ui.
+
+    Parameters
+    ----------
+    fig : plotly.graph_objects.Figure
+    click_input : str, optional
+        Full id of the Shiny input that receives ``{twist, rise}`` when a point
+        carrying that pair as its customdata is clicked.
+    """
     html = pio.to_html(
         fig,
         full_html=False,
         include_plotlyjs=True,
         config={"responsive": True, "displayModeBar": False},
         default_height=400,
+        post_script=None if click_input is None else _CLICK_TO_INPUT % click_input,
     )
     return ui.HTML(html)
+
+
+# What the hover text of a candidate says a click does.
+CLICK_HINT = "Click to reconstruct a 3D map with this twist and rise"
+
+
+def _picked_pair(payload):
+    """The ``(twist, rise)`` of a click on a candidate, or None if it is not one.
+
+    The payload comes from the browser, so it is checked: both numbers finite,
+    the rise positive and the twist within half a turn.
+    """
+    try:
+        twist, rise = float(payload["twist"]), float(payload["rise"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    if not (np.isfinite(twist) and np.isfinite(rise)):
+        return None
+    if rise <= 0 or abs(twist) > 180:
+        return None
+    return twist, rise
+
+
+def _scores_figure(res, picked=None):
+    """The scores of the candidate twist/rise solutions, each clickable.
+
+    A heat map over twist and rise when both were searched, a line when one was.
+    Every point carries its ``(twist, rise)`` as customdata, which is what a click
+    sends back, and its hover text says what a click does (:data:`CLICK_HINT`).
+
+    Parameters
+    ----------
+    res : list
+        ``(score, return_data, params)`` of each candidate (params[5] twist,
+        params[6] rise).
+    picked : tuple of float, optional
+        ``(twist, rise)`` whose 3D map was reconstructed: marked on the plot.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure or None
+        None when there are fewer than two candidates, or one value of each.
+    """
+    if len(res) <= 1:
+        return None
+    results_arr = np.zeros((3, len(res)), dtype=float)
+    for ri, result in enumerate(res):
+        score, _projs, params = result
+        results_arr[0, ri] = params[5]
+        results_arr[1, ri] = params[6]
+        results_arr[2, ri] = score
+
+    n_twists = len(np.unique(results_arr[0, :]))
+    n_rises = len(np.unique(results_arr[1, :]))
+
+    if n_twists > 1 and n_rises > 1:
+        x = results_arr[0, :]
+        y = results_arr[1, :]
+        scores = results_arr[2, :]
+        vmin = np.min(scores)
+        x_unique = np.sort(np.unique(x))
+        y_unique = np.sort(np.unique(y))
+        X, Y = np.meshgrid(x_unique, y_unique, indexing="ij")
+        Z = np.zeros_like(X) + vmin
+        for j in range(Z.shape[1]):
+            for i in range(Z.shape[0]):
+                vals = [
+                    scores[si]
+                    for si in range(len(x))
+                    if y[si] == Y[i, j] and x[si] == X[i, j]
+                ]
+                if vals:
+                    Z[i, j] = np.max(vals)
+        fig = px.imshow(
+            Z.T,
+            x=x_unique,
+            y=y_unique,
+            origin="lower",
+            labels=dict(x="Twist (deg)", y="Rise (A)", color="Score"),
+            color_continuous_scale="viridis",
+        )
+        fig.update_layout(coloraxis_colorbar_title="Score")
+        fig.update_traces(
+            customdata=np.stack([X.T, Y.T], axis=-1),
+            hovertemplate=(
+                "Twist: %{x:.3f} deg<br>Rise: %{y:.3f} A<br>Score: %{z:.3f}"
+                f"<br><i>{CLICK_HINT}</i><extra></extra>"
+            ),
+        )
+        max_idx = np.unravel_index(np.argmax(Z), Z.shape)
+        max_x = x_unique[max_idx[0]]
+        max_y = y_unique[max_idx[1]]
+        dx = (x_unique[1] - x_unique[0]) / 2
+        dy = (y_unique[1] - y_unique[0]) / 2
+        fig.add_shape(
+            type="rect",
+            x0=max_x - dx,
+            y0=max_y - dy,
+            x1=max_x + dx,
+            y1=max_y + dy,
+            line=dict(color="red", width=2),
+            fillcolor=None,
+        )
+        if picked is not None:
+            fig.add_scatter(
+                x=[picked[0]],
+                y=[picked[1]],
+                mode="markers",
+                marker=dict(symbol="x", size=11, color="white", line=dict(width=2)),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+    elif n_twists > 1 or n_rises > 1:
+        if n_twists > 1:
+            x = results_arr[0, :]
+            x_title = "Twist (deg)"
+            hovertemplate = (
+                "Twist: %{x} deg<br>Rise: %{customdata[1]:.3f} A<br>Score: %{y}"
+                f"<br><i>{CLICK_HINT}</i><extra></extra>"
+            )
+        else:
+            x = results_arr[1, :]
+            x_title = "Rise (A)"
+            hovertemplate = (
+                "Rise: %{x} A<br>Twist: %{customdata[0]:.3f} deg<br>Score: %{y}"
+                f"<br><i>{CLICK_HINT}</i><extra></extra>"
+            )
+        y = results_arr[2, :]
+        sort_idx = np.argsort(x)
+        x = np.array(x)[sort_idx]
+        y = np.array(y)[sort_idx]
+        pairs = np.stack([results_arr[0, :], results_arr[1, :]], axis=-1)[sort_idx]
+        fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
+        fig.update_layout(xaxis_title=x_title, yaxis_title="Score", showlegend=False)
+        fig.update_traces(hovertemplate=hovertemplate, customdata=pairs)
+        if picked is not None:
+            at = [
+                i
+                for i, (t, r) in enumerate(pairs)
+                if abs(t - picked[0]) < 1e-6 and abs(r - picked[1]) < 1e-6
+            ]
+            if at:
+                fig.add_scatter(
+                    x=[x[at[0]]],
+                    y=[y[at[0]]],
+                    mode="markers",
+                    marker=dict(symbol="x", size=12, color="red", line=dict(width=2)),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+    else:
+        return None
+    return fig
 
 
 def _display_key(param_tuple):
@@ -784,6 +961,10 @@ def denovo3d_tab_server(input, output, session):
         return [str(l) for l in labels]
 
     reconstruction_results = reactive.value([])
+    # The candidates of the last search over several twist/rise pairs, kept while a
+    # 3D map is reconstructed for one of them (which then is all that
+    # reconstruction_results holds), so that another can be clicked.
+    scan_results = reactive.value([])
     # The unranked per-(image, twist, rise) results. reconstruction_results
     # keeps one entry per twist/rise pair -- which is what the scores plot and
     # the download path expect -- so the per-image reconstructions behind each
@@ -2178,80 +2359,18 @@ def denovo3d_tab_server(input, output, session):
     @render.ui
     def dn_scores_plot():
         res = reconstruction_results()
-        if len(res) <= 1:
+        scan = scan_results()
+        picked = None
+        # After a candidate has been reconstructed the displayed result is that one
+        # alone: the candidates stay on screen, with it marked, to click another.
+        if len(res) <= 1 and len(scan) > 1:
+            if len(res) == 1:
+                picked = (float(res[0][2][5]), float(res[0][2][6]))
+            res = scan
+        fig = _scores_figure(res, picked)
+        if fig is None:
             return ui.div()
-        results_arr = np.zeros((3, len(res)), dtype=float)
-        for ri, result in enumerate(res):
-            score, _projs, params = result
-            twist, rise = params[5], params[6]
-            results_arr[0, ri] = twist
-            results_arr[1, ri] = rise
-            results_arr[2, ri] = score
-
-        n_twists = len(np.unique(results_arr[0, :]))
-        n_rises = len(np.unique(results_arr[1, :]))
-
-        if n_twists > 1 and n_rises > 1:
-            x = results_arr[0, :]
-            y = results_arr[1, :]
-            scores = results_arr[2, :]
-            vmin = np.min(scores)
-            x_unique = np.sort(np.unique(x))
-            y_unique = np.sort(np.unique(y))
-            X, Y = np.meshgrid(x_unique, y_unique, indexing="ij")
-            Z = np.zeros_like(X) + vmin
-            for j in range(Z.shape[1]):
-                for i in range(Z.shape[0]):
-                    vals = [
-                        scores[si]
-                        for si in range(len(x))
-                        if y[si] == Y[i, j] and x[si] == X[i, j]
-                    ]
-                    if vals:
-                        Z[i, j] = np.max(vals)
-            fig = px.imshow(
-                Z.T,
-                x=x_unique,
-                y=y_unique,
-                origin="lower",
-                labels=dict(x="Twist (deg)", y="Rise (A)", color="Score"),
-                color_continuous_scale="viridis",
-            )
-            fig.update_layout(coloraxis_colorbar_title="Score")
-            max_idx = np.unravel_index(np.argmax(Z), Z.shape)
-            max_x = x_unique[max_idx[0]]
-            max_y = y_unique[max_idx[1]]
-            fig.add_shape(
-                type="rect",
-                x0=max_x - (x_unique[1] - x_unique[0]) / 2,
-                y0=max_y - (y_unique[1] - y_unique[0]) / 2,
-                x1=max_x + (x_unique[1] - x_unique[0]) / 2,
-                y1=max_y + (y_unique[1] - y_unique[0]) / 2,
-                line=dict(color="red", width=2),
-                fillcolor=None,
-            )
-        elif n_twists > 1 or n_rises > 1:
-            if n_twists > 1:
-                x = results_arr[0, :]
-                x_title = "Twist (deg)"
-                hovertemplate = "Twist: %{x}deg<br>Score: %{y}"
-            else:
-                x = results_arr[1, :]
-                x_title = "Rise (A)"
-                hovertemplate = "Rise: %{x}A<br>Score: %{y}"
-            y = results_arr[2, :]
-            sort_idx = np.argsort(x)
-            x = np.array(x)[sort_idx]
-            y = np.array(y)[sort_idx]
-            fig = px.line(x=x, y=y, color_discrete_sequence=["blue"], markers=True)
-            fig.update_layout(
-                xaxis_title=x_title, yaxis_title="Score", showlegend=False
-            )
-            fig.update_traces(hovertemplate=hovertemplate)
-        else:
-            return ui.div()
-
-        return _fig_to_html(fig)
+        return _fig_to_html(fig, click_input=session.ns("dn_pick_candidate"))
 
     # ── Render: reconstructed projections ────────────────────────────
 
@@ -2675,6 +2794,7 @@ def denovo3d_tab_server(input, output, session):
         selected_images_original.set(images)
         selected_images_labels.set([displayed_image_labels()[i] for i in sel])
         reconstruction_results.set([])
+        scan_results.set([])
 
     @reactive.effect
     @reactive.event(selected_images_original)
@@ -3276,6 +3396,18 @@ def denovo3d_tab_server(input, output, session):
     @reactive.effect
     @reactive.event(input.dn_run_denovo3D)
     def _run_denovo3D_reconstruction():
+        _start_reconstruction()
+
+    def _start_reconstruction(pair=None):
+        """Search the twist/rise ranges, or reconstruct the map of one pair.
+
+        Parameters
+        ----------
+        pair : tuple of float, optional
+            ``(twist, rise)`` to reconstruct a 3D map for, as clicked on the
+            candidates; the ranges are not read then. Without it the ranges of the
+            inputs are searched (and a range of one value gives the map too).
+        """
         images = selected_images_thresholded_rotated_shifted_cropped()
         req(len(images) > 0)
 
@@ -3329,6 +3461,8 @@ def denovo3d_tab_server(input, output, session):
             rises = [rise_min]
 
         tr_pairs = list(itertools.product(twists, rises))
+        if pair is not None:
+            tr_pairs = [pair]
         n_pairs = len(tr_pairs)
         return_3d = n_pairs == 1
         n_cpu = input.dn_cpu()
@@ -3456,6 +3590,9 @@ def denovo3d_tab_server(input, output, session):
         )
 
         abort_flag[0] = False
+        if pair is None:
+            # a new search: the candidates of the last one are gone
+            scan_results.set([])
         # Everything the task needs is read here, on this side of the boundary.
         # An extended task may not read reactive sources at all -- doing so
         # raises, the run dies inside the catch-all below, and the only symptom
@@ -3471,7 +3608,27 @@ def denovo3d_tab_server(input, output, session):
             input.dn_lr_algorithm(),
             list(images),
             input.dn_rec_algorithm(),
+            is_scan=pair is None and n_pairs > 1,
         )
+
+    @reactive.effect
+    @reactive.event(input.dn_pick_candidate)
+    def _reconstruct_picked_candidate():
+        """A click on a candidate of the scores plot: reconstruct its 3D map."""
+        pair = _picked_pair(input.dn_pick_candidate())
+        req(pair is not None)
+        if _reconstruction_task.status() == "running":
+            ui.notification_show(
+                "A calculation is running. Wait for it, or stop it, and click again.",
+                duration=6,
+            )
+            return
+        ui.notification_show(
+            f"Reconstructing a 3D map with twist {pair[0]:.3f} deg and "
+            f"rise {pair[1]:.3f} A.",
+            duration=6,
+        )
+        _start_reconstruction(pair)
 
     @reactive.extended_task
     async def _reconstruction_task(
@@ -3485,6 +3642,7 @@ def denovo3d_tab_server(input, output, session):
         lr_algorithm="elasticnet",
         images=None,
         rec_algorithm=None,
+        is_scan=False,
     ):
         log = _denovo3d_logger()
 
@@ -3667,13 +3825,18 @@ def denovo3d_tab_server(input, output, session):
             ranked = await _rank_final(results, log)
             reconstruction_results_raw.set(list(results))
             reconstruction_results.set(ranked)
+            if is_scan:
+                scan_results.set(list(ranked))
 
             if display_model and results and not abort_ref[0]:
                 results = await _redraw_with(
                     tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
                 )
                 reconstruction_results_raw.set(list(results))
-                reconstruction_results.set(await _rank_final(results, log))
+                ranked = await _rank_final(results, log)
+                reconstruction_results.set(ranked)
+                if is_scan:
+                    scan_results.set(list(ranked))
         except Exception:
             log.error("Reconstruction task failed:\n%s", traceback.format_exc())
             # Say so on screen. Swallowed silently, a failure here is
