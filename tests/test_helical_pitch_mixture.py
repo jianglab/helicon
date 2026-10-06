@@ -99,6 +99,36 @@ class TestOneType:
         assert mx.objective_gain(pairs, two, est["period"], est["phases"]) < 0.01
 
 
+class TestHeldOutGain:
+    def _gain(self, periods):
+        pairs, _ = _pairs(periods, length=1600.0)
+        est = ph.estimate_period(pairs)
+        est, _ = ph.sync_filament_directions(pairs, est)
+        rng = np.random.default_rng(0)
+        labels = rng.integers(0, 2, pairs.n_filaments)
+        return mx.heldout_gain(
+            pairs,
+            labels,
+            (est["period"] * 0.93, est["period"] * 1.07),
+            est["period"],
+        )
+
+    def test_two_types_gain_on_filaments_the_rings_were_not_fitted_to(self):
+        assert self._gain((400.0, 480.0)) > 0.1
+
+    def test_one_type_gains_nothing_on_held_out_filaments(self):
+        assert abs(self._gain((400.0, 400.0))) < 0.01
+
+    def test_train_filaments_alone_fit_the_rings(self):
+        pairs, truth = _pairs((400.0, 480.0), length=1600.0)
+        train = np.arange(pairs.n_filaments) % 2 == 0
+        labels = truth.copy()
+        two = mx.fit_two_rings(pairs, labels, (400.0, 480.0), train=train)
+        assert sorted(np.round(two["periods"] / 10) * 10) == [400.0, 480.0]
+        # the held-out filaments were still given a ring
+        assert len(two["best"]) == pairs.n_filaments and np.all(two["best"] > 0.5)
+
+
 class TestStartingLabels:
     def test_the_filaments_are_split_at_the_median_repeat(self):
         pairs, _ = _pairs((400.0, 440.0), n_fil=40)

@@ -69,6 +69,7 @@ def fit_two_rings(
     window=0.12,
     n_iter=20,
     length_scale=800.0,
+    train=None,
 ):
     """Alternate the fit of two rings and the giving of filaments to them.
 
@@ -84,21 +85,27 @@ def fit_two_rings(
         Fraction of the repeat searched about the last repeat. Defaults to 0.12.
     n_iter : int, optional
         Most rounds. Defaults to 20.
+    train : np.ndarray, optional
+        Boolean per filament: only these take part in fitting the rings. The
+        others are given to the better ring all the same, which is how a ring pair
+        is judged on filaments it was not fitted to (:func:`heldout_gain`).
 
     Returns
     -------
     dict
         ``labels``, ``periods`` (2,), ``phases`` (2, K), ``scores`` (the rings'
         own coherence), ``objective`` (mean agreement of all pairs with the ring
-        their filament is in), ``n_filaments`` per ring, ``rounds``.
+        their filament is in), ``n_filaments`` per ring, ``rounds``, and per
+        filament ``best`` (its agreement with its ring) and ``weight``.
     """
     labels = np.asarray(labels, dtype=int).copy()
+    use = np.ones(len(labels), bool) if train is None else np.asarray(train, bool)
     p = [float(periods[0]), float(periods[1])]
     rings = [None, None]
     rounds = 0
     for rounds in range(1, n_iter + 1):
         for t in (0, 1):
-            member = labels == t
+            member = (labels == t) & use
             if member.sum() < 3:
                 return None
             rings[t] = _fit_ring(pairs, member, p[t], window, length_scale)
@@ -122,6 +129,8 @@ def fit_two_rings(
         objective=float((best * weight).sum() / total),
         n_filaments=np.array([(labels == 0).sum(), (labels == 1).sum()]),
         rounds=rounds,
+        best=best,
+        weight=weight,
     )
 
 
@@ -129,6 +138,67 @@ def one_ring_objective(pairs, period, phases):
     """Mean agreement of all pairs with a single ring (each filament either way)."""
     keep, swap, weight = filament_scores(pairs, period, phases)
     return float((np.maximum(keep, swap) * weight).sum() / max(weight.sum(), 1e-12))
+
+
+def heldout_gain(pairs, labels, periods, one_period, folds=2, seed=0, restarts=4, **kw):
+    """What a second ring adds on filaments it was not fitted to.
+
+    A fit with more freedom always agrees better with the data it was fitted to,
+    so the gain of :func:`objective_gain` is positive even for filaments of one
+    type. Here the filaments are split into ``folds`` parts; for each, one ring and
+    two rings are fitted to the other parts, and both are then judged on this
+    part, every filament going to the ring it agrees with better. For one type
+    the second ring has nothing to offer there (the gain is about 0), for two it
+    does.
+
+    Parameters
+    ----------
+    pairs : SegmentPairs
+    labels, periods : see :func:`fit_two_rings`
+        The starting rings.
+    one_period : float
+        The repeat the single ring starts from.
+    folds : int, optional
+        Defaults to 2.
+    restarts : int, optional
+        Starts for each fold: ``labels`` and ``restarts - 1`` random ones; the one
+        that agrees best with the filaments it was fitted to is kept (a fit to half
+        of the filaments may fall into one ring from a random start). Defaults to 4.
+
+    Returns
+    -------
+    float
+        The gain of the two-ring objective over the one-ring one, over the filaments
+        held out, averaged over the folds (weighted by their pairs).
+    """
+    rng = np.random.default_rng(seed)
+    fold = rng.integers(0, folds, pairs.n_filaments)
+    num = den = 0.0
+    for k in range(folds):
+        train = fold != k
+        test = ~train
+        two = None
+        for start in [np.asarray(labels)] + [
+            rng.integers(0, 2, pairs.n_filaments) for _ in range(restarts - 1)
+        ]:
+            trial = fit_two_rings(pairs, start, periods, train=train, **kw)
+            if trial is None:
+                continue
+            fitted = float(
+                (trial["best"] * trial["weight"])[train].sum()
+                / max(trial["weight"][train].sum(), 1e-12)
+            )
+            if two is None or fitted > two["fitted"]:
+                two = dict(trial, fitted=fitted)
+        if two is None:
+            continue
+        one = _fit_ring(pairs, train, one_period, 0.12, kw.get("length_scale", 800.0))
+        keep, swap, weight = filament_scores(pairs, one["period"], one["phases"])
+        single = np.maximum(keep, swap)
+        w = weight[test]
+        num += float(((two["best"] - single)[test] * w).sum())
+        den += float(w.sum())
+    return num / max(den, 1e-12)
 
 
 def objective_gain(pairs, two, period, phases):
