@@ -122,6 +122,50 @@ def pixel_groups(similarity, cut=0.15, min_classes=3):
     return labels
 
 
+def pixel_groups_n(similarity, n_groups, cut0=0.15, min_classes=3, low=0.02, high=0.6):
+    """:func:`pixel_groups` asked for a number of groups instead of a cut.
+
+    The tree is cut at every height at which the groups change, and the number of
+    groups of ``min_classes`` classes or more is counted (the others are left
+    unassigned, as in :func:`pixel_groups`). The cut that gives ``n_groups`` of them
+    is used; when several do, the one closest to ``cut0``, so that the groups stay
+    those of the default cut where they can. If no cut gives that many, the nearest
+    number that some cut does.
+
+    Returns
+    -------
+    labels : numpy.ndarray
+        As :func:`pixel_groups`.
+    cut : float
+        The cut used.
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import squareform
+
+    S = np.asarray(similarity, dtype=float)
+    if len(S) < 2:
+        return np.zeros(len(S), dtype=int), cut0
+    D = 1.0 - S
+    np.fill_diagonal(D, 0.0)
+    Z = linkage(squareform(D, checks=False), method="average")
+    cuts = np.unique(np.clip(np.r_[Z[:, 2], cut0, low, high], low, high))
+    counts = []
+    for c in cuts:
+        sizes = np.bincount(fcluster(Z, c, criterion="distance"))
+        counts.append(int(np.sum(sizes >= min_classes)))
+    counts = np.asarray(counts)
+    target = int(min(counts, key=lambda k: (abs(k - n_groups), k)))
+    best = np.flatnonzero(counts == target)
+    cut = float(cuts[best[np.argmin(np.abs(cuts[best] - cut0))]])
+    return pixel_groups(S, cut, min_classes), cut
+
+
+def default_n_groups(similarity, cut0=0.15, min_classes=3):
+    """The number of groups the default cut gives."""
+    labels = pixel_groups(similarity, cut0, min_classes)
+    return int(labels.max()) + 1
+
+
 def suggest_cut(similarity, low=0.05, high=0.7, default=0.25):
     """A cut for :func:`pixel_groups` from the tree: the middle of its largest gap.
 

@@ -237,3 +237,54 @@ class TestNeighbourFrequency:
         a = ty.neighbour_affinity(S, np.full((2, 2), 1.5), 0.3, saturation=1.5)
         b = ty.neighbour_affinity(S, np.full((2, 2), 50.0), 0.3, saturation=1.5)
         assert np.allclose(a, b)
+
+
+def _blocks(sizes, within=0.95, between=0.72, seed=0, noise=0.01):
+    """A class similarity of groups of the given sizes on a common baseline."""
+    rng = np.random.default_rng(seed)
+    lab = np.repeat(np.arange(len(sizes)), sizes)
+    S = np.where(lab[:, None] == lab[None, :], within, between)
+    S = S + noise * rng.standard_normal(S.shape)
+    S = np.clip(0.5 * (S + S.T), 0, 1)
+    np.fill_diagonal(S, 1.0)
+    return S, lab
+
+
+class TestGroupsByNumber:
+    def _three(self):
+        # three blocks; the first two are more alike than either is to the third
+        S, lab = _blocks([12, 8, 6], within=0.95, between=0.7, noise=0.0)
+        S[np.ix_(lab == 0, lab == 1)] = 0.88
+        S[np.ix_(lab == 1, lab == 0)] = 0.88
+        return S, lab
+
+    def test_the_default_number_is_what_the_default_cut_gives(self):
+        S, _ = self._three()
+        assert ty.default_n_groups(S) == int(ty.pixel_groups(S).max()) + 1
+
+    def test_the_groups_at_the_default_number_are_those_of_the_default_cut(self):
+        S, _ = self._three()
+        n = ty.default_n_groups(S)
+        labels, cut = ty.pixel_groups_n(S, n)
+        assert list(labels) == list(ty.pixel_groups(S))
+
+    def test_fewer_groups_join_the_most_alike_ones(self):
+        S, lab = self._three()
+        labels, _ = ty.pixel_groups_n(S, 2)
+        assert len(set(labels)) == 2 and len(set(labels[lab == 2])) == 1
+        assert len(set(labels[lab != 2])) == 1  # blocks 0 and 1 are joined
+
+    def test_one_group_holds_every_class_the_tree_joins(self):
+        S, _ = self._three()
+        labels, _ = ty.pixel_groups_n(S, 1)
+        assert set(labels) == {0}
+
+    def test_a_number_no_cut_gives_falls_back_to_the_nearest_one(self):
+        S, _ = self._three()
+        labels, _ = ty.pixel_groups_n(S, 8)
+        assert int(labels.max()) + 1 == 3
+
+    def test_junk_classes_stay_unassigned_when_they_form_no_group(self):
+        S, lab = _blocks([12, 10, 1, 1])
+        labels, _ = ty.pixel_groups_n(S, 2)
+        assert (labels[lab >= 2] == -1).all() and set(labels[lab < 2]) == {0, 1}
