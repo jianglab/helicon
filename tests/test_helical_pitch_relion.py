@@ -246,3 +246,262 @@ class TestTemporaryFolder:
         work = tmp_path / "work"
         out = relion.reconstruct(_segments(tmp_path), str(tmp_path), work_dir=work)
         assert Path(out["path"]).exists() and out["path"].startswith(str(work))
+
+
+class TestFusedAvailability:
+    def _run(self, monkeypatch, text):
+        from types import SimpleNamespace
+
+        calls = []
+
+        def fake(command, **kw):
+            calls.append(command)
+            return SimpleNamespace(returncode=0, stdout=text, stderr="")
+
+        monkeypatch.setattr(relion.subprocess, "run", fake)
+        relion._FUSED_CHECKED.clear()
+        return calls
+
+    def test_a_program_with_the_option_has_it(self, monkeypatch):
+        self._run(monkeypatch, "  --fused_extract (false) : Particles are ...")
+        assert relion.fused_extract_available("/r/rr") is True
+
+    def test_a_program_without_the_option_does_not(self, monkeypatch):
+        self._run(monkeypatch, "  --i () : Input STAR file")
+        assert relion.fused_extract_available("/r/rr") is False
+
+    def test_it_is_asked_once_for_each_program(self, monkeypatch):
+        calls = self._run(monkeypatch, "--fused_extract")
+        relion.fused_extract_available("/r/rr")
+        relion.fused_extract_available("/r/rr")
+        assert len(calls) == 1
+
+    def test_without_the_program_there_is_nothing(self, monkeypatch):
+        monkeypatch.setattr(relion, "find_relion_reconstruct", lambda: None)
+        assert relion.fused_extract_available() is False
+
+
+def _job_star(path, **options):
+    import starfile
+
+    table = pd.DataFrame(
+        dict(
+            rlnJobOptionVariable=list(options),
+            rlnJobOptionValue=[str(v) for v in options.values()],
+        )
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    starfile.write(dict(joboptions_values=table), str(path), overwrite=True)
+
+
+class TestExtractionSettings:
+    def test_they_are_read_from_the_extract_job(self, tmp_path):
+        _job_star(
+            tmp_path / "Extract/job009/job.star",
+            do_invert="Yes",
+            do_norm="No",
+            bg_diameter=-1,
+            do_extract_helical_tubes="Yes",
+            helical_tube_outer_diameter=200,
+        )
+        s = relion.extraction_settings(tmp_path, "000001@Extract/job009/a/b.mrcs")
+        assert s == dict(
+            invert=True, norm=False, bg_diameter=-1.0, helical_diameter=200.0
+        )
+
+    def test_a_job_of_other_particles_gives_relions_defaults(self, tmp_path):
+        s = relion.extraction_settings(tmp_path, "1@Polish/job225/x_shiny.mrcs")
+        assert s["invert"] and s["norm"] and s["helical_diameter"] is None
+
+    def test_a_missing_job_gives_the_defaults_too(self, tmp_path):
+        s = relion.extraction_settings(tmp_path, "1@Extract/job999/x.mrcs")
+        assert s["invert"] and s["norm"]
+
+    def test_no_tube_without_helical_extraction(self, tmp_path):
+        _job_star(
+            tmp_path / "Extract/job1/job.star",
+            do_extract_helical_tubes="No",
+            helical_tube_outer_diameter=200,
+        )
+        s = relion.extraction_settings(tmp_path, "1@Extract/job1/x.mrcs")
+        assert s["helical_diameter"] is None
+
+
+class TestFusedArgs:
+    def _args(self, **kw):
+        base = dict(invert=True, norm=True, bg_diameter=-1.0, helical_diameter=200.0)
+        base.update(kw)
+        return relion.fused_args(2.0, 301, 100, None, base)
+
+    def _value(self, args, name):
+        return args[args.index(name) + 1]
+
+    def test_the_box_is_rectangular_and_even(self):
+        a = self._args()
+        assert self._value(a, "--box_x") == "302" and self._value(a, "--box_y") == "100"
+        assert self._value(a, "--box_z") == "302"  # the map is as long as the box
+        assert self._value(a, "--angpix") == "2"
+        assert "--fused_extract" in a and "--fused_rotate_to_horizontal" in a
+
+    def test_the_depth_can_differ_from_the_length(self):
+        a = relion.fused_args(2.0, 300, 100, 200, {})
+        assert self._value(a, "--box_z") == "200"
+
+    def test_the_segments_are_cut_as_the_extract_job_did(self):
+        a = self._args()
+        assert "--fused_invert_contrast" in a and "--fused_norm" in a
+        assert self._value(a, "--fused_helical_diameter") == "200"
+        # the background is outside the tube: its radius in output pixels
+        assert float(self._value(a, "--fused_bg_radius")) == pytest.approx(50.0)
+
+    def test_without_normalisation_or_inversion_neither_is_asked_for(self):
+        a = self._args(invert=False, norm=False)
+        assert "--fused_norm" not in a and "--fused_invert_contrast" not in a
+        assert "--fused_bg_radius" not in a
+
+    def test_the_background_diameter_of_the_job_wins_over_the_tube(self):
+        a = self._args(bg_diameter=300.0)
+        assert float(self._value(a, "--fused_bg_radius")) == pytest.approx(75.0)
+
+
+class TestTurnToHorizontal:
+    def _segments(self, prior=-30.0, psi=-25.0):
+        return pd.DataFrame(
+            dict(
+                rlnAnglePsiPrior=[prior],
+                rlnAnglePsi=[psi],
+                rlnOriginXAngst=[10.0],
+                rlnOriginYAngst=[0.0],
+                rlnDefocusAngle=[10.0],
+            )
+        )
+
+    def test_psi_is_taken_relative_to_the_prior(self):
+        out = relion.turn_to_horizontal(self._segments())
+        assert out["rlnAnglePsi"].iloc[0] == pytest.approx(5.0)
+
+    def test_psi_stays_in_range(self):
+        out = relion.turn_to_horizontal(self._segments(prior=170.0, psi=-175.0))
+        assert -180 <= out["rlnAnglePsi"].iloc[0] < 180
+        assert out["rlnAnglePsi"].iloc[0] == pytest.approx(15.0)
+
+    def test_the_origin_is_turned_by_the_prior(self):
+        out = relion.turn_to_horizontal(self._segments(prior=90.0, psi=90.0))
+        assert out["rlnOriginXAngst"].iloc[0] == pytest.approx(0.0, abs=1e-9)
+        assert out["rlnOriginYAngst"].iloc[0] == pytest.approx(10.0)
+
+    def test_the_length_of_the_shift_is_kept(self):
+        out = relion.turn_to_horizontal(self._segments())
+        x, y = out["rlnOriginXAngst"].iloc[0], out["rlnOriginYAngst"].iloc[0]
+        assert np.hypot(x, y) == pytest.approx(10.0)
+
+    def test_the_astigmatism_turns_with_the_image(self):
+        out = relion.turn_to_horizontal(self._segments(prior=-30.0))
+        assert out["rlnDefocusAngle"].iloc[0] == pytest.approx(-20.0)
+
+    def test_the_input_is_not_changed(self):
+        seg = self._segments()
+        relion.turn_to_horizontal(seg)
+        assert seg["rlnAnglePsi"].iloc[0] == -25.0
+
+    def test_segments_from_a_turned_extraction_are_left_as_they_are(self):
+        seg = self._segments()
+        seg["rlnParticleExtractionAngle"] = 30.0
+        out = relion.turn_to_horizontal(seg)
+        assert out["rlnAnglePsi"].iloc[0] == -25.0
+
+
+class TestFusedReconstruct:
+    def _setup(self, tmp_path, monkeypatch, available=True):
+        fake = _FakeRun()
+        monkeypatch.setattr(relion.subprocess, "run", fake)
+        monkeypatch.setattr(relion, "find_relion_reconstruct", lambda: "/r/rr")
+        monkeypatch.setattr(relion, "find_relion_reconstruct_mpi", lambda: None)
+        monkeypatch.setattr(
+            relion, "fused_extract_available", lambda exe=None: available
+        )
+        mic = tmp_path / "MotionCorr" / "m1.mrc"
+        mic.parent.mkdir()
+        mic.touch()
+        seg = pd.DataFrame(
+            dict(
+                rlnImageName=["1@Extract/job1/a.mrcs"],
+                rlnMicrographName=["MotionCorr/m1.mrc"],
+                rlnCoordinateX=[100.0],
+                rlnCoordinateY=[200.0],
+                rlnAnglePsiPrior=[-30.0],
+                rlnAnglePsi=[-25.0],
+                rlnAngleRot=[0.0],
+            )
+        )
+        return fake, seg
+
+    def test_the_options_the_turned_star_and_the_micrographs_are_passed(
+        self, tmp_path, monkeypatch
+    ):
+        import starfile
+
+        fake, seg = self._setup(tmp_path, monkeypatch)
+        out = relion.reconstruct(
+            seg,
+            str(tmp_path),
+            work_dir=tmp_path / "w",
+            fused=dict(angpix=2.5, length=200, diameter=100),
+        )
+        (command,) = fake.commands
+        assert (
+            "--fused_extract" in command and "--fused_rotate_to_horizontal" in command
+        )
+        assert command[command.index("--box_x") + 1] == "200"
+        assert command[command.index("--box_y") + 1] == "100"
+        assert out["fused"] is True
+        written = starfile.read(str(tmp_path / "w" / "segments.star"))
+        assert written["rlnMicrographName"].iloc[0] == str(
+            tmp_path / "MotionCorr/m1.mrc"
+        )
+        assert written["rlnAnglePsi"].iloc[0] == pytest.approx(5.0)
+
+    def test_the_stored_images_need_not_exist_for_a_fused_run(
+        self, tmp_path, monkeypatch
+    ):
+        fake, seg = self._setup(tmp_path, monkeypatch)
+        relion.reconstruct(
+            seg, str(tmp_path), fused=dict(angpix=2, length=64, diameter=64)
+        )
+        assert len(fake.commands) == 1
+
+    def test_a_missing_micrograph_is_reported_before_relion_runs(
+        self, tmp_path, monkeypatch
+    ):
+        fake, seg = self._setup(tmp_path, monkeypatch)
+        seg["rlnMicrographName"] = "MotionCorr/none.mrc"
+        with pytest.raises(FileNotFoundError, match="micrograph paths"):
+            relion.reconstruct(
+                seg, str(tmp_path), fused=dict(angpix=2, length=64, diameter=64)
+            )
+        assert not fake.commands
+
+    def test_the_coordinates_are_needed(self, tmp_path, monkeypatch):
+        fake, seg = self._setup(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="rlnCoordinateX"):
+            relion.reconstruct(
+                seg.drop(columns="rlnCoordinateX"),
+                str(tmp_path),
+                fused=dict(angpix=2, length=64, diameter=64),
+            )
+
+    def test_a_program_without_the_option_refuses(self, tmp_path, monkeypatch):
+        fake, seg = self._setup(tmp_path, monkeypatch, available=False)
+        with pytest.raises(RuntimeError, match="no --fused_extract"):
+            relion.reconstruct(
+                seg, str(tmp_path), fused=dict(angpix=2, length=64, diameter=64)
+            )
+
+    def test_without_fused_nothing_changes(self, tmp_path, monkeypatch):
+        fake, seg = self._setup(tmp_path, monkeypatch)
+        stack = tmp_path / "Extract" / "job1" / "a.mrcs"
+        stack.parent.mkdir(parents=True)
+        stack.touch()
+        out = relion.reconstruct(seg, str(tmp_path))
+        (command,) = fake.commands
+        assert "--fused_extract" not in command and out["fused"] is False
