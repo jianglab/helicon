@@ -288,3 +288,144 @@ class TestGroupsByNumber:
         S, lab = _blocks([12, 10, 1, 1])
         labels, _ = ty.pixel_groups_n(S, 2)
         assert (labels[lab >= 2] == -1).all() and set(labels[lab < 2]) == {0, 1}
+
+
+def _marker_data(n_a=300, n_b=300, n_seg=40, marker_rate=0.3, seed=0):
+    """Two types sharing classes 0-5; type A also shows classes 6-8 (its markers)
+    at ``marker_rate`` of its segments, and type B never does. Classes 0-5 and
+    6-8 look alike among themselves."""
+    rng = np.random.default_rng(seed)
+    K = 9
+    counts = np.zeros((n_a + n_b, K))
+    for i in range(n_a + n_b):
+        n = rng.integers(n_seg // 2, n_seg * 2)
+        if i < n_a:
+            k = rng.binomial(n, marker_rate)
+            np.add.at(counts[i], rng.integers(6, 9, k), 1)
+            np.add.at(counts[i], rng.integers(0, 6, n - k), 1)
+        else:
+            np.add.at(counts[i], rng.integers(0, 6, n), 1)
+    S = np.full((K, K), 0.7)
+    S[:6, :6] = 0.95
+    S[6:, 6:] = 0.95
+    np.fill_diagonal(S, 1.0)
+    return counts, S, np.r_[np.zeros(n_a, int), np.ones(n_b, int)]
+
+
+class TestBinomialMixture:
+    def test_two_populations_are_found_with_their_rates(self):
+        rng = np.random.default_rng(0)
+        n = rng.integers(20, 80, 2000)
+        high = rng.random(2000) < 0.4
+        k = rng.binomial(n, np.where(high, 0.3, 0.01))
+        fit = ty.binomial_mixture(k, n)
+        assert abs(fit["low"] - 0.01) < 0.01 and abs(fit["high"] - 0.3) < 0.02
+        assert abs(fit["share"] - 0.4) < 0.03
+        assert fit["gain"] > 2.0
+        assert np.mean(ty.in_high(fit, k, n) == high) > 0.97
+
+    def test_one_population_gains_little(self):
+        rng = np.random.default_rng(1)
+        n = rng.integers(20, 80, 2000)
+        k = rng.binomial(n, 0.2)
+        assert ty.binomial_mixture(k, n)["gain"] < 0.05
+
+    def test_weights_count_filaments_with_the_same_counts_once(self):
+        k, n = np.array([0, 0, 5, 5, 5]), np.array([20, 20, 20, 20, 20])
+        a = ty.binomial_mixture(k, n)
+        b = ty.binomial_mixture(np.array([0, 5]), np.array([20, 20]), np.array([2, 3]))
+        assert a["gain"] == pytest.approx(b["gain"], abs=1e-6)
+        assert a["high"] == pytest.approx(b["high"], abs=1e-6)
+
+
+class TestMarkerCandidates:
+    def test_the_sets_of_alike_classes_are_offered(self):
+        _, S, _ = _marker_data()
+        sets = [tuple(x) for x in ty.marker_candidates(S, max_share=0.7)]
+        assert (6, 7, 8) in sets and (0, 1, 2, 3, 4, 5) in sets
+
+    def test_no_set_is_larger_than_its_share_of_the_classes(self):
+        _, S, _ = _marker_data()
+        assert all(len(x) <= 3 for x in ty.marker_candidates(S))
+
+
+class TestMarkerGroups:
+    def test_the_type_with_markers_is_split_from_the_one_without(self):
+        counts, S, truth = _marker_data()
+        splits = ty.marker_groups(counts, S, max_groups=2)
+        assert len(splits) == 1
+        assert list(splits[0]["markers"]) == [6, 7, 8]
+        labels = splits[0]["labels"]
+        # the group that uses the markers keeps number 0
+        assert np.mean(labels[truth == 0] == 0) > 0.95
+        assert np.mean(labels[truth == 1] == 1) > 0.95
+
+    def test_a_clear_split_is_in_the_default_number_of_groups(self):
+        counts, S, _ = _marker_data()
+        splits = ty.marker_groups(counts, S, max_groups=4)
+        assert splits[0]["gain"] > 2.0
+        assert ty.default_n_marker_groups(splits) >= 2
+
+    def test_one_type_has_no_clear_split(self):
+        counts, S, _ = _marker_data(n_a=600, n_b=0)
+        splits = ty.marker_groups(counts, S, max_groups=4)
+        assert ty.default_n_marker_groups(splits) == 1
+
+    def test_filaments_without_compared_segments_are_not_grouped(self):
+        counts, S, _ = _marker_data()
+        counts[:3] = 0
+        labels = ty.marker_groups(counts, S, max_groups=2)[0]["labels"]
+        assert np.all(labels[:3] == -1)
+
+    def test_short_filaments_follow_the_split(self):
+        counts, S, truth = _marker_data()
+        counts[0] = 0
+        counts[0, 7] = 3  # three marker segments: type A, though too short to fit
+        labels = ty.marker_groups(counts, S, max_groups=2)[0]["labels"]
+        assert labels[0] == 0
+
+
+class TestDescribeMarkerGroups:
+    def test_one_group_before_any_split(self):
+        counts, S, _ = _marker_data()
+        splits = ty.marker_groups(counts, S, max_groups=2)
+        labels, groups = ty.describe_marker_groups(splits, 1)
+        assert labels is None and len(groups) == 1
+
+    def test_the_group_without_sparse_markers_may_hold_the_other_type(self):
+        counts, S, _ = _marker_data(marker_rate=0.3)
+        splits = ty.marker_groups(counts, S, max_groups=2)
+        _, groups = ty.describe_marker_groups(splits, 2)
+        assert groups[0]["markers"] == [6, 7, 8] and groups[0]["lacks"] == []
+        assert groups[1]["markers"] == [] and groups[1]["lacks"] == [0]
+
+    def test_abundant_markers_are_not_missed_by_short_filaments(self):
+        counts, S, _ = _marker_data(marker_rate=0.8)
+        splits = ty.marker_groups(counts, S, max_groups=2)
+        _, groups = ty.describe_marker_groups(splits, 2)
+        assert groups[1]["lacks"] == []
+
+
+class TestSimilarityCache:
+    def test_the_same_averages_are_not_registered_again(self, monkeypatch):
+        rng = np.random.default_rng(5)
+        images = [rng.standard_normal((32, 48)).astype(np.float32) for _ in range(4)]
+        first = ty.class_similarity(images, range(4), 2.0)
+        calls = []
+        monkeypatch.setattr(
+            ty, "_class_similarity", lambda *a, **k: calls.append(1) or np.eye(4)
+        )
+        assert np.array_equal(ty.class_similarity(images, range(4), 2.0), first)
+        assert not calls
+        # other averages, or other settings, are computed
+        images[2] = images[2] + 1.0
+        ty.class_similarity(images, range(4), 2.0)
+        ty.class_similarity(images, range(4), 2.0, modulation=True)
+        assert len(calls) == 2
+
+    def test_a_cached_matrix_cannot_be_changed_from_outside(self):
+        rng = np.random.default_rng(6)
+        images = [rng.standard_normal((32, 48)).astype(np.float32) for _ in range(3)]
+        S = ty.class_similarity(images, range(3), 2.0)
+        S[0, 1] = -5
+        assert ty.class_similarity(images, range(3), 2.0)[0, 1] != -5

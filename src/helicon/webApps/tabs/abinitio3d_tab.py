@@ -25,6 +25,7 @@ from .. import bookmark, class2d_files, deployment, map_viewers
 
 from ..lib import helical_pitch_compute as compute
 from ..lib import helical_pitch_map as maps
+from ..lib import helical_pitch_mixture as mixture
 from ..lib import helical_pitch_phase as phase
 from ..lib import helical_pitch_pixel as pixel
 from ..lib import helical_pitch_types as types
@@ -56,7 +57,7 @@ BOOKMARK_DEFAULTS = {
     "rise": ("rise", 4.75),
     "min_twist": ("min_twist", 0.3),
     "merge_counterparts": ("merge_counterparts", True),
-    # starts at what the default cut of the tree gives, from the classes
+    # starts at the number of clear splits of the filaments, from the classes
     "types_n": ("types_n", 1, bookmark.DERIVED),
     "agree_cut": ("agree_threshold", 0.0),
     "csym": ("rot_fold", 1),
@@ -73,17 +74,245 @@ BOOKMARK_DEFAULTS = {
 # Plotly sizes a figure once, to its box as the page is first laid out, and after
 # that only when the window is resized. The box changes without that (a scrollbar
 # appears, the results are shown, the columns are re-flowed), which left a figure
-# larger than its box and its left and bottom edges cut off. This resizes the
-# figure whenever its box does.
+# larger than its box and its left and bottom edges cut off. A figure made in a box
+# that is not shown yet has no size to take, and keeps a default one. So the figure
+# is compared with its box, and made to fit it, whenever the box or the window
+# changes, when the figure comes into view, and a few times as the page settles.
 _RESIZE_WITH_BOX = (
     "var gd = document.getElementById('{plot_id}');"
-    "if (gd && window.ResizeObserver && gd.parentElement) {"
-    "  new ResizeObserver(function() {"
-    # a plot in a box that is not shown (the results wait) cannot be resized
-    "    if (gd.offsetWidth > 0) { try { Plotly.Plots.resize(gd); } catch (e) {} }"
-    "  }).observe(gd.parentElement);"
+    "if (gd && gd.parentElement) {"
+    "  var fit = function() {"
+    # a box that is not shown cannot be fitted
+    "    if (!gd.offsetWidth || !gd.offsetHeight || !gd._fullLayout) return;"
+    "    var l = gd._fullLayout;"
+    "    if (Math.abs(l.width - gd.offsetWidth) > 1 || Math.abs(l.height - gd.offsetHeight) > 1) {"
+    "      try { Plotly.Plots.resize(gd); } catch (e) {}"
+    "    }"
+    "  };"
+    "  if (window.ResizeObserver) {"
+    "    var ro = new ResizeObserver(fit);"
+    "    ro.observe(gd.parentElement); ro.observe(gd);"
+    "  }"
+    "  if (window.IntersectionObserver) {"
+    "    new IntersectionObserver(fit).observe(gd);"
+    "  }"
+    "  window.addEventListener('resize', fit);"
+    "  [0, 100, 400, 1000, 2500].forEach(function(t) { setTimeout(fit, t); });"
     "}"
 )
+
+
+def _filament_joint_figure(
+    filaments, period, length_range=(None, None), repeat_band=(None, None), n_unfitted=0
+):
+    """The repeat of each filament against its length, with a histogram of each.
+
+    A scatter of the filaments with a fitted repeat (length across, repeat up), a
+    histogram of the lengths on top of it and one of the repeats at its right. The
+    filaments in the selection (inside the length range and the repeat band set
+    by the sliders) are blue and the others grey, in the scatter and in the
+    histograms; The green line is the pooled repeat.
+
+    Everything is a trace, not a shape: the page script that gives the
+    HelicalPitch histograms their crosshairs takes over the shapes of every plot.
+
+    Parameters
+    ----------
+    filaments : pandas.DataFrame
+        The filaments with a fitted repeat: ``span`` (length, A) and ``pitch``
+        (repeat, A), and ``rlnMicrographName`` and ``rlnHelicalTubeID`` for the hover.
+    period : float
+        The pooled repeat, in A.
+    length_range, repeat_band : tuple of float or None
+        The selection; a bound that is None is not applied.
+    n_unfitted : int, optional
+        Filaments without a clear repeat, which are not in the plot.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    length = np.asarray(filaments["span"], dtype=float)
+    repeat = np.asarray(filaments["pitch"], dtype=float)
+    l_lo, l_hi = length_range
+    r_lo, r_hi = repeat_band
+    chosen = np.ones(len(length), dtype=bool)
+    if l_lo is not None:
+        chosen &= length >= l_lo
+    if l_hi is not None:
+        chosen &= length <= l_hi
+    if r_lo is not None:
+        chosen &= repeat >= r_lo
+    if r_hi is not None:
+        chosen &= repeat <= r_hi
+
+    x_counts, x_edges = np.histogram(length, bins=40)
+    y_counts, y_edges = np.histogram(repeat, bins=40)
+    x_top, y_top = float(x_counts.max()) * 1.05, float(y_counts.max()) * 1.05
+    x_bins = dict(start=x_edges[0], end=x_edges[-1], size=x_edges[1] - x_edges[0])
+    y_bins = dict(start=y_edges[0], end=y_edges[-1], size=y_edges[1] - y_edges[0])
+    x_max = float(length.max()) * 1.03
+    y_pad = 0.04 * max(float(repeat.max() - repeat.min()), 1.0)
+    y_min, y_max = float(repeat.min()) - y_pad, float(repeat.max()) + y_pad
+
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        column_widths=[0.8, 0.2],
+        row_heights=[0.2, 0.8],
+        shared_xaxes=True,
+        shared_yaxes=True,
+        horizontal_spacing=0.015,
+        vertical_spacing=0.02,
+    )
+    grey, blue = "#c9c9c9", "#1f77b4"
+
+    # the selection first, so that it lies behind the bars and the points
+    def band(x, y, row, col):
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y,
+                mode="lines",
+                fill="toself",
+                fillcolor="rgba(255,165,0,0.2)",
+                line=dict(width=0),
+                hoverinfo="skip",
+                showlegend=False,
+            ),
+            row=row,
+            col=col,
+        )
+
+    sel_x = [l_lo if l_lo is not None else 0.0, l_hi if l_hi is not None else x_max]
+    sel_y = [r_lo if r_lo is not None else y_min, r_hi if r_hi is not None else y_max]
+    if sel_x[1] > sel_x[0] and sel_y[1] > sel_y[0]:
+        a, b = sel_x
+        c, d = sel_y
+        band([a, b, b, a, a], [c, c, d, d, c], 2, 1)
+        # in the histograms the edges of the selection, not a band: bars are drawn
+        # below lines, so a band would tint them
+        for x, y, row, col in (
+            ([a, a], [0, x_top], 1, 1),
+            ([b, b], [0, x_top], 1, 1),
+            ([0, y_top], [c, c], 2, 2),
+            ([0, y_top], [d, d], 2, 2),
+        ):
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=y,
+                    mode="lines",
+                    line=dict(color="orange", width=2),
+                    hoverinfo="skip",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+            )
+    for mask, colour, name in (
+        (chosen, blue, "selected"),
+        (~chosen, grey, "not selected"),
+    ):
+        if not mask.any():
+            continue
+        fig.add_trace(
+            go.Histogram(
+                x=length[mask],
+                xbins=x_bins,
+                marker_color=colour,
+                opacity=1,
+                name=name,
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Histogram(
+                y=repeat[mask],
+                ybins=y_bins,
+                marker_color=colour,
+                opacity=1,
+                name=name,
+                orientation="h",
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=2,
+            col=2,
+        )
+    kind = go.Scattergl if len(length) > 3000 else go.Scatter
+    name = filaments["rlnMicrographName"].astype(str).str.rsplit("/", n=1).str[-1]
+    label = (name + ":" + filaments["rlnHelicalTubeID"].astype(str)).to_numpy()
+    for mask, colour, text in (
+        (~chosen, grey, "not selected"),
+        (chosen, blue, "selected"),
+    ):
+        if not mask.any():
+            continue
+        fig.add_trace(
+            kind(
+                x=length[mask],
+                y=repeat[mask],
+                mode="markers",
+                marker=dict(color=colour, size=4, opacity=0.7),
+                customdata=label[mask],
+                hovertemplate="length %{x:.0f} \u00c5<br>repeat %{y:.0f} "
+                "\u00c5<br>%{customdata}<extra>" + text + "</extra>",
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+
+    for x, y, row, col in (
+        ([0, x_max], [period, period], 2, 1),
+        ([0, y_top], [period, period], 2, 2),
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y,
+                mode="lines",
+                line=dict(color="green", width=2),
+                hoverinfo="skip",
+                showlegend=False,
+            ),
+            row=row,
+            col=col,
+        )
+    fig.update_layout(
+        template="plotly_white",
+        # selected below, the others on top: the whole bar is every filament
+        barmode="stack",
+        bargap=0.03,
+        title_text=(
+            # two lines: it shares its row with the ranked fits
+            f"Per-filament repeat \u00b7 {len(length):,} filaments, "
+            f"{int(chosen.sum()):,} selected"
+            f"<br><sup>+{n_unfitted:,} without a clear repeat</sup>"
+        ),
+        title_x=0.5,
+        title_font=dict(size=12),
+        margin=dict(t=62, b=50, l=55, r=15),
+        showlegend=False,
+    )
+    fig.update_xaxes(
+        range=[0, x_max], row=2, col=1, title_text="Filament length (\u00c5)"
+    )
+    fig.update_yaxes(range=[y_min, y_max], row=2, col=1, title_text="Repeat (\u00c5)")
+    fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_yaxes(range=[0, x_top], title_text="#", row=1, col=1)
+    fig.update_yaxes(showticklabels=False, row=2, col=2)
+    fig.update_xaxes(range=[0, y_top], title_text="#", row=2, col=2)
+    fig.update_xaxes(visible=False, row=1, col=2)
+    fig.update_yaxes(visible=False, row=1, col=2)
+    return fig
 
 
 def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
@@ -100,9 +329,13 @@ def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
 
 
 # The plots size themselves to their container, which has no
-# height of its own inside a card, so each is given one; without it the three
-# collapse onto each other and the histogram covers the download links.
-_PLOT_BOX = "height: 340px; min-height: 340px; flex-shrink: 0; overflow: hidden;"
+# height of its own inside a card, so each is given one, from the height of the
+# window (two rows of plots fit one screen, between 280 and 640 px); without it the
+# three collapse onto each other and the histogram covers the download links.
+_PLOT_BOX = (
+    "height: clamp(280px, calc((100vh - 300px) / 2), 640px); min-height: 280px; "
+    "flex-shrink: 0; overflow: hidden;"
+)
 
 
 def _tip(element, text, placement="top"):
@@ -341,6 +574,22 @@ def abinitio3d_tab_ui():
                         step=10,
                         update_on="blur",
                     ),
+                    ui.input_checkbox(
+                        "types_restrict",
+                        ui.span(
+                            "Only the filaments of the type group in use",
+                            _info(
+                                "Use group (Types card) ticks this: Estimate "
+                                "pitch, the suggestions, the maps and the "
+                                "downloads then take the segments of that "
+                                "group's filaments only. Untick it to use the "
+                                "selected classes on all filaments; tick it again "
+                                "for the group's filaments."
+                            ),
+                        ),
+                        value=False,
+                    ),
+                    ui.output_ui("types_restrict_note"),
                     ui.input_numeric(
                         "phase_n_boot",
                         ui.span(
@@ -502,36 +751,39 @@ def abinitio3d_tab_ui():
                         _tip(
                             ui.input_task_button(
                                 "types_run",
-                                label="Group classes by type",
+                                label="Group filaments by type",
                                 class_="btn-outline-secondary",
                             ),
-                            "Groups the classes by how their averages look: every "
-                            "pair of averages is registered along the filament, "
-                            "and the classes whose averages correlate well "
-                            "make a group. Different helical types look "
-                            "different, and the filaments of a type use its "
-                            "classes. It does not use the repeat, which "
-                            "different types can share. Select one group at a "
-                            "time, then estimate its pitch.",
+                            "Groups the filaments by the classes they use. Every "
+                            "pair of class averages is registered, and classes "
+                            "whose averages look alike form candidate sets. The "
+                            "filaments are then split, one step at a time, by the "
+                            "set that the filaments of one side use and those of "
+                            "the other never do (views only one type shows). "
+                            "Classes that look like no other (junk, or a view of "
+                            "their own) are left out and listed as Not grouped. It "
+                            "does not use the repeat, which different types can "
+                            "share. Use one group at a time, then estimate its "
+                            "pitch.",
                         ),
                         helicon.shiny.slider(
                             "types_n",
                             ui.span(
                                 "Groups",
                                 _info(
-                                    "How many groups of classes. It starts at the "
-                                    "number that cutting the tree where the "
-                                    "averages of a group correlate 0.85 on average "
-                                    "gives (the earlier default). Fewer groups join "
-                                    "the most alike ones; more split them. Classes "
-                                    "in a group of fewer than three are not "
-                                    "grouped (junk, or a view of their own). How "
-                                    "different the types look sets the right "
-                                    "number, so look at the groups."
+                                    "How many groups of filaments: the splits are "
+                                    "made best first. It starts after the last "
+                                    "clear split. Too many groups is the safer "
+                                    "error: two groups of one type give the same "
+                                    "structure and can be merged later, while a "
+                                    "group of two types gives none. A group that "
+                                    "lacks the views another group is told by may "
+                                    "also hold short filaments of that group, and "
+                                    "says so."
                                 ),
                             ),
                             min=1,
-                            max=8,
+                            max=types.MAX_MARKER_GROUPS,
                             value=1,
                             step=1,
                         ),
@@ -541,6 +793,7 @@ def abinitio3d_tab_ui():
                             style="max-height: 32vh; overflow-y: auto;",
                         ),
                         ui.output_ui("types_buttons"),
+                        ui.output_ui("types_pitch_ui"),
                     ),
                 ),
                 # one block that scrolls: a card body is a flex container that
@@ -589,6 +842,7 @@ def abinitio3d_tab_ui():
                         _PITCH_ROW_CSS,
                         class_="ab-pitch-row",
                     ),
+                    ui.output_ui("type_filter_status"),
                     ui.output_ui("phase_summary"),
                     # takes no room, and is never hidden itself, so that it keeps
                     # running: it hides the results below until there are some
@@ -1136,6 +1390,27 @@ def abinitio3d_tab_server(input, output, session):
         )
         displayed_class_labels.set(image_labels)
 
+    # the filaments the analysis is restricted to (Use group of the Types card):
+    # {"label": ..., "keys": set of (micrograph, tube)}, or None for all
+    type_filter = reactive.value(None)
+    # the group Use group last chose (with what Add group added): the checkbox
+    # Only the filaments of the type group in use switches to it and back
+    type_group_used = reactive.value(None)
+
+    @reactive.calc
+    def analysis_params():
+        """The Class2D parameters the analysis uses: all of them, or the segments
+        of the filaments of the type group in use."""
+        p = params()
+        chosen = type_filter()
+        if p is None or chosen is None:
+            return p
+        keys = list(zip(p["rlnMicrographName"].astype(str), p["rlnHelicalTubeID"]))
+        keep = np.array([(m, int(t)) in chosen["keys"] for m, t in keys], dtype=bool)
+        out = p.loc[keep].reset_index(drop=True)
+        out.attrs = dict(p.attrs)
+        return out
+
     # ── Sidebar class selection ──
 
     @reactive.calc
@@ -1149,13 +1424,26 @@ def abinitio3d_tab_server(input, output, session):
             .values
         )
 
-    def _counts_text(class_numbers):
-        """'N filaments | M segments' for the segments of these classes."""
-        p = params()
+    @reactive.calc
+    def _used_segment_filament():
+        """Filament number of every row of :func:`analysis_params`."""
+        p = analysis_params()
+        req(p is not None)
+        return (
+            p.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False)
+            .ngroup()
+            .values
+        )
+
+    def _counts_text(class_numbers, in_use=False):
+        """'N filaments | M segments' for the segments of these classes: of all
+        the filaments, or (``in_use``) of those the analysis uses."""
+        p = analysis_params() if in_use else params()
         if p is None:
             return ""
         mask = p["rlnClassNumber"].astype(int).isin(list(class_numbers)).values
-        n_fil = len(np.unique(_segment_filament()[mask]))
+        fil = _used_segment_filament() if in_use else _segment_filament()
+        n_fil = len(np.unique(fil[mask]))
         return f"{n_fil:,} filaments | {int(mask.sum()):,} segments"
 
     def _gallery(gallery_id, images, labels, label="", selection=False, initial=None):
@@ -1230,7 +1518,7 @@ def abinitio3d_tab_server(input, output, session):
         return [int(displayed_class_ids()[i]) + 1 for i in sel]
 
     @reactive.effect
-    @reactive.event(params, input.select_classes_inner)
+    @reactive.event(analysis_params, input.select_classes_inner)
     def _clear_phase_result():
         # a result belongs to the selection it was computed from
         phase_result.set(None)
@@ -1310,7 +1598,7 @@ def abinitio3d_tab_server(input, output, session):
     def _phase_apply(job, result):
         # a result belongs to the selection it was computed from
         if (
-            params() is not job["params"]
+            analysis_params() is not job["params"]
             or _selected_class_numbers() != job["class_ids"]
         ):
             return
@@ -1401,7 +1689,7 @@ def abinitio3d_tab_server(input, output, session):
         merge = bool(input.merge_counterparts())
         phase_task.invoke(
             dict(
-                params=params(),
+                params=analysis_params(),
                 class_ids=class_ids,
                 # the UI's bounds, enforced here too: the browser's are not
                 # binding
@@ -1439,7 +1727,7 @@ def abinitio3d_tab_server(input, output, session):
             selected_images(),
             labels,
             label=f"{len(selected_images())} class(es) | "
-            + _counts_text(numbers)
+            + _counts_text(numbers, in_use=True)
             + (f" | {len(poor)} picked to remove" if poor else ""),
             selection=True,
             initial=[i for i, c in enumerate(numbers) if c in poor],
@@ -1554,7 +1842,7 @@ def abinitio3d_tab_server(input, output, session):
 
     def _suggest_apply(job, found):
         # suggestions for a selection or data set no longer shown are dropped
-        if params() is not job["params"] or list(
+        if analysis_params() is not job["params"] or list(
             input.select_classes_inner() or []
         ) != list(job["sel_disp"]):
             return
@@ -1631,7 +1919,7 @@ def abinitio3d_tab_server(input, output, session):
         has_data = data_all() is not None and data_all()[0] is not None
         suggest_task.invoke(
             dict(
-                params=params(),
+                params=analysis_params(),
                 sel_disp=sel_disp,
                 ids=ids,
                 selected=selected,
@@ -1667,7 +1955,9 @@ def abinitio3d_tab_server(input, output, session):
             [images[d["pos"]] for d in items],
             [d["text"] for d in items],
             label=f"{len(items)} suggested | "
-            + _counts_text(int(displayed_class_ids()[d["pos"]]) + 1 for d in items)
+            + _counts_text(
+                (int(displayed_class_ids()[d["pos"]]) + 1 for d in items), in_use=True
+            )
             + below,
             selection=True,
         )
@@ -1740,16 +2030,25 @@ def abinitio3d_tab_server(input, output, session):
     def add_picked_suggested():
         _add_suggested(input.suggested_pick() or [])
 
-    # ── types: the classes grouped by how their averages look ──
+    # ── types: the filaments grouped by the classes they use ──
 
     # {"params": the table it was computed for, "classes": class numbers,
-    #  "similarity": (K, K) registered correlations}
+    #  "similarity": (K, K) registered correlations, "counts": (filaments, K)
+    #  segments, "keys": (micrograph, tube) of each filament, "splits": the
+    #  marker splits best first, "default_n": groups up to the last clear split}
     types_state = reactive.value(None)
+    # the groups' test for two repeats: {"state": the types_state it was made
+    # for, "n": the number of groups, "cut": held-out gain needed, "tests":
+    # {group: two_pitch_test result or None}}
+    types_pitch = reactive.value(None)
 
     @reactive.effect
     @reactive.event(params)
     def _forget_types():
         types_state.set(None)
+        types_pitch.set(None)
+        type_group_used.set(None)
+        ui.update_checkbox("types_restrict", value=False)
 
     def _types_work(job, progress):
         position = {int(c): i for i, c in enumerate(job["ids"])}
@@ -1773,25 +2072,41 @@ def abinitio3d_tab_server(input, output, session):
             list(range(len(classes))),
             job["apix"],
             progress=lambda k, n: progress.set(
-                int(100 * k / max(n, 1)), message=f"registered {k:,} of {n:,} pairs"
+                int(90 * k / max(n, 1)), message=f"registered {k:,} of {n:,} pairs"
             ),
         )
+        # a class that looks like no other (junk, or a view of its own) is no
+        # evidence of a type: it is left out of the split and shown apart
+        grouped = np.flatnonzero(types.pixel_groups(similarity) >= 0)
+        if len(grouped) < 3:
+            grouped = np.arange(len(classes))
+        loners = [classes[i] for i in range(len(classes)) if i not in set(grouped)]
+        classes = [classes[i] for i in grouped]
+        similarity = similarity[np.ix_(grouped, grouped)]
+        progress.set(90, message="splitting the filaments by the classes they use")
+        usage, keys = types.usage_matrix(job["params"], classes)
+        splits = types.marker_groups(usage, similarity)
         return dict(
             classes=classes,
+            loners=loners,
             similarity=similarity,
             floor=floor,
-            default_n=types.default_n_groups(similarity),
+            counts=usage,
+            keys=[(str(m), int(t)) for m, t in keys],
+            splits=splits,
+            default_n=types.default_n_marker_groups(splits),
         )
 
     def _types_apply(job, result):
         if params() is not job["params"]:
             return  # other data have been loaded meanwhile
+        types_pitch.set(None)
         types_state.set(dict(result, params=job["params"]))
 
     def _types_error(job, e):
         ui.modal_show(
             ui.modal(
-                f"The classes could not be grouped: {e}",
+                f"The filaments could not be grouped: {e}",
                 title="Grouping error",
                 easy_close=True,
                 footer=None,
@@ -1805,7 +2120,7 @@ def abinitio3d_tab_server(input, output, session):
         _types_error,
         progress_max=100,
         session=session,
-        label="Class types",
+        label="Filament types",
     )
 
     @reactive.effect
@@ -1828,9 +2143,9 @@ def abinitio3d_tab_server(input, output, session):
     @reactive.effect
     @reactive.event(types_state)
     def _default_types_n():
-        # each comparison starts at the number the default cut gives; a bookmarked
+        # each grouping starts at the number of its clear splits; a bookmarked
         # number is kept for the first one (the card is static, so only a bookmark
-        # can have moved the slider before there is a comparison)
+        # can have moved the slider before there is a grouping)
         state = types_state()
         if state is None:
             return
@@ -1840,57 +2155,196 @@ def abinitio3d_tab_server(input, output, session):
                 return
         ui.update_slider("types_n", value=int(state["default_n"]))
 
+    def _types_number():
+        return int(
+            helicon.shiny.clamp_number(
+                input.types_n(), 1, 1, types.MAX_MARKER_GROUPS, float
+            )
+        )
+
     @reactive.calc
-    def _type_groups():
-        """The groups at the current number: a list of dicts, largest first, then
-        the classes in no group; None before the classes have been compared."""
+    def _marker_groups():
+        """The groups at the current number, before any split by repeat: a list of
+        dicts, largest first; None before the filaments have been grouped."""
         state = types_state()
         if state is None:
             return None
-        n = int(helicon.shiny.clamp_number(input.types_n(), 1, 1, 8, float))
-        labels, _ = types.pixel_groups_n(state["similarity"], n)
+        labels, described = types.describe_marker_groups(
+            state["splits"], _types_number()
+        )
+        counts = np.asarray(state["counts"])
+        if labels is None:
+            labels = np.where(counts.sum(1) > 0, 0, -1)
+        return _group_entries(state, labels, described)
+
+    def _group_entries(state, labels, described, mixed=None, fits=None, numbers=None):
+        """One dict per group of ``labels``, largest first, numbered from 1; the
+        group ``mixed`` (the groups whose classes fit no ring, merged) last.
+        ``fits``: group -> ring fit, from the check of the groups; ``numbers``:
+        group -> the number to show (by default, by size)."""
+        fits = fits or {}
         classes = np.asarray(state["classes"])
-        counts = np.asarray(abundance())
-        counts_c = np.array([counts[c - 1] for c in classes], dtype=float)
-        total = max(float(counts_c.sum()), 1.0)
-        # filaments: the group most of whose segments they have (60% or more)
+        counts = np.asarray(state["counts"])
+        keys = state["keys"]
+        # the share of all segments, those of the classes in no group included
+        total = max(float(np.sum(abundance())), 1.0)
         found = []
-        usage, _ = types.usage_matrix(params(), classes.tolist())
-        n_groups = int(labels.max()) + 1
-        if n_groups:
-            voted, _ = types.assign_filaments(usage, labels, n_groups, 0.6)
-        else:
-            voted = np.zeros(0, dtype=int)
-        for g in range(n_groups):
-            m = labels == g
+        for g in range(int(labels.max()) + 1 if labels.size else 0):
+            rows = np.flatnonzero(labels == g)
+            if not len(rows):
+                continue
+            seg = counts[rows].sum(0)
+            n_seg = max(float(seg.sum()), 1.0)
+            # the classes the group's filaments use: 1% of their segments or more
+            used = [
+                i for i in np.argsort(-seg, kind="stable") if seg[i] >= 0.01 * n_seg
+            ]
+            markers = set(int(m) for m in described[g]["markers"])
+            if g == mixed:
+                markers = set()
             found.append(
                 dict(
-                    label=f"Group {g + 1}",
-                    classes=[int(c) for c in classes[m]],
-                    segments=int(counts_c[m].sum()),
-                    share=float(counts_c[m].sum() / total),
-                    filaments=int(np.sum(voted == g)),
+                    id=g,
+                    classes=[int(classes[i]) for i in used],
+                    class_share=[float(seg[i] / n_seg) for i in used],
+                    markers={int(classes[i]) for i in markers},
+                    keys={keys[i] for i in rows},
+                    filaments=len(rows),
+                    segments=int(seg.sum()),
+                    share=float(seg.sum() / total),
+                    lacks=[] if g == mixed else list(described[g]["lacks"]),
+                    repeat=None,
+                    fit=fits.get(g),
+                    mixed=g == mixed,
                 )
             )
-        m = labels < 0
-        if m.any():
-            found.append(
-                dict(
-                    label="Not grouped",
-                    classes=[int(c) for c in classes[m]],
-                    segments=int(counts_c[m].sum()),
-                    share=float(counts_c[m].sum() / total),
-                    filaments=None,
-                )
-            )
+        found.sort(key=lambda x: (x["mixed"], -x["filaments"]))
+        number = numbers or {
+            x["id"]: i + 1 for i, x in enumerate(found) if not x["mixed"]
+        }
+        # only the groups still there can be named (not those merged as Mixed)
+        present = {x["id"] for x in found}
+        number = {i: k for i, k in number.items() if i != mixed and i in present}
+        found.sort(key=lambda x: (x["mixed"], number.get(x["id"], 0)))
+        for x in found:
+            x["label"] = "Mixed" if x["mixed"] else f"Group {number[x['id']]}"
+            # a group merged into the mixed one is no longer there to name
+            x["lacks"] = sorted(number[g] for g in x["lacks"] if g in number)
         return found
 
-    def _group_text(g):
-        fil = "" if g["filaments"] is None else f", {g['filaments']:,} filaments"
-        return (
-            f"{g['label']}: {len(g['classes'])} classes, {g['segments']:,} segments "
-            f"({100 * g['share']:.0f}%){fil}"
+    @reactive.calc
+    def _type_groups():
+        """The groups shown: those of :func:`_marker_groups`; once each group has
+        been fitted with a ring, the groups whose classes fit none merged as Mixed
+        and the groups with two repeats split in two."""
+        groups = _marker_groups()
+        if groups is None:
+            return None
+        tests = _pitch_tests()
+        if not tests:
+            return groups + _not_grouped()
+        poor = sorted(
+            i for i, t in tests.items() if not t.get("split") and t.get("poor")
         )
+        state = types_state()
+        labels, described = types.describe_marker_groups(
+            state["splits"], _types_number()
+        )
+        if labels is None:
+            labels = np.where(np.asarray(state["counts"]).sum(1) > 0, 0, -1)
+        labels = labels.copy()
+        if poor:
+            # the groups whose classes fit no single ring: one group of mixtures
+            labels[np.isin(labels, poor)] = poor[0]
+        fits = {i: t.get("fit") for i, t in tests.items()}
+        if poor:
+            fits[poor[0]] = None
+        # the numbers of the groups as first shown, which the note refers to
+        numbers = {g["id"]: int(g["label"].split()[-1]) for g in groups}
+        groups = _group_entries(
+            state,
+            labels,
+            described,
+            mixed=poor[0] if poor else None,
+            fits=fits,
+            numbers=numbers,
+        )
+        for g in groups:
+            if g["mixed"]:
+                g["merged"] = [tests[i]["fit"] for i in poor]
+        out = []
+        for g in groups:
+            t = tests.get(g["id"])
+            if t is None or g["mixed"] or not t.get("split"):
+                out.append(g)
+                continue
+            # the filaments without a ring of their own go with the larger one
+            larger = int(np.argmax(t["counts"]))
+            ring = {k: t["rings"].get(k, larger) for k in g["keys"]}
+            for r, letter in ((0, "a"), (1, "b")):
+                keys = {k for k, v in ring.items() if v == r}
+                out.append(
+                    dict(
+                        g,
+                        label=f"{g['label']}{letter}",
+                        keys=keys,
+                        filaments=len(keys),
+                        segments=None,
+                        repeat=t["periods"][r],
+                    )
+                )
+        return out + _not_grouped()
+
+    def _not_grouped():
+        """The classes that look like no other, as an entry of their own."""
+        loners = list(types_state().get("loners", []))
+        if not loners:
+            return []
+        counts = np.asarray(abundance(), dtype=float)
+        n = np.array([counts[c - 1] for c in loners])
+        order = np.argsort(-n, kind="stable")
+        return [
+            dict(
+                id=None,
+                label="Not grouped",
+                classes=[loners[i] for i in order],
+                class_share=[float(n[i] / max(n.sum(), 1.0)) for i in order],
+                markers=set(),
+                keys=set(),
+                filaments=None,
+                segments=int(n.sum()),
+                share=float(n.sum() / max(float(counts.sum()), 1.0)),
+                lacks=[],
+                repeat=None,
+            )
+        ]
+
+    def _group_text(g):
+        seg = "" if g.get("segments") is None else f", {g['segments']:,} segments"
+        share = "" if g.get("segments") is None else f" ({100 * g['share']:.0f}%)"
+        if g["filaments"] is None:
+            return (
+                f"{g['label']}: {len(g['classes'])} classes that look like no "
+                f"other{seg}{share}"
+            )
+        if g.get("mixed"):
+            fits = g.get("merged") or []
+            return (
+                f"{g['label']}: {g['filaments']:,} filaments{seg}{share} from "
+                f"{len(fits)} group(s) whose classes fit no single ring (ring fit "
+                f"{min(fits):.2f} to {max(fits):.2f}): probably several types"
+            )
+        text = f"{g['label']}: {g['filaments']:,} filaments{seg}{share}"
+        if g.get("repeat"):
+            text += f", repeat ≈ {g['repeat']:.0f} Å"
+        if g.get("fit") is not None and np.isfinite(g["fit"]):
+            text += f", ring fit {g['fit']:.2f}"
+        if g["markers"]:
+            text += f", {len(g['markers'])} marker classes"
+        if g["lacks"]:
+            names = ", ".join(f"Group {x}" for x in g["lacks"])
+            text += f" — may also hold filaments of {names} that lack its markers"
+        return text
 
     @reactive.effect
     def _types_choices():
@@ -1905,17 +2359,21 @@ def abinitio3d_tab_server(input, output, session):
 
     @render.ui
     def types_controls():
-        # drawn once for each comparison of the classes, not at each move of the
-        # cut; the groups are then followed by update_select
+        # drawn once for each grouping, not at each move of the number; the
+        # groups are then followed by update_select
         state = types_state()
         if state is None:
             return None
         with reactive.isolate():
             groups = _type_groups()
+        n_fil = len(state["keys"])
+        loners = len(state.get("loners", []))
+        apart = f"; {loners} that look like no other are left out" if loners else ""
         return ui.TagList(
             ui.p(
+                f"{n_fil:,} filaments, by their segments in the "
                 f"{len(state['classes'])} classes with {state['floor']:,} segments "
-                "or more are compared",
+                f"or more that look like others{apart}",
                 class_="small text-muted",
                 style="margin-bottom: 4px;",
             ),
@@ -1943,13 +2401,23 @@ def abinitio3d_tab_server(input, output, session):
             return None
         position = {int(c): i for i, c in enumerate(displayed_class_ids())}
         images = displayed_class_images()
-        pos = [position[c - 1] for c in g["classes"] if c - 1 in position]
-        labels = displayed_class_labels()
+        shown = [
+            (c, s) for c, s in zip(g["classes"], g["class_share"]) if c - 1 in position
+        ]
         return _gallery(
             "types_pick",
-            [images[i] for i in pos],
-            [labels[i] for i in pos],
-            label=_group_text(g),
+            [images[position[c - 1]] for c, _ in shown],
+            [
+                f"{c}: {100 * s:.0f}%" + (" ★" if c in g["markers"] else "")
+                for c, s in shown
+            ],
+            label=(
+                "Classes that look like no other (junk, or views of their own), "
+                "with the share of their segments"
+                if g["id"] is None
+                else "The classes the group's filaments use, with the share of "
+                "their segments (★: the marker classes that set the group apart)"
+            ),
             selection=True,
         )
 
@@ -1965,7 +2433,8 @@ def abinitio3d_tab_server(input, output, session):
                     class_="btn-sm btn-outline-primary",
                 ),
                 "Select the classes of this group (picked ones if some are "
-                "picked) and no others, ready for Estimate pitch",
+                "picked) and no others, and restrict the analysis to the "
+                "group's filaments, ready for Estimate pitch",
             ),
             _tip(
                 ui.input_action_button(
@@ -1973,35 +2442,334 @@ def abinitio3d_tab_server(input, output, session):
                     "Add group",
                     class_="btn-sm btn-outline-primary",
                 ),
-                "Add the classes of this group to those selected",
+                "Add all the classes of this group to those selected; when the "
+                "analysis is restricted to a group, add this group's filaments "
+                "to it",
             ),
-            col_widths=(6, 6),
+            _tip(
+                ui.input_action_button(
+                    "types_add_picked",
+                    "Add selected",
+                    class_="btn-sm btn-outline-primary",
+                ),
+                "Add the classes picked in this group's gallery to those "
+                "selected; when the analysis is restricted to a group, add this "
+                "group's filaments to it",
+            ),
+            col_widths=(4, 4, 4),
             fill=False,
         )
 
-    def _type_positions():
+    def _type_positions(picked_only=None):
+        """Sidebar positions of the chosen group's classes: the picked ones if
+        some are picked (``picked_only=None``), only those (True) or all (False)."""
         g = _chosen_group()
         req(g is not None)
         position = {int(c): i for i, c in enumerate(displayed_class_ids())}
-        classes = g["classes"]
+        classes = [c for c in g["classes"] if c - 1 in position]
         picked = input.types_pick() or []
-        if picked:
+        if picked_only or (picked_only is None and picked):
             classes = [classes[i] for i in picked if i < len(classes)]
-        return [position[c - 1] for c in classes if c - 1 in position]
+        return [position[c - 1] for c in classes]
 
     @reactive.effect
     @reactive.event(input.types_use)
     def use_type_group():
         positions = _type_positions()
         req(positions)
+        g = _chosen_group()
+        # the classes in no group have no filaments of their own
+        if g["id"] is None:
+            ui.update_checkbox("types_restrict", value=False)
+        else:
+            type_group_used.set(dict(label=g["label"], keys=set(g["keys"])))
+            ui.update_checkbox("types_restrict", value=True)
         _set_selection(positions)
 
     @reactive.effect
     @reactive.event(input.types_add)
     def add_type_group():
-        positions = _type_positions()
+        _add_type_classes(_type_positions(picked_only=False))
+
+    @reactive.effect
+    @reactive.event(input.types_add_picked)
+    def add_picked_type_classes():
+        positions = _type_positions(picked_only=True)
+        if not positions:
+            ui.notification_show(
+                "Pick classes in the group's gallery first.", duration=4
+            )
+            return
+        _add_type_classes(positions)
+
+    def _add_type_classes(positions):
+        """Add these classes of the chosen group to the selection, and the
+        group's filaments to the restriction if there is one."""
         req(positions)
+        g = _chosen_group()
+        current = type_filter()
+        if current is not None and g["id"] is not None:
+            type_group_used.set(
+                dict(
+                    label=f"{current['label']} + {g['label']}",
+                    keys=set(current["keys"]) | set(g["keys"]),
+                )
+            )
         _set_selection(list(input.select_classes_inner() or []) + positions)
+
+    @reactive.effect
+    @reactive.event(input.types_restrict)
+    def _restrict_without_group():
+        # ticked by the user with no group to restrict to
+        if input.types_restrict() and type_group_used() is None:
+            ui.update_checkbox("types_restrict", value=False)
+            ui.notification_show(
+                "No group is in use: choose one in the Types card and press Use "
+                "group.",
+                duration=6,
+            )
+
+    @reactive.effect
+    def _restrict_to_group():
+        """The restriction follows the checkbox, to the group last used."""
+        group = type_group_used()
+        on = bool(input.types_restrict())
+        with reactive.isolate():
+            before = type_filter()
+            had_result = phase_result() is not None
+        after = group if on and group is not None else None
+        if after is before:
+            return
+        type_filter.set(after)
+        if before is not None and after is None and group is not None:
+            # unticked: say what changed
+            ui.notification_show(
+                f"All filaments are used again, not only those of {before['label']}."
+                + (
+                    f" The pitch estimate of {before['label']} was cleared: run "
+                    "Estimate pitch for the selected classes on all filaments."
+                    if had_result
+                    else ""
+                ),
+                duration=8,
+            )
+
+    @render.ui
+    def types_restrict_note():
+        group = type_group_used()
+        if group is None:
+            text = "No group in use yet (Types card: Use group)."
+        elif type_filter() is None:
+            text = f"Off: all filaments. On: the {len(group['keys']):,} of {group['label']}."
+        else:
+            text = f"On: the {len(group['keys']):,} filaments of {group['label']}."
+        return ui.p(text, class_="small text-muted", style="margin: -8px 0 8px 0;")
+
+    @render.ui
+    def type_filter_status():
+        chosen = type_filter()
+        if chosen is None:
+            return None
+        return ui.p(
+            f"Only the {len(chosen['keys']):,} filaments of {chosen['label']} are "
+            "used (Parameters: untick Only the filaments of the type group in "
+            "use, for all).",
+            class_="small text-muted",
+            style="margin: 2px 0;",
+        )
+
+    # ── types: does a group hold two repeats ──
+
+    # a sample of 400 filaments gave the same ring fit and held-out gain as 800
+    # (and as the whole group) in half the time; two starts of each two-ring fit
+    # instead of four kept the same splits at half the time again
+    MAX_TEST_FILAMENTS = 400
+    TEST_RESTARTS = 2
+
+    def _types_pitch_work(job, progress):
+        groups = [
+            g for g in job["groups"] if g["filaments"] >= 100 and len(g["classes"]) >= 3
+        ]
+        if not groups:
+            raise ValueError(
+                "no group has 100 filaments and three classes, the least a ring "
+                "fit needs"
+            )
+        p = job["params"]
+        keys = [
+            (m, int(t))
+            for m, t in zip(p["rlnMicrographName"].astype(str), p["rlnHelicalTubeID"])
+        ]
+
+        def rows_of(g):
+            out = p.loc[np.array([k in g["keys"] for k in keys], dtype=bool)]
+            out.attrs = dict(p.attrs)
+            return out
+
+        jobs = [(rows_of(g), g["classes"][:MAX_PHASE_CLASSES]) for g in groups]
+        progress.set(0, message=f"one ring and two, for {len(groups)} groups")
+        found = mixture.two_pitch_tests(
+            jobs,
+            max_filaments=MAX_TEST_FILAMENTS,
+            restarts=TEST_RESTARTS,
+            progress=lambda k, n: progress.set(
+                int(90 * k / max(n, 1)), message=f"{k} of {n} fits"
+            ),
+        )
+        tests = {}
+        for g, t in zip(groups, found):
+            if isinstance(t, Exception):
+                logger.warning("ring fits of %s failed: %s", g["label"], t)
+            elif t is not None:
+                tests[g["id"]] = t
+        gains = [t["heldout"] for t in tests.values() if np.isfinite(t["heldout"])]
+        cut = mixture.split_cut(gains)
+        again = []
+        for g in groups:
+            t = tests.get(g["id"])
+            if t is None:
+                continue
+            if t.get("periods") is None:
+                t["split"] = False
+            else:
+                lo, hi = t["periods"]
+                t["split"] = t["heldout"] > cut and hi / lo - 1 >= mixture.MIN_APART
+            # classes that fit no single ring: several types (or junk) together
+            t["poor"] = not t["split"] and t["fit"] < mixture.MIN_RING_FIT
+            if t["split"] and g["filaments"] > MAX_TEST_FILAMENTS:
+                again.append((g, rows_of(g)))
+        if again:
+            # the rings of every filament of a group split in two, not a sample's
+            progress.set(90, message="the two repeats of every filament")
+            full = mixture.two_pitch_tests(
+                [(rows, g["classes"][:MAX_PHASE_CLASSES]) for g, rows in again],
+                restarts=TEST_RESTARTS,
+            )
+            for (g, _), t in zip(again, full):
+                if isinstance(t, dict) and t.get("periods") is not None:
+                    tests[g["id"]] = dict(
+                        t, split=True, poor=False, fit=tests[g["id"]]["fit"]
+                    )
+        return dict(tests=tests, cut=cut)
+
+    def _types_pitch_apply(job, result):
+        if types_state() is not job["state"] or _types_number() != job["n"]:
+            return  # regrouped meanwhile
+        types_pitch.set(dict(result, state=job["state"], n=job["n"]))
+
+    def _types_pitch_error(job, e):
+        ui.modal_show(
+            ui.modal(
+                f"The groups could not be evaluated: {e}",
+                title="Ring fit error",
+                easy_close=True,
+                footer=None,
+            )
+        )
+
+    types_pitch_task = helicon.shiny.background_task(
+        "types_pitch_run",
+        _types_pitch_work,
+        _types_pitch_apply,
+        _types_pitch_error,
+        progress_max=100,
+        session=session,
+        label="One vs two rings",
+    )
+
+    def _pitch_tests():
+        """The groups evaluated so far, for the groups shown now: {id: test}."""
+        test = types_pitch()
+        if (
+            test is None
+            or test["state"] is not types_state()
+            or test["n"] != _types_number()
+        ):
+            return {}
+        return test["tests"]
+
+    @reactive.effect
+    @reactive.event(input.types_pitch_run)
+    def run_types_pitch():
+        groups = _marker_groups()
+        req(groups)
+        types_pitch_task.invoke(
+            dict(
+                params=params(),
+                state=types_state(),
+                n=_types_number(),
+                groups=groups,
+            )
+        )
+
+    @render.ui
+    def types_pitch_ui():
+        if types_state() is None:
+            return None
+        tests = _pitch_tests()
+        note = None
+        if tests:
+            label = {g["id"]: g["label"] for g in _marker_groups()}
+            parts = []
+            for i, t in tests.items():
+                if i not in label:
+                    continue
+                if t.get("split"):
+                    what = (
+                        f"two repeats, {t['periods'][0]:.0f} and "
+                        f"{t['periods'][1]:.0f} Å: split in two"
+                    )
+                elif t.get("poor"):
+                    what = "no single ring: merged as Mixed"
+                else:
+                    what = "one ring"
+                gain = (
+                    f", second ring {t['heldout']:+.2f}"
+                    if np.isfinite(t.get("heldout", np.nan))
+                    else ""
+                )
+                parts.append(f"{label[i]} (fit {t['fit']:.2f}{gain}): {what}")
+            cut = types_pitch()["cut"]
+            untested = [g["label"] for g in _marker_groups() if g["id"] not in tests]
+            note = ui.p(
+                "; ".join(parts)
+                + f". A split needs a held-out gain above {cut:.2f}"
+                + (
+                    " (the default: fewer than four groups to compare)"
+                    if len(tests) < 4
+                    else " (from the groups' gains)"
+                )
+                + f"; a fit below {mixture.MIN_RING_FIT:.1f} means several types."
+                + (
+                    " Not evaluated (fewer than 100 filaments or three classes): "
+                    + ", ".join(untested)
+                    + "."
+                    if untested
+                    else ""
+                ),
+                class_="small text-muted",
+                style="margin: 4px 0 0 0;",
+            )
+        return ui.TagList(
+            _tip(
+                ui.input_task_button(
+                    "types_pitch_run",
+                    label="Evaluate one vs two ring fits for each group",
+                    class_="btn-sm btn-outline-secondary",
+                ),
+                "For each group, fits one ring of its classes and two. A group "
+                "whose classes fit no single ring (ring fit below 0.3) holds "
+                "several types or junk: such groups are merged as Mixed. Types "
+                "that share their classes can differ in repeat: a group is split "
+                "in two where the second ring clearly helps on filaments it was "
+                "not fitted to (far more than in the other groups) and the two "
+                "repeats differ by 8% or more. A good fit does not prove one type: "
+                "two types of nearly the same repeat (a doublet and a triplet, "
+                "say) fit one ring well. The groups are fitted in parallel, on "
+                "the processors available: about a minute.",
+            ),
+            note,
+        )
 
     def _poorly_fitting(r):
         """Selected classes to take out, with the reason for each."""
@@ -2716,57 +3484,15 @@ def abinitio3d_tab_server(input, output, session):
     def filament_pitch_plot():
         r = phase_result()
         req(r is not None)
-        lo, hi = _length_range()
         table = r.filaments
-        table = table[(table["span"] >= lo) & (table["span"] <= hi)]
-        n_all = len(table)
+        n_unfitted = int((~table["fitted"]).sum())
         table = table[table["fitted"]]
-        pitches = table["pitch"].values
-        spans = table["span"].values
-        req(len(pitches) > 0)
-        import plotly.graph_objects as go
-
-        counts, edges = np.histogram(pitches, bins=40)
-        top = float(counts.max()) * 1.05
-        fig = go.Figure(
-            go.Histogram(
-                x=pitches,
-                # the same bins as counted above, so the band reaches the top
-                xbins=dict(start=edges[0], end=edges[-1], size=edges[1] - edges[0]),
-                name="filaments",
-                showlegend=False,
+        req(len(table) > 0)
+        return _fig_to_html(
+            _filament_joint_figure(
+                table, r.period, _length_range(), _pitch_band(), n_unfitted
             )
         )
-        low, high = _pitch_band()
-        if low is not None and high is not None and high > low:
-            fig.add_trace(
-                go.Scatter(
-                    x=[low, high, high, low, low],
-                    y=[0, 0, top, top, 0],
-                    mode="lines",
-                    fill="toself",
-                    fillcolor="rgba(255,165,0,0.2)",
-                    line=dict(width=0),
-                    hoverinfo="skip",
-                    showlegend=False,
-                )
-            )
-        _add_marker(fig, r.period, 0.0, top)
-        fig.update_layout(
-            template="plotly_white",
-            title_text=(
-                # two lines: it shares its row with the ranked fits
-                f"Per-filament repeat \u00b7 {len(pitches)} filaments, "
-                f"{spans.min():,.0f}\u2013{spans.max():,.0f} \u00c5 long"
-                f"<br><sup>+{n_all - len(pitches)} without a clear repeat</sup>"
-            ),
-            title_x=0.5,
-            title_font=dict(size=12),
-            xaxis_title="Repeat distance (Å)",
-            yaxis_title="# of filaments",
-            margin=dict(t=62, b=50, l=50, r=20),
-        )
-        return _fig_to_html(fig)
 
     def _write_star(out):
         import starfile
@@ -2782,7 +3508,7 @@ def abinitio3d_tab_server(input, output, session):
         r = phase_result()
         req(r is not None)
         fold = helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
-        return phase.segment_angles(params(), r, fold=fold)
+        return phase.segment_angles(analysis_params(), r, fold=fold)
 
     def _download_label(subset, prefix="Download"):
         n_fil = subset.groupby(["rlnMicrographName", "rlnHelicalTubeID"]).ngroups
@@ -2796,7 +3522,7 @@ def abinitio3d_tab_server(input, output, session):
         lo, hi = _length_range()
         req(low is not None and high is not None and high >= low)
         subset = phase.select_segments(
-            params(),
+            analysis_params(),
             r.filaments,
             low,
             high,
@@ -2817,7 +3543,7 @@ def abinitio3d_tab_server(input, output, session):
             lo, hi = _length_range()
             yield from _write_star(
                 phase.select_segments(
-                    params(),
+                    analysis_params(),
                     r.filaments,
                     low,
                     high,
@@ -2927,26 +3653,15 @@ def abinitio3d_tab_server(input, output, session):
     def relion_ui():
         r = phase_result()
         req(r is not None)
+        # nothing is shown, and no message, where RELION cannot be used: on a hosted
+        # copy (no external programs run on visitors' data, and the reconstruction
+        # would need a RELION project folder on the server and minutes of its CPUs
+        # per visitor) and where relion_reconstruct is not on this server's PATH
         if deployment.is_cloud():
-            # a hosted copy runs no external programs on visitors' data: the
-            # reconstruction would need a RELION project folder on the server
-            # and minutes of the server's CPUs per visitor
-            return _tip(
-                ui.tags.small(
-                    "relion_reconstruct: not available on the hosted web site",
-                    class_="text-muted",
-                ),
-                "Download the star file and run relion_reconstruct where RELION is "
-                "installed, or install helicon and run this tab locally "
-                "(https://jianglab.science.psu.edu/helicon/).",
-            )
+            return None
         exe = relion.find_relion_reconstruct()
         if exe is None:
-            return _tip(
-                ui.tags.small("relion_reconstruct: not available", class_="text-muted"),
-                "relion_reconstruct is not on this server's PATH; download the star "
-                "file and reconstruct it where RELION is installed.",
-            )
+            return None
         return ui.TagList(_relion_project_row(exe), ui.output_ui("relion_fused_ui"))
 
     def _relion_project_row(exe):
@@ -3169,7 +3884,7 @@ def abinitio3d_tab_server(input, output, session):
         low, high = _pitch_band()
         lo, hi = _length_range()
         subset = phase.select_segments(
-            params(),
+            analysis_params(),
             r.filaments,
             low,
             high,

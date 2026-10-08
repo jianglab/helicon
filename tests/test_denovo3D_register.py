@@ -361,3 +361,121 @@ def test_closure_is_not_claimed_meaningful_without_loops():
     assert diag["redundancy"] == 0
     assert diag["closure_meaningful"] is False
     assert diag["trustworthy"] is False
+
+
+class TestBestCorrMatrix:
+    """The correlations of every pair at once, as register_pair finds them."""
+
+    @pytest.fixture(scope="class")
+    def images(self):
+        rng = np.random.default_rng(0)
+        y, x = np.mgrid[:40, :64]
+        out = []
+        for k in range(7):
+            band = np.exp(-((y - 20 - 3 * np.sin(x / (6 + k) + k)) ** 2) / 20.0)
+            out.append(
+                (band + 0.3 * rng.standard_normal(band.shape)).astype(np.float32)
+            )
+        return out
+
+    def test_it_agrees_with_registering_pair_by_pair(self, images):
+        S = R.best_corr_matrix(images, workers=1)
+        for i in range(len(images)):
+            for j in range(i + 1, len(images)):
+                one = R.register_pair(images[i], images[j], flips=R.FLIPS, refine=False)
+                assert S[i, j] == pytest.approx(np.clip(one["corr"], 0, 1), abs=1e-9)
+        assert np.allclose(S, S.T) and np.allclose(np.diag(S), 1.0)
+
+    def test_processes_give_the_same_matrix(self, images):
+        assert np.allclose(
+            R.best_corr_matrix(images, workers=1), R.best_corr_matrix(images, workers=3)
+        )
+
+    def test_blocks_give_the_same_matrix(self, images, monkeypatch):
+        whole = R.best_corr_matrix(images, workers=1)
+        monkeypatch.setattr(R, "CORR_BLOCK", 2)
+        assert np.allclose(R.best_corr_matrix(images, workers=1), whole)
+
+    def test_progress_counts_the_pairs(self, images):
+        seen = []
+        R.best_corr_matrix(images, workers=1, progress=lambda k, n: seen.append((k, n)))
+        assert seen[-1] == (21, 21)
+
+    def test_images_of_different_shapes_are_refused(self, images):
+        with pytest.raises(ValueError):
+            R.best_corr_matrix([images[0], images[1][:, :50]])
+
+
+class TestRegisterMany:
+    """register_pair for many pairs at once."""
+
+    @pytest.fixture(autouse=True)
+    def fresh(self):
+        # each test computes its registrations, not the cache of an earlier one
+        R.clear_pair_cache()
+        yield
+        R.clear_pair_cache()
+
+    @pytest.fixture(scope="class")
+    def images(self):
+        return TestBestCorrMatrix.images.__wrapped__(None)
+
+    @pytest.mark.parametrize(
+        "flips,rot,dy", [(R.FLIPS, 6.0, 5.0), (((False, False),), 3.0, 3.0)]
+    )
+    def test_it_gives_what_register_pair_gives(self, images, flips, rot, dy):
+        pairs = [(0, 3), (1, 3), (2, 5), (4, 1), (6, 0)]
+        many = R.register_many(images, pairs, flips, rot, dy, workers=1)
+        for (i, j), got in zip(pairs, many):
+            one = R.register_pair(
+                images[i],
+                images[j],
+                rot_range=rot,
+                dy_range=dy,
+                flips=flips,
+                refine=False,
+            )
+            for key in ("corr", "dx", "prominence", "psi", "dy"):
+                assert got[key] == pytest.approx(one[key], abs=1e-9), key
+            assert (got["flip_x"], got["flip_y"]) == (one["flip_x"], one["flip_y"])
+
+    def test_processes_give_the_same_results(self, images):
+        pairs = [(i, j) for i in range(7) for j in range(7) if i != j]
+        one = R.register_many(images, pairs, workers=1)
+        R.clear_pair_cache()
+        many = R.register_many(images, pairs, workers=3)
+        assert all(a == pytest.approx(b) for a, b in zip(one, many))
+
+    def test_refining_from_the_bulk_coarse_search_is_register_pair(self, images):
+        pairs = [(0, 3), (2, 5), (6, 1)]
+        coarse = R.register_many(images, pairs, workers=1)
+        for (i, j), c in zip(pairs, coarse):
+            full = R.register_pair(images[i], images[j], refine=True)
+            fast = R.register_pair(images[i], images[j], refine=True, coarse=c)
+            assert fast == pytest.approx(full, abs=1e-9)
+
+    def test_a_repeat_is_read_from_the_cache(self, images, monkeypatch):
+        pairs = [(0, 3), (2, 5)]
+        first = R.register_many(images, pairs, workers=1)
+
+        def no(*a, **k):
+            raise AssertionError("registered again")
+
+        monkeypatch.setattr(R, "_register_column", no)
+        assert R.register_many(images, pairs, workers=1) == first
+        # the order and a pair asked for twice do not matter
+        again = R.register_many(images, [(2, 5), (0, 3), (2, 5)], workers=1)
+        assert again == [first[1], first[0], first[1]]
+
+    def test_other_images_or_another_search_are_not_read_from_it(self, images):
+        pairs = [(0, 3)]
+        first = R.register_many(images, pairs, workers=1)[0]
+        other = R.register_many(images, pairs, workers=1, rot_range=2.0)[0]
+        changed = [im.copy() for im in images]
+        changed[3] = changed[3][::-1].copy()
+        turned = R.register_many(changed, pairs, workers=1)[0]
+        fresh = R.register_pair(images[0], changed[3], refine=False)
+        assert turned["corr"] == pytest.approx(fresh["corr"], abs=1e-9)
+        assert (other["psi"], other["corr"]) != (first["psi"], first["corr"]) or abs(
+            first["psi"]
+        ) <= 2.0

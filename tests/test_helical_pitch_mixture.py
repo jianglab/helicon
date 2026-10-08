@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
@@ -243,3 +244,98 @@ class TestSegmentStates:
         pairs, _, _, _, scores = data
         state = mx.assign_segments(pairs, scores, switch_cost=2.0, junk=0.3)
         assert set(np.unique(state)) <= {0, 1, 2}
+
+
+class TestSplitCut:
+    def test_few_groups_take_the_default(self):
+        assert mx.split_cut([0.02, 0.18]) == 0.10
+
+    def test_the_cut_sits_far_above_the_typical_group(self):
+        gains = [0.024, 0.027, 0.03, 0.037, 0.039, 0.053, 0.057, 0.184]
+        cut = mx.split_cut(gains)
+        assert 0.06 < cut < 0.184
+
+    def test_the_cut_is_never_below_the_floor(self):
+        assert mx.split_cut([0.01, 0.01, 0.01, 0.01, 0.01]) == 0.08
+
+
+class TestTwoPitchTest:
+    @pytest.fixture(scope="class")
+    def two(self):
+        from test_helical_pitch_phase import make_params
+
+        a = make_params(n_fil=120, period=300.0, seed=1)
+        b = make_params(n_fil=120, period=420.0, seed=2, tube_offset=100)
+        return pd.concat([a, b], ignore_index=True)
+
+    def test_two_types_of_different_repeat_give_two_rings(self, two):
+        t = mx.two_pitch_test(two, range(1, 13))
+        assert t["periods"][0] == pytest.approx(300.0, rel=0.06)
+        assert t["periods"][1] == pytest.approx(420.0, rel=0.06)
+        assert t["heldout"] > 0.10
+        right = [
+            t["rings"].get((str(m), int(tube))) == (0 if tube <= 100 else 1)
+            for m, tube in two.groupby(["rlnMicrographName", "rlnHelicalTubeID"])
+            .size()
+            .index
+        ]
+        assert np.mean(right) > 0.9
+
+    def test_one_type_gains_little(self):
+        from test_helical_pitch_phase import make_params
+
+        t = mx.two_pitch_test(
+            make_params(n_fil=200, period=300.0, seed=3), range(1, 13)
+        )
+        assert t["heldout"] < 0.05
+
+    def test_one_type_fits_one_ring_well(self):
+        from test_helical_pitch_phase import make_params
+
+        t = mx.two_pitch_test(
+            make_params(n_fil=200, period=300.0, seed=3), range(1, 13)
+        )
+        assert t["fit"] > mx.MIN_RING_FIT
+
+    def test_classes_at_random_fit_no_ring(self):
+        from test_helical_pitch_phase import make_params
+
+        junk = make_params(n_fil=200, period=300.0, seed=4)
+        junk["rlnClassNumber"] = np.random.default_rng(0).integers(1, 13, len(junk))
+        t = mx.two_pitch_test(junk, range(1, 13))
+        assert t["fit"] < mx.MIN_RING_FIT
+
+    def test_a_sample_of_filaments_is_fitted(self, two):
+        t = mx.two_pitch_test(two, range(1, 13), max_filaments=100)
+        assert len(t["rings"]) <= 100
+
+
+class TestTwoPitchTests:
+    @pytest.fixture(scope="class")
+    def jobs(self):
+        from test_helical_pitch_phase import make_params
+
+        a = make_params(n_fil=60, period=300.0, seed=1)
+        b = make_params(n_fil=60, period=420.0, seed=2, tube_offset=100)
+        return [(pd.concat([a, b], ignore_index=True), range(1, 13)), (a, range(1, 13))]
+
+    def test_in_parallel_it_gives_what_it_gives_in_turn(self, jobs):
+        one = mx.two_pitch_tests(jobs, restarts=2, workers=1)
+        many = mx.two_pitch_tests(jobs, restarts=2, workers=3)
+        for x, y in zip(one, many):
+            assert x["heldout"] == pytest.approx(y["heldout"], abs=1e-9)
+            assert x["fit"] == pytest.approx(y["fit"], abs=1e-9)
+            assert x["periods"] == pytest.approx(y["periods"], abs=1e-6)
+        assert one[0]["heldout"] > one[1]["heldout"]
+
+    def test_the_pieces_add_up_to_the_whole(self, jobs):
+        p, c = jobs[0]
+        assert mx.two_pitch_tests([jobs[0]], restarts=2, workers=1)[0][
+            "heldout"
+        ] == pytest.approx(mx.two_pitch_test(p, c, restarts=2)["heldout"])
+
+    def test_a_group_that_fails_does_not_stop_the_others(self, jobs):
+        bad = (jobs[1][0].iloc[:0], range(1, 13))
+        out = mx.two_pitch_tests([bad, jobs[1]], restarts=2, workers=2)
+        assert isinstance(out[0], Exception)
+        assert isinstance(out[1], dict)

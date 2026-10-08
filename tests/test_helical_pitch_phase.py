@@ -776,3 +776,51 @@ class TestCandidateFit:
     def test_classes_already_in_the_fit_are_not_candidates(self, two_types):
         r = ph.analyze(two_types, class_ids=list(range(1, 13)), n_boot=2)
         assert ph.candidate_fit(two_types, r, [3, 4]) == {}
+
+
+class TestFilamentSample:
+    def test_few_filaments_are_all_used(self):
+        df = make_params(n_fil=30, n_seg=10)
+        assert ph._filament_sample(df, 20) is df
+
+    def test_many_are_sampled_whole_and_keep_the_attrs(self):
+        df = make_params(n_fil=120, n_seg=10)
+        df.attrs["optics"] = "kept"
+        out = ph._filament_sample(df, 20)
+        n = out.groupby(["rlnMicrographName", "rlnHelicalTubeID"]).ngroups
+        assert n == 20 and len(out) == 20 * 10  # every segment of a filament taken
+        assert out.attrs == df.attrs
+        # the same sample every time
+        again = ph._filament_sample(df, 20)
+        assert out.index.equals(again.index)
+
+
+class TestCurvesInBatches:
+    def test_batches_in_threads_give_the_serial_curves(self, monkeypatch):
+        rng = np.random.default_rng(3)
+        n_fil, per = 40, 60
+        fi = np.repeat(np.arange(n_fil), per)
+        d = rng.uniform(-900, 900, len(fi))
+        w = rng.uniform(0.5, 1.5, len(fi))
+        dphi = rng.uniform(-np.pi, np.pi, len(fi))
+        grid = np.arange(250.0, 450.0, 2.0)
+        monkeypatch.setattr(ph, "CURVES_PARALLEL_MIN", 10**9)
+        serial = ph._filament_curves(fi, n_fil, d, w, dphi, grid)
+        monkeypatch.setattr(ph, "CURVES_PARALLEL_MIN", 1)
+        threaded = ph._filament_curves(fi, n_fil, d, w, dphi, grid)
+        assert np.allclose(serial, threaded, atol=1e-9)
+        # the formula, at the separations the function bins to (0.5 A)
+        binned = d.min() + np.round((d - d.min()) / 0.5) * 0.5
+        direct = np.array(
+            [
+                [
+                    np.sum(
+                        w[fi == f]
+                        * np.cos(2 * np.pi * binned[fi == f] / p - dphi[fi == f])
+                    )
+                    for f in range(n_fil)
+                ]
+                for p in grid
+            ]
+        )
+        assert np.allclose(direct, threaded, atol=1e-9)

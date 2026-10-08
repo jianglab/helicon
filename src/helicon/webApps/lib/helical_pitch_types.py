@@ -9,21 +9,31 @@ which is the repeat (types can have nearly the same repeat):
   and the correlation at the best offset is high; that of two structures is lower;
 * the *usage*: the classes of one type are used by the same filaments.
 
-The classes are grouped by an affinity combining the two, and each filament is
-given the group most of its segments are in. A wrong class for many segments of a
-filament does not matter while most of them are right, and a filament with no clear
-majority is left out as unclassified.
+The Types card of AbInitio3D groups the filaments (:func:`marker_groups`): one
+split at a time, by a set of alike classes that the filaments of one side use and
+those of the other never do. The earlier grouping of the classes
+(:func:`pixel_groups`, with a vote of each filament) is kept for comparison.
 
 This is a prototype.
 """
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pandas as pd
 
 from . import denovo3d_register as R
 from . import helical_pitch_phase as ph
+
+
+# Similarity matrices of class_similarity, by the averages' contents and the
+# settings: the same Class2D job grouped again (in any session) is not registered
+# again. A matrix is a few hundred kB at most; the oldest go first.
+SIMILARITY_CACHE_SIZE = 16
+_SIMILARITY_CACHE = {}
+_SIMILARITY_LOCK = threading.Lock()
 
 
 def class_similarity(
@@ -62,7 +72,30 @@ def class_similarity(
     np.ndarray
         ``(K, K)`` symmetric matrix in [0, 1] with ones on the diagonal.
     """
+    import hashlib
+
     classes = [int(c) for c in classes]
+    digest = hashlib.blake2b(digest_size=16)
+    for c in classes:
+        im = np.ascontiguousarray(images[c], dtype=np.float32)
+        digest.update(str(im.shape).encode())
+        digest.update(im.tobytes())
+    key = (digest.hexdigest(), float(apix), int(max_width), bool(modulation))
+    with _SIMILARITY_LOCK:
+        if key in _SIMILARITY_CACHE:
+            if progress is not None:
+                progress(1, 1)
+            return _SIMILARITY_CACHE[key].copy()
+    S = _class_similarity(images, classes, apix, max_width, progress, modulation)
+    with _SIMILARITY_LOCK:
+        _SIMILARITY_CACHE[key] = S.copy()
+        while len(_SIMILARITY_CACHE) > SIMILARITY_CACHE_SIZE:
+            _SIMILARITY_CACHE.pop(next(iter(_SIMILARITY_CACHE)))
+    return S
+
+
+def _class_similarity(images, classes, apix, max_width, progress, modulation):
+    """:func:`class_similarity` without its cache."""
     K = len(classes)
     prepared, _ = ph._register_prepared(images, classes, max_width)
     if modulation:
@@ -71,6 +104,11 @@ def class_similarity(
             - np.asarray(im, dtype=np.float32).mean(axis=1, keepdims=True)
             for c, im in prepared.items()
         }
+    images = [prepared[c] for c in classes]
+    if len({np.shape(im) for im in images}) == 1:
+        # each image's turned and shifted copies made once, the pairs in bulk:
+        # the same correlations as registering pair by pair, many times faster
+        return R.best_corr_matrix(images, R.FLIPS, progress=progress)
     todo = [(i, j) for x, i in enumerate(classes) for j in classes[x + 1 :]]
     S = np.eye(K)
     if todo:
@@ -326,3 +364,271 @@ def assign_filaments(counts, class_groups, n_groups=2, min_share=0.6):
     share = by_group.max(1) / total
     labels = np.where(share >= min_share, by_group.argmax(1), -1)
     return labels, share
+
+
+# ── filaments grouped by the classes only one type uses ──
+#
+# Measured on a Class2D job of five types solved by hand (benchmarks/multi_type):
+# grouping the classes first and letting each filament vote put the filaments of
+# two types that share most of their classes (a doublet and a triplet) in one group.
+# What tells them apart is a set of views only one of them shows (the triplet's
+# wide, three-strand views): its filaments have several segments in that set, the
+# other's none. Looking for such sets, one split at a time, found it without labels
+# and gave a triplet group 99% pure, where clustering the filaments' class usage
+# (k-means, Ward, Gaussian mixtures, HDBSCAN, DBSCAN, OPTICS) did not. A filament
+# shorter than one turn of its type may never show such a view: those stay with
+# the other type, and the group is named as possibly holding them.
+
+# A marker set used by less than this share of its filaments' segments can be
+# missed by a short filament of that type
+SPARSE_MARKER = 0.5
+
+# The most groups the Types card offers
+MAX_MARKER_GROUPS = 12
+
+
+def marker_candidates(similarity, max_share=1.0 / 3.0):
+    """Sets of classes whose averages look alike: every branch of the tree.
+
+    The branches of the average-linkage tree of ``1 - similarity`` with at least
+    two classes and at most ``max_share`` of them.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Class positions (rows of ``similarity``) of each set.
+    """
+    from scipy.cluster.hierarchy import linkage, to_tree
+    from scipy.spatial.distance import squareform
+
+    S = np.asarray(similarity, dtype=float)
+    K = len(S)
+    if K < 3:
+        return []
+    D = np.clip(1.0 - S, 0.0, None)
+    np.fill_diagonal(D, 0.0)
+    out = []
+    stack = [to_tree(linkage(squareform(D, checks=False), method="average"))]
+    while stack:
+        node = stack.pop()
+        ids = node.pre_order()
+        if 2 <= len(ids) <= max(2, int(max_share * K)):
+            out.append(np.sort(np.asarray(ids)))
+        if not node.is_leaf():
+            stack += [node.left, node.right]
+    return out
+
+
+def _binomial_ll(k, n, p):
+    """log P(k | n, p) without the binomial coefficient (it cancels)."""
+    p = np.clip(p, 1e-9, 1.0 - 1e-9)
+    return k * np.log(p) + (n - k) * np.log1p(-p)
+
+
+def binomial_mixture(k, n, weight=None, n_iter=200, tol=1e-7):
+    """Two populations of filaments: rarely and often in a set of classes.
+
+    Each filament has ``k`` of its ``n`` segments in the set. Two binomials (a low
+    and a high rate) are fitted by EM, and compared with one.
+
+    Parameters
+    ----------
+    k, n : numpy.ndarray
+        Segments in the set, and in all compared classes, of each filament (or of
+        each distinct ``(k, n)``, with ``weight`` its number of filaments).
+    weight : numpy.ndarray, optional
+        Defaults to 1 for each.
+
+    Returns
+    -------
+    dict
+        ``gain`` (log-likelihood gain of two binomials over one, per filament),
+        ``low`` and ``high`` (the rates), ``share`` (of filaments in the high
+        one).
+    """
+    k = np.asarray(k, dtype=float)
+    n = np.asarray(n, dtype=float)
+    w = np.ones_like(k) if weight is None else np.asarray(weight, dtype=float)
+    total = max(float(w.sum()), 1e-12)
+    p1 = float((w * k).sum() / max((w * n).sum(), 1e-12))
+    ll1 = float((w * _binomial_ll(k, n, p1)).sum())
+    r = np.where(k / np.maximum(n, 1.0) > p1, 0.9, 0.1)
+    last = -np.inf
+    for _ in range(n_iter):
+        share = float((w * r).sum() / total)
+        low = float((w * (1 - r) * k).sum() / max((w * (1 - r) * n).sum(), 1e-12))
+        high = float((w * r * k).sum() / max((w * r * n).sum(), 1e-12))
+        a = np.log(max(1.0 - share, 1e-12)) + _binomial_ll(k, n, low)
+        b = np.log(max(share, 1e-12)) + _binomial_ll(k, n, high)
+        m = np.maximum(a, b)
+        ll = float((w * (m + np.log(np.exp(a - m) + np.exp(b - m)))).sum())
+        r = np.exp(b - m) / (np.exp(a - m) + np.exp(b - m))
+        if ll - last < tol * total:
+            break
+        last = ll
+    if high < low:
+        low, high, share = high, low, 1.0 - share
+    return dict(gain=(ll - ll1) / total, low=low, high=high, share=share)
+
+
+def in_high(fit, k, n):
+    """Whether each filament belongs to the high-rate population of ``fit``."""
+    a = np.log(max(1.0 - fit["share"], 1e-12)) + _binomial_ll(k, n, fit["low"])
+    b = np.log(max(fit["share"], 1e-12)) + _binomial_ll(k, n, fit["high"])
+    return b > a
+
+
+def _best_marker_split(counts, rows, candidates, min_child):
+    """The set of classes that best splits the filaments ``rows`` in two."""
+    C = counts[rows]
+    n = C.sum(1).astype(np.int64)
+    base = int(n.max()) + 1
+    best = None
+    for s, members in enumerate(candidates):
+        k = C[:, members].sum(1)
+        if k.sum() < 50:
+            continue
+        # filaments with the same (k, n) are fitted once; one integer for each
+        # pair (a unique of rows sorts far more slowly)
+        code, weight = np.unique(k.astype(np.int64) * base + n, return_counts=True)
+        fit = binomial_mixture(code // base, code % base, weight)
+        high = in_high(fit, k, n)
+        if min(int(high.sum()), int((~high).sum())) < min_child:
+            continue
+        if best is None or fit["gain"] > best["gain"]:
+            best = dict(fit, set=s, high_rows=rows[high], low_rows=rows[~high])
+    return best
+
+
+def marker_groups(
+    counts, similarity, max_groups=MAX_MARKER_GROUPS, min_segments=10, min_child=25
+):
+    """Filaments split, one step at a time, by sets of classes one part never uses.
+
+    At each step, every leaf is offered every set of alike classes
+    (:func:`marker_candidates`); the filaments' counts of segments in the set are
+    fitted as two populations (:func:`binomial_mixture`), and the leaf and set
+    with the largest gain are split: the filaments that use the set (its
+    *markers*) from those that do not. The filaments with fewer than
+    ``min_segments`` segments in the compared classes are not fitted, and follow
+    the split they are most likely in.
+
+    Parameters
+    ----------
+    counts : numpy.ndarray
+        ``(n_filaments, K)`` segments of each filament in each compared class
+        (:func:`usage_matrix`), columns in the order of ``similarity``.
+    similarity : numpy.ndarray
+        ``(K, K)`` from :func:`class_similarity`.
+    max_groups : int, optional
+        Splits are made until there are this many groups.
+    min_segments, min_child : int, optional
+        A split leaves at least ``min_child`` fitted filaments on each side.
+
+    Returns
+    -------
+    list of dict
+        The splits in the order they were made: ``gain``, ``low`` and ``high``
+        (rates), ``markers`` (class positions of the set), ``parent`` (the group
+        split: an index into the groups after the previous split, 0 at first),
+        and ``labels`` (the group of every filament after this split, -1 for
+        those without segments in the compared classes). The groups after split
+        ``i`` are those of ``labels``; the group that used the markers keeps the
+        parent's number and the other takes the next one.
+    """
+    counts = np.asarray(counts, dtype=float)
+    n_all = counts.sum(1)
+    candidates = marker_candidates(similarity)
+    labels = np.where(n_all > 0, 0, -1)
+    fitted = n_all >= min_segments
+    pending = {0: None}  # group -> its best split (None: not looked at yet)
+    splits = []
+    while len(pending) < max_groups:
+        for g in pending:
+            if pending[g] is None:
+                rows = np.flatnonzero((labels == g) & fitted)
+                found = None
+                if len(rows) >= 2 * min_child:
+                    found = _best_marker_split(counts, rows, candidates, min_child)
+                pending[g] = found or dict(gain=-np.inf)
+        g = max(pending, key=lambda x: pending[x]["gain"])
+        best = pending[g]
+        if not np.isfinite(best["gain"]):
+            break
+        markers = candidates[best["set"]]
+        new = len(pending)
+        # every filament of the group, fitted or not, follows the split
+        members = np.flatnonzero(labels == g)
+        k = counts[members][:, markers].sum(1)
+        labels = labels.copy()
+        labels[members[~in_high(best, k, n_all[members])]] = new
+        splits.append(
+            dict(
+                gain=float(best["gain"]),
+                low=float(best["low"]),
+                high=float(best["high"]),
+                markers=markers,
+                parent=g,
+                labels=labels,
+            )
+        )
+        pending[g] = None
+        pending[new] = None
+    return splits
+
+
+def default_n_marker_groups(splits, min_gain=2.0):
+    """Groups up to the first split whose gain is below ``min_gain``.
+
+    The gain is a log-likelihood per filament. Splits of one type by the views a
+    filament happens to cover (a filament shorter than a turn sees part of the
+    ring) gained 1.2 to 1.8 on the data set it was measured on; the split of a
+    doublet from a triplet by the triplet's own views 2.9, and of other types 3.7
+    to 11. Fewer groups than types is the worse error (a mixed group gives no
+    structure; two groups of one type can be merged later), so the cut is set
+    low.
+    """
+    n = 1
+    for s in splits:
+        if s["gain"] < min_gain:
+            break
+        n += 1
+    return n
+
+
+def describe_marker_groups(splits, n_groups):
+    """The groups after ``n_groups - 1`` splits, and what each may also hold.
+
+    Returns
+    -------
+    labels : numpy.ndarray
+        Group of each filament (-1: not grouped).
+    groups : list of dict
+        For each group: ``markers`` (class positions that its filaments use and
+        the group split from them did not), and ``lacks`` (the groups whose sparse
+        markers its filaments lack, so it may hold short filaments of theirs).
+    """
+    used = splits[: max(0, n_groups - 1)]
+    if not used:
+        return None, [dict(markers=[], lacks=[])]
+    labels = used[-1]["labels"]
+    n = len(used) + 1
+    markers = [set() for _ in range(n)]
+    # each group's descent: the splits it went through, and on which side
+    path = [[] for _ in range(n)]
+    for i, s in enumerate(used):
+        new = i + 1
+        path[new] = list(path[s["parent"]]) + [(i, False)]
+        path[s["parent"]] = path[s["parent"]] + [(i, True)]
+    groups = []
+    for g in range(n):
+        lacks = set()
+        for i, high in path[g]:
+            s = used[i]
+            if high:
+                markers[g].update(int(x) for x in s["markers"])
+            elif s["high"] < SPARSE_MARKER:
+                # the groups that came from the side that uses the markers
+                lacks.update(h for h in range(n) if (i, True) in path[h])
+        groups.append(dict(markers=sorted(markers[g]), lacks=sorted(lacks)))
+    return labels, groups

@@ -145,18 +145,35 @@ def class_pixel_offsets(
         z = np.zeros(0)
         return PixelOffsets(z.astype(int), z.astype(int), z, z, z, z, K)
 
-    def register(a, b, **kw):
-        return R.register_pair(a, b, rot_range=rot_range, dy_range=dy_range, **kw)
-
-    # the shared pool of ph._register_all uses the default search ranges, so
-    # the ranges asked for here are applied by registering directly
-    out = []
-    for k, (i, j) in enumerate(todo):
-        if progress is not None:
-            progress(k, len(todo))
-        out.append(
-            register(prepared[i], prepared[j], flips=same_polarity, refine=False)
+    keys = list(prepared)
+    if len({np.shape(prepared[c]) for c in keys}) == 1:
+        # each image's turned and shifted copies made once for all its pairs:
+        # what register_pair gives, many times faster
+        at = {c: x for x, c in enumerate(keys)}
+        out = R.register_many(
+            [prepared[c] for c in keys],
+            [(at[i], at[j]) for i, j in todo],
+            same_polarity,
+            rot_range,
+            dy_range,
         )
+        if progress is not None:
+            progress(len(todo), len(todo))
+    else:
+        out = []
+        for k, (i, j) in enumerate(todo):
+            if progress is not None:
+                progress(k, len(todo))
+            out.append(
+                R.register_pair(
+                    prepared[i],
+                    prepared[j],
+                    rot_range=rot_range,
+                    dy_range=dy_range,
+                    flips=same_polarity,
+                    refine=False,
+                )
+            )
     row = {c: r for r, c in enumerate(classes)}
     a = np.array([row[i] for i, _ in todo])
     b = np.array([row[j] for _, j in todo])

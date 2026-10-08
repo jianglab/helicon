@@ -75,6 +75,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from threadpoolctl import threadpool_limits
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +369,24 @@ def _filament_slices(df):
     return order, starts, ends, keys
 
 
+# More filaments than this and the sign of the merge of 180-degree copies is
+# chosen on a sample of this many (0: always on all of them)
+SIGN_SAMPLE = 2000
+
+
+def _filament_sample(params, n, seed=0):
+    """The rows of ``params`` of ``n`` filaments chosen at random (all of them
+    when there are fewer than twice as many)."""
+    key = params.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False).ngroup()
+    total = int(key.max()) + 1 if len(key) else 0
+    if total <= 2 * n:
+        return params
+    keep = np.random.default_rng(seed).choice(total, n, replace=False)
+    out = params[key.isin(keep).to_numpy()]
+    out.attrs = dict(params.attrs)
+    return out
+
+
 def prepare_pairs(
     params,
     class_ids=None,
@@ -437,7 +456,10 @@ def prepare_pairs(
     track_all = col("rlnHelicalTrackLengthAngst").astype(float)
     psi_all = col("rlnAnglePsi").astype(float)
     prior_all = col("rlnAnglePsiPrior").astype(float) if has_prior else None
-    class_all = np.array([row_of[int(c)] for c in col("rlnClassNumber")], np.int32)
+    # the row of each segment's class among the (sorted) class ids
+    class_all = np.searchsorted(class_ids, col("rlnClassNumber").astype(int)).astype(
+        np.int32
+    )
     row_all = col("_row")
     conf_all = (
         col("rlnMaxValueProbDistribution").astype(float)
@@ -982,6 +1004,10 @@ def filament_periods(
     )
 
 
+# Fewer filaments than this are done on the calling thread
+CURVES_PARALLEL_MIN = 500
+
+
 def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
     """``sum w cos(2 pi d / p - dphi)`` over each filament's pairs, at each ``p``.
 
@@ -1003,7 +1029,11 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
     nb = int(b.max()) + 1
     c = w * np.exp(-1j * dphi)
     centres = lo + np.arange(nb) * bin_width
-    E = np.exp(2j * np.pi * centres[:, None] / np.asarray(grid)[None, :])
+    # only the real part of (h @ E) is wanted: Re h Re E - Im h Im E, two real
+    # products where one complex product would do four
+    turns = (2 * np.pi * centres[:, None]) / np.asarray(grid)[None, :]
+    Er, Ei = np.cos(turns), np.sin(turns)
+    del turns
     # A filament's pairs fill only the bins its own length reaches, and most
     # filaments are far shorter than the longest: with every filament over all
     # the bins, most of the product multiplied zeros, more so the longer the
@@ -1021,12 +1051,18 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
     order = np.argsort(rank[fi], kind="stable")
     fr, b, c = rank[fi][order], b[order], c[order]
     edges = np.searchsorted(fr, np.arange(n_fil + 1))
+    batches = []
     s0 = 0
     while s0 < n_fil:
         s1 = s0 + 1
         # grow the batch while the binned array stays small
         while s1 < n_fil and (s1 + 1 - s0) * (2 * reach[by_reach[s1]] + 1) <= 2e7:
             s1 += 1
+        batches.append((s0, s1))
+        s0 = s1
+
+    def run(batch):
+        s0, s1 = batch
         r = int(reach[by_reach[s1 - 1]])
         i0, i1 = max(0, zero - r), min(nb, zero + r + 1)
         width = i1 - i0
@@ -1036,8 +1072,31 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
         h = np.bincount(flat, weights=c[lo_p:hi_p].real, minlength=size) + 1j * (
             np.bincount(flat, weights=c[lo_p:hi_p].imag, minlength=size)
         )
-        curves[:, by_reach[s0:s1]] = (h.reshape(s1 - s0, width) @ E[i0:i1]).real.T
-        s0 = s1
+        h = h.reshape(s1 - s0, width)
+        curves[:, by_reach[s0:s1]] = (h.real @ Er[i0:i1] - h.imag @ Ei[i0:i1]).T
+
+    workers = 1
+    if len(batches) > 1 and n_fil >= CURVES_PARALLEL_MIN:
+        try:
+            import helicon
+
+            # a batch needs the binned array and its product: about 0.5 GB
+            workers = min(
+                int(helicon.available_cpu(mem_gb_per_cpu=0.5)), 16, len(batches)
+            )
+        except Exception:
+            workers = 1
+    if workers <= 1:
+        for batch in batches:
+            run(batch)
+    else:
+        # The batches are independent (each fills its own columns), and the
+        # products release the interpreter's lock; with one maths thread each,
+        # several run side by side instead of one product using many threads.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with threadpool_limits(1), ThreadPoolExecutor(workers) as pool:
+            list(pool.map(run, batches))
     return curves
 
 
@@ -1444,22 +1503,28 @@ def candidate_fit(
         if evidence is not None and np.any(evidence > 0)
         else 0.0
     )
+    # every candidate at once, by its pairs with a class of the fit: with the
+    # candidate first in a pair, phi_c - phi_b = ang; second, phi_a - phi_c = ang
+    K = pairs.n_classes
+    m1 = ~placed_row[a] & placed_row[b] & far
+    m2 = placed_row[a] & ~placed_row[b] & far
+    cls = np.concatenate([a[m1], b[m2]])
+    where = np.concatenate([phase[b[m1]] + ang[m1], phase[a[m2]] - ang[m2]])
+    weight = np.concatenate([w[m1], w[m2]])
+    n = np.bincount(cls, minlength=K)
+    total = np.bincount(cls, weights=weight, minlength=K)
+    vec = np.bincount(
+        cls, weights=weight * np.cos(where), minlength=K
+    ) + 1j * np.bincount(cls, weights=weight * np.sin(where), minlength=K)
     for c in cands:
         k = row.get(c)
-        if k is None:
+        if k is None or n[k] == 0 or total[k] <= 0:
             continue
-        # with the candidate first in a pair: phi_c - phi_b = ang; second:
-        # phi_a - phi_c = ang
-        m1 = (a == k) & placed_row[b] & far
-        m2 = (b == k) & placed_row[a] & far
-        where = np.concatenate([phase[b[m1]] + ang[m1], phase[a[m2]] - ang[m2]])
-        weight = np.concatenate([w[m1], w[m2]])
-        n = len(where)
-        if n == 0 or weight.sum() <= 0:
-            continue
-        phi = np.angle(np.sum(weight * np.exp(1j * where)))
-        mean = float(np.sum(weight * np.cos(where - phi)) / weight.sum())
-        out[c] = mean * n / (n + n0)
+        # the weighted mean of cos(where - phi), phi the direction of the
+        # summed vector, is the vector's length over the weight
+        phi = np.angle(vec[k])
+        mean = float(np.abs(vec[k]) / total[k])
+        out[c] = mean * n[k] / (n[k] + n0)
         where_on_ring[c] = (float(phi), zdir[k])
     return ret()
 
@@ -1813,10 +1878,13 @@ _POOL_IMAGES_LOCK = threading.Lock()
 def _register_chunk(args):
     from . import denovo3d_register as R
 
-    pairs, turn, refine = args
+    pairs, turn, refine, coarse = args
+    coarse = coarse or [None] * len(pairs)
     return [
-        R.register_pair(_POOL_IMAGES[i], _POOL_IMAGES[j], flips=turn, refine=refine)
-        for i, j in pairs
+        R.register_pair(
+            _POOL_IMAGES[i], _POOL_IMAGES[j], flips=turn, refine=refine, coarse=c
+        )
+        for (i, j), c in zip(pairs, coarse)
     ]
 
 
@@ -1827,11 +1895,24 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
     """
     from . import denovo3d_register as R
 
+    coarse = None
+    if todo and len({np.shape(im) for im in prepared.values()}) == 1:
+        # the coarse search in bulk (each image's turned and shifted copies
+        # made once): what register_pair finds, many times faster
+        keys = list(prepared)
+        at = {c: x for x, c in enumerate(keys)}
+        coarse = R.register_many(
+            [prepared[c] for c in keys], [(at[i], at[j]) for i, j in todo], turn
+        )
+        if not refine:
+            if progress is not None:
+                progress(len(todo), len(todo))
+            return coarse
     workers = 1
     try:
         import helicon
 
-        workers = max(1, min(int(helicon.available_cpu()), 32))
+        workers = max(1, min(int(helicon.available_cpu(mem_gb_per_cpu=0.5)), 32))
     except Exception:
         pass
     if workers == 1 or len(todo) < 40:
@@ -1840,7 +1921,13 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
             if progress is not None:
                 progress(k, len(todo))
             out.append(
-                R.register_pair(prepared[i], prepared[j], flips=turn, refine=refine)
+                R.register_pair(
+                    prepared[i],
+                    prepared[j],
+                    flips=turn,
+                    refine=refine,
+                    coarse=None if coarse is None else coarse[k],
+                )
             )
         return out
     import multiprocessing as mp
@@ -1849,7 +1936,15 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
     from concurrent.futures.process import BrokenProcessPool
 
     size = max(1, len(todo) // (workers * 4))
-    chunks = [(todo[k : k + size], turn, refine) for k in range(0, len(todo), size)]
+    chunks = [
+        (
+            todo[k : k + size],
+            turn,
+            refine,
+            None if coarse is None else coarse[k : k + size],
+        )
+        for k in range(0, len(todo), size)
+    ]
     out = []
     with _POOL_IMAGES_LOCK:
         _POOL_IMAGES.clear()
@@ -1875,7 +1970,11 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
                         progress(k, len(todo))
                     out.append(
                         R.register_pair(
-                            prepared[i], prepared[j], flips=turn, refine=refine
+                            prepared[i],
+                            prepared[j],
+                            flips=turn,
+                            refine=refine,
+                            coarse=None if coarse is None else coarse[k],
                         )
                     )
         finally:
@@ -1917,12 +2016,12 @@ def pair_counterparts(images, indices, min_corr=0.85, max_width=128, progress=No
         return []
     prepared, factor = _register_prepared(images, indices, max_width)
     turn = [(True, True)]
-    self_corr = {
-        i: R.register_pair(prepared[i], prepared[i], flips=turn, refine=False)["corr"]
-        for i in indices
-    }
     todo = [(i, j) for x, i in enumerate(indices) for j in indices[x + 1 :]]
-    results = _register_all(prepared, todo, turn, progress)
+    # each class against itself turned (how alike it is both ways) with the
+    # pairs, in one bulk registration
+    results = _register_all(prepared, [(i, i) for i in indices] + todo, turn, progress)
+    self_corr = {i: r["corr"] for i, r in zip(indices, results)}
+    results = results[len(indices) :]
     found = []
     for (i, j), res in zip(todo, results):
         if res["corr"] >= min_corr and res["corr"] > max(self_corr[i], self_corr[j]):
@@ -2278,8 +2377,8 @@ def analyze(
     if counterparts:
         step("merging classes that are each other's 180-degree rotation")
 
-        def trial_of(sign):
-            trial, gone = merge_counterparts(params, counterparts, image_apix, sign)
+        def trial_of(sign, table):
+            trial, gone = merge_counterparts(table, counterparts, image_apix, sign)
             keep = None
             if class_ids is not None:
                 keep = [c for c in class_ids if int(c) not in set(gone)]
@@ -2290,19 +2389,34 @@ def analyze(
                 )
             except ValueError:
                 return None
-            return score, trial, keep, gone, tp
+            return score, trial, keep, gone, tp, sign
 
-        # the two signs at once: the scans are numpy work that runs in parallel
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(2) as pool:
-            trials = [t for t in pool.map(trial_of, (1.0, -1.0)) if t is not None]
+        # The sign of the turn is chosen on a sample of the filaments when there
+        # are many: collecting the pairs is the slowest single-CPU step, and a
+        # sample of 2,000 filaments chose the sign of the whole data in every one
+        # of 12 samples on three selections (the scores of the two signs differ
+        # by 0.01 to 0.14; where they differ least, either gives the same ring).
+        sample = _filament_sample(params, SIGN_SAMPLE) if SIGN_SAMPLE else params
+        # One sign after the other. Run at once in two threads they were much
+        # slower: collecting the pairs is many small numpy calls, and two threads
+        # fought over the interpreter's lock (10 s each, against 2 s alone, on
+        # 9,700 filaments), while the scan that follows already uses every CPU.
+        trials = [t for t in (trial_of(sg, sample) for sg in (1.0, -1.0)) if t]
         best = None
         for t in trials:  # in sign order, so a tie keeps +1 as before
             if best is None or t[0] > best[0]:
                 best = t
+        if sample is not params:
+            # the pairs of every filament, once, for the sign the sample chose
+            # (both signs, as before, if the sample could not be judged)
+            signs = (best[5],) if best is not None else (1.0, -1.0)
+            trials = [t for t in (trial_of(sg, params) for sg in signs) if t]
+            best = None
+            for t in trials:
+                if best is None or t[0] > best[0]:
+                    best = t
         if best is not None:
-            _, used, class_ids, merged, pairs = best
+            _, used, class_ids, merged, pairs, _ = best
     if pairs is None:
         step("collecting segment pairs")
         # the winning merge trial already collected its pairs

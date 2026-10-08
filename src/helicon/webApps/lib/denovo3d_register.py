@@ -151,6 +151,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import threading
 
 import numpy as np
 
@@ -321,6 +322,7 @@ def register_pair(
     min_overlap=MIN_OVERLAP,
     try_flips=True,
     flips=None,
+    coarse=None,
 ):
     """Register ``b`` onto ``a`` over flip, in-plane rotation, dy and dx.
 
@@ -333,6 +335,10 @@ def register_pair(
 
     Returns ``{flip_x, flip_y, psi, dy, dx, corr}``: flip ``b``, then apply psi
     and dy, then offset by dx, to bring it into ``a``'s frame.
+
+    ``coarse``, the result of the coarse search for this pair (from
+    :func:`register_many`, which makes it in bulk), skips that search: only the
+    refinement is done.
     """
     a = np.asarray(a, dtype=np.float32)
     b = np.asarray(b, dtype=np.float32)
@@ -350,7 +356,19 @@ def register_pair(
         return best
 
     overall = None
-    for fx, fy in candidates:
+    if coarse is not None:
+        overall = (
+            (
+                coarse["corr"],
+                coarse["psi"],
+                coarse["dy"],
+                coarse["dx"],
+                coarse["prominence"],
+            ),
+            coarse["flip_x"],
+            coarse["flip_y"],
+        )
+    for fx, fy in candidates if overall is None else ():
         src = _flip(b, fx, fy)
         best = scan(src, 0.0, 0.0, rot_range, dy_range, coarse_step)
         if overall is None or best[0] > overall[0][0]:
@@ -948,3 +966,372 @@ def apply_composed(img, t):
             post_translation=(float(t.get("shift_y", 0.0)), 0),
         )
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Best correlation of every pair, in bulk
+# ──────────────────────────────────────────────────────────────────────────
+
+# the images of best_corr_matrix, for its worker processes (forked: they
+# inherit it rather than receive it)
+_CORR_IMAGES = []
+_CORR_LOCK = threading.Lock()
+
+
+def _candidates(b, flips, psis, dys):
+    """Every flip, rotation and shift across of ``b``, as :func:`register_pair`
+    makes them (``(n_candidates, ny, nx)``, float64)."""
+    out = [
+        _apply(_flip(b, fx, fy), psi, dy)
+        for fx, fy in flips
+        for psi in psis
+        for dy in dys
+    ]
+    return np.asarray(out, dtype=np.float64)
+
+
+# images of the other side of a pair scored at once in :func:`_corr_column`: the
+# block bounds the memory of a worker (about 0.35 GB for 128-pixel images)
+CORR_BLOCK = 32
+
+
+def _corr_column(j, flips, psis, dys, min_overlap):
+    """The best correlation of image ``j``, over all its candidates, with every
+    image before it: what :func:`register_pair` (without refinement) returns as
+    ``corr``, for all those pairs at once.
+
+    The correlation along the axis of :func:`_dx_profile` is a sum over rows of
+    products of the rows' Fourier transforms; with the transforms of ``j``'s
+    candidates made once, the pairs become one matrix product per frequency.
+    """
+    images = _CORR_IMAGES
+    if j == 0:
+        return np.zeros(0)
+    ny, nx = images[0].shape
+    n = 2 * nx
+    cand = _candidates(images[j], flips, psis, dys)
+    bv = cand - cand.mean(axis=(1, 2), keepdims=True)
+    fb = np.conj(np.fft.rfft(bv, n=n, axis=2)).transpose(2, 1, 0)  # (f, y, c)
+    eb = np.concatenate(
+        [np.zeros((len(cand), 1)), np.cumsum((bv**2).sum(axis=1), axis=1)], axis=1
+    )
+    del cand, bv
+    min_cols = max(4, int(round(min_overlap * nx)))
+    k = np.arange(-(nx - min_cols), nx - min_cols + 1)
+    lo_a, hi_a = np.maximum(0, k), np.minimum(nx, nx + k)
+    lo_b, hi_b = np.maximum(0, -k), np.minimum(nx, nx - k)
+    sb = eb[:, hi_b] - eb[:, lo_b]  # (c, k)
+    out = np.empty(j)
+    for start in range(0, j, CORR_BLOCK):
+        a = np.asarray(images[start : min(j, start + CORR_BLOCK)], dtype=np.float64)
+        av = a - a.mean(axis=(1, 2), keepdims=True)
+        fa = np.fft.rfft(av, n=n, axis=2).transpose(2, 0, 1)  # (f, i, y)
+        # sum over y of fa[i, y, f] * conj(fb[c, y, f]): (f, i, c)
+        num = np.fft.irfft(np.matmul(fa, fb).transpose(1, 2, 0), n=n, axis=2)
+        ea = np.concatenate(
+            [np.zeros((len(a), 1)), np.cumsum((av**2).sum(axis=1), axis=1)], axis=1
+        )
+        sa = ea[:, hi_a] - ea[:, lo_a]  # (i, k)
+        denom = np.sqrt(np.maximum(sa[:, None, :] * sb[None, :, :], 0.0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            corr = np.where(denom > 0, num[:, :, k % n] / denom, -2.0)
+        out[start : start + len(a)] = corr.max(axis=(1, 2))
+    return out
+
+
+def corr_memory_gb(shape, n_candidates):
+    """Memory one worker of :func:`best_corr_matrix` needs, in GB (an estimate,
+    with room for the worker itself)."""
+    ny, nx = shape
+    nf = nx + 1
+    candidates = n_candidates * ny * nx * 8 * 2 + n_candidates * ny * nf * 16
+    block = CORR_BLOCK * (ny * nf * 16 + n_candidates * (nf * 16 + 2 * nx * 8) * 2)
+    block += 3 * CORR_BLOCK * n_candidates * (2 * nx) * 8
+    return (candidates + block) / 1024**3 + 0.3
+
+
+def best_corr_matrix(
+    images,
+    flips=FLIPS,
+    rot_range=6.0,
+    dy_range=5.0,
+    step=1.0,
+    min_overlap=MIN_OVERLAP,
+    progress=None,
+    workers=None,
+):
+    """The correlation :func:`register_pair` (without refinement) finds for every
+    pair of ``images``, as a symmetric matrix with ones on the diagonal.
+
+    The same search (the flips, rotations of ``rot_range`` and shifts across of
+    ``dy_range`` in steps of ``step``, the axial offset by the correlation over
+    the overlapping columns), but each image's candidates are made once rather
+    than once per pair, and the pairs are scored in bulk: on 60 class averages it
+    agreed with ``register_pair`` to 1e-6 and was many times faster. The images
+    must all have one shape. The columns are spread over ``workers`` processes:
+    by default the CPUs that are free, as many as the memory available allows
+    (:func:`corr_memory_gb` each), and at most a quarter of the columns.
+    ``progress`` is called with (pairs done, pairs in all).
+    """
+    images = [np.asarray(im, dtype=np.float32) for im in images]
+    K = len(images)
+    if len({im.shape for im in images}) > 1:
+        raise ValueError("the images must all have one shape")
+    psis = np.arange(-rot_range, rot_range + step / 2, step)
+    dys = np.arange(-dy_range, dy_range + step / 2, step)
+    S = np.eye(K)
+    if K < 2:
+        return S
+    if workers is None:
+        import helicon
+
+        # the CPUs free, as many as the memory allows for each worker, and a
+        # few columns each (a process for each column costs more than it saves)
+        need = corr_memory_gb(images[0].shape, len(flips) * len(psis) * len(dys))
+        workers = min(int(helicon.available_cpu(mem_gb_per_cpu=need)), (K - 1) // 4)
+    workers = max(1, min(workers, K - 1))
+    columns = list(range(1, K))
+    n_pairs = K * (K - 1) // 2
+    with _CORR_LOCK:
+        _CORR_IMAGES[:] = images
+        try:
+            if workers == 1:
+                from threadpoolctl import threadpool_limits
+
+                found = []
+                limit = threadpool_limits(1)
+                for j in columns:
+                    found.append(_corr_column(j, flips, psis, dys, min_overlap))
+                    if progress is not None:
+                        progress(j * (j + 1) // 2, n_pairs)
+                limit.restore_original_limits()
+            else:
+                import multiprocessing as mp
+                from concurrent.futures import ProcessPoolExecutor
+
+                from threadpoolctl import threadpool_limits
+
+                found = [None] * len(columns)
+                # forked, so that the workers inherit the images; one thread
+                # each, since the work is spread over processes
+                with (
+                    threadpool_limits(1),
+                    ProcessPoolExecutor(
+                        workers, mp_context=mp.get_context("fork")
+                    ) as pool,
+                ):
+                    # the longest columns (most images before them) first
+                    futures = {
+                        pool.submit(_corr_column, j, flips, psis, dys, min_overlap): x
+                        for x, j in sorted(enumerate(columns), key=lambda t: -t[1])
+                    }
+                    from concurrent.futures import as_completed
+
+                    done = 0
+                    for f in as_completed(futures):
+                        found[futures[f]] = f.result()
+                        done += columns[futures[f]]
+                        if progress is not None:
+                            progress(done, n_pairs)
+        finally:
+            _CORR_IMAGES[:] = []
+    for j, col in zip(columns, found):
+        S[:j, j] = S[j, :j] = np.clip(col, 0, 1)
+    return S
+
+
+def _register_column(j, rows, flips, psis, dys, min_overlap):
+    """:func:`register_pair` (without refinement) of image ``j`` onto each of the
+    images ``rows``, in bulk: for each, ``(corr, dx, prominence, candidate)``.
+
+    As :func:`_corr_column`, but the best candidate's whole correlation profile
+    is kept, for the sub-pixel offset and the prominence of :func:`_dx_profile`.
+    """
+    images = _CORR_IMAGES
+    ny, nx = images[0].shape
+    n = 2 * nx
+    cand = _candidates(images[j], flips, psis, dys)
+    bv = cand - cand.mean(axis=(1, 2), keepdims=True)
+    fb = np.conj(np.fft.rfft(bv, n=n, axis=2)).transpose(2, 1, 0)
+    eb = np.concatenate(
+        [np.zeros((len(cand), 1)), np.cumsum((bv**2).sum(axis=1), axis=1)], axis=1
+    )
+    del cand, bv
+    min_cols = max(4, int(round(min_overlap * nx)))
+    k = np.arange(-(nx - min_cols), nx - min_cols + 1)
+    lo_a, hi_a = np.maximum(0, k), np.minimum(nx, nx + k)
+    lo_b, hi_b = np.maximum(0, -k), np.minimum(nx, nx - k)
+    sb = eb[:, hi_b] - eb[:, lo_b]
+    out = []
+    for start in range(0, len(rows), CORR_BLOCK):
+        idx = rows[start : start + CORR_BLOCK]
+        a = np.asarray([images[i] for i in idx], dtype=np.float64)
+        av = a - a.mean(axis=(1, 2), keepdims=True)
+        fa = np.fft.rfft(av, n=n, axis=2).transpose(2, 0, 1)
+        num = np.fft.irfft(np.matmul(fa, fb).transpose(1, 2, 0), n=n, axis=2)
+        ea = np.concatenate(
+            [np.zeros((len(a), 1)), np.cumsum((av**2).sum(axis=1), axis=1)], axis=1
+        )
+        sa = ea[:, hi_a] - ea[:, lo_a]
+        denom = np.sqrt(np.maximum(sa[:, None, :] * sb[None, :, :], 0.0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            corr = np.where(denom > 0, num[:, :, k % n] / denom, -2.0)
+        for prof in corr:
+            # the first candidate (in register_pair's order) with the highest
+            # peak, and its peak as _dx_profile places it
+            peaks = prof.max(axis=1)
+            c = int(np.argmax(peaks))
+            row = prof[c]
+            best = int(np.argmax(row))
+            sub = float(k[best])
+            if 0 < best < len(row) - 1:
+                cl, cc, cr = row[best - 1], row[best], row[best + 1]
+                if cl > -2.0 and cr > -2.0:
+                    d = cl - 2.0 * cc + cr
+                    if d < -1e-12:
+                        delta = 0.5 * (cl - cr) / d
+                        if abs(delta) <= 0.5:
+                            sub = float(k[best]) + float(delta)
+            valid = row[row > -2.0]
+            if valid.size > 8 and valid.std() > 1e-9:
+                prom = float((row[best] - valid.mean()) / valid.std())
+            else:
+                prom = 0.0
+            out.append((float(row[best]), sub, prom, c))
+    return out
+
+
+# Results of register_many, by the two images' contents and the search: a task
+# repeated on the same images (Estimate pitch again on one selection, the
+# suggestions again on one ring) skips the registrations it has done. A result
+# is a few numbers; the oldest go first.
+PAIR_CACHE_SIZE = 200_000
+_PAIR_CACHE = None
+_PAIR_CACHE_LOCK = threading.Lock()
+
+
+def _digest(image):
+    """A key for an image's contents."""
+    import hashlib
+
+    im = np.ascontiguousarray(image, dtype=np.float32)
+    return (im.shape, hashlib.blake2b(im.tobytes(), digest_size=16).hexdigest())
+
+
+def clear_pair_cache():
+    """Forget the registrations :func:`register_many` has kept."""
+    global _PAIR_CACHE
+    with _PAIR_CACHE_LOCK:
+        _PAIR_CACHE = None
+
+
+def register_many(
+    images,
+    pairs,
+    flips=FLIPS,
+    rot_range=6.0,
+    dy_range=5.0,
+    step=1.0,
+    min_overlap=MIN_OVERLAP,
+    workers=None,
+):
+    """:func:`register_pair` (without refinement) for many pairs at once.
+
+    ``pairs`` are ``(i, j)``: image ``j`` registered onto image ``i``. Each image
+    ``j``'s turned and shifted copies are made once for all its pairs, and the
+    pairs are scored in bulk (as :func:`best_corr_matrix`). The results are those
+    of :func:`register_pair`: ``corr``, ``dx``, ``prominence``, ``psi``, ``dy``,
+    ``flip_x`` and ``flip_y``, in the order of ``pairs``. The images must all have
+    one shape. Several processes are used when there is enough work for them (as
+    many as the CPUs free and the memory allow).
+    """
+    global _PAIR_CACHE
+    from collections import OrderedDict
+
+    images = [np.asarray(im, dtype=np.float32) for im in images]
+    if len({im.shape for im in images}) > 1:
+        raise ValueError("the images must all have one shape")
+    psis = np.arange(-rot_range, rot_range + step / 2, step)
+    dys = np.arange(-dy_range, dy_range + step / 2, step)
+    combos = [(fx, fy, psi, dy) for fx, fy in flips for psi in psis for dy in dys]
+    search = (
+        tuple((bool(fx), bool(fy)) for fx, fy in flips),
+        float(rot_range),
+        float(dy_range),
+        float(step),
+        float(min_overlap),
+    )
+    digests = {k: _digest(images[k]) for k in {int(x) for p in pairs for x in p}}
+    keys = [(digests[int(i)], digests[int(j)], search) for i, j in pairs]
+    results = [None] * len(pairs)
+    with _PAIR_CACHE_LOCK:
+        if _PAIR_CACHE is None:
+            _PAIR_CACHE = OrderedDict()
+        for x, key in enumerate(keys):
+            if key in _PAIR_CACHE:
+                results[x] = dict(_PAIR_CACHE[key])
+                _PAIR_CACHE.move_to_end(key)
+    by_j = {}
+    for x, (i, j) in enumerate(pairs):
+        if results[x] is None:
+            by_j.setdefault(int(j), []).append((x, int(i)))
+    if not by_j:
+        return results
+    columns = sorted(by_j, key=lambda j: -len(by_j[j]))
+    if workers is None:
+        import helicon
+
+        need = corr_memory_gb(images[0].shape, len(combos))
+        # a process pays for itself with a few thousand candidate images
+        # (about 0.4 s of work)
+        busy = sum(len(v) for v in by_j.values()) * len(combos) // 5000
+        workers = min(int(helicon.available_cpu(mem_gb_per_cpu=need)), busy)
+    workers = max(1, min(workers, len(columns)))
+    with _CORR_LOCK:
+        _CORR_IMAGES[:] = images
+        try:
+            args = [
+                (j, [i for _, i in by_j[j]], flips, psis, dys, min_overlap)
+                for j in columns
+            ]
+            if workers == 1:
+                from threadpoolctl import threadpool_limits
+
+                # the products are small: many threads only get in each
+                # other's way (4x slower than one)
+                with threadpool_limits(1):
+                    found = [_register_column(*a) for a in args]
+            else:
+                import multiprocessing as mp
+                from concurrent.futures import ProcessPoolExecutor
+
+                from threadpoolctl import threadpool_limits
+
+                with (
+                    threadpool_limits(1),
+                    ProcessPoolExecutor(
+                        workers, mp_context=mp.get_context("fork")
+                    ) as pool,
+                ):
+                    found = list(pool.map(_register_column, *zip(*args)))
+        finally:
+            _CORR_IMAGES[:] = []
+    for j, column in zip(columns, found):
+        for (x, _), (corr, dx, prom, c) in zip(by_j[j], column):
+            fx, fy, psi, dy = combos[c]
+            results[x] = dict(
+                corr=corr,
+                psi=float(psi),
+                dy=float(dy),
+                dx=dx,
+                prominence=prom,
+                flip_x=fx,
+                flip_y=fy,
+            )
+    with _PAIR_CACHE_LOCK:
+        for j in columns:
+            for x, _ in by_j[j]:
+                _PAIR_CACHE[keys[x]] = dict(results[x])
+        while len(_PAIR_CACHE) > PAIR_CACHE_SIZE:
+            _PAIR_CACHE.popitem(last=False)
+    return results

@@ -8,6 +8,7 @@ inputs, and HelicalPitch is back to the same-class pair-distance histogram.
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from helicon.webApps.tabs import abinitio3d_tab, helical_pitch_tab
@@ -234,16 +235,31 @@ class TestLongWorkInTheBackground:
 
 
 class TestRelionOnAHost:
-    def test_the_controls_are_replaced_by_a_note(self):
+    def _body(self):
         import inspect
 
         src = inspect.getsource(abinitio3d_tab)
         body = src[src.index("def relion_ui") :]
-        body = body[: body.index("@render.ui")]
+        return body[: body.index("@render.ui")]
+
+    def test_the_controls_are_not_offered_on_a_host(self):
+        body = self._body()
         cloud = body.index("deployment.is_cloud()")
+        assert (
+            body[cloud:]
+            .lstrip()
+            .startswith("deployment.is_cloud():\n            return None")
+        )
         assert cloud < body.index("find_relion_reconstruct()")
         assert cloud < body.index('"relion_run"')
-        assert "not available on the hosted web site" in body
+
+    def test_nothing_is_offered_without_relion_and_no_message_is_shown(self):
+        body = self._body()
+        missing = body[body.index("exe is None") :]
+        assert missing.lstrip("exe is None:\n ").startswith("return None")
+        # no note on the page: the controls are just not there
+        assert "not available" not in body
+        assert "text-muted" not in body
 
     def test_the_run_is_refused_on_the_server_too(self):
         import inspect
@@ -464,7 +480,7 @@ class TestClassAverageCheck:
 
 
 class TestTypesGrouping:
-    """The classes grouped by how their averages look (helical_pitch_types)."""
+    """The filaments grouped by the classes they use (helical_pitch_types)."""
 
     def _src(self):
         import inspect
@@ -495,6 +511,9 @@ class TestTypesGrouping:
         src = self._src()
         forget = src[src.index("def _forget_types") : src.index("def _types_work")]
         assert "types_state.set(None)" in forget
+        assert "types_pitch.set(None)" in forget
+        assert "type_group_used.set(None)" in forget
+        assert 'ui.update_checkbox("types_restrict", value=False)' in forget
 
     def test_the_number_of_groups_is_a_bookmarked_input_that_follows_the_classes(self):
         d = abinitio3d_tab.BOOKMARK_DEFAULTS
@@ -516,17 +535,168 @@ class TestTypesGrouping:
 
     def test_the_groups_are_those_of_the_number_asked_for(self):
         src = self._src()
-        groups = src[src.index("def _type_groups") : src.index("def _group_text")]
-        assert 'types.pixel_groups_n(state["similarity"], n)' in groups
-        assert "input.types_n()" in groups
+        groups = src[src.index("def _marker_groups") : src.index("def _group_entries")]
+        assert "types.describe_marker_groups(" in groups
+        assert "_types_number()" in groups
+        number = src[src.index("def _types_number") : src.index("def _marker_groups")]
+        assert "input.types_n()" in number
 
-    def test_each_comparison_starts_at_the_number_of_the_default_cut(self):
+    def test_each_grouping_starts_at_the_number_of_its_clear_splits(self):
         src = self._src()
         work = src[src.index("def _types_work") : src.index("def _types_apply")]
-        assert "types.default_n_groups(similarity)" in work
+        assert "types.marker_groups(usage, similarity)" in work
+        assert "types.default_n_marker_groups(splits)" in work
         effect = src[src.index("def _default_types_n") :][:900]
         assert 'ui.update_slider("types_n"' in effect
         assert "types_first" in effect  # a bookmarked number is kept at first
+
+    def test_the_slider_offers_the_groups_the_splits_can_make(self):
+        src = self._src()
+        assert "max=types.MAX_MARKER_GROUPS" in src
+
+    def test_using_a_group_restricts_the_analysis_to_its_filaments(self):
+        src = self._src()
+        use = src[src.index("def use_type_group") : src.index("def add_type_group")]
+        assert "type_group_used.set(" in use and 'g["keys"]' in use
+        assert 'ui.update_checkbox("types_restrict", value=True)' in use
+        calc = src[
+            src.index("def analysis_params") : src.index("# ── pitch from the phases")
+        ]
+        assert "type_filter()" in calc and "out.attrs = dict(p.attrs)" in calc
+
+    def test_everything_after_the_selection_uses_the_restricted_table(self):
+        src = self._src()
+        for start, end in (
+            ("def _phase_apply", "def _phase_error"),
+            ("def run_phase_pitch", "# ── the classes in the computation"),
+            ("def _suggest_apply", "def run_suggestions"),
+            ("def _angles", "def _download_label"),
+        ):
+            part = src[src.index(start) : src.index(end)]
+            assert "analysis_params()" in part, start
+            # (a check that data are loaded may read the whole table)
+            rest = part.replace("analysis_params()", "")
+            assert "params()" not in rest.replace(
+                "req(params() is not None)", ""
+            ), start
+        assert src.count("phase.select_segments(\n") == src.count(
+            "phase.select_segments(\n            analysis_params()"
+        ) + src.count("phase.select_segments(\n                    analysis_params()")
+
+    def test_the_restricted_table_is_defined_before_anything_uses_it(self):
+        # a decorator that names it runs when the server function reaches it
+        import re
+
+        src = self._src()
+        uses = [m.start() for m in re.finditer(r"(?<!def )\banalysis_params\b", src)]
+        assert src.index("def analysis_params") < min(uses)
+        assert src.index("type_filter = reactive.value(None)") < src.index(
+            "def analysis_params"
+        )
+
+    def test_a_new_restriction_clears_the_pitch_estimate(self):
+        src = self._src()
+        clear = src[src.index("def _clear_phase_result") - 120 :][:200]
+        assert "@reactive.event(analysis_params, input.select_classes_inner)" in clear
+
+    def test_the_restriction_is_shown_and_can_be_undone(self):
+        src = self._src()
+        assert 'ui.output_ui("type_filter_status")' in src
+        # a checkbox of the Parameters tab switches it off and on
+        params_tab = src[
+            src.index('"Parameters",') : src.index('ui.tags.b("3D map from classes")')
+        ]
+        assert '"types_restrict"' in params_tab
+        follow = src[
+            src.index("def _restrict_to_group") : src.index("def types_restrict_note")
+        ]
+        assert "input.types_restrict()" in follow
+        assert "type_filter.set(after)" in follow
+        # what happened is said: all filaments again, and a pitch estimate cleared
+        assert "ui.notification_show(" in follow and "was cleared" in follow
+        alone = src[
+            src.index("def _restrict_without_group") : src.index(
+                "def _restrict_to_group"
+            )
+        ]
+        assert "type_group_used() is None" in alone
+
+    def test_the_two_repeat_test_runs_in_the_background_on_the_shown_groups(self):
+        src = self._src()
+        assert 'helicon.shiny.background_task(\n        "types_pitch_run"' in src
+        work = src[
+            src.index("def _types_pitch_work") : src.index("def _types_pitch_apply")
+        ]
+        assert "mixture.two_pitch_tests(" in work
+        assert "mixture.split_cut(" in work
+        apply_ = src[
+            src.index("def _types_pitch_apply") : src.index("def _types_pitch_error")
+        ]
+        assert 'types_state() is not job["state"]' in apply_
+        assert '_types_number() != job["n"]' in apply_
+
+    def test_groups_whose_classes_fit_no_ring_are_merged_as_mixed(self):
+        src = self._src()
+        work = src[
+            src.index("def _types_pitch_work") : src.index("def _types_pitch_apply")
+        ]
+        assert 't["fit"] < mixture.MIN_RING_FIT' in work
+        assert 'not t["split"]' in work  # a group split by repeat is not mixed
+        shown = src[src.index("def _type_groups") : src.index("def _not_grouped")]
+        assert "labels[np.isin(labels, poor)] = poor[0]" in shown
+        assert "mixed=poor[0] if poor else None" in shown
+        entries = src[src.index("def _group_entries") : src.index("def _type_groups")]
+        assert '"Mixed" if x["mixed"]' in entries
+
+    def test_the_groups_keep_their_numbers_when_some_are_merged(self):
+        # the note names groups by the numbers they were first shown with
+        src = self._src()
+        shown = src[src.index("def _type_groups") : src.index("def _not_grouped")]
+        assert "numbers=numbers" in shown
+        entries = src[src.index("def _group_entries") : src.index("def _type_groups")]
+        assert "i != mixed and i in present" in entries
+
+    def test_classes_that_look_like_no_other_stay_out_of_the_split(self):
+        # junk classes split filaments by their junk segments, not by their type
+        src = self._src()
+        work = src[src.index("def _types_work") : src.index("def _types_apply")]
+        assert "types.pixel_groups(similarity) >= 0" in work
+        assert work.index("loners = ") < work.index("types.usage_matrix(")
+        assert "loners=loners" in work
+        shown = src[src.index("def _type_groups") : src.index("def _group_text")]
+        assert shown.count("+ _not_grouped()") == 2
+
+    def test_using_the_classes_in_no_group_restricts_no_filaments(self):
+        src = self._src()
+        use = src[src.index("def use_type_group") : src.index("def add_type_group")]
+        assert 'if g["id"] is None:' in use
+        assert 'ui.update_checkbox("types_restrict", value=False)' in use
+        add = src[
+            src.index("def _add_type_classes") : src.index(
+                "def _restrict_without_group"
+            )
+        ]
+        assert 'g["id"] is not None' in add
+
+    def test_all_groups_are_evaluated_together_in_parallel(self):
+        src = self._src()
+        run = src[src.index("def run_types_pitch") : src.index("def types_pitch_ui")]
+        assert "groups=groups" in run and "_marker_groups()" in run
+        work = src[
+            src.index("def _types_pitch_work") : src.index("def _types_pitch_apply")
+        ]
+        assert "mixture.two_pitch_tests(" in work
+        # one cut from the gains of all the groups
+        assert "mixture.split_cut(gains)" in work
+        assert '"Evaluate one vs two ring fits for each group"' in src
+
+    def test_a_group_with_two_repeats_is_shown_as_two(self):
+        src = self._src()
+        shown = src[src.index("def _type_groups") : src.index("def _group_text")]
+        assert "_pitch_tests()" in shown
+        tests = src[src.index("def _pitch_tests") : src.index("def run_types_pitch")]
+        assert 'test["n"] != _types_number()' in tests
+        assert 'for r, letter in ((0, "a"), (1, "b"))' in shown
 
     def test_moving_the_number_does_not_redraw_the_slider(self):
         # the controls follow the comparison, not the number: read the groups isolated
@@ -538,10 +708,25 @@ class TestTypesGrouping:
     def test_the_group_replaces_or_adds_to_the_selection(self):
         src = self._src()
         assert (
-            "_set_selection(positions)" in src[src.index("def use_type_group") :][:300]
+            "_set_selection(positions)"
+            in src[src.index("def use_type_group") : src.index("def add_type_group")]
         )
-        add = src[src.index("def add_type_group") :][:400]
+        add = src[
+            src.index("def add_type_group") : src.index("def _restrict_without_group")
+        ]
         assert "input.select_classes_inner()" in add and "_set_selection(" in add
+
+    def test_add_group_adds_all_and_add_selected_the_picked_classes(self):
+        src = self._src()
+        assert '"types_add_picked",\n                    "Add selected"' in src
+        add = src[src.index("def add_type_group") : src.index("def add_picked_type")]
+        assert "_type_positions(picked_only=False)" in add
+        picked = src[
+            src.index("def add_picked_type") : src.index("def _add_type_classes")
+        ]
+        assert "_type_positions(picked_only=True)" in picked
+        buttons = src[src.index("def types_buttons") : src.index("def _type_positions")]
+        assert "col_widths=(4, 4, 4)" in buttons
 
     def test_nothing_is_selected_or_estimated_without_the_user(self):
         # the grouping only offers; the selection changes on Use / Add group
@@ -919,3 +1104,153 @@ class TestMicrographsFound:
             seg.drop(columns="rlnAnglePsiPrior"), str(tmp_path)
         )
         assert not relion.micrographs_found(None, str(tmp_path))
+
+
+class TestPlotSizing:
+    def test_the_plot_boxes_follow_the_height_of_the_window(self):
+        assert "vh" in abinitio3d_tab._PLOT_BOX
+        assert "340px" not in abinitio3d_tab._PLOT_BOX
+        assert "clamp(" in abinitio3d_tab._PLOT_BOX
+
+    def test_a_figure_is_fitted_to_its_box_whenever_it_changes(self):
+        js = abinitio3d_tab._RESIZE_WITH_BOX
+        # the figure's size is compared with its box's, not only the window's
+        assert "_fullLayout" in js and "offsetWidth" in js and "offsetHeight" in js
+        assert "ResizeObserver" in js and "IntersectionObserver" in js
+        assert "addEventListener('resize'" in js
+        # and again as the page settles
+        assert "setTimeout(fit" in js
+
+    def test_the_figure_html_carries_the_script_for_its_own_div(self):
+        import plotly.graph_objects as go
+
+        html = str(abinitio3d_tab._fig_to_html(go.Figure(), plot_id="abc"))
+        assert "getElementById('abc')" in html
+
+
+class TestFilamentJointFigure:
+    """The per-filament repeat against the length, with a histogram of each."""
+
+    @pytest.fixture(scope="class")
+    def table(self):
+        import pandas as pd
+
+        rng = np.random.default_rng(1)
+        n = 300
+        return pd.DataFrame(
+            dict(
+                span=rng.uniform(100, 2000, n),
+                pitch=np.where(rng.random(n) < 0.5, 700.0, 780.0) + rng.normal(0, 5, n),
+                rlnMicrographName=[
+                    f"MotionCorr/job001/mic{i % 30}.mrc" for i in range(n)
+                ],
+                rlnHelicalTubeID=[i % 5 for i in range(n)],
+            )
+        )
+
+    def _fig(self, table, **kw):
+        args = dict(length_range=(300, 1500), repeat_band=(680, 720), n_unfitted=12)
+        args.update(kw)
+        return abinitio3d_tab._filament_joint_figure(
+            table, 705.0, args["length_range"], args["repeat_band"], args["n_unfitted"]
+        )
+
+    @staticmethod
+    def _scatters(fig):
+        return [d for d in fig.data if d.type in ("scatter", "scattergl")]
+
+    def _points(self, fig):
+        return [d for d in self._scatters(fig) if d.mode == "markers"]
+
+    def _lines(self, fig, colour):
+        return [
+            d
+            for d in self._scatters(fig)
+            if d.mode == "lines" and d.line is not None and d.line.color == colour
+        ]
+
+    def _selected(self, table, lo=300, hi=1500, low=680, high=720):
+        s, p = table["span"].to_numpy(), table["pitch"].to_numpy()
+        return (s >= lo) & (s <= hi) & (p >= low) & (p <= high)
+
+    def test_the_scatter_has_length_across_and_repeat_up(self, table):
+        fig = self._fig(table)
+        points = self._points(fig)
+        x = np.concatenate([np.asarray(d.x) for d in points])
+        y = np.concatenate([np.asarray(d.y) for d in points])
+        assert len(x) == len(table)
+        assert sorted(x) == pytest.approx(sorted(table["span"]))
+        assert sorted(y) == pytest.approx(sorted(table["pitch"]))
+        assert fig.layout.xaxis3.title.text.startswith("Filament length")
+        assert fig.layout.yaxis3.title.text.startswith("Repeat")
+
+    def test_the_selection_is_what_the_sliders_set(self, table):
+        fig = self._fig(table)
+        chosen = [
+            d
+            for d in self._points(fig)
+            if "selected" in d.hovertemplate and "not selected" not in d.hovertemplate
+        ]
+        assert len(chosen) == 1
+        assert len(chosen[0].x) == int(self._selected(table).sum())
+        assert f"{int(self._selected(table).sum())} selected" in fig.layout.title.text
+
+    def test_no_bounds_select_every_filament(self, table):
+        fig = self._fig(table, length_range=(None, None), repeat_band=(None, None))
+        assert f"{len(table)} selected" in fig.layout.title.text
+        assert not [d for d in self._points(fig) if "not selected" in d.hovertemplate]
+
+    def test_each_variable_has_a_histogram_beside_the_scatter(self, table):
+        fig = self._fig(table)
+        hists = [d for d in fig.data if d.type == "histogram"]
+        top = [d for d in hists if d.x is not None]
+        right = [d for d in hists if d.y is not None]
+        assert sum(len(d.x) for d in top) == len(table)
+        assert sum(len(d.y) for d in right) == len(table)
+        assert all(d.orientation == "h" for d in right)
+        # a bar is every filament of its bin: the others stacked on the selected
+        assert fig.layout.barmode == "stack"
+
+    def test_the_histograms_share_an_axis_with_the_scatter(self, table):
+        fig = self._fig(table)
+        assert fig.layout.xaxis.matches == "x3" or fig.layout.xaxis3.matches == "x"
+        assert fig.layout.yaxis4.matches == "y3" or fig.layout.yaxis3.matches == "y4"
+
+    def test_the_pooled_repeat_is_a_green_line_in_the_scatter_and_the_histogram(
+        self, table
+    ):
+        fig = self._fig(table)
+        green = self._lines(fig, "green")
+        assert len(green) == 2
+        assert all(list(d.y) == [705.0, 705.0] for d in green)
+
+    def test_the_selection_marks_are_traces_not_shapes(self, table):
+        # the page script of the crosshairs takes over the shapes of every plot
+        fig = self._fig(table)
+        assert len(fig.layout.shapes) == 0
+        orange = self._lines(fig, "orange")
+        assert len(orange) == 4  # two edges in each histogram
+        filled = [d for d in self._scatters(fig) if d.fill == "toself"]
+        assert len(filled) == 1  # the rectangle in the scatter
+
+    def test_the_title_counts_the_filaments_without_a_repeat(self, table):
+        fig = self._fig(table, n_unfitted=1740)
+        assert "1,740 without a clear repeat" in fig.layout.title.text
+        assert f"{len(table):,} filaments" in fig.layout.title.text
+
+    def test_many_filaments_are_drawn_with_webgl(self, table):
+        import pandas as pd
+
+        big = pd.concat([table] * 12, ignore_index=True)
+        points = self._points(self._fig(big))
+        assert {d.type for d in points} == {"scattergl"}
+        small = self._points(self._fig(table))
+        assert {d.type for d in small} == {"scatter"}
+
+    def test_the_plot_uses_the_figure_in_its_box(self):
+        import inspect
+
+        src = inspect.getsource(abinitio3d_tab)
+        plot = src[src.index("def filament_pitch_plot") : src.index("def _write_star")]
+        assert "_filament_joint_figure(" in plot
+        assert "_fig_to_html(" in plot

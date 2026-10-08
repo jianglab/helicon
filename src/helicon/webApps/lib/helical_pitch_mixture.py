@@ -53,13 +53,34 @@ def filament_scores(pairs, period, phases):
     return keep, swap, weight
 
 
-def _fit_ring(pairs, member, around, window, length_scale):
-    """A ring from the filaments in ``member`` (bool per filament), near ``around``."""
+# Most of a two-ring fit is the scan of candidate repeats (an eigenvector for
+# each). The grid is 2 A, and its peak is interpolated, so the fine scan about it
+# needs only a few A, not the 3% the first estimate of a data set searches.
+REFINE_FRACTION = 0.005
+# After the first round a ring's repeat moves little: it is searched this close
+# to its last value, and the whole window again only if it reaches the edge.
+NEAR_WINDOW = 0.04
+
+
+def _fit_ring(pairs, member, around, window, length_scale, near=None):
+    """A ring from the filaments in ``member`` (bool per filament), near ``around``.
+
+    With ``near``, the repeat is first searched within ``near`` of ``around``, and
+    within ``window`` only if it ends at the edge of that.
+    """
     w = member[pairs.pair_filament].astype(float)
-    periods = np.arange(around * (1 - window), around * (1 + window), 2.0)
-    return ph.estimate_period(
-        pairs, pair_weights=w, periods=periods, length_scale=length_scale
-    )
+    for width in ([near] if near else []) + [window]:
+        periods = np.arange(around * (1 - width), around * (1 + width), 2.0)
+        ring = ph.estimate_period(
+            pairs,
+            pair_weights=w,
+            periods=periods,
+            length_scale=length_scale,
+            refine_fraction=REFINE_FRACTION,
+        )
+        if abs(ring["period"] / around - 1) < 0.9 * width:
+            break
+    return ring
 
 
 def fit_two_rings(
@@ -108,7 +129,14 @@ def fit_two_rings(
             member = (labels == t) & use
             if member.sum() < 3:
                 return None
-            rings[t] = _fit_ring(pairs, member, p[t], window, length_scale)
+            rings[t] = _fit_ring(
+                pairs,
+                member,
+                p[t],
+                window,
+                length_scale,
+                near=NEAR_WINDOW if rounds > 1 else None,
+            )
             p[t] = rings[t]["period"]
         scores = []
         for t in (0, 1):
@@ -173,32 +201,41 @@ def heldout_gain(pairs, labels, periods, one_period, folds=2, seed=0, restarts=4
     """
     rng = np.random.default_rng(seed)
     fold = rng.integers(0, folds, pairs.n_filaments)
+    starts = [np.asarray(labels)] + [
+        rng.integers(0, 2, pairs.n_filaments) for _ in range(restarts - 1)
+    ]
     num = den = 0.0
     for k in range(folds):
-        train = fold != k
-        test = ~train
-        two = None
-        for start in [np.asarray(labels)] + [
-            rng.integers(0, 2, pairs.n_filaments) for _ in range(restarts - 1)
-        ]:
-            trial = fit_two_rings(pairs, start, periods, train=train, **kw)
-            if trial is None:
-                continue
-            fitted = float(
-                (trial["best"] * trial["weight"])[train].sum()
-                / max(trial["weight"][train].sum(), 1e-12)
-            )
-            if two is None or fitted > two["fitted"]:
-                two = dict(trial, fitted=fitted)
-        if two is None:
-            continue
-        one = _fit_ring(pairs, train, one_period, 0.12, kw.get("length_scale", 800.0))
-        keep, swap, weight = filament_scores(pairs, one["period"], one["phases"])
-        single = np.maximum(keep, swap)
-        w = weight[test]
-        num += float(((two["best"] - single)[test] * w).sum())
-        den += float(w.sum())
+        a, b = _heldout_fold(pairs, fold, k, starts, periods, one_period, **kw)
+        num += a
+        den += b
     return num / max(den, 1e-12)
+
+
+def _heldout_fold(pairs, fold, k, starts, periods, one_period, **kw):
+    """One fold of :func:`heldout_gain`: rings fitted to the filaments of the other
+    folds, judged on those of fold ``k``. Returns the weighted sum of the gain over
+    them, and the sum of their weights."""
+    train = fold != k
+    test = ~train
+    two = None
+    for start in starts:
+        trial = fit_two_rings(pairs, start, periods, train=train, **kw)
+        if trial is None:
+            continue
+        fitted = float(
+            (trial["best"] * trial["weight"])[train].sum()
+            / max(trial["weight"][train].sum(), 1e-12)
+        )
+        if two is None or fitted > two["fitted"]:
+            two = dict(trial, fitted=fitted)
+    if two is None:
+        return 0.0, 0.0
+    one = _fit_ring(pairs, train, one_period, 0.12, kw.get("length_scale", 800.0))
+    keep, swap, weight = filament_scores(pairs, one["period"], one["phases"])
+    single = np.maximum(keep, swap)
+    w = weight[test]
+    return float(((two["best"] - single)[test] * w).sum()), float(w.sum())
 
 
 def objective_gain(pairs, two, period, phases):
@@ -328,3 +365,308 @@ def assign_segments(pairs, scores, switch_cost=4.0, junk=0.3):
             state[seg[i]] = k
             k = back[k, i]
     return state
+
+
+# The two repeats of a split must differ by this fraction: two rings a few percent
+# apart split one type by the spread of its filaments' repeats
+MIN_APART = 0.08
+
+
+def two_pitch_prepare(params, class_ids, max_filaments=None, seed=0):
+    """The first step of :func:`two_pitch_test`: the ring of one group.
+
+    The segments (of a random sample of ``max_filaments`` filaments, if given) go
+    through :func:`helical_pitch_phase.analyze`; the segment pairs, the single
+    ring, the starting split for two rings and the ring fit are kept for the
+    two-ring fits (:func:`two_pitch_start`, :func:`two_pitch_fold`), which can
+    then run apart, in other processes.
+
+    Returns
+    -------
+    dict
+        ``pairs``, ``period`` (one ring), ``phases``, ``start`` (labels),
+        ``periods`` (the two starting repeats), ``fit`` (:func:`ring_fit`) and
+        ``seed``.
+    """
+    keys = params.groupby(
+        ["rlnMicrographName", "rlnHelicalTubeID"], sort=False
+    ).ngroup()
+    if max_filaments is not None and keys.max() + 1 > max_filaments:
+        rng = np.random.default_rng(seed)
+        keep = rng.choice(int(keys.max()) + 1, max_filaments, replace=False)
+        params = params[keys.isin(keep).values]
+    res = ph.analyze(params, class_ids=[int(c) for c in class_ids], n_boot=2)
+    fit = ring_fit(res, params)
+    cl = [int(c) for c in res.class_ids]
+    pairs = ph.prepare_pairs(res.params_used, class_ids=cl, max_sep=4000.0)
+    est = ph.estimate_period(pairs)
+    est, _ = ph.sync_filament_directions(pairs, est)
+    fil = res.filaments
+    own = {
+        (m, int(t)): q
+        for m, t, q, ok in zip(
+            fil.rlnMicrographName, fil.rlnHelicalTubeID, fil.pitch, fil.fitted
+        )
+        if ok
+    }
+    pitch = np.array([own.get((x[0], int(x[1])), np.nan) for x in pairs.filament_keys])
+    start = starting_labels(pairs, pitch, np.random.default_rng(seed))
+    return dict(
+        pairs=pairs,
+        period=float(est["period"]),
+        phases=est["phases"],
+        start=start,
+        periods=(est["period"] * 0.93, est["period"] * 1.07),
+        fit=fit,
+        seed=seed,
+    )
+
+
+def _start_labels(prep, k):
+    """Start ``k`` of the two-ring fits: the prepared split, then random ones."""
+    if k == 0:
+        return np.asarray(prep["start"])
+    rng = np.random.default_rng([prep["seed"], k])
+    return rng.integers(0, 2, prep["pairs"].n_filaments)
+
+
+def two_pitch_start(prep, k):
+    """The two-ring fit to all the filaments from start ``k``."""
+    return fit_two_rings(prep["pairs"], _start_labels(prep, k), prep["periods"])
+
+
+def two_pitch_fold(prep, k, folds=2, restarts=4):
+    """Held-out fold ``k`` of :func:`heldout_gain` for a prepared group.
+
+    Returns
+    -------
+    tuple
+        The fold's sum of (two-ring minus one-ring agreement) times weight over
+        its held-out filaments, and the sum of their weights.
+    """
+    pairs = prep["pairs"]
+    fold = np.random.default_rng(prep["seed"]).integers(0, folds, pairs.n_filaments)
+    return _heldout_fold(
+        pairs,
+        fold,
+        k,
+        [_start_labels(prep, i) for i in range(restarts)],
+        prep["periods"],
+        prep["period"],
+    )
+
+
+def two_pitch_finish(prep, fits, folds):
+    """The result of :func:`two_pitch_test` from its pieces: the two-ring fits
+    from every start and the held-out folds."""
+    pairs = prep["pairs"]
+    fits = [f for f in fits if f is not None]
+    if not fits:
+        return dict(period=prep["period"], fit=prep["fit"], heldout=np.nan)
+    best = max(fits, key=lambda f: f["objective"])
+    num = sum(x[0] for x in folds)
+    den = sum(x[1] for x in folds)
+    order = np.argsort(best["periods"])
+    ring = np.argsort(order)[np.asarray(best["labels"], dtype=int)]
+    return dict(
+        period=prep["period"],
+        fit=prep["fit"],
+        periods=tuple(float(best["periods"][i]) for i in order),
+        heldout=float(num / max(den, 1e-12)),
+        rings={
+            (str(x[0]), int(x[1])): int(r) for x, r in zip(pairs.filament_keys, ring)
+        },
+        counts=tuple(int(np.sum(ring == i)) for i in (0, 1)),
+    )
+
+
+def two_pitch_test(params, class_ids, max_filaments=None, seed=0, restarts=4, folds=2):
+    """One ring or two, for the filaments of one group.
+
+    The segments go through :func:`helical_pitch_phase.analyze` (a ring of the
+    classes and a repeat); one ring and two rings are fitted, and the gain of the
+    second ring is measured on filaments it was not fitted to
+    (:func:`heldout_gain`). :func:`two_pitch_tests` does the same for several
+    groups at once, in parallel.
+
+    Parameters
+    ----------
+    params : pandas.DataFrame
+        Class2D parameters of the group's filaments.
+    class_ids : sequence of int
+        The classes to place on the ring (class numbers).
+    max_filaments : int, optional
+        Fit a random sample of this many filaments (for the gain only: then
+        ``rings`` covers the sample).
+    restarts : int, optional
+        Starts of each two-ring fit: the filaments split at their median repeat,
+        and ``restarts - 1`` at random. Defaults to 4.
+    folds : int, optional
+        Held-out folds. Defaults to 2.
+
+    Returns
+    -------
+    dict
+        ``period`` (one ring), ``fit`` (:func:`ring_fit`), ``periods`` (the two,
+        ascending), ``heldout`` (gain), ``rings`` (``(micrograph name, int tube)
+        -> 0 or 1``, 0 for the shorter repeat) and ``counts`` (filaments per
+        ring); without ``periods`` and with a NaN gain if two rings could not be
+        fitted.
+    """
+    prep = two_pitch_prepare(params, class_ids, max_filaments, seed)
+    fits = [two_pitch_start(prep, k) for k in range(restarts)]
+    held = [two_pitch_fold(prep, k, folds, restarts) for k in range(folds)]
+    return two_pitch_finish(prep, fits, held)
+
+
+def _single_threaded(fn, *args):
+    """Run ``fn`` with the maths libraries on one thread: the parallel work is
+    spread over processes, and the eigenproblems are too small to gain from
+    threads (several processes each running many threads only slowed down)."""
+    from threadpoolctl import threadpool_limits
+
+    with threadpool_limits(1):
+        return fn(*args)
+
+
+def two_pitch_tests(
+    jobs, max_filaments=None, restarts=4, folds=2, seed=0, workers=None, progress=None
+):
+    """:func:`two_pitch_test` for several groups, its pieces run in parallel.
+
+    Each group is first prepared (:func:`two_pitch_prepare`); then its two-ring
+    fits from each start and its held-out folds are independent tasks. They all
+    go to one pool of single-threaded processes, the largest groups first, and a
+    group's fits are queued as soon as it is prepared, so no process waits while
+    another group is still running.
+
+    Parameters
+    ----------
+    jobs : list of tuple
+        ``(params, class_ids)`` of each group.
+    workers : int, optional
+        Processes; by default the CPUs free (:func:`helicon.available_cpu`,
+        which respects Slurm and numba's settings) as far as the memory available
+        allows 1.5 GB for each, and at most the number of tasks. 1
+        runs everything here, in turn. On 12 groups, 8 processes took 53 s and 16
+        took 55 s: past a point the slowest group sets the time.
+    progress : callable, optional
+        Called with (tasks done, tasks in all).
+
+    Returns
+    -------
+    list
+        The result of :func:`two_pitch_test` for each job, or the exception that
+        stopped it.
+    """
+    import multiprocessing as mp
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+    n_tasks = len(jobs) * (1 + restarts + folds)
+    if workers is None:
+        import helicon
+
+        # each spawned worker holds its own Python, numpy and numba (about
+        # 0.5 GB) and a group's segments and pairs
+        workers = min(int(helicon.available_cpu(mem_gb_per_cpu=1.5)), n_tasks)
+    results = [None] * len(jobs)
+    if workers <= 1 or len(jobs) == 0:
+        for i, (p, c) in enumerate(jobs):
+            try:
+                results[i] = two_pitch_test(p, c, max_filaments, seed, restarts, folds)
+            except Exception as e:  # one group's failure does not stop the others
+                results[i] = e
+            if progress is not None:
+                progress((i + 1) * (1 + restarts + folds), n_tasks)
+        return results
+    preps, fits, held = {}, {}, {}
+    done = 0
+    # spawned, not forked: a copy of a process running threads (a web server)
+    # can hang
+    with ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn")) as ex:
+        pending = {}
+        for i in sorted(range(len(jobs)), key=lambda i: -len(jobs[i][0])):
+            p, c = jobs[i]
+            f = ex.submit(
+                _single_threaded, two_pitch_prepare, p, c, max_filaments, seed
+            )
+            pending[f] = ("prepare", i, None)
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for f in finished:
+                kind, i, k = pending.pop(f)
+                done += 1
+                if isinstance(results[i], Exception):
+                    continue
+                try:
+                    value = f.result()
+                except Exception as e:  # one group's failure does not stop the others
+                    results[i] = e
+                    done += 0 if kind != "prepare" else restarts + folds
+                    continue
+                if kind == "prepare":
+                    preps[i], fits[i], held[i] = value, [], []
+                    for k in range(restarts):
+                        g = ex.submit(_single_threaded, two_pitch_start, value, k)
+                        pending[g] = ("start", i, k)
+                    for k in range(folds):
+                        g = ex.submit(
+                            _single_threaded, two_pitch_fold, value, k, folds, restarts
+                        )
+                        pending[g] = ("fold", i, k)
+                elif kind == "start":
+                    fits[i].append(value)
+                else:
+                    held[i].append(value)
+                if (
+                    i in preps
+                    and len(fits[i]) == restarts
+                    and len(held[i]) == folds
+                    and results[i] is None
+                ):
+                    results[i] = two_pitch_finish(preps[i], fits[i], held[i])
+            if progress is not None:
+                progress(min(done, n_tasks), n_tasks)
+    return results
+
+
+# Below this ring fit (:func:`ring_fit`) the classes of a group fit no single ring.
+# Measured on twelve groups of a data set of five types solved by hand: the groups
+# of one type fitted 0.6 to 0.8, the mixtures of three to five types 0.07 to 0.28;
+# between 0.3 and 0.6 there were both (mostly one type, with a fifth to a third of
+# another). Two types of nearly the same repeat fit one ring well (a doublet and a
+# triplet together: 0.82), so a good fit does not prove one type.
+MIN_RING_FIT = 0.3
+
+
+def ring_fit(result, params):
+    """How well the classes of an analysis fit one ring: the mean of the class
+    fits (:func:`helical_pitch_phase.class_fit`, 1 when every segment is at its
+    class's azimuth), each class weighted by its segments."""
+    fits = np.asarray(result.class_fit, dtype=float)
+    n = params["rlnClassNumber"].astype(int).value_counts()
+    w = np.array([float(n.get(int(c), 0)) for c in result.class_ids])
+    ok = np.isfinite(fits) & (w > 0)
+    if not ok.any():
+        return float("nan")
+    return float(np.sum(fits[ok] * w[ok]) / np.sum(w[ok]))
+
+
+def split_cut(gains, floor=0.08, default=0.10):
+    """The held-out gain above which a group holds two repeats.
+
+    Groups of one type gain from a second ring too (0.02 to 0.06 on the data set
+    this was measured on: the ring also fits the filaments' spread of repeats and
+    class placements), and the level varies between data sets, so the cut comes
+    from the groups themselves: their median plus four robust standard
+    deviations, and at least ``floor``. With fewer than four groups there is no
+    such spread to measure, and ``default`` is used. On that data set, the one
+    group of two types (repeats 36% apart) gained 0.18 and the cut was 0.10
+    to 0.12.
+    """
+    g = np.asarray([x for x in gains if np.isfinite(x)], dtype=float)
+    if len(g) < 4:
+        return default
+    med = float(np.median(g))
+    mad = float(np.median(np.abs(g - med)))
+    return max(floor, med + 4 * 1.4826 * mad)
