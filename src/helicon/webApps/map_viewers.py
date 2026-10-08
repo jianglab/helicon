@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import secrets
 import time
 from pathlib import Path
 
@@ -93,9 +94,11 @@ def write_map(volume, apix, name="map") -> Path:
                 old.unlink()
         except OSError:
             pass
+    # a random part as well: two maps written in the same millisecond would
+    # otherwise get one name, and the second would overwrite the first
     path = (
-        folder
-        / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{int(now * 1000) % 1000:03d}.mrc"
+        folder / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}_{int(now * 1000) % 1000:03d}"
+        f"_{secrets.token_hex(3)}.mrc"
     )
     with mrcfile.new(str(path), overwrite=True) as mrc:
         mrc.set_data(np.asarray(volume, dtype=np.float32))

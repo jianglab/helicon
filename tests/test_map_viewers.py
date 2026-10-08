@@ -340,3 +340,14 @@ class TestAbinitio3dButtonsAreBlue:
         assert "map_viewers.download_link(" in band and '"download_pitch_band"' in band
         # its handler is still the one registered by decorating it
         assert "def download_pitch_band():" in band
+
+
+class TestManyMapsAtOnce:
+    def test_maps_written_in_the_same_instant_get_different_names(
+        self, cache, monkeypatch
+    ):
+        # a frozen clock: the second and the millisecond are the same for all
+        monkeypatch.setattr(mv.time, "time", lambda: 1_700_000_000.123)
+        paths = [mv.write_map(np.full((2, 2, 2), i), 1.0, "x") for i in range(20)]
+        assert len({p.name for p in paths}) == 20
+        assert all(p.exists() for p in paths)
