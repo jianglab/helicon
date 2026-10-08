@@ -1,4 +1,4 @@
-"""Open WebCalEM, the web app to calibrate the magnification (pixel size) of a TEM"""
+"""A Web app that calibrates the magnification (pixel size) of a TEM"""
 
 import logging
 import webbrowser

@@ -1,13 +1,12 @@
-# Make submodules available
-from . import denovo3d_pipeline
-from . import image_loader
-from . import denovo3d_solver
-from . import whereismyclass_compute
-from . import hi3d_core
-from . import helical_projection_utils
-from . import helical_pitch_compute
-from . import hill_compute
-from . import helical_projection_compute
+"""Compute libraries of the web apps.
+
+The submodules are imported when first used, not when this package is: each tab
+needs only a few of them, and they pull in SciPy, scikit-image and more (importing
+all of them for every tab took about 2 s). ``from helicon.webApps.lib import x``
+and ``helicon.webApps.lib.x`` both work as before.
+"""
+
+import importlib
 
 __all__ = [
     "denovo3d_pipeline",
@@ -20,3 +19,11 @@ __all__ = [
     "helical_projection_compute",
     "hill_compute",
 ]
+
+
+def __getattr__(name):
+    if name in __all__:
+        module = importlib.import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

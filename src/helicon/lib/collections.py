@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 import numpy as np
-import pandas as pd
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 __all__ = [
     "unique",

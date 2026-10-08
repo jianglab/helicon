@@ -53,6 +53,9 @@ class TestOverride:
         assert not deployment.is_cloud(env)
 
 
+from helicon.webApps.tabs import home_tab  # noqa: E402
+
+
 class TestTheAppFollowsIt:
     def _page(self, monkeypatch, cloud):
         from shiny import ui
@@ -66,13 +69,15 @@ class TestTheAppFollowsIt:
         html = self._page(monkeypatch, cloud=True)
         assert "WhereIsMyClass runs only where your data are" in html
         assert 'id="where_is_my_class-wimc_input_mode' not in html
-        assert "Open file browser" not in html
+        assert home_tab._DISPLAY_LABEL not in html
 
     def test_locally_everything_is_there(self, monkeypatch):
         html = self._page(monkeypatch, cloud=False)
         assert "runs only where your data are" not in html
-        assert "where_is_my_class-wimc_input_mode" in html
-        assert "Open file browser" in html
+        # its page arrives when the tab is first opened: the page holds the place
+        assert 'id="lazy_tab_where_is_my_class"' in html
+        # the launcher of the file explorer, offered where the files are
+        assert home_tab._DISPLAY_LABEL in html
 
 
 class TestHostedCopiesReadOnlyByUrl:

@@ -8,16 +8,10 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.ndimage import map_coordinates, affine_transform
-from scipy.interpolate import splrep, splev, RegularGridInterpolator
-from scipy.signal import find_peaks
 from scipy.special import jnp_zeros
 from scipy.optimize import minimize
 from itertools import product
 
-from bokeh.events import MouseMove
-from bokeh.models import ColumnDataSource, CustomJS, LinearColorMapper
-from bokeh.models.tools import CrosshairTool, HoverTool
-from bokeh.plotting import figure
 
 import helicon
 
@@ -482,6 +476,9 @@ def sample_filament_axis(data, num_points=10, filament_radius_pixels=None):
     Designed for low-SNR images where the filament runs roughly vertically.
     Returns (xs, ys) pixel coordinates, ordered top-to-bottom.
     """
+    from scipy.interpolate import splrep
+    from scipy.interpolate import splev
+
     data = np.asarray(data, dtype=np.float64)
     ny, nx = data.shape
 
@@ -572,6 +569,8 @@ def sample_filament_axis(data, num_points=10, filament_radius_pixels=None):
 
 def fit_spline(xs, ys):
     """Fit a cubic smoothing spline to axis points."""
+    from scipy.interpolate import splrep
+
     if len(xs) < 4:
         return None
     xs = np.asarray(xs, float)
@@ -582,6 +581,9 @@ def fit_spline(xs, ys):
 
 def filament_straighten(data, tck, r_filament_pixel_display, y_start, y_end):
     """Straighten a curved filament using a spline fit."""
+    from scipy.interpolate import splev
+    from scipy.interpolate import RegularGridInterpolator
+
     ny, nx = data.shape
     x_coord = np.arange(0, nx, 1)
     y_coord = np.arange(0, ny, 1)
@@ -658,6 +660,12 @@ def create_image_figure(
     tools="box_zoom,crosshair,pan,reset,save,wheel_zoom",
 ):
     """Create a Bokeh figure displaying a 2D image."""
+    from bokeh.plotting import figure
+    from bokeh.models.tools import HoverTool
+    from bokeh.models.tools import CrosshairTool
+    from bokeh.models import LinearColorMapper
+    from bokeh.models import ColumnDataSource
+
     h, w = image.shape
     if aspect_ratio is None:
         if plot_width and plot_height:
@@ -734,6 +742,13 @@ def create_layerline_image_figure(
     hover_phase=False,
 ):
     """Create a Bokeh figure for power spectrum / phase difference layer lines."""
+    from bokeh.plotting import figure
+    from bokeh.models.tools import HoverTool
+    from bokeh.models import LinearColorMapper
+    from bokeh.models import CustomJS
+    from bokeh.models import ColumnDataSource
+    from bokeh.events import MouseMove
+
     ny, nx = data.shape
     dsy = 1.0 / (ny // 2 * cutoff_res_y)
     dsx = 1.0 / (nx // 2 * cutoff_res_x)

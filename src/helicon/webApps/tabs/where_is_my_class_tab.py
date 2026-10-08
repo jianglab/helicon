@@ -22,21 +22,7 @@ from ..lib import whereismyclass_compute as compute
 
 logger = logging.getLogger(__name__)
 
-BOOKMARK_DEFAULTS = {
-    "input_mode": ("wimc_input_mode", "server"),
-    "url_star": ("wimc_url_star", ""),
-    "server_star": ("wimc_server_star", ""),
-    "ignore_blank": ("wimc_ignore_blank", True),
-    "sort_abundance": ("wimc_sort_abundance", True),
-    "rise": ("wimc_rise", 4.75),
-    "target_apix": ("wimc_target_apix", 5),
-    "low_pass": ("wimc_low_pass_angstrom", 20),
-    "high_pass": ("wimc_high_pass_angstrom", 0),
-    "max_len": ("wimc_max_len", -1),
-    "max_pair_dist": ("wimc_max_pair_dist", -1),
-    "bins": ("wimc_bins", 100),
-    "plot_height": ("wimc_plot_height", 640),
-}
+from .where_is_my_class_bookmark import BOOKMARK_DEFAULTS  # noqa: E402
 
 
 @module.ui

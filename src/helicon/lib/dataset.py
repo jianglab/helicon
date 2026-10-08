@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging, os
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 import numpy as np
-import pandas as pd
+
+if TYPE_CHECKING:
+    import pandas as pd
 import helicon
 from .exceptions import HeliconIOError
 
@@ -633,6 +635,8 @@ def get_emd_entries(fields: list[str]) -> pd.DataFrame:
         DataFrame of EMDB entries with standardized column names
         (method, pdb, rise, twist, csym).
     """
+    import pandas as pd
+
     url = f'https://www.ebi.ac.uk/emdb/api/search/current_status:"REL"?rows=1000000&wt=csv&download=true&fl={",".join(fields)}'
     entries = pd.read_csv(url)
     entries["emd_id"] = entries["emdb_id"].str.split("-", expand=True).iloc[:, 1]
@@ -671,6 +675,8 @@ def get_amyloid_atlas(
         Table of Amyloid Atlas entries with emd_id, resolution, pdb_id, and
         sample columns.
     """
+    import pandas as pd
+
     replaced_pdb_ids = {"7z40": "8ade"}
 
     df = pd.read_html(url, header=0, flavor="html5lib")[0]
@@ -728,6 +734,8 @@ def update_helical_parameters_from_curated_table(
     pd.DataFrame
         Updated DataFrame with curated helical parameters where available.
     """
+    import pandas as pd
+
     columns = df.columns
     df_curated = pd.read_csv(url)
     df_curated = df_curated[df_curated["emdb_id"].isin(df["emdb_id"])]

@@ -423,7 +423,6 @@ def cache(
     @cache(expires_after=timedelta(weeks=2))
     @cache(expires_after=None)
     """
-    import joblib
     import functools
 
     if isinstance(expires_after, (int, float)):
@@ -437,12 +436,25 @@ def cache(
 
     ignore = ignore or []
 
+    # joblib takes 0.4 s to import, and many functions are decorated when helicon
+    # is imported: it is imported, and the expiry callback built, on the first call
     if expires_after is None:
         cache_validation_callback = lambda x: True
     else:
-        cache_validation_callback = _tolerate_unreadable_metadata(
-            joblib.memory.expires_after(seconds=expires_after.total_seconds())
-        )
+        _expiry = []
+
+        def cache_validation_callback(metadata):
+            if not _expiry:
+                import joblib
+
+                _expiry.append(
+                    _tolerate_unreadable_metadata(
+                        joblib.memory.expires_after(
+                            seconds=expires_after.total_seconds()
+                        )
+                    )
+                )
+            return _expiry[0](metadata)
 
     if cache_dir is None:
         cache_dir = setup_cache_dir()
@@ -454,6 +466,8 @@ def cache(
     state_lock = threading.Lock()
 
     def _memory():
+        import joblib
+
         with state_lock:
             if "memory" not in state:
                 try:

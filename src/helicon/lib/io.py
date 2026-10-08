@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging, math, os
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
-import pandas as pd
+
+if TYPE_CHECKING:
+    import pandas as pd
 from .exceptions import HeliconIOError, HeliconValueError, HeliconConfigError
 
 logger = logging.getLogger(__name__)
@@ -419,6 +421,8 @@ def merge_optics_groups(
     HeliconValueError
         If two inputs define the same optics group differently.
     """
+    import pandas as pd
+
     tables = [o for o in opticslist if o is not None and len(o)]
     if not tables:
         return None
@@ -516,6 +520,8 @@ def images2dataframe(
         DataFrame combining data from all input files, with ``attrs`` containing
         optics, convention, and source_path metadata.
     """
+    import pandas as pd
+
     if isinstance(inputFiles, str):
         data = image2dataframe(
             inputFiles,
@@ -615,6 +621,8 @@ def image2dataframe(
     pd.DataFrame
         DataFrame with particle metadata and a ``source_path`` attribute.
     """
+    import pandas as pd
+
     if inputFile.endswith(".db"):
         realInputFile = inputFile.split("@")[-1]
     else:
@@ -827,6 +835,8 @@ def star_dissolve_opticsgroup(data: pd.DataFrame) -> None:
     data : pd.DataFrame
         DataFrame with RELION convention and an ``optics`` attribute.
     """
+    import pandas as pd
+
     assert (
         data.attrs["convention"] == "relion"
     ), f"star_dissolve_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
@@ -886,6 +896,8 @@ def star_build_opticsgroup(data: pd.DataFrame) -> None:
     data : pd.DataFrame
         DataFrame with particle data using RELION convention.
     """
+    import pandas as pd
+
     assert (
         data.attrs["convention"] == "relion"
     ), f"star_build_opticsgroup: requires data in RELION convention. current convention is {data.attrs['convention']}"
@@ -938,6 +950,8 @@ def remove_invalid_opticsgroup_parameters(data: pd.DataFrame) -> None:
     data : pd.DataFrame
         DataFrame containing optics group metadata.
     """
+    import pandas as pd
+
     try:
         badVars = []
         if data.attrs["optics"] is not None:
@@ -1378,6 +1392,8 @@ def _cs2dataframe_from_star_import(
     alternative_folders, ignore_bad_particle_path, ignore_bad_micrograph_path
         Forwarded to ``dataframe_normalize_filename``.
     """
+    import pandas as pd
+
     cs = np.load(csFile, allow_pickle=True)
     names = cs.dtype.names
     if "uid" not in names:
@@ -1528,6 +1544,8 @@ def cs2dataframe(
     pd.DataFrame
         DataFrame containing the CryoSPARC particle/micrograph data.
     """
+    import pandas as pd
+
     # Auto-detect if this .cs file originated from a RELION STAR import.
     # If so, use the original STAR file as data source (preserving all original
     # RELION fields) with the .cs as subset selector, overlaying CryoSPARC-
@@ -1681,6 +1699,7 @@ def cistem2dataframe(
     pd.DataFrame
         DataFrame with relion-convention column names.
     """
+    import pandas as pd
     import sqlite3
 
     if dbFile.find("@") == -1:
@@ -2234,6 +2253,8 @@ def dataframe_cryosparc_to_relion(data: pd.DataFrame) -> pd.DataFrame:
     AttributeError
         If the input is not in cryosparc convention.
     """
+    import pandas as pd
+
     data.attrs["convention"] = get_dataframe_convention(data)
 
     if data.attrs["convention"] == "relion":

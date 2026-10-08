@@ -123,8 +123,20 @@ class TestTheTables:
             assert bookmark.tab_entries(module), name
 
     def test_every_entry_names_an_input_of_its_tab(self, tabs):
+        import importlib.util
+
+        from helicon.webApps import app
+
         for name, (_ns, module) in tabs.items():
-            src = Path(module.__file__).read_text()
+            # the tabs opened on first visit keep their table in a small module of
+            # its own: the inputs are in the tab's module, found without importing it
+            lazy = app._LAZY_TABS.get(name)
+            path = (
+                importlib.util.find_spec(lazy["module"]).origin
+                if lazy
+                else module.__file__
+            )
+            src = Path(path).read_text()
             declared = set(
                 re.findall(
                     r"(?:ui\.input_\w+|helicon\.shiny\.(?:range_)?slider)"
@@ -134,6 +146,39 @@ class TestTheTables:
             )
             for key, entry in bookmark.tab_entries(module).items():
                 assert entry.input_id in declared, (name, key, entry.input_id)
+
+    def test_a_lazy_tab_has_its_table_in_a_module_that_needs_no_heavy_import(self):
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; from helicon.webApps import app\n"
+            "heavy = [m for m in ('shinywidgets', 'ipywidgets', 'IPython', "
+            "'helicon.webApps.tabs.hill_tab', 'helicon.webApps.tabs.denovo3d_tab', "
+            "'helicon.webApps.tabs.where_is_my_class_tab') if m in sys.modules]\n"
+            "print(heavy)"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True
+        ).stdout.strip()
+        assert out == "[]", out
+
+    def test_the_tab_modules_use_the_same_table(self):
+        from helicon.webApps.tabs import (
+            denovo3d_bookmark,
+            denovo3d_tab,
+            hill_bookmark,
+            hill_tab,
+            where_is_my_class_bookmark,
+            where_is_my_class_tab,
+        )
+
+        for light, tab in (
+            (hill_bookmark, hill_tab),
+            (denovo3d_bookmark, denovo3d_tab),
+            (where_is_my_class_bookmark, where_is_my_class_tab),
+        ):
+            assert tab.BOOKMARK_DEFAULTS is light.BOOKMARK_DEFAULTS
 
     def test_short_keys_do_not_collide_with_reserved_ones(self, tabs):
         for name, (_ns, module) in tabs.items():

@@ -25,6 +25,7 @@ This is the only Shiny web app in helicon; the individual apps
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import secrets
@@ -33,63 +34,10 @@ import threading
 import time
 from pathlib import Path
 
-import ipywidgets.widgets.widget as _ipyw_mod
-
-# ipyfilechooser creates sub-widgets (Output, etc.) whose comms aren't opened
-# until shinywidgets processes them.  On browser refresh, shinywidgets calls
-# get_state() on every widget → _widget_to_json() → model_id → crashes because
-# sub-widget.comm is None.
-#
-# Two patches are needed:
-# 1) Widget.model_id — returns None instead of crashing when comm is None.
-# 2) Widget.get_state — skips individual traits that fail serialization, so a
-#    single broken sub-widget doesn't prevent the entire parent from serializing.
-_orig_model_id = _ipyw_mod.Widget.model_id.fget
-_orig_get_state = _ipyw_mod.Widget.get_state
-
-
-def _safe_model_id(self):
-    if self.comm is None:
-        return None
-    return _orig_model_id(self)
-
-
-def _safe_get_state(self, key=None, drop_defaults=False):
-    try:
-        return _orig_get_state(self, key=key, drop_defaults=drop_defaults)
-    except (AttributeError, TypeError):
-        from collections.abc import Iterable
-
-        if key is None:
-            keys = self.keys
-        elif isinstance(key, str):
-            keys = [key]
-        elif isinstance(key, Iterable):
-            keys = key
-        else:
-            return {}
-        state = {}
-        traits = self.traits()
-        for k in keys:
-            try:
-                to_json = self.trait_metadata(k, "to_json", self._trait_to_json)
-                value = to_json(getattr(self, k), self)
-                if not drop_defaults or not self._compare(
-                    value, traits[k].default_value
-                ):
-                    state[k] = value
-            except (AttributeError, TypeError):
-                continue
-        return state
-
-
-_ipyw_mod.Widget.model_id = property(_safe_model_id)
-_ipyw_mod.Widget.get_state = _safe_get_state
-
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-from shiny import App, reactive, ui
+from shiny import App, reactive, render, ui
 
 from helicon.lib.shiny import encode_query_params
 
@@ -117,9 +65,7 @@ from helicon.webApps.tabs.helical_pitch_tab import (
     helical_pitch_tab_ui,
     helical_pitch_tab_server,
 )
-from helicon.webApps.tabs.hill_tab import hill_tab_ui, hill_tab_server
 from helicon.webApps.tabs.hi3d_tab import hi3d_tab_ui, hi3d_tab_server
-from helicon.webApps.tabs.denovo3d_tab import denovo3d_tab_ui, denovo3d_tab_server
 from helicon.webApps.tabs.abinitio3d_tab import (
     abinitio3d_tab_ui,
     abinitio3d_tab_server,
@@ -128,9 +74,14 @@ from helicon.webApps.tabs.helical_projection_tab import (
     helical_projection_tab_ui,
     helical_projection_tab_server,
 )
-from helicon.webApps.tabs.where_is_my_class_tab import (
-    where_is_my_class_tab_ui,
-    where_is_my_class_tab_server,
+
+# The tabs imported when first opened: their modules (the widget bridge, SciPy)
+# take seconds to import, and every visitor would wait for them. The page needs
+# only their bookmark tables (small modules of their own) to start.
+from helicon.webApps.tabs import (
+    denovo3d_bookmark,
+    hill_bookmark,
+    where_is_my_class_bookmark,
 )
 import helicon
 from helicon.webApps import bookmark, deployment
@@ -142,30 +93,56 @@ from helicon.webApps.tabs.home_tab import (
 )
 
 from helicon.webApps.tabs import (
-    hill_tab,
     hi3d_tab,
-    denovo3d_tab,
     abinitio3d_tab,
     helical_projection_tab,
 )
 from helicon.webApps.tabs import (
     helical_pitch_tab,
-    where_is_my_class_tab,
     helical_lattice_tab,
 )
+
+# tab -> what to import when it is first opened: the module namespace of its
+# inputs, its module, and the names of its page and server functions
+_LAZY_TABS = {
+    "WhereIsMyClass": dict(
+        prefix="where_is_my_class",
+        module="helicon.webApps.tabs.where_is_my_class_tab",
+        ui="where_is_my_class_tab_ui",
+        server="where_is_my_class_tab_server",
+    ),
+    "HILL": dict(
+        prefix="hill",
+        module="helicon.webApps.tabs.hill_tab",
+        ui="hill_tab_ui",
+        server="hill_tab_server",
+    ),
+    "Denovo3D": dict(
+        prefix="denovo3d",
+        module="helicon.webApps.tabs.denovo3d_tab",
+        ui="denovo3d_tab_ui",
+        server="denovo3d_tab_server",
+    ),
+}
+
+
+def _lazy_panel(prefix: str):
+    """The place in the page where a lazily loaded tab's page appears."""
+    return ui.output_ui(f"lazy_tab_{prefix}", fill=True, fillable=True)
+
 
 # ── Bookmark module map ─────────────────────────────────────────
 # Maps tab names to (module_prefix, tab_module) for constructing full
 # input IDs from short keys in BOOKMARK_DEFAULTS.
 
 _TAB_MODULE_MAP: dict[str, tuple[str, object]] = {
-    "HILL": ("hill", hill_tab),
+    "HILL": ("hill", hill_bookmark),
     "HI3D": ("hi3d", hi3d_tab),
-    "Denovo3D": ("denovo3d", denovo3d_tab),
+    "Denovo3D": ("denovo3d", denovo3d_bookmark),
     "AbInitio3D": ("abinitio3d", abinitio3d_tab),
     "HelicalProjection": ("helical_projection", helical_projection_tab),
     "HelicalPitch": ("helical_pitch", helical_pitch_tab),
-    "WhereIsMyClass": ("where_is_my_class", where_is_my_class_tab),
+    "WhereIsMyClass": ("where_is_my_class", where_is_my_class_bookmark),
     "HelicalLattice": ("helical_lattice", helical_lattice_tab),
 }
 
@@ -463,6 +440,8 @@ def _page(theme: str, initial_theme: str, active_tab: str):
             if os.environ.get("HELICON_ANALYTICS", "1").strip() == "0"
             else helicon.shiny.google_analytics(_GOOGLE_TAG)
         ),
+        # Bokeh's scripts for the HILL tab, whose page arrives when it is opened
+        hill_bookmark.bokeh_dependency(),
         ui.head_content(
             ui.tags.title("Helicon"),
             # the vector icon (26 KB) where the browser takes one, the PNG
@@ -612,15 +591,15 @@ def _page(theme: str, initial_theme: str, active_tab: str):
                 (
                     _local_only_note("WhereIsMyClass", "the micrographs")
                     if deployment.is_cloud()
-                    else where_is_my_class_tab_ui("where_is_my_class")
+                    else _lazy_panel("where_is_my_class")
                 ),
             ),
             ui.nav_panel(
                 "HelicalProjection", helical_projection_tab_ui("helical_projection")
             ),
-            ui.nav_panel("HILL", hill_tab_ui("hill")),
+            ui.nav_panel("HILL", _lazy_panel("hill")),
             ui.nav_panel("HelicalPitch", helical_pitch_tab_ui("helical_pitch")),
-            ui.nav_panel("Denovo3D", denovo3d_tab_ui("denovo3d")),
+            ui.nav_panel("Denovo3D", _lazy_panel("denovo3d")),
             ui.nav_panel("AbInitio3D", abinitio3d_tab_ui("abinitio3d")),
             ui.nav_panel("HelicalLattice", helical_lattice_tab_ui("helical_lattice")),
             ui.nav_panel("HI3D", hi3d_tab_ui("hi3d")),
@@ -726,19 +705,59 @@ def server(input, output, session):
     # reactive effects (EMDB lookups, default-map downloads, plot setup)
     # used to run on every page load even though only one tab is visible.
 
+    def _start_lazy_tab(tab: str) -> None:
+        """Import a tab, show its page where the placeholder is, start its server.
+
+        The tab's server function starts only after the browser has the page:
+        it creates widgets and sends their set-up messages at once, and the
+        scripts that receive them arrive with the page (without the wait the
+        browser answered "No model found for id").
+        """
+        spec = _LAZY_TABS[tab]
+        module = importlib.import_module(spec["module"])
+        make_page = getattr(module, spec["ui"])
+        start_server = getattr(module, spec["server"])
+        ready = f"lazy_ready_{spec['prefix']}"
+
+        def page():
+            return ui.TagList(
+                make_page(spec["prefix"]),
+                # run by the browser once the page and its scripts are in
+                ui.tags.script(
+                    f"Shiny.setInputValue('{ready}', Date.now(), {{priority: 'event'}});"
+                ),
+            )
+
+        # the placeholder's id is the function's name
+        page.__name__ = f"lazy_tab_{spec['prefix']}"
+        render.ui(page)
+
+        started = []
+
+        @reactive.effect
+        @reactive.event(input[ready])
+        def _start_server_when_page_is_in():
+            if started:
+                return
+            started.append(True)
+            try:
+                start_server(spec["prefix"])
+            except Exception:
+                logger.error("failed to initialise tab %s", tab, exc_info=True)
+
     _TAB_STARTERS: dict[str, object] = {
         # nothing to start on a hosting service: the tab shows a note instead
         "WhereIsMyClass": (
             (lambda: None)
             if deployment.is_cloud()
-            else (lambda: where_is_my_class_tab_server("where_is_my_class"))
+            else (lambda: _start_lazy_tab("WhereIsMyClass"))
         ),
         "HelicalProjection": lambda: helical_projection_tab_server(
             "helical_projection"
         ),
-        "HILL": lambda: hill_tab_server("hill"),
+        "HILL": lambda: _start_lazy_tab("HILL"),
         "HelicalPitch": lambda: helical_pitch_tab_server("helical_pitch"),
-        "Denovo3D": lambda: denovo3d_tab_server("denovo3d"),
+        "Denovo3D": lambda: _start_lazy_tab("Denovo3D"),
         "AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d"),
         "HelicalLattice": lambda: helical_lattice_tab_server("helical_lattice"),
         "HI3D": lambda: hi3d_tab_server("hi3d"),

@@ -11,23 +11,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.interpolate import splev
-from scipy.signal import find_peaks
 
 import helicon
 from shiny import reactive, render, ui, module, req
 from shinywidgets import output_widget, render_widget
-
-from bokeh.models import CustomJS
-from bokeh.resources import Resources
-
-
-def bokeh_dependency():
-    """Return HTMLDependency for Bokeh with widget bundle via CDN."""
-    resources = Resources(
-        mode="cdn", components=["bokeh", "bokeh-widgets", "bokeh-tables"]
-    )
-    return ui.head_content(ui.HTML(resources.render()))
 
 
 try:
@@ -45,39 +32,7 @@ logger = logging.getLogger(__name__)
 
 MODULE_PREFIX = "hill"
 
-# Worked out from the loaded image (its pixel size, the filament's diameter,
-# the rotation and shift that straighten and centre it) rather than chosen:
-# in a bookmark only once edited.
-_DERIVED = bookmark.DERIVED
-
-BOOKMARK_DEFAULTS = {
-    "input_mode": ("hill_input_mode_params", "2"),
-    "url": ("hill_img_file_url", "https://tinyurl.com/y5tq9fqa"),
-    "server_image": ("hill_img_file_server", ""),
-    "is_3d": ("hill_is_3d", False),
-    "twist": ("hill_twist", 29.40),
-    "rise": ("hill_rise", 21.92),
-    "csym": ("hill_csym", 6),
-    "diameter": ("hill_diameter", 155.2, _DERIVED),
-    "apix": ("hill_apix", 2.3438, _DERIVED),
-    "cutoff_res_x": ("hill_cutoff_res_x", 7.03, _DERIVED),
-    "cutoff_res_y": ("hill_cutoff_res_y", 4.69, _DERIVED),
-    "log_amp": ("hill_log_amp", True),
-    "pnx": ("hill_pnx", 512),
-    "pny": ("hill_pny", 1024),
-    "hp_fraction": ("hill_hp_fraction", 0.40),
-    "lp_fraction": ("hill_lp_fraction", 0.00),
-    "m_max": ("hill_m_max", 3),
-    "const_image_color": ("hill_const_image_color", ""),
-    "ll_colors": ("hill_ll_colors", "lime cyan violet salmon silver"),
-    "fft_top_only": ("hill_fft_top_only", False),
-    "use_twist_pitch": ("hill_use_twist_pitch", "Twist"),
-    "out_of_plane_tilt": ("hill_out_of_plane_tilt", 0.0),
-    "input_type": ("hill_input_type", "Image"),
-    "angle": ("hill_angle", 0.0, _DERIVED),
-    "dx": ("hill_dx", 0.0, _DERIVED),
-    "dy": ("hill_dy", 0.0, _DERIVED),
-}
+from .hill_bookmark import BOOKMARK_DEFAULTS  # noqa: E402
 
 _INIT_TWIST = 29.40
 _INIT_RISE = 21.92
@@ -122,7 +77,6 @@ _DEFAULT_URL = BOOKMARK_DEFAULTS["url"][1]
 @module.ui
 def hill_tab_ui():
     return ui.page_fillable(
-        bokeh_dependency(),
         ui.tags.style(
             """
         .hill-scrollable-sidebar {
@@ -567,6 +521,10 @@ def hill_tab_ui():
 @module.server
 def hill_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
+    from bokeh.models import CustomJS
+    from scipy.signal import find_peaks
+    from scipy.interpolate import splev
+
     if not deployment.is_cloud():
         helicon.shiny.file_picker_fill(
             "image_browse",
@@ -3326,6 +3284,8 @@ def _setup_helix_control_js(
     controls,
 ):
     """Preview locally on value changes and commit once interaction finishes."""
+    from bokeh.models import CustomJS
+
     args = dict(
         slider_twist=slider_twist,
         slider_pitch=slider_pitch,

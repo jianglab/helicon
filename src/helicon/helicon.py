@@ -136,6 +136,38 @@ def _maybe_reexec_macos_display() -> None:
         return
 
 
+def _source_doc(module_name: str):
+    """The docstring of a command module, read from its source file.
+
+    Returns
+    -------
+    tuple
+        ``(has_add_args, docstring)``; ``(False, None)`` if the file cannot be read.
+        The module is not imported: importing every command (the file browser's Qt
+        stack, the images2star plugins, ...) took 15 s to print a list of one-line
+        descriptions.
+    """
+    import ast
+    from pathlib import Path
+
+    path = Path(__file__).parent / "commands" / f"{module_name}.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return False, None
+    has_add_args = any(
+        isinstance(node, ast.FunctionDef) and node.name == "add_args"
+        for node in tree.body
+    )
+    return has_add_args, ast.get_docstring(tree, clean=False)
+
+
+def _selected_command(argv, names):
+    """The command the line names: its first argument that is not an option."""
+    first = next((a for a in argv[1:] if not a.startswith("-")), None)
+    return first if first in names else None
+
+
 def _get_commands(
     cli_commands: list,
     napari_commands: list,
@@ -153,9 +185,11 @@ def _get_commands(
     )
     subparsers.required = True
 
-    for module_name in sorted(
-        cli_commands + napari_commands + shiny_commands + streamlit_commands
-    ):
+    all_commands = cli_commands + napari_commands + shiny_commands + streamlit_commands
+    # Only the command that is run is imported, and its options built; the others
+    # are listed with the first line of their docstring, read from the source
+    selected = _selected_command(sys.argv, all_commands)
+    for module_name in sorted(all_commands):
         if module_name in napari_commands and not helicon.has_napari():
             continue
         elif module_name in shiny_commands and not helicon.has_shiny():
@@ -164,10 +198,15 @@ def _get_commands(
             continue
 
         module_name_full = ".".join(["helicon", "commands", module_name])
-        module = import_module(module_name_full)
+        if module_name == selected:
+            module = import_module(module_name_full)
+            has_add_args, doc = hasattr(module, "add_args"), module.__doc__
+        else:
+            module = None
+            has_add_args, doc = _source_doc(module_name)
 
-        if hasattr(module, "add_args"):
-            parsed_doc = module.__doc__.split("\n") if module.__doc__ else list()
+        if has_add_args:
+            parsed_doc = doc.split("\n") if doc else list()
             descr_txt = parsed_doc[0] if parsed_doc else ""
             epilog_txt = "" if len(parsed_doc) <= 1 else "\n".join(parsed_doc[1:])
 
@@ -178,6 +217,8 @@ def _get_commands(
                 epilog=epilog_txt,
                 allow_abbrev=True,
             )
+            if module is None:
+                continue
             module.add_args(this_parser)
             this_parser.set_defaults(
                 main_function=module.main,

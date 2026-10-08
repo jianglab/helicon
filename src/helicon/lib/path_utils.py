@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging, sys, os, time
 from pathlib import Path
-from typing import Optional, Any
+from typing import TYPE_CHECKING, Optional, Any
 import numpy as np
-import pandas as pd
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +393,7 @@ def convert_file_path(
     pd.Series
         Converted file paths.
     """
+    import pandas as pd
     import pandas as pd
 
     if to == "current":

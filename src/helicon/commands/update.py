@@ -1,4 +1,4 @@
-"""Update helicon to the newest release (a version tag such as v2026.10)
+"""A command that updates helicon to the newest release (a version tag such as v2026.10)
 
 Only releases count, not the commits between them. The newest release is looked
 up on PyPI when helicon is published there, otherwise among the version tags of

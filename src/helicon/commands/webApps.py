@@ -14,7 +14,9 @@ def main(args):
     from helicon.lib.shiny import launch_shiny_app
 
     try:
-        launch_shiny_app("helicon.webApps.app:app", block=True, reload=True)
+        launch_shiny_app(
+            "helicon.webApps.app:app", block=True, reload=getattr(args, "reload", False)
+        )
     except Exception as e:
         homepage = "https://jianglab.science.psu.edu/helicon"
         logger.error("Please visit %s for more information", homepage)
@@ -22,7 +24,14 @@ def main(args):
 
 
 def add_args(parser):
-    """No additional CLI arguments for this web app launcher."""
+    """Add the options of the web app launcher."""
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Restart the app when its source files change (for developing the "
+        "app). Off by default: the reloader imports the whole app twice, which "
+        "doubles the start-up time",
+    )
     return parser
 
 

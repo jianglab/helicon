@@ -135,3 +135,66 @@ class TestMainDispatch:
         helicon_mod.main()
         assert called == {"help": True}
         assert sys.argv == ["helicon"]
+
+
+class TestOnlyTheCommandThatRunsIsImported:
+    """Importing every command (the file browser's Qt stack, the images2star
+    plugins, ...) to print a list of one-line descriptions took 15 s."""
+
+    NAMES = ["cryosparc", "display", "images2star", "proc3d", "webApps"]
+
+    def test_the_command_is_the_first_argument_that_is_not_an_option(self):
+        pick = helicon_mod._selected_command
+        assert pick(["helicon", "proc3d", "--help"], self.NAMES) == "proc3d"
+        assert pick(["helicon", "--version", "display"], self.NAMES) == "display"
+        assert pick(["helicon", "--help"], self.NAMES) is None
+        assert pick(["helicon"], self.NAMES) is None
+        assert pick(["helicon", "nosuchcommand"], self.NAMES) is None
+
+    def test_the_docstring_is_read_from_the_source_without_importing(self):
+        has_add_args, doc = helicon_mod._source_doc("webApps")
+        assert has_add_args is True
+        assert doc.startswith("A Helicon Web app")
+        assert helicon_mod._source_doc("no_such_command") == (False, None)
+
+    def test_the_docstring_read_is_the_modules_own(self):
+        import importlib
+
+        for name in ("update", "trueFSC", "webCalEM"):
+            _, doc = helicon_mod._source_doc(name)
+            assert doc == importlib.import_module(f"helicon.commands.{name}").__doc__
+
+    def _run(self, monkeypatch, argv):
+        loaded = []
+        real = helicon_mod.import_module
+        monkeypatch.setattr(
+            helicon_mod,
+            "import_module",
+            lambda name, *a: loaded.append(name.rsplit(".", 1)[-1]) or real(name, *a),
+        )
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(helicon, "has_napari", lambda: True)
+        monkeypatch.setattr(helicon, "has_shiny", lambda: True)
+        monkeypatch.setattr(helicon, "has_streamlit", lambda: False)
+        with pytest.raises(SystemExit):
+            helicon_mod._get_commands(
+                cli_commands=["update", "trueFSC", "webCalEM"],
+                napari_commands=[],
+                shiny_commands=[],
+                streamlit_commands=[],
+                doc_str="test",
+            )
+        return loaded
+
+    def test_help_imports_no_command(self, monkeypatch, capsys):
+        loaded = self._run(monkeypatch, ["helicon", "--help"])
+        assert loaded == []
+        out = capsys.readouterr().out
+        # every command is still listed, with its description
+        for name in ("update", "trueFSC", "webCalEM"):
+            assert name in out
+
+    def test_a_command_imports_only_itself(self, monkeypatch, capsys):
+        loaded = self._run(monkeypatch, ["helicon", "update", "--help"])
+        assert loaded == ["update"]
+        assert "usage: helicon update" in capsys.readouterr().out

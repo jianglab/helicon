@@ -954,6 +954,52 @@ def _make_pdeathsig_preexec():
     return _preexec
 
 
+def _wait_until_serving(url, proc=None, timeout=180.0, interval=0.25):
+    """Wait until the web server at ``url`` answers a request.
+
+    The server prints "Uvicorn running on ..." before it can serve: with
+    ``--reload`` that line comes from the reloader, and connections are refused
+    until the reloaded worker has imported the app (18 s, on a busy computer, in
+    one measurement). A browser opened at that line showed "This site cannot be
+    reached" until then. Any HTTP answer, an error page too, counts as serving.
+
+    Parameters
+    ----------
+    url : str
+        The app's address; a query string is ignored.
+    proc : subprocess.Popen, optional
+        The server's process: waiting stops if it exits.
+    timeout, interval : float, optional
+        Longest wait, and time between tries, in seconds.
+
+    Returns
+    -------
+    bool
+        True if the server answered; False if it exited or the time ran out.
+    """
+    import re
+    import time
+    import urllib.error
+    import urllib.request
+
+    # localhost may resolve to IPv6 first, which a server on 0.0.0.0 does not serve
+    probe = re.sub(r"^(https?://)localhost", r"\g<1>127.0.0.1", url.split("?", 1)[0])
+    end = time.monotonic() + timeout
+    while True:
+        if proc is not None and proc.poll() is not None:
+            return False
+        try:
+            urllib.request.urlopen(probe, timeout=5).close()
+            return True
+        except urllib.error.HTTPError:
+            return True  # an answer, if not a good one
+        except Exception:  # refused, reset or timed out: not up yet
+            pass
+        if time.monotonic() >= end:
+            return False
+        time.sleep(interval)
+
+
 def launch_shiny_app(
     app_file, env=None, block=True, query_params=None, reload=False, url_callback=None
 ):
@@ -961,7 +1007,8 @@ def launch_shiny_app(
 
     Handles WSL2 where Python's webbrowser module fails to open the Windows
     browser. Captures the random port from server output and opens the browser
-    manually.
+    manually, once the server answers (:func:`_wait_until_serving`), so that the
+    browser never shows an error page for a server that is still starting.
 
     Parameters
     ----------
@@ -1047,6 +1094,8 @@ def launch_shiny_app(
                     m = re.search(r"Uvicorn running on http://[\d.]+:(\d+)", line)
                     if m:
                         base = f"http://localhost:{m.group(1)}/"
+                        # the browser is opened once the server answers
+                        _wait_until_serving(base, proc)
                         if query_params:
                             base += "?" + encode_query_params(query_params)
                         if url_callback is not None:
@@ -1068,6 +1117,8 @@ def launch_shiny_app(
             break
 
     if url:
+        # the browser is opened once the server answers, not when it says it runs
+        _wait_until_serving(url, proc)
         if query_params:
             url += "?" + encode_query_params(query_params)
         if url_callback is not None:
