@@ -2330,6 +2330,9 @@ class PhasePitchResult:
     class_count: np.ndarray = None
     # set by the caller (helical_pitch_pixel.class_pixel_check), which has the images
     pixel_check: object = None
+    # set by the caller (helical_pitch_lattice.detect), which has the images: the
+    # subunit lattice the class averages show, or None (as for an amyloid)
+    lattice: object = None
     # the repeat the scan would have chosen if the class averages had not ruled it
     # out (None if they did not change it)
     vetoed_period: float = None

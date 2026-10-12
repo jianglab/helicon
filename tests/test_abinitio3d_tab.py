@@ -178,8 +178,8 @@ class TestFileBrowserLaunch:
 
 
 class TestRelionSymmetry:
-    """relion_reconstruct imposes the C symmetry only when Impose C is ticked,
-    as the map from the class averages does."""
+    """relion_reconstruct imposes the C symmetry only when Impose C symmetry is
+    ticked, as the map from the class averages does."""
 
     def _src(self):
         import inspect
@@ -1254,3 +1254,39 @@ class TestFilamentJointFigure:
         plot = src[src.index("def filament_pitch_plot") : src.index("def _write_star")]
         assert "_filament_joint_figure(" in plot
         assert "_fig_to_html(" in plot
+
+
+class TestMapFigure:
+    """The classes and the map projection, one above the other, with no gap."""
+
+    @staticmethod
+    def _figure(ny=46, nx=330):
+        m = dict(
+            tiles=np.zeros((ny, nx)),
+            projection=np.zeros((ny, nx)),
+            z_view=np.zeros((60, 60)),
+        )
+        return abinitio3d_tab._map_figure(m, "title")
+
+    def test_the_strips_meet_and_the_z_section_spans_both(self):
+        fig = self._figure()
+        lay = fig.layout
+        # row 1 shrinks toward row 2 and row 2 toward row 1
+        assert lay.yaxis.constraintoward == "bottom"
+        assert lay.yaxis3.constraintoward == "top"
+        assert lay.xaxis.constraintoward == lay.xaxis3.constraintoward == "right"
+        # the z section (axis 2) spans the height of both strips
+        assert lay.yaxis2.domain[0] == pytest.approx(lay.yaxis3.domain[0])
+        assert lay.yaxis2.domain[1] == pytest.approx(lay.yaxis.domain[1])
+
+    def test_rows_and_height_follow_the_shape_of_the_strips(self):
+        flat, tall = self._figure(ny=30), self._figure(ny=90)
+        assert flat.layout.height < tall.layout.height
+        # the strips of the screenshot that had a gap: no more than ~300 px tall
+        assert self._figure().layout.height < 320
+
+    def test_each_title_sits_on_its_own_image(self):
+        refs = {a.text: (a.xref, a.yref) for a in self._figure().layout.annotations}
+        assert refs["Classes at their azimuths"] == ("x domain", "y domain")
+        assert refs["Map projection"] == ("x3 domain", "y3 domain")
+        assert refs["z section"] == ("x2 domain", "y2 domain")

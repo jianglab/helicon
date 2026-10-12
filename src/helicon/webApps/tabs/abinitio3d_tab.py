@@ -24,6 +24,7 @@ from shiny.module import resolve_id
 from .. import bookmark, class2d_files, deployment, map_viewers
 
 from ..lib import helical_pitch_compute as compute
+from ..lib import helical_pitch_lattice as lattice
 from ..lib import helical_pitch_map as maps
 from ..lib import helical_pitch_mixture as mixture
 from ..lib import helical_pitch_phase as phase
@@ -338,6 +339,107 @@ _PLOT_BOX = (
 )
 
 
+# The map figure: the width (px) it is laid out for, and the share of it that the
+# strips of classes and map projection take, the z section the rest.
+_MAP_PLOT_WIDTH = 900
+_MAP_STRIP_SHARE = 0.72
+
+
+def _map_figure(m, title):
+    """The map from classes: the classes at their azimuths above the map's side
+    projection, and its central z section beside both.
+
+    Each row is as tall as its strip is at the width the two share, and the strips
+    are pulled together (row 1 to its bottom, row 2 to its top, both toward the z
+    section), so that the space the figure leaves over goes outside them, not
+    between them.
+
+    Parameters
+    ----------
+    m : dict
+        From :func:`helical_pitch_map.reconstruct_map`: ``tiles``,
+        ``projection`` and ``z_view``.
+    title : str
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    strips = (m["tiles"], m["projection"])
+    shape = [np.shape(s)[0] / max(np.shape(s)[1], 1) for s in strips]
+    strip_px = [_MAP_PLOT_WIDTH * _MAP_STRIP_SHARE * a for a in shape]
+    gap_px = 34  # room for the second title
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        column_widths=[_MAP_STRIP_SHARE, 1.0 - _MAP_STRIP_SHARE],
+        row_heights=strip_px,
+        specs=[[{}, {"rowspan": 2}], [{}, None]],
+        horizontal_spacing=0.04,
+        vertical_spacing=gap_px / (sum(strip_px) + gap_px),
+    )
+    panels = (
+        # (image, row, col, title, side its x and y shrink toward)
+        (m["tiles"], 1, 1, "Classes at their azimuths", "right", "bottom"),
+        (m["projection"], 2, 1, "Map projection", "right", "top"),
+        (m["z_view"], 1, 2, "z section", "left", "middle"),
+    )
+    for image, row, col, label, x_toward, y_toward in panels:
+        fig.add_trace(
+            go.Heatmap(z=image, colorscale="gray", showscale=False, hoverinfo="skip"),
+            row=row,
+            col=col,
+        )
+        sub = fig.get_subplot(row, col)
+        x_ref = sub.xaxis.plotly_name.replace("axis", "")
+        y_ref = sub.yaxis.plotly_name.replace("axis", "")
+        fig.update_yaxes(
+            autorange="reversed",
+            scaleanchor=x_ref,
+            constrain="domain",
+            constraintoward=y_toward,
+            showticklabels=False,
+            showgrid=False,
+            row=row,
+            col=col,
+        )
+        fig.update_xaxes(
+            constrain="domain",
+            constraintoward=x_toward,
+            showticklabels=False,
+            showgrid=False,
+            row=row,
+            col=col,
+        )
+        # on the axis, not the page: the title follows its image when the image
+        # is shrunk to keep its shape
+        fig.add_annotation(
+            text=label,
+            x=0.5,
+            y=1.0,
+            xref=f"{x_ref} domain",
+            yref=f"{y_ref} domain",
+            xanchor="center",
+            yanchor="bottom",
+            showarrow=False,
+            font=dict(size=14),
+        )
+    fig.update_layout(
+        template="plotly_white",
+        title_text=title,
+        title_x=0.5,
+        title_font=dict(size=12),
+        margin=dict(t=60, b=10, l=10, r=10),
+        # as tall as the strips are at a typical width; at other widths the
+        # strips keep their shape and stay together
+        height=int(round(70 + sum(strip_px) + gap_px)),
+    )
+    return fig
+
+
 def _tip(element, text, placement="top"):
     """``element`` with ``text`` shown on hover."""
     return ui.tooltip(element, text, placement=placement)
@@ -611,7 +713,7 @@ def abinitio3d_tab_ui():
                         ui.input_checkbox(
                             "map_csym",
                             ui.span(
-                                "Impose C",
+                                "Impose C symmetry",
                                 _info(
                                     "Off, the C symmetry seen in the z "
                                     "section is an independent check"
@@ -1576,7 +1678,24 @@ def abinitio3d_tab_server(input, output, session):
             max_sep=job["max_repeat"],
         )
         result.pixel_check = _pixel_check(job, result, progress)
+        result.lattice = _lattice(job, result)
         return result
+
+    def _lattice(job, result):
+        """The subunit lattice the ring's class averages show, or None (as for an amyloid)."""
+        try:
+            position = {int(c): i for i, c in enumerate(job["ids"])}
+            at = [position[int(c) - 1] for c in result.class_ids]
+            straight = maps.straighten_classes(
+                [job["images"][i] for i in at],
+                result.class_zdir,
+                target_apix=job["apix"],
+                apix=job["apix"],
+            )
+            return lattice.detect(straight, job["apix"])
+        except Exception as e:  # a diagnostic: never in the way of the result
+            logger.warning("subunit lattice of the class averages failed: %s", e)
+            return None
 
     def _pixel_check(job, result, progress):
         """The ring against the registered class averages; None if it cannot be made."""
@@ -2904,16 +3023,61 @@ def abinitio3d_tab_server(input, output, session):
                 style="margin-bottom: 2px;",
             )
         ]
-        if rise is not None and rise > 0:
-            twists = " \u00b7 ".join(
-                f"C{c} {360.0 * rise / (r.period * c):.3f}\u00b0" for c in (1, 2, 3, 4)
-            )
+        lat = getattr(r, "lattice", None)
+        if lat is not None:
+            peaks = ", ".join(f"{d:.1f}" for d, _, _ in lat.peaks)
             lines.append(
                 ui.p(
-                    f"Twist: {twists}",
+                    f"Lattice: rise {lat.rise:.2f} \u00c5 (from the class averages)",
                     _info(
-                        f"If the repeat is the pitch divided by C, at rise {rise} \u00c5 "
-                        f"({r.period / rise:.1f} subunits per repeat)"
+                        "The class averages match themselves shifted along the axis "
+                        f"by whole subunits ({peaks} \u00c5), best by {lat.k_s}: so "
+                        f"C \u00d7 twist is close to 360\u00b0 \u00d7 {lat.m}/{lat.k_s}, "
+                        "and the helix turns many times 360\u00b0/C over one repeat. "
+                        "The twists below take that into account; which C it is, "
+                        "the class averages cannot tell, and it is set in Parameters."
+                    ),
+                    style="margin-bottom: 2px;",
+                )
+            )
+            if rise and abs(rise - lat.rise) > 0.03 * lat.rise:
+                lines.append(
+                    ui.p(
+                        f"The rise in Parameters ({rise} \u00c5) is not the one the "
+                        "class averages show. ",
+                        ui.input_action_link(
+                            "use_lattice_rise", f"Use {lat.rise:.2f} \u00c5"
+                        ),
+                        class_="text-warning",
+                        style="margin-bottom: 2px;",
+                    )
+                )
+        if rise is not None and rise > 0:
+            j, n = lattice.periods_per_repeat(r.period, rise, lat)
+            choices = (1, 2, 3, 4, 5, 6, 8, 12) if lat is not None else (1, 2, 3, 4)
+            chosen = int(input.rot_fold() or 1)
+            parts = []
+            for c in choices:
+                text = f"C{c} {lattice.twist(r.period, rise, c, lat):.3f}\u00b0"
+                parts.append(ui.tags.b(text) if c == chosen else text)
+                parts.append(" \u00b7 ")
+            lines.append(
+                ui.p(
+                    "Twist: ",
+                    *parts[:-1],
+                    _info(
+                        (
+                            f"{n:.0f} subunits and {j} turns of 360\u00b0/C per "
+                            f"repeat, at rise {rise} \u00c5: twist = {j} \u00d7 "
+                            f"360\u00b0 / (C \u00d7 {n:.0f}). The hand cannot be "
+                            "seen in projections; the other hand has "
+                            f"{int(n) - j} turns."
+                        )
+                        if j > 1
+                        else (
+                            f"If the repeat is the pitch divided by C, at rise {rise} "
+                            f"\u00c5 ({r.period / rise:.1f} subunits per repeat)"
+                        )
                     ),
                     style="margin-bottom: 2px;",
                 )
@@ -3565,7 +3729,7 @@ def abinitio3d_tab_server(input, output, session):
                 "pitch, length and direction score. It can be used directly to "
                 "reconstruct a 3D map, without helical symmetry, for example (the "
                 "rlnAngleRot follow the C symmetry set below; --sym imposes it when "
-                "Impose C is ticked in Parameters):<br>"
+                "Impose C symmetry is ticked in Parameters):<br>"
                 f'<span style="font-family: monospace; color: #ffd479;">relion_reconstruct --i {star_name} '
                 f"--o map.mrc --ctf --sym c{csym}</span><br>"
                 "and the map serves as a starting reference for refinement."
@@ -3576,7 +3740,8 @@ def abinitio3d_tab_server(input, output, session):
     # ── a 3D map from the segments, by relion_reconstruct ──
 
     def _imposed_csym():
-        """The C symmetry to impose on a map: the tab's, when Impose C is ticked."""
+        """The C symmetry to impose on a map: the tab's, when Impose C symmetry is
+        ticked."""
         return (
             helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
             if input.map_csym()
@@ -3688,8 +3853,9 @@ def abinitio3d_tab_server(input, output, session):
                     style="width: 100%;",
                 ),
                 "Reconstruct the segments in the selected ranges with their angles "
-                "and origins: no helical symmetry, no C symmetry unless Impose C is "
-                "ticked in Parameters (as for the map from the class averages), and "
+                "and origins: no helical symmetry, no C symmetry unless Impose C "
+                "symmetry is ticked in Parameters (as for the map from the class "
+                "averages), and "
                 "CTF correction when the star file has it. "
                 + (
                     "Runs relion_reconstruct_mpi, with as many MPI processes as "
@@ -4020,7 +4186,7 @@ def abinitio3d_tab_server(input, output, session):
             message=f"reconstructing from {len(prepared)} "
             + ("unique classes" if r.merged_classes else "classes"),
         )
-        return maps.reconstruct_map(
+        out = maps.reconstruct_map(
             prepared,
             np.rad2deg(r.phases),
             r.period,
@@ -4030,13 +4196,20 @@ def abinitio3d_tab_server(input, output, session):
             apix=max(5.0, apix_orig),
             helical_sym_order=job["hsym"],
             impose_csym=job["impose_csym"],
-            method="backprojection" if job["method"] == "backprojection" else "joint",
+            method=(
+                "projection"
+                if job["turns"] > 1
+                else "backprojection" if job["method"] == "backprojection" else "joint"
+            ),
             algorithm=dict(model="gauss") if job["method"] == "gauss" else None,
+            turns=job["turns"],
             rounds=job["rounds"],
             output_box=int(job["images"][0].shape[0]),
             output_apix=apix_orig,
             cpu=max(1, int(helicon.available_cpu())),
         )
+        out["turns"] = job["turns"]
+        return out
 
     def _map_apply(job, result):
         # a map from an older pitch result is not shown
@@ -4083,9 +4256,23 @@ def abinitio3d_tab_server(input, output, session):
                 hsym=helicon.shiny.clamp_number(input.map_hsym(), 1, 1, 1000),
                 impose_csym=bool(input.map_csym()),
                 method=input.map_method(),
+                # turns of 360/C per repeat; with more than one the ring angles
+                # are not precise enough to place the averages, which are then
+                # placed by projection matching
+                turns=lattice.periods_per_repeat(
+                    r.period, float(input.rise()), getattr(r, "lattice", None)
+                )[0],
                 rounds=2 if input.map_refine() else 1,
             )
         )
+
+    @reactive.effect
+    @reactive.event(input.use_lattice_rise)
+    def _use_lattice_rise():
+        r = phase_result()
+        lat = getattr(r, "lattice", None) if r is not None else None
+        req(lat is not None)
+        ui.update_numeric("rise", value=round(float(lat.rise), 2))
 
     def _map_classes_text(n_used):
         """The selected classes, and how many the map used after merging."""
@@ -4103,55 +4290,17 @@ def abinitio3d_tab_server(input, output, session):
         m = map_result()
         if m is None:
             return None
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-
-        fig = make_subplots(
-            rows=2,
-            cols=2,
-            column_widths=[0.72, 0.28],
-            row_heights=[0.5, 0.5],
-            horizontal_spacing=0.04,
-            vertical_spacing=0.12,
-            subplot_titles=(
-                "Classes at their azimuths",
-                "",
-                "Map projection",
-                "z section",
-            ),
-        )
-        for image, row, col in (
-            (m["tiles"], 1, 1),
-            (m["projection"], 2, 1),
-            (m["z_view"], 2, 2),
-        ):
-            fig.add_trace(
-                go.Heatmap(
-                    z=image, colorscale="gray", showscale=False, hoverinfo="skip"
-                ),
-                row=row,
-                col=col,
+        title = (
+            f"{_map_classes_text(len(m['phis']))} \u00b7 twist {m['twist']:.3f}\u00b0 \u00b7 "
+            f"fit {m['score']:.2f}"
+            + (
+                f" \u00b7 {m['turns']} turns per repeat: placed by projection "
+                "matching"
+                if m.get("turns", 1) > 1
+                else ""
             )
-            fig.update_yaxes(
-                autorange="reversed",
-                scaleanchor=f"x{'' if (row, col) == (1, 1) else 2 * (row - 1) + col}",
-                showticklabels=False,
-                row=row,
-                col=col,
-            )
-            fig.update_xaxes(showticklabels=False, row=row, col=col)
-        fig.update_layout(
-            template="plotly_white",
-            title_text=(
-                f"{_map_classes_text(len(m['phis']))} \u00b7 twist {m['twist']:.3f}\u00b0 \u00b7 "
-                f"fit {m['score']:.2f}"
-            ),
-            title_x=0.5,
-            title_font=dict(size=12),
-            margin=dict(t=60, b=10, l=10, r=10),
-            height=440,
         )
-        return _fig_to_html(fig)
+        return _fig_to_html(_map_figure(m, title))
 
     @render.ui
     def map_download():

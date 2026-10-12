@@ -9,16 +9,21 @@ the azimuths given instead of searched for.
 
 Conventions
 -----------
-* The repeat distance ``P`` is the axial period of the side projection, and the
-  pitch is ``csym * P``. The twist per rise is ``360 * rise / (csym * P)``,
-  negative for a left-handed helix, as in RELION (amyloid filaments are
-  left-handed, with negative twists).
+* The repeat distance ``P`` is the axial period of the side projection. Over it
+  the helix turns ``turns`` times ``360 / csym``: once for a slowly twisting
+  filament (an amyloid), when the pitch is ``csym * P`` and the twist per rise
+  ``360 * rise / (csym * P)``; many times for one whose class averages resolve
+  its subunits (VipA/VipB: 25 times 60 degrees over 51 subunits), when the
+  twist is ``turns * 360 / (csym * n)`` for ``n`` subunits per repeat
+  (``helical_pitch_lattice``). The twist is negative for a left-handed helix,
+  as in RELION (amyloid filaments are left-handed, with negative twists).
 * Every class average is straightened, and turned by 180 degrees where the
   ring's axial direction points to the left, so that the axial coordinate
   increases to the right in all of them.
 * A class at ring angle ``phi`` (360 degrees per repeat) is a view at the
-  azimuth ``sign(twist) * phi / csym``, in the convention of the denovo3D
-  tab.
+  azimuth ``sign(twist) * turns * phi / csym``, in the convention of the
+  denovo3D tab. With many turns an error in the ring angles is multiplied as
+  much, and the azimuths are found by projection matching instead.
 * The hand cannot be told from the projections: the mirror image of a helix
   gives the same side views at mirrored azimuths. It is an input.
 """
@@ -371,6 +376,7 @@ def reconstruct_map(
     output_box=None,
     output_apix=None,
     cpu=1,
+    turns=1,
 ):
     """Assemble straightened class averages into one map.
 
@@ -404,8 +410,12 @@ def reconstruct_map(
         Whether the cyclic symmetry is also imposed in the reconstruction. Left
         off, the apparent symmetry of the z section is an independent check on
         the reconstruction. Defaults to False.
-    method : {"joint", "backprojection"}, optional
-        ``"joint"`` is the denovo3D joint fit (elastic net unless ``algorithm``
+    method : {"joint", "backprojection", "projection"}, optional
+        ``"projection"`` does not use the ring angles: every average is placed
+        against the map by projection matching (``denovo3d_joint.joint_refine``,
+        starting from them all at one azimuth), the map rebuilt from all of them,
+        and so on until the placements settle; the map is then solved once more
+        with ``algorithm`` at those placements. ``"joint"`` is the denovo3D joint fit (elastic net unless ``algorithm``
         says otherwise), which imposes the full helical symmetry (and the cyclic
         symmetry, if ``impose_csym``) and takes ``algorithm`` and
         ``length_in_rises`` into account; it agreed better with
@@ -427,6 +437,17 @@ def reconstruct_map(
         Size (voxels, cubic) and pixel size (A) of the exported map,
         ``volume_out``, so that it can serve as a reference in RELION.
 
+    turns : int, optional
+        Turns of ``360 / csym`` the helix makes over one repeat
+        (``helical_pitch_lattice.periods_per_repeat``): the twist is
+        ``turns * 360 * rise / (csym * repeat)`` and a class at ring angle ``phi``
+        is a view at ``turns * phi / csym``; above 1 the twist is
+        ``turns * 360 / (csym * n)`` with ``n`` the whole number of subunits
+        nearest ``repeat / rise``, since the views come back only after whole
+        subunits. Defaults to 1, a slowly twisting helix. Above 1 an error in the ring angles is multiplied by
+        ``turns / csym`` in the azimuths, which then cannot be taken from the
+        ring: use ``method="projection"``.
+
     Returns
     -------
     dict
@@ -439,8 +460,28 @@ def reconstruct_map(
     """
     csym = int(max(csym, 1))
     sign = -1.0 if left_handed else 1.0
-    twist = sign * 360.0 * rise / (csym * float(repeat))
-    phis = [sign * float(a) / csym for a in ring_angles]
+    turns = int(max(turns, 1))
+    if turns > 1:
+        # the views come back after a whole number of subunits, n * twist being
+        # close to turns * 360 / csym (helical_pitch_lattice.periods_per_repeat)
+        n_subunits = max(1, int(round(float(repeat) / rise)))
+        twist = sign * 360.0 * turns / (csym * n_subunits)
+    else:
+        twist = sign * 360.0 * rise / (csym * float(repeat))
+    phis = [sign * turns * float(a) / csym for a in ring_angles]
+    if method == "projection":
+        return _reconstruct_projection(
+            images,
+            twist,
+            csym if impose_csym else 1,
+            rise,
+            apix,
+            length_in_rises,
+            algorithm,
+            output_box,
+            output_apix,
+            cpu,
+        )
     if method == "joint":
         return _reconstruct_joint(
             images,
@@ -565,31 +606,14 @@ def _reconstruct_joint(
     The solver defaults to elastic net, as the denovo3D tab's reconstruction does;
     the Gaussian basis (``dict(model="gauss")``) is faster and smoother.
     """
-    from .denovo3d_align import _rotate, long_side_projection
+    from .denovo3d_align import _rotate
     from .denovo3d_jointsolve import joint_reconstruct
 
     # no intercept: the images' background is zero, and an intercept let a
     # thin volume trade a negative offset for a bright ring at its edge (see
     # denovo3d_solver)
     algorithm = algorithm or dict(model="elasticnet", l1_ratio=0.5, fit_intercept=False)
-    ny, nx = images[0].shape
-    apix2d = float(apix)
-    apix3d = apix2d
-    d3 = int(round(ny * apix2d / apix3d))
-    d3 += d3 % 2
-    nz = max(int(np.ceil(rise / apix3d)), int(np.ceil(length_in_rises * rise / apix3d)))
-    nz += nz % 2
-    geometry = dict(
-        scale2d_to_3d=apix2d / apix3d,
-        reconstruct_diameter_2d_pixel=ny + ny % 2,
-        reconstruct_diameter_3d_pixel=d3,
-        reconstruct_length_2d_pixel=nx + nx % 2,
-        reconstruct_length_3d_pixel=nz,
-        reconstruct_diameter_3d_inner_pixel=0,
-        sym_oversample=-1,
-        interpolation="linear",
-        positive_constraint=-1,
-    )
+    apix2d, apix3d, geometry = _joint_geometry(images, apix, rise, length_in_rises)
 
     def solve(imgs, azimuths):
         return joint_reconstruct(
@@ -615,6 +639,66 @@ def _reconstruct_joint(
         phis = [float(a["phi"]) for a in alignments]
         volume, info = solve(used, phis)
         alignments = _align_all(used, volume, twist, rise, apix3d, apix2d, csym, cpu)
+    return _finish_joint(
+        used,
+        volume,
+        info,
+        phis,
+        alignments,
+        twist,
+        rise,
+        csym,
+        apix2d,
+        apix3d,
+        output_box,
+        output_apix,
+        cpu,
+    )
+
+
+def _joint_geometry(images, apix, rise, length_in_rises):
+    """``(apix2d, apix3d, geometry)`` of the joint fit, as ``joint_reconstruct`` takes it."""
+    ny, nx = images[0].shape
+    apix2d = float(apix)
+    apix3d = apix2d
+    d3 = int(round(ny * apix2d / apix3d))
+    d3 += d3 % 2
+    nz = max(int(np.ceil(rise / apix3d)), int(np.ceil(length_in_rises * rise / apix3d)))
+    nz += nz % 2
+    geometry = dict(
+        scale2d_to_3d=apix2d / apix3d,
+        reconstruct_diameter_2d_pixel=ny + ny % 2,
+        reconstruct_diameter_3d_pixel=d3,
+        reconstruct_length_2d_pixel=nx + nx % 2,
+        reconstruct_length_3d_pixel=nz,
+        reconstruct_diameter_3d_inner_pixel=0,
+        sym_oversample=-1,
+        interpolation="linear",
+        positive_constraint=-1,
+    )
+    return apix2d, apix3d, geometry
+
+
+def _finish_joint(
+    used,
+    volume,
+    info,
+    phis,
+    alignments,
+    twist,
+    rise,
+    csym,
+    apix2d,
+    apix3d,
+    output_box,
+    output_apix,
+    cpu,
+):
+    """What the tab shows of a joint map: its side projection, the averages placed on
+    it, the middle section and the map in the output box."""
+    from .denovo3d_align import long_side_projection
+
+    ny = used[0].shape[0]
     pitch = abs(360.0 * rise / twist)
     length = int(np.ceil(1.2 * pitch / apix2d))
     length += length % 2
@@ -652,4 +736,74 @@ def _reconstruct_joint(
         z_view=z_view,
         phis=phis,
         alignments=alignments,
+    )
+
+
+def _reconstruct_projection(
+    images,
+    twist,
+    csym,
+    rise,
+    apix,
+    length_in_rises,
+    algorithm,
+    output_box,
+    output_apix,
+    cpu,
+    iterations=4,
+):
+    """A joint map whose azimuths come from projection matching, not from the ring.
+
+    ``denovo3d_joint.joint_refine`` places every average against the current map and
+    rebuilds the map from all of them until the placements settle (with the Gaussian
+    basis, which is quick); the map is then solved once more with ``algorithm`` (elastic
+    net by default, as the joint fit) at the placements found.
+    """
+    from .denovo3d_joint import joint_refine
+    from .denovo3d_jointsolve import joint_reconstruct
+
+    apix2d, apix3d, geometry = _joint_geometry(images, apix, rise, length_in_rises)
+    placed = joint_refine(
+        [np.asarray(im, dtype=np.float32) for im in images],
+        None,
+        twist,
+        rise,
+        apix2d,
+        apix3d,
+        csym,
+        geometry,
+        iterations=iterations,
+        algorithm=dict(model="gauss"),
+        cpu=cpu,
+    )
+    phis = [float(p) for p in placed["phis"]]
+    algorithm = algorithm or dict(model="elasticnet", l1_ratio=0.5, fit_intercept=False)
+    volume, info = joint_reconstruct(
+        images,
+        phis,
+        twist_degree=twist,
+        rise_pixel=rise / apix3d,
+        csym=csym,
+        algorithm=algorithm,
+        target_apix2d=apix2d,
+        cpu=cpu,
+        **geometry,
+    )
+    alignments = _align_all(
+        list(images), volume, twist, rise, apix3d, apix2d, csym, cpu
+    )
+    return _finish_joint(
+        list(images),
+        volume,
+        info,
+        phis,
+        alignments,
+        twist,
+        rise,
+        csym,
+        apix2d,
+        apix3d,
+        output_box,
+        output_apix,
+        cpu,
     )
