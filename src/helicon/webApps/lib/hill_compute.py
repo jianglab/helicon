@@ -6,6 +6,8 @@ have been removed in favor of the canonical implementations.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 from scipy.ndimage import map_coordinates, affine_transform
 from scipy.special import jnp_zeros
@@ -138,6 +140,141 @@ def compute_layer_line_positions(
 # ── Power spectra computation ─────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=8)
+def fourier_shells(shape: tuple, cutoff_res: tuple) -> np.ndarray:
+    """The Fourier shell of each pixel of a layer-line power spectrum.
+
+    A shell is a set of pixels of one spatial frequency |s|. The spectrum spans
+    ``1 / res`` along each axis, and the two limits differ (X is usually coarser
+    than Y), so the pixels are not square in frequency: the shells are the
+    ellipses of the pixel grid but the circles of |s|.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        (ny, nx) of the spectrum, the zero frequency at (ny // 2, nx // 2).
+    cutoff_res : tuple of float
+        (res_y, res_x), the resolution at the edge of each axis, A.
+
+    Returns
+    -------
+    numpy.ndarray
+        The shell number of each pixel, 0 at the origin; as wide as the coarser
+        of the two pixel sizes, so that every shell holds a good number of pixels.
+    """
+    ny, nx = shape
+    res_y, res_x = cutoff_res
+    ds_y = 1.0 / (ny // 2) / res_y
+    ds_x = 1.0 / (nx // 2) / res_x
+    sy = (np.arange(ny) - ny // 2) * ds_y
+    sx = (np.arange(nx) - nx // 2) * ds_x
+    radius = np.hypot(sy[:, None], sx[None, :])
+    shells = np.floor(radius / max(ds_y, ds_x)).astype(np.int64)
+    shells.setflags(write=False)  # shared through the cache
+    return shells
+
+
+def shell_median_ratio(amplitude: np.ndarray, cutoff_res) -> np.ndarray:
+    """Divide a spectrum, shell by shell, by the median of the shell.
+
+    Amplitudes fall by orders of magnitude from low to high resolution. The
+    median of a shell follows that fall, and a layer line, which fills only a
+    small part of a shell, does not move it, so what is left is how far each
+    pixel stands above the background at its own resolution.
+
+    Parameters
+    ----------
+    amplitude : numpy.ndarray
+        The 2D amplitude (not the intensity) of the Fourier transform, the zero
+        frequency at the centre. Negative values, which resampling can leave,
+        count by their size.
+    cutoff_res : tuple of float
+        (res_y, res_x), the resolution at the edge of each axis, A.
+
+    Returns
+    -------
+    numpy.ndarray
+        The ratio, 1 at the median of every shell. A shell whose median is 0
+        (nothing there) comes out 0.
+    """
+    amplitude = np.abs(amplitude)
+    cutoff = tuple(float(r) for r in cutoff_res)
+    shells = fourier_shells(amplitude.shape, cutoff)
+    order, starts, ends = _shell_pixels(amplitude.shape, cutoff)
+    in_shell_order = amplitude.ravel()[order]
+    medians = np.zeros(len(starts))
+    for k, (start, end) in enumerate(zip(starts, ends)):
+        medians[k] = np.median(in_shell_order[start:end])  # the mean of two, if even
+    divisor = medians[shells.ravel()].reshape(amplitude.shape)
+    return np.divide(
+        amplitude,
+        divisor,
+        out=np.zeros_like(amplitude, dtype=np.float64),
+        where=divisor > 0,
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _shell_pixels(shape: tuple, cutoff_res: tuple):
+    """The pixels of each Fourier shell, as slices of one ordering.
+
+    Which pixels are in a shell depends only on the grid, not on the spectrum, so
+    it is worked out once and each call only takes the median of each slice.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        (ny, nx) of the spectrum.
+    cutoff_res : tuple of float
+        (res_y, res_x), the resolution at the edge of each axis, A.
+
+    Returns
+    -------
+    order : numpy.ndarray
+        The flat pixel indices sorted by shell.
+    starts, ends : numpy.ndarray
+        Where each shell begins and ends in ``order``, one entry per shell number
+        from 0 to the last (a shell number nothing falls in gets an empty slice).
+    """
+    shells = fourier_shells(shape, cutoff_res).ravel()
+    order = np.argsort(shells, kind="stable")
+    counts = np.bincount(shells, minlength=shells.max() + 1)
+    ends = np.cumsum(counts)
+    starts = ends - counts
+    for array in (order, starts, ends):
+        array.setflags(write=False)  # shared through the cache
+    return order, starts, ends
+
+
+def normalize_shell_scaled(ratio: np.ndarray, clip_percentile: float = 99.5):
+    """Scale a shell-median ratio to 0..1 for display.
+
+    The log keeps the strong low-resolution layer lines from crowding out the
+    weaker ones. The top of the range is clipped: a few pixels stand hundreds of
+    times above their shell and, left in, would set the scale for all the rest.
+
+    Parameters
+    ----------
+    ratio : numpy.ndarray
+        The spectrum divided shell by shell by the shell's median, from
+        :func:`shell_median_ratio`.
+    clip_percentile : float, optional
+        The percentile of the log-scaled values that maps to 1; above it the
+        image is clipped. Defaults to 99.5.
+
+    Returns
+    -------
+    numpy.ndarray
+        The image scaled to 0..1, all 0 when it is flat.
+    """
+    scaled = np.log1p(ratio)
+    lo = scaled.min()
+    hi = np.percentile(scaled, clip_percentile)
+    if hi - lo == 0:
+        return scaled * 0
+    return np.clip((scaled - lo) / (hi - lo), 0, 1)
+
+
 @helicon.cache(cache_dir=str(helicon.cache_dir / "hill"), expires_after=7, verbose=0)
 def compute_power_spectra(
     data: np.ndarray,
@@ -149,10 +286,23 @@ def compute_power_spectra(
     do_normalize: bool = True,
     low_pass_fraction: float = 0,
     high_pass_fraction: float = 0,
+    shell_median: bool = False,
 ):
-    """Compute power spectrum and phase from 2D image."""
+    """Compute power spectrum and phase from 2D image.
+
+    With ``shell_median`` the spectrum is divided shell by shell by the median
+    (:func:`shell_median_ratio`) instead of being log-transformed and filtered:
+    ``log``, ``square`` and the pass fractions are then not used.
+    """
     fft = fft_rescale(data, apix=apix, cutoff_res=cutoff_res, output_size=output_size)
     fft = np.fft.fftshift(fft)
+    if shell_median:
+        pwr = shell_median_ratio(np.abs(fft), cutoff_res or (2 * apix, 2 * apix))
+        if do_normalize:
+            pwr = normalize_shell_scaled(pwr)
+        else:
+            pwr = np.log1p(pwr)
+        return pwr.astype(np.float32), np.angle(fft, deg=False).astype(np.float32)
     if log:
         pwr = np.log1p(np.abs(fft))
     else:
@@ -212,8 +362,13 @@ def resize_rescale_power_spectra(
     low_pass_fraction=0,
     high_pass_fraction=0,
     norm=1,
+    shell_median=False,
 ):
-    """Resize a power spectrum image to match new resolution/size."""
+    """Resize a power spectrum image to match new resolution/size.
+
+    With ``shell_median`` it is divided shell by shell by the median
+    (:func:`shell_median_ratio`) instead of being log-transformed and filtered.
+    """
     ny, nx = data.shape
     ony, onx = output_size
     res_y, res_x = cutoff_res
@@ -227,6 +382,9 @@ def resize_rescale_power_spectra(
     pwr = map_coordinates(
         data, (Y.flatten(), X.flatten()), order=3, mode="constant"
     ).reshape(Y.shape)
+    if shell_median:
+        ratio = shell_median_ratio(pwr, cutoff_res)
+        return normalize_shell_scaled(ratio) if norm else np.log1p(ratio)
     if log:
         pwr = np.log1p(np.abs(pwr))
     if 0 < low_pass_fraction < 1 or 0 < high_pass_fraction < 1:
@@ -262,6 +420,114 @@ def normalize(data: np.ndarray, percentile=(0, 100)):
 
 
 # ── 2D image transforms ──────────────────────────────────────────
+
+
+def auto_upright_transform(image, apix, method="threshold"):
+    """The transform that stands a filament upright and centres it, as HILL takes it.
+
+    HILL keeps the helical axis along y; the estimators find the rotation that
+    makes it horizontal, so it is turned a quarter more, and what is left to
+    do to centre it is a shift across the axis, which is along x.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        The 2D image.
+    apix : float
+        Pixel size, A.
+    method : str, optional
+        How the image is measured; see ``helix_transform.METHODS``. Defaults to
+        ``"threshold"``.
+
+    Returns
+    -------
+    dict
+        ``angle`` (degrees) and ``dx``, ``dy`` (A) for :func:`transform_2d_image`,
+        and ``mask_radius`` (A).
+    """
+    from . import helix_transform
+
+    rotation, shift, diameter = helix_transform.estimate_rotation_center_diameter(
+        np.asarray(image, dtype=np.float64), method=method, refine=False
+    )
+    return {
+        "angle": round(rotation + 90, 2),
+        "dx": round(-shift * apix, 2),
+        "dy": 0.0,
+        "mask_radius": round(diameter / 2 * apix, 2),
+    }
+
+
+def images_for_indexing(images, records, apix, method="threshold"):
+    """The images stood upright and centred, as the layer-line search takes them.
+
+    Parameters
+    ----------
+    images : sequence of numpy.ndarray
+        The 2D images, as loaded.
+    records : sequence of dict or None
+        For each image, the transform HILL holds for it (``angle``, ``dx``,
+        ``dy``, ``negate``, and optionally ``apix``), or None to work it out with
+        :func:`auto_upright_transform`.
+    apix : float
+        Pixel size, A.
+    method : str, optional
+        How a missing transform is worked out; see ``helix_transform.METHODS``.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        The images with their helical axis along y, through the middle.
+    """
+    out = []
+    for image, record in zip(images, records):
+        image = np.asarray(image, dtype=np.float64)
+        if not record:
+            record = dict(auto_upright_transform(image, apix, method), negate=False)
+        angle, dx, dy = record.get("angle", 0), record.get("dx", 0), record.get("dy", 0)
+        negate = bool(record.get("negate", False))
+        if angle or dx or dy or negate:
+            image = transform_2d_image(
+                image, angle, dx, dy, negate, record.get("apix", apix)
+            )
+        out.append(image)
+    return out
+
+
+def candidates_table(candidates, twist_sign=1.0):
+    """The candidates of the layer-line search as the table HILL shows.
+
+    Parameters
+    ----------
+    candidates : sequence of layerline_index.Candidate
+        The best first.
+    twist_sign : float, optional
+        The hand to show the twists in: a power spectrum cannot tell it, so the
+        sign of the twist the user has is kept. Defaults to positive.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per candidate: its rank, csym, twist, rise and pitch, and its
+        score as a percentage of the best one's.
+    """
+    import pandas as pd
+
+    sign = -1.0 if twist_sign < 0 else 1.0
+    best = max((c.score for c in candidates), default=0.0)
+    rows = []
+    for rank, c in enumerate(candidates, start=1):
+        rows.append(
+            {
+                "Rank": rank,
+                "Csym": int(c.csym),
+                "Twist (°)": round(sign * c.twist, 2),
+                "Rise (Å)": round(c.rise, 2),
+                "Pitch (Å)": round(360.0 * c.rise / c.twist, 1) if c.twist else None,
+                "Score (%)": int(round(100.0 * c.score / best)) if best > 0 else 0,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 @helicon.cache(cache_dir=str(helicon.cache_dir / "hill"), expires_after=7, verbose=0)
@@ -353,8 +619,35 @@ def generate_tapering_filter(image_size, fraction_start=(0, 0), fraction_slope=0
 
 
 def estimate_radial_range(data, thresh_ratio=0.1):
-    """Estimate filament radial range from projection profile."""
-    proj_y = np.sum(data, axis=0)
+    """Estimate filament radial range from projection profile.
+
+    The estimate, 16 fits, depends only on the sums of the image's columns, so it
+    is remembered for them (rounded to single precision): the same profile, which
+    comes back when an image is shown again, costs nothing.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        The 2D image, the filament along the rows.
+    thresh_ratio : float, optional
+        The fraction of the profile's height that counts as the filament's edge.
+        Defaults to 0.1.
+
+    Returns
+    -------
+    rmean : float
+        The mean radius of the filament, in pixels.
+    mask_radius : float
+        The radius of the range to fit within, in pixels.
+    """
+    profile = np.sum(data, axis=0).astype(np.float32)
+    return _radial_range_of_profile(profile.tobytes(), float(thresh_ratio))
+
+
+@functools.lru_cache(maxsize=128)
+def _radial_range_of_profile(profile_bytes, thresh_ratio):
+    """:func:`estimate_radial_range` for a profile given as float32 bytes."""
+    proj_y = np.frombuffer(profile_bytes, dtype=np.float32).astype(np.float64)
     n = len(proj_y)
     background = np.mean(proj_y[[0, 1, 2, -3, -2, -1]])
     thresh = (proj_y.max() - background) * thresh_ratio + background
@@ -792,7 +1085,7 @@ def create_layerline_image_figure(
 
     source_data = ColumnDataSource(
         data=dict(
-            image=[data.astype(np.float16)],
+            image=[data.astype(np.float32)],
             x=[-nx // 2 * dsx],
             y=[-ny // 2 * dsy],
             dw=[nx * dsx],
@@ -802,7 +1095,7 @@ def create_layerline_image_figure(
     )
     if phase is not None:
         source_data.add(
-            data=[np.fmod(np.rad2deg(phase) + 360, 360).astype(np.float16)],
+            data=[np.fmod(np.rad2deg(phase) + 360, 360).astype(np.float32)],
             name="phase",
         )
     if const_image_color:

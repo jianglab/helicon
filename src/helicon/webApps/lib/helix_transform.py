@@ -16,6 +16,289 @@ import numpy as np
 import helicon
 
 
+# The ways of finding a filament's orientation and centre; the first is the default.
+METHODS = {
+    "threshold": "Threshold and moments",
+    "spectral": "Projection sharpness and phases across the meridian",
+}
+DEFAULT_METHOD = "threshold"
+
+
+def _ring_noise(power):
+    """Mean noise power of every pixel of an ``rfft2``: the median of its ring over ``ln 2``.
+
+    Signal fills few pixels of a ring, so the median is the noise; for complex
+    Gaussian noise the power is exponential and its median is ``ln 2`` of its mean.
+    """
+    ny, nx2 = power.shape
+    fy = np.fft.fftfreq(ny)[:, None] * ny
+    fx = np.arange(nx2)[None, :].astype(float)
+    ring = np.rint(np.hypot(fy, fx)).astype(int)
+    order = np.argsort(ring, axis=None, kind="stable")
+    sorted_ring = ring.ravel()[order]
+    sorted_power = power.ravel()[order]
+    bounds = np.searchsorted(sorted_ring, np.arange(ring.max() + 2))
+    noise = np.full(ring.max() + 1, np.nan)
+    for r in range(len(noise)):
+        lo, hi = bounds[r], bounds[r + 1]
+        if hi - lo > 3:
+            noise[r] = np.median(sorted_power[lo:hi]) / np.log(2.0)
+    ok = np.flatnonzero(np.isfinite(noise))
+    noise = np.interp(np.arange(len(noise)), ok, noise[ok])
+    return np.maximum(noise[ring], 1e-30)
+
+
+def _sharpness_rotation(data, max_size=128):
+    """The rotation (degrees, as ``helicon.transform_image`` takes it) that makes the filament horizontal.
+
+    A horizontal filament, summed along its length, gives the narrowest and tallest
+    profile across it, so the rotation that maximises the sum of squares of that
+    profile is the one. It looks at the image as a whole, with no threshold, and
+    does not care whether the filament is bright or dark. A coarse scan on a
+    reduced image is followed by two finer ones on the full image.
+    """
+    import helicon
+
+    img = np.asarray(data, dtype=float)
+    img = img - img.mean()
+    ny, nx = img.shape
+    y, x = np.mgrid[:ny, :nx]
+    # a disc, so that the corners that rotation brings in or out do not count
+    img = img * (np.hypot(y - ny / 2, x - nx / 2) < min(ny, nx) / 2 - 1)
+    step = max(1, int(np.ceil(max(ny, nx) / max_size)))
+    small = img[: ny // step * step, : nx // step * step]
+    small = small.reshape(ny // step, step, nx // step, step).mean(axis=(1, 3))
+
+    def sharpness(image, angle):
+        rotated = helicon.transform_image(image=image, rotation=angle)
+        return float((rotated.sum(axis=1) ** 2).sum())
+
+    best = float(max(np.arange(-90.0, 90.0, 2.0), key=lambda a: sharpness(small, a)))
+    for half, resolution in ((2.0, 0.25), (0.25, 0.03)):
+        angles = np.arange(best - half, best + half + 1e-9, resolution)
+        best = float(max(angles, key=lambda a: sharpness(img, a)))
+    return helicon.set_to_periodic_range(best, min=-90, max=90)
+
+
+def _meridian_offset(image, max_shift=None, resolution=0.01, band=0.25):
+    """How far the helical axis is from the middle of the box, in pixels, across the rows.
+
+    Along the axis (the columns of ``image``), the transform of a helix has layer
+    lines whose two halves, on either side of the meridian, are mirror images of
+    each other up to a sign that is the same along the whole line, when the axis
+    is at the origin. Moving the axis by ``dx`` multiplies the product of the two
+    halves, ``F(X, Y) F(X, -Y)``, by ``exp(-4 pi i X dx)``. The phase of that
+    product is therefore a straight line in ``X`` through the same constant on
+    each line: the offset is the ``dx`` that makes the phases of every line agree.
+    Each pixel counts for as much as its excess over the noise, so the noise,
+    which has random phases, adds little, and the equator and the layer lines
+    that stand out most decide.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        The filament along the rows... that is, horizontal: axis 1 along the filament.
+    max_shift : float, optional
+        Largest offset looked for, pixels. Defaults to a quarter of the width,
+        beyond which the product cannot tell an offset from another (it repeats
+        every half width).
+    resolution : float, optional
+        Pixels. Defaults to 0.01.
+    band : float, optional
+        Highest frequency used, cycles per pixel. The finest lines are the
+        most easily upset by the interpolation of the rotation that came before,
+        and past 0.25 they added error to the offset and no precision.
+
+    Returns
+    -------
+    float
+        The offset along axis 0, pixels from ``image.shape[0] // 2``.
+    """
+    img = np.asarray(
+        image, dtype=float
+    ).T  # axis along the rows, as the transform is laid out
+    n = img.shape[1]
+    img = np.roll(img - img.mean(), -(n // 2), axis=1)
+    F = np.fft.rfft2(img)
+    excess = np.maximum(np.abs(F) ** 2 / _ring_noise(np.abs(F) ** 2) - 1.0, 0.0)
+    ny = img.shape[0]
+    rows = np.arange(0, ny // 2 + 1)
+    mirror = (-rows) % ny
+    product = F[rows, :] * F[mirror, :]
+    weight = np.sqrt(excess[rows, :] * excess[mirror, :])
+    keep = np.arange(F.shape[1]) / n < 0.5
+    phasor = (weight * product / np.maximum(np.abs(product), 1e-30))[:, keep]
+    freq = (np.arange(F.shape[1]) / n)[keep]
+    max_shift = n / 4.0 if max_shift is None else max_shift
+
+    height = rows / ny  # of each layer line, cycles per pixel
+
+    def score(shifts, f_max):
+        # each line's weights summed coherently along X, then over the lines,
+        # within the disc of radius f_max: a small error of the rotation shears
+        # the transform in proportion to the height of the line, so the lines
+        # near the equator are the most reliable
+        inside = (freq[None, :] ** 2 + height[:, None] ** 2) <= f_max**2
+        phase = np.exp(4j * np.pi * freq[:, None] * np.asarray(shifts)[None, :])
+        return np.abs((phasor * inside) @ phase).sum(axis=0)
+
+    # Coarse to fine. Over a band 0..f the score is one lobe about 1/(4 f) wide,
+    # where over the whole band it also has ghosts a few pixels away that a
+    # small error of the rotation can make the highest: so the lowest
+    # frequencies place the axis and each wider band refines it.
+    f_max, centre, half = 0.03, 0.0, max_shift
+    while True:
+        f_max = min(f_max, band)
+        step = max(1.0 / (16.0 * f_max), resolution)
+        grid = np.arange(centre - half, centre + half + step / 2, step)
+        centre = float(grid[int(np.argmax(score(grid, f_max)))])
+        if f_max >= band:
+            break
+        half = 1.0 / (2.0 * f_max)
+        f_max *= 2.0
+    half = step
+    while half > resolution:
+        fine = np.linspace(centre - half, centre + half, 21)
+        centre = float(fine[int(np.argmax(score(fine, band)))])
+        half /= 5.0
+    return centre
+
+
+def _profile_width(image, fraction=0.2, smooth=2.0):
+    """The width of a filament across a horizontal axis, in pixels.
+
+    The profile across is the image summed along the axis. The filament is where it
+    departs from the baseline (the mean of its two edges) in the same direction as
+    its strongest part in the middle of the box, by more than ``fraction`` of that
+    departure. Only that direction counts: class averages have a halo of the
+    opposite sign around the filament, which is not part of it.
+    """
+    from scipy import ndimage as ndi
+
+    profile = ndi.gaussian_filter1d(np.asarray(image, dtype=float).mean(axis=1), smooth)
+    n = len(profile)
+    edge = max(2, n // 10)
+    departure = profile - 0.5 * (profile[:edge].mean() + profile[-edge:].mean())
+    middle = slice(n // 4, n - n // 4)
+    sign = 1.0 if departure[middle][np.argmax(np.abs(departure[middle]))] > 0 else -1.0
+    departure = sign * departure
+    above = np.flatnonzero(departure > fraction * departure.max())
+    return int(above[-1] - above[0] + 1) if len(above) else n
+
+
+def spectral_rotation_center_diameter(
+    data, estimate_rotation=True, estimate_center=True
+):
+    """Rotation, vertical shift and diameter of a horizontal-ish filament, from its transform.
+
+    The orientation is the one that makes the projection along the filament
+    sharpest (:func:`_sharpness_rotation`) and the centre is where the phases
+    across the meridian agree (:func:`_meridian_offset`). Neither takes a
+    threshold, neither assumes a bright filament on a dark background, and
+    both hold up in noise where a threshold fails.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        The 2D image.
+    estimate_rotation, estimate_center : bool, optional
+        As for :func:`refine_helix_rotation_center`; what is not estimated is 0.
+
+    Returns
+    -------
+    rotation : float
+        Degrees to rotate with ``helicon.transform_image`` to make it horizontal.
+    shift_y : float
+        Pixels to move it down (``post_translation=(shift_y, 0)``) to centre it.
+    diameter : int
+        Width of the filament across its axis, pixels.
+    """
+    import helicon
+
+    data = np.asarray(data, dtype=float)
+
+    def turned(image, angle):
+        return helicon.transform_image(image=image, rotation=angle) if angle else image
+
+    def moved(image, down):
+        if not down:
+            return image
+        return helicon.transform_image(image=image, post_translation=(down, 0))
+
+    rotation = _sharpness_rotation(data) if estimate_rotation else 0.0
+    straight = turned(data, rotation)
+    shift = -_meridian_offset(straight) if estimate_center else 0.0
+    centred = moved(straight, shift)
+    if estimate_rotation:
+        # the first rotation was measured with an off-centre filament, which the
+        # disc it is measured in cuts unevenly; measure what is left on the
+        # centred one (a turn this small moves the shift by a hundredth of a pixel)
+        rotation += _sharpness_rotation(centred)
+        centred = moved(turned(data, rotation), shift)
+    return float(rotation), float(shift), _profile_width(centred)
+
+
+def estimate_rotation_center_diameter(
+    data,
+    method=DEFAULT_METHOD,
+    threshold=0.0,
+    estimate_rotation=True,
+    estimate_center=True,
+    refine=True,
+):
+    """``(rotation, shift_y, diameter)`` of a filament by the chosen ``method``.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        The 2D image.
+    method : str, optional
+        One of the keys of :data:`METHODS`. Defaults to :data:`DEFAULT_METHOD`.
+    threshold : float, optional
+        The density floor of the ``"threshold"`` method; the ``"spectral"`` one
+        takes none.
+    estimate_rotation, estimate_center : bool, optional
+        Whether to estimate them; what is not estimated is 0.
+    refine : bool, optional
+        For ``"threshold"``: whether to check and improve the estimate
+        (:func:`refine_helix_rotation_center`) or take the single estimate of
+        ``helicon.estimate_helix_rotation_center_diameter``. Defaults to True.
+
+    Returns
+    -------
+    rotation : float
+        Degrees, for ``helicon.transform_image``, to make the filament horizontal.
+    shift_y : float
+        Pixels, down, to centre it.
+    diameter : float
+        Pixels.
+
+    Raises
+    ------
+    ValueError
+        For a ``method`` that is not in :data:`METHODS`.
+    """
+    if method == "spectral":
+        return spectral_rotation_center_diameter(
+            data, estimate_rotation=estimate_rotation, estimate_center=estimate_center
+        )
+    if method != "threshold":
+        raise ValueError(f"unknown method {method!r}; choose from {sorted(METHODS)}")
+    if not refine:
+        return helicon.estimate_helix_rotation_center_diameter(
+            data,
+            estimate_rotation=estimate_rotation,
+            estimate_center=estimate_center,
+            threshold=threshold,
+        )
+    return refine_helix_rotation_center(
+        data,
+        threshold=threshold,
+        estimate_rotation=estimate_rotation,
+        estimate_center=estimate_center,
+    )
+
+
 def refine_helix_rotation_center(
     data,
     threshold=0.0,
@@ -190,6 +473,7 @@ def auto_transform(
     crop_factor=2.0,
     crop_multiple=4,
     cache=None,
+    method=DEFAULT_METHOD,
 ):
     """Work out the transform that puts each image's filament horizontal.
 
@@ -216,6 +500,9 @@ def auto_transform(
         in place. Measuring an image is the whole cost here, and a caller that
         re-runs on every change to a selection re-measures every image that was
         already in it; with a cache only what is new is measured.
+    method : str, optional
+        How each image is measured: one of the keys of :data:`METHODS`. Defaults to
+        :data:`DEFAULT_METHOD`.
 
     Returns
     -------
@@ -228,13 +515,14 @@ def auto_transform(
     for image in images:
         key = None
         if cache is not None:
-            key = (image_key(image), estimate_rotation, estimate_center)
+            key = (image_key(image), estimate_rotation, estimate_center, method)
             measured = cache.get(key)
         else:
             measured = None
         if measured is None:
-            rotation, shift, diameter = refine_helix_rotation_center(
+            rotation, shift, diameter = estimate_rotation_center_diameter(
                 image,
+                method=method,
                 threshold=np.max(image) * 0.2,
                 estimate_rotation=estimate_rotation,
                 estimate_center=estimate_center,

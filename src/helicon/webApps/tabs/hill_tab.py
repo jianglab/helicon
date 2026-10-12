@@ -6,6 +6,7 @@ Uses Bokeh widgets for interactive power spectrum / layer line analysis.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pandas as pd
 
 import helicon
 from shiny import reactive, render, ui, module, req
+from shiny.types import SilentException
 from shinywidgets import output_widget, render_widget
 
 
@@ -23,7 +25,7 @@ except Exception:
     hill = None
 
 # helicon.get_images_from_url does not exist; use the shared webApps lib.
-from .. import bookmark, deployment
+from .. import auto_method_ui, bookmark, deployment
 from ..lib import denovo3d_pipeline
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,16 @@ logger = logging.getLogger(__name__)
 MODULE_PREFIX = "hill"
 
 from .hill_bookmark import BOOKMARK_DEFAULTS  # noqa: E402
+
+# One row, whatever the sidebar's width: the pieces wrap rather than overflow,
+# and the radio's label sits beside its options instead of above them.
+_IMAGE_ROW_CSS = """
+.hill-img-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 14px; }
+.hill-img-row .form-group { margin-bottom: 0.5rem; }
+.hill-img-row .shiny-input-radiogroup { display: flex; flex-wrap: wrap;
+    align-items: baseline; column-gap: 8px; }
+.hill-img-row .shiny-input-radiogroup > label { margin-bottom: 0; }
+"""
 
 _INIT_TWIST = 29.40
 _INIT_RISE = 21.92
@@ -45,6 +57,144 @@ _INIT_PNY = 1024
 _INIT_CUTOFF_X = 7.03
 _INIT_CUTOFF_Y = 4.69
 _INIT_HELICAL_RADIUS = 77.6
+
+
+def _set_helix_sliders(slider_twist, slider_pitch, slider_rise, twist, pitch, rise):
+    """Set the helix sliders and their ranges to a twist, pitch and rise.
+
+    This is what the browser does for a value that arrives from the server
+    (``apply_values`` in ``_HELIX_CONTROL_JS``), done on the model itself: a
+    widget the browser does not have yet is built from the model, and a value
+    sent to it before then is lost.
+
+    Parameters
+    ----------
+    slider_twist, slider_pitch, slider_rise : bokeh.models.Slider
+        The three sliders.
+    twist, pitch, rise : float
+        The values to show.
+
+    Returns
+    -------
+    bool
+        Whether anything of the sliders changed.
+    """
+    changed = False
+
+    def same(a, b):
+        return abs(a - b) <= 1e-12 * max(1.0, abs(a), abs(b))
+
+    def set_range(slider, start, end, step=None):
+        nonlocal changed
+        if slider.start != start or slider.end != end:
+            slider.start, slider.end = start, end
+            changed = True
+        if step is not None and slider.step != step:
+            slider.step = step
+            changed = True
+
+    set_range(slider_twist, min(-180.0, twist), max(180.0, twist))
+    for slider, value in ((slider_pitch, pitch), (slider_rise, rise)):
+        if value < slider.start or value > slider.end:
+            end = value * 2
+            set_range(slider, value / 2, end, max(end * 0.001, np.finfo(float).eps))
+    for slider, value in (
+        (slider_twist, twist),
+        (slider_pitch, pitch),
+        (slider_rise, rise),
+    ):
+        if not same(slider.value, value):
+            slider.value = value
+            changed = True
+    return changed
+
+
+def _as_csym(value) -> int:
+    """A csym as the whole number it must be.
+
+    Parameters
+    ----------
+    value : int, float or str
+        What an input holds: a bookmark's ``csym=2.5``, a number typed with a
+        decimal point, an EMDB entry.
+
+    Returns
+    -------
+    int
+        The nearest whole number, and at least 1.
+    """
+    return max(1, int(round(float(value))))
+
+
+def _progress_bar(done: int, total: int):
+    """A Bootstrap progress bar for a search that has done ``done`` of ``total``
+    steps; an animated full-width one while the number of steps is not known yet.
+
+    Parameters
+    ----------
+    done, total : int
+        Steps finished and steps in all; ``total`` 0 when it is not known.
+
+    Returns
+    -------
+    shiny.ui.Tag
+    """
+    if total <= 0:
+        label, width = "Searching", 100
+        classes = " progress-bar-striped progress-bar-animated"
+    else:
+        width = max(0, min(100, round(100 * done / total)))
+        label, classes = f"{width}%", ""
+    return ui.div(
+        ui.div(
+            label if total > 0 else "",
+            class_="progress-bar" + classes,
+            role="progressbar",
+            # As tall as the track, which clips it. The ipywidgets stylesheet this
+            # tab loads sets every .progress-bar to 28 px, so the height must be
+            # said here; the bottom of a taller fill is cut off.
+            style=f"width: {width}%; height: 100%; line-height: 1.3rem; "
+            "font-size: 0.8rem; padding: 0;",
+            **{
+                "aria-valuenow": str(width),
+                "aria-valuemin": "0",
+                "aria-valuemax": "100",
+                "aria-label": label,
+            },
+        ),
+        class_="progress hill-search-progress",
+        style="height: 1.3rem; margin: 0.4em 0;",
+    )
+
+
+@contextlib.contextmanager
+def _held(document):
+    """Send the changes made inside as few messages as Bokeh can combine them to.
+
+    Every change to a figure that is on a page is sent to the browser as soon as
+    it is made, and the document's graph of models is walked again each time;
+    redrawing the layer lines removes and adds about fifty renderers one at a
+    time. Held, the changes to one attribute are combined into one message, and
+    with the graph frozen it is walked once, at the end. Either alone saves
+    nothing measurable: together a redraw takes a tenth of the time.
+
+    Parameters
+    ----------
+    document : bokeh.document.Document or None
+        The document of the figures, None when they are not on a page yet.
+    """
+    if document is None:
+        yield
+        return
+    # ``models.freeze`` belongs to Bokeh's document internals rather than its
+    # documented API: without it the changes are still combined, only slower.
+    freeze = getattr(getattr(document, "models", None), "freeze", None)
+    with freeze() if freeze is not None else contextlib.nullcontext():
+        document.hold("combine")
+        try:
+            yield
+        finally:
+            document.unhold()
 
 
 def _resolution_limits_from_apix(apix: float) -> tuple[float, float]:
@@ -87,6 +237,17 @@ def hill_tab_ui():
         .hill-inline-box label { display: table-cell; text-align: left; vertical-align: middle; }
         .hill-inline-box input { width: 4em; margin-left: 1em; }
         .hill-inline-box .form-group { display: table-row; }
+        .hill-params .accordion-body { padding: 0.6rem 0.5rem; }
+        /* Every row is two columns. bslib's twelve-column grid has eleven gaps,
+           which in a narrow sidebar leave its columns no width at all and the
+           fields run out of the panel. */
+        .hill-params .bslib-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            column-gap: 0.75rem;
+        }
+        .hill-params .bslib-grid > * { grid-column: auto !important; min-width: 0; }
+        .hill-params .form-control { min-width: 0; }
+        .hill-params .shiny-input-container { width: 100%; }
         #hill-hill_main_plots { overflow-y: auto; }
         """
         ),
@@ -108,7 +269,6 @@ def hill_tab_ui():
                                     "of increasing orders (0, ±1, ±2, ...) from the Fourier origin."
                                 ),
                                 value="hill_readme_panel",
-                                open=False,
                             ),
                             id="hill_sidebar_accordion",
                             open=False,
@@ -130,37 +290,70 @@ def hill_tab_ui():
                                     selected="2",
                                     inline=True,
                                 ),
+                                ui.output_ui("hill_conditional_input_uis"),
                                 value="hill_input_mode",
-                                open=True,
-                            )
+                            ),
+                            open=True,
                         ),
-                        ui.output_ui("hill_conditional_input_uis"),
                         ui.output_ui("hill_conditional_3d_uis"),
                         ui.div(
                             ui.output_ui("hill_select_image_gallery"),
                             style="max-height: 500px; overflow-y: auto;",
                         ),
-                        output_widget("hill_display_selected_image", height="auto"),
+                        ui.div(
+                            ui.output_ui("hill_active_image_gallery"),
+                            style="max-height: 300px; overflow-y: auto;",
+                        ),
                         ui.accordion(
                             ui.accordion_panel(
-                                "Image Parameters",
-                                ui.output_ui("hill_select_from_multiselect_ui"),
-                                ui.input_radio_buttons(
-                                    "hill_input_type",
-                                    "Input is:",
-                                    choices=["Image", "PS", "PD"],
-                                    inline=True,
+                                ui.output_text("hill_image_params_title", inline=True),
+                                # "Input is:", the contrast and the auto-transform on
+                                # one row (wrapping when the sidebar is too narrow)
+                                ui.tags.style(_IMAGE_ROW_CSS),
+                                ui.div(
+                                    ui.input_radio_buttons(
+                                        "hill_input_type",
+                                        "Input is:",
+                                        choices=["Image", "PS", "PD"],
+                                        inline=True,
+                                        width="auto",
+                                    ),
+                                    ui.output_ui("hill_img_flags_ui"),
+                                    class_="hill-img-row",
                                 ),
                                 ui.output_ui("hill_img_2d_uis"),
-                                ui.output_ui("hill_img_update_buttons"),
                                 value="hill_image_params",
-                                open=False,
-                            )
+                            ),
+                            # on the accordion: on a panel it is only an HTML
+                            # attribute, and the first panel is then open
+                            open=False,
                         ),
                         output_widget("hill_display_transformed", height="auto"),
                         output_widget("hill_plot_radial_profile", height="auto"),
-                        output_widget("hill_plot_acf", width="auto"),
+                        output_widget("hill_plot_acf", width="auto", height="auto"),
                         ui.output_ui("hill_get_avg_ps_ui"),
+                        ui.div(
+                            ui.div(
+                                ui.tooltip(
+                                    ui.input_action_button(
+                                        "hill_suggest_symmetry",
+                                        "Suggest csym, twist and rise",
+                                        class_="btn-primary",
+                                    ),
+                                    "Search the layer lines of the selected images for "
+                                    "the helical symmetries that explain them, best "
+                                    "first. Uses the filament diameter and the "
+                                    "resolution limit X (Parameters tab); several class "
+                                    "averages of one helix do better than one.",
+                                ),
+                                class_="hill-suggest-button",
+                                style="text-align: center;",
+                            ),
+                            ui.output_ui("hill_symmetry_message"),
+                            ui.output_ui("hill_symmetry_progress"),
+                            ui.output_data_frame("hill_symmetry_candidates"),
+                            style="margin: 0.5em 0 1em 0;",
+                        ),
                         ui.HTML(
                             "<i><p>Developed by the <a href='https://jianglab.science.psu.edu/helicon' target='_blank'>Jiang Lab</a>. "
                             "Report issues to <a href='https://github.com/jianglab/helicon/issues' target='_blank'>helicon@GitHub</a>.</p></i>"
@@ -169,184 +362,259 @@ def hill_tab_ui():
                     ),
                     ui.nav_panel(
                         "Parameters",
-                        ui.layout_columns(
-                            ui.input_radio_buttons(
-                                "hill_use_twist_pitch",
-                                "Keep twist/pitch when changing rise:",
-                                choices=["Twist", "Pitch"],
-                                selected="Twist",
-                                inline=True,
+                        # One panel per function, the controls of one type together
+                        # inside it. Every input keeps its id (bookmarks, effects).
+                        ui.accordion(
+                            ui.accordion_panel(
+                                "Helical symmetry",
+                                ui.layout_columns(
+                                    ui.input_numeric(
+                                        "hill_diameter",
+                                        "Filament/tube diameter (Å)",
+                                        value=155.2,
+                                        min=1.0,
+                                        max=1000.0,
+                                        step=10.0,
+                                        update_on="blur",
+                                    ),
+                                    ui.input_numeric(
+                                        "hill_out_of_plane_tilt",
+                                        "Out-of-plane tilt (°)",
+                                        value=0.0,
+                                        min=-90.0,
+                                        max=90.0,
+                                        step=1.0,
+                                        update_on="blur",
+                                    ),
+                                    col_widths=6,
+                                    style="align-items: flex-end;",
+                                ),
+                                ui.input_radio_buttons(
+                                    "hill_use_twist_pitch",
+                                    "Keep twist/pitch when changing rise:",
+                                    choices=["Twist", "Pitch"],
+                                    selected="Twist",
+                                    inline=True,
+                                ),
+                                value="hill_params_symmetry",
                             ),
-                            ui.input_numeric(
-                                "hill_csym",
-                                "csym",
-                                value=6,
-                                min=1,
-                                step=1,
-                                update_on="blur",
+                            ui.accordion_panel(
+                                "Image alignment",
+                                ui.tooltip(
+                                    ui.input_select(
+                                        "hill_auto_method",
+                                        auto_method_ui.LABEL,
+                                        choices=auto_method_ui.CHOICES,
+                                        selected=auto_method_ui.DEFAULT,
+                                    ),
+                                    auto_method_ui.HELP,
+                                ),
+                                ui.input_checkbox(
+                                    "hill_inhibit_update",
+                                    "Inhibit automatic update",
+                                    value=False,
+                                ),
+                                value="hill_params_alignment",
                             ),
-                            ui.input_numeric(
-                                "hill_diameter",
-                                "Filament/tube diameter (Å)",
-                                value=155.2,
-                                min=1.0,
-                                max=1000.0,
-                                step=10.0,
-                                update_on="blur",
+                            ui.accordion_panel(
+                                "Fourier transform",
+                                ui.layout_columns(
+                                    ui.input_numeric(
+                                        "hill_cutoff_res_x",
+                                        "Resolution limit X (Å)",
+                                        value=7.03,
+                                        min=2.0,
+                                        step=1.0,
+                                        update_on="blur",
+                                    ),
+                                    ui.input_numeric(
+                                        "hill_cutoff_res_y",
+                                        "Resolution limit Y (Å)",
+                                        value=4.69,
+                                        min=2.0,
+                                        step=1.0,
+                                        update_on="blur",
+                                    ),
+                                    ui.input_numeric(
+                                        "hill_pnx",
+                                        "FFT X-dim (px)",
+                                        value=512,
+                                        min=128,
+                                        step=2,
+                                        update_on="blur",
+                                    ),
+                                    ui.input_numeric(
+                                        "hill_pny",
+                                        "FFT Y-dim (px)",
+                                        value=1024,
+                                        min=512,
+                                        step=2,
+                                        update_on="blur",
+                                    ),
+                                    col_widths=6,
+                                    style="align-items: flex-end;",
+                                ),
+                                ui.tooltip(
+                                    ui.input_radio_buttons(
+                                        "hill_ps_scaling",
+                                        "Scale the spectra by:",
+                                        choices={
+                                            "log": "Log + filter",
+                                            "shell": "Shell median",
+                                        },
+                                        selected="log",
+                                        inline=True,
+                                    ),
+                                    "Amplitudes fall by orders of magnitude from low to "
+                                    "high resolution. Log + filter compresses that range "
+                                    "with a log and a Fourier high/low-pass. Shell median "
+                                    "divides each Fourier shell (the pixels of one spatial "
+                                    "frequency) by its median, so a layer line shows by how "
+                                    "far it stands above the background at its own "
+                                    "resolution, then takes the log of the ratio.",
+                                ),
+                                ui.panel_conditional(
+                                    "input.hill_ps_scaling == 'log'",
+                                    ui.layout_columns(
+                                        ui.input_numeric(
+                                            "hill_hp_fraction",
+                                            "Fourier high-pass (%)",
+                                            value=0.40,
+                                            min=0.0,
+                                            max=100.0,
+                                            step=0.1,
+                                            update_on="blur",
+                                        ),
+                                        ui.input_numeric(
+                                            "hill_lp_fraction",
+                                            "Fourier low-pass (%)",
+                                            value=0.00,
+                                            min=0.0,
+                                            max=100.0,
+                                            step=0.1,
+                                            update_on="blur",
+                                        ),
+                                        col_widths=6,
+                                        style="align-items: flex-end;",
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_log_amp", "Log (amplitude)", value=True
+                                    ),
+                                ),
+                                value="hill_params_fft",
                             ),
-                            ui.input_numeric(
-                                "hill_out_of_plane_tilt",
-                                "Out-of-plane tilt (°)",
-                                value=0.0,
-                                min=-90.0,
-                                max=90.0,
-                                step=1.0,
-                                update_on="blur",
+                            ui.accordion_panel(
+                                "Y profile",
+                                ui.input_checkbox(
+                                    "hill_yp_peak_detect",
+                                    "Detect peaks in Y-Profile",
+                                    value=True,
+                                ),
+                                ui.panel_conditional(
+                                    "input.hill_yp_peak_detect",
+                                    ui.layout_columns(
+                                        ui.input_numeric(
+                                            "hill_yp_peak_prominence",
+                                            "Peak prominence",
+                                            value=0.2,
+                                            min=0.001,
+                                            max=1.0,
+                                            step=0.01,
+                                            update_on="blur",
+                                        ),
+                                        ui.input_numeric(
+                                            "hill_yp_peak_fit_hw",
+                                            "Fit half-width (px)",
+                                            value=5,
+                                            min=2,
+                                            max=50,
+                                            step=1,
+                                            update_on="blur",
+                                        ),
+                                        col_widths=6,
+                                        style="align-items: flex-end;",
+                                    ),
+                                ),
+                                value="hill_params_yprofile",
                             ),
-                            ui.input_numeric(
-                                "hill_cutoff_res_x",
-                                "Resolution limit X (Å)",
-                                value=7.03,
-                                min=2.0,
-                                step=1.0,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                "hill_cutoff_res_y",
-                                "Resolution limit Y (Å)",
-                                value=4.69,
-                                min=2.0,
-                                step=1.0,
-                                update_on="blur",
-                            ),
-                            ui.input_checkbox(
-                                "hill_fft_top_only",
-                                "Only display top half of FFT",
-                                value=False,
-                            ),
-                            ui.input_checkbox(
-                                "hill_log_amp", "Log (amplitude)", value=True
-                            ),
-                            ui.input_text(
-                                "hill_const_image_color",
-                                "Flatten PS/PD image in this color",
-                                value="",
-                                placeholder="white black",
-                                update_on="blur",
-                            ),
-                            ui.input_text(
-                                "hill_ll_colors",
-                                "Layerline colors",
-                                value="lime cyan violet salmon silver",
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                "hill_hp_fraction",
-                                "Fourier high-pass (%)",
-                                value=0.40,
-                                min=0.0,
-                                max=100.0,
-                                step=0.1,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                "hill_lp_fraction",
-                                "Fourier low-pass (%)",
-                                value=0.00,
-                                min=0.0,
-                                max=100.0,
-                                step=0.1,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                "hill_pnx",
-                                "FFT X-dim (px)",
-                                value=512,
-                                min=128,
-                                step=2,
-                                update_on="blur",
-                            ),
-                            ui.input_numeric(
-                                "hill_pny",
-                                "FFT Y-dim (px)",
-                                value=1024,
-                                min=512,
-                                step=2,
-                                update_on="blur",
-                            ),
-                            col_widths=6,
-                            style="align-items: flex-end;",
-                        ),
-                        ui.input_checkbox(
-                            "hill_inhibit_update",
-                            "Inhibit automatic update",
-                            value=False,
-                        ),
-                        ui.hr(),
-                        ui.input_checkbox(
-                            "hill_yp_peak_detect",
-                            "Detect peaks in Y-Profile",
-                            value=True,
-                        ),
-                        ui.panel_conditional(
-                            "input.hill_yp_peak_detect",
-                            ui.layout_columns(
-                                ui.input_numeric(
-                                    "hill_yp_peak_prominence",
-                                    "Peak prominence",
-                                    value=0.2,
-                                    min=0.001,
-                                    max=1.0,
-                                    step=0.01,
+                            ui.accordion_panel(
+                                "Layer lines",
+                                ui.layout_columns(
+                                    ui.input_checkbox(
+                                        "hill_LL", "Layer line", value=True
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_LLText", "Layer line text", value=True
+                                    ),
+                                    col_widths=6,
+                                    style="align-items: flex-end;",
+                                ),
+                                ui.div(
+                                    ui.input_numeric(
+                                        "hill_m_max",
+                                        "Max M =",
+                                        value=3,
+                                        min=1,
+                                        step=1,
+                                        update_on="blur",
+                                        width="4em",
+                                    ),
+                                    class_="hill-inline-box",
+                                ),
+                                ui.input_checkbox_group(
+                                    "hill_ms",
+                                    "m:",
+                                    ["3", "2", "1", "0", "-1", "-2", "-3"],
+                                    selected=["-1", "0", "1"],
+                                    inline=True,
+                                ),
+                                ui.input_text(
+                                    "hill_ll_colors",
+                                    "Layerline colors",
+                                    value="lime cyan violet salmon silver",
                                     update_on="blur",
                                 ),
-                                ui.input_numeric(
-                                    "hill_yp_peak_fit_hw",
-                                    "Fit half-width (px)",
-                                    value=5,
-                                    min=2,
-                                    max=50,
-                                    step=1,
+                                value="hill_params_layerlines",
+                            ),
+                            ui.accordion_panel(
+                                "Display",
+                                ui.layout_columns(
+                                    ui.input_checkbox(
+                                        "hill_PS", "Power spectra", value=True
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_YP", "Y Profile", value=True
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_PD", "Phase difference", value=True
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_Phase", "Phase hover", value=False
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_Color", "Color", value=True
+                                    ),
+                                    ui.input_checkbox(
+                                        "hill_fft_top_only",
+                                        "Only display top half of FFT",
+                                        value=False,
+                                    ),
+                                    col_widths=6,
+                                    style="align-items: flex-end;",
+                                ),
+                                ui.input_text(
+                                    "hill_const_image_color",
+                                    "Flatten PS/PD image in this color",
+                                    value="",
+                                    placeholder="white black",
                                     update_on="blur",
                                 ),
-                                col_widths=6,
-                                style="align-items: flex-end;",
+                                value="hill_params_display",
                             ),
-                        ),
-                        ui.hr(),
-                        ui.h5("Display:"),
-                        ui.layout_columns(
-                            ui.input_checkbox("hill_PS", "Power spectra", value=True),
-                            ui.input_checkbox("hill_YP", "Y Profile", value=True),
-                            ui.input_checkbox("hill_Phase", "Phase hover", value=False),
-                            ui.input_checkbox(
-                                "hill_PD", "Phase difference", value=True
-                            ),
-                            ui.input_checkbox("hill_Color", "Color", value=True),
-                            ui.input_checkbox("hill_LL", "Layer line", value=True),
-                            ui.input_checkbox(
-                                "hill_LLText", "Layer line text", value=True
-                            ),
-                            col_widths=6,
-                            style="align-items: flex-end;",
-                        ),
-                        ui.div(
-                            ui.input_numeric(
-                                "hill_m_max",
-                                "Max M =",
-                                value=3,
-                                min=1,
-                                step=1,
-                                update_on="blur",
-                                width="4em",
-                            ),
-                            class_="hill-inline-box",
-                        ),
-                        ui.input_checkbox_group(
-                            "hill_ms",
-                            "m:",
-                            ["3", "2", "1", "0", "-1", "-2", "-3"],
-                            selected=["-1", "0", "1"],
+                            id="hill_params_accordion",
+                            class_="hill-params",
+                            multiple=True,
+                            open=True,
                         ),
                         ui.div(
                             ui.input_numeric(
@@ -375,6 +643,17 @@ def hill_tab_ui():
                                 "hill_helix_revision",
                                 "Helix control revision",
                                 value=0,
+                            ),
+                            # What the csym box beside the sliders sets and shows;
+                            # kept as an input for the bookmark, the candidate rows
+                            # and everything that reads input.hill_csym().
+                            ui.input_numeric(
+                                "hill_csym",
+                                "csym",
+                                value=6,
+                                min=1,
+                                step=1,
+                                update_on="blur",
                             ),
                             hidden=True,  # only for JS communication
                         ),
@@ -497,6 +776,7 @@ def hill_tab_ui():
                             ui.column(
                                 12,
                                 output_widget("hill_main_plots", height="100%"),
+                                ui.tags.script(_BOKEH_SLIDER_EDIT_JS),
                             )
                         ),
                         class_="scrollable-container",
@@ -554,6 +834,17 @@ def hill_tab_server(input, output, session):
     image_display_size = reactive.value(128)
     selected_images = reactive.value([])
     selected_image_labels = reactive.value([])
+
+    # The layer-line figures need to know whether there are images, not which:
+    # depending on the list itself redrew them (about a second) every time the
+    # selection was touched, and again for the diameter that change led to. A
+    # value, unlike a calc, tells its dependents only when it changes.
+    has_images = reactive.value(False)
+
+    @reactive.effect
+    def _track_has_images():
+        has_images.set(len(selected_images()) > 0)
+
     straighten_tab_activated = reactive.value(False)
     markers_straighten = reactive.value(None)
     mask_radius_auto = reactive.value(0.0)
@@ -567,11 +858,15 @@ def hill_tab_server(input, output, session):
     phase_data = reactive.value(None)
     pd_data = reactive.value(None)
     _last_transform_key = [None]
+    _layerline_frame_key = [None]
     _last_ps_pd_selection = [None]
     _previous_input_mode = [None]
     prev_data_from = reactive.value("main")
     avg_ps_pd_df = reactive.value({})
     avg_ps_pd_main_in_df = reactive.value({})
+    # The image (its index in data_all_2d) that the transform controls hold the
+    # values of; None when they hold no image's values (new data, new estimates).
+    _active_orig = [None]
     straightened_filaments_for_avg = reactive.value([])
 
     # Error display state
@@ -589,8 +884,8 @@ def hill_tab_server(input, output, session):
         ColumnDataSource,
         CustomJS,
         Span,
-        Spinner,
         Slider,
+        Spinner,
         LinearColorMapper,
     )
     from bokeh.models.tools import CrosshairTool, HoverTool, PointDrawTool
@@ -719,39 +1014,10 @@ def hill_tab_server(input, output, session):
     fig_ellipses = []
     _init_layer_lines(fig_ellipses, figs_image)
 
-    # ── Bokeh spinners and sliders for helix params ────────────
+    # ── Bokeh sliders for helix params (their numbers are edited in place) ──
     curr_twist = _INIT_TWIST
     curr_rise = _INIT_RISE
     curr_pitch = hill.twist2pitch(curr_twist, curr_rise)
-
-    spinner_twist = Spinner(
-        title="Twist (°)",
-        low=-360.0,
-        high=360.0,
-        step=1.0,
-        value=curr_twist,
-        format="0.00",
-        sizing_mode="stretch_width",
-        syncable=False,
-    )
-    spinner_pitch = Spinner(
-        title="Pitch (Å)",
-        low=1.0,
-        step=1.0,
-        value=curr_pitch,
-        format="0.00",
-        sizing_mode="stretch_width",
-        syncable=False,
-    )
-    spinner_rise = Spinner(
-        title="Rise (Å)",
-        low=1.0,
-        step=1.0,
-        value=curr_rise,
-        format="0.00",
-        sizing_mode="stretch_width",
-        syncable=False,
-    )
 
     slider_twist = Slider(
         start=-180.0,
@@ -780,6 +1046,27 @@ def hill_tab_server(input, output, session):
         sizing_mode="stretch_width",
         syncable=False,
     )
+    for slider in (slider_twist, slider_pitch, slider_rise):
+        slider.css_classes = _editable_slider_classes(slider)
+
+    # csym, which is part of indexing too, is set beside the sliders it goes with,
+    # at their left.
+    spinner_csym = Spinner(
+        title="Csym",
+        low=1,
+        step=1,
+        mode="int",
+        value=BOOKMARK_DEFAULTS["csym"][1],
+        width=64,
+        syncable=False,
+    )
+    csym_controls = ColumnDataSource(
+        data=dict(value=[spinner_csym.value], revision=[0])
+    )
+    csym_controls.syncable = False
+    csym_callbacks = _setup_csym_control_js(
+        spinner_csym, csym_controls, session.ns("hill_csym")
+    )
 
     # Send complete parameter sets through the module's actual input IDs.
     helix_input_ids = {
@@ -807,9 +1094,6 @@ def hill_tab_server(input, output, session):
         slider_twist,
         slider_pitch,
         slider_rise,
-        spinner_twist,
-        spinner_pitch,
-        spinner_rise,
         fig_ellipses,
         helix_input_ids,
         helix_controls,
@@ -822,9 +1106,12 @@ def hill_tab_server(input, output, session):
     figs_grid = layout(
         children=[
             row(
-                spinner_twist, spinner_pitch, spinner_rise, sizing_mode="stretch_width"
+                spinner_csym,
+                slider_twist,
+                slider_pitch,
+                slider_rise,
+                sizing_mode="stretch_width",
             ),
-            row(slider_twist, slider_pitch, slider_rise, sizing_mode="stretch_width"),
             figs_row,
         ],
         sizing_mode="stretch_width",
@@ -885,17 +1172,6 @@ def hill_tab_server(input, output, session):
     )
 
     # ── Sidebar image display figures ──────────────────────────
-    fig_selected_image, source_selected_image = hill.create_image_figure(
-        init_img,
-        _INIT_APIX,
-        _INIT_APIX,
-        title=f"Selected Image ({_INIT_NX}x{_INIT_NY})",
-        title_location="below",
-        show_axis=False,
-        show_toolbar=False,
-        crosshair_color="white",
-    )
-
     fig_transformed_img, source_transformed_img = hill.create_image_figure(
         init_img,
         _INIT_APIX,
@@ -1025,7 +1301,7 @@ def hill_tab_server(input, output, session):
             ph = session.clientdata.output_height("hill_main_plots")
         if pw is None or pw <= 0 or ph is None or ph <= 0:
             return
-        # Subtract space for spinner row (~40px), slider row (~40px),
+        # Subtract space for the slider row (~40px),
         # plot title (~30px), toolbar (~60px), and margins (~20px).
         available_width = max(int(pw) - 60, 1)
         available_height = max(int(ph) - 100, 1)
@@ -1059,7 +1335,8 @@ def hill_tab_server(input, output, session):
     def _update_m_choices():
         prev = input.hill_ms()
         ms = [str(m) for m in range(input.hill_m_max(), -input.hill_m_max() - 1, -1)]
-        ui.update_checkbox_group("hill_ms", choices=ms, selected=prev)
+        # inline, as it was drawn: an update that leaves it out stacks them again
+        ui.update_checkbox_group("hill_ms", choices=ms, selected=prev, inline=True)
 
     @reactive.effect(priority=10)
     @reactive.event(
@@ -1082,10 +1359,59 @@ def hill_tab_server(input, output, session):
             revision=[int(revision)],
         )
 
+    def _model_follows_inputs():
+        """Bring the Bokeh model up to date with the inputs.
+
+        What a bookmark restored (twist, rise, csym) can arrive after the model
+        was built and before the browser has the widget, and a patch sent then
+        is lost; the widget is built from the model as it stands, so the model
+        must be right.
+
+        Returns
+        -------
+        bool
+            Whether the model had to change, that is, whether the widget must be
+            built again.
+        """
+        try:
+            twist, rise, csym = input.hill_twist(), input.hill_rise(), _csym()
+        except SilentException:
+            return False  # the inputs are not there yet: nothing to follow
+        if not (np.isfinite(twist) and np.isfinite(rise) and rise > 0):
+            return False
+        pitch = hill.twist2pitch(twist, rise)
+        changed = _set_helix_sliders(
+            slider_twist, slider_pitch, slider_rise, twist, pitch, rise
+        )
+        if spinner_csym.value != csym:
+            spinner_csym.value = csym
+            changed = True
+        return changed
+
+    revision_of_csym = [0]
+
+    @reactive.effect
+    @reactive.event(input.hill_csym)
+    def _sync_csym_spinner():
+        """Show a csym that was set elsewhere (a bookmark, a candidate row)."""
+        csym = _csym()
+        if input.hill_csym() != csym:
+            # not a whole number (a bookmark's csym=2.5, a decimal typed): the
+            # input is made one, so that everything that reads it agrees
+            ui.update_numeric("hill_csym", value=csym)
+        # Two ways, for two cases. The model's own value is what a box that is
+        # still being drawn starts from (the browser's callbacks run only on a
+        # change after that, which is how a bookmark's csym was missed); it is
+        # not changed by what is typed in the browser, so setting it again to the
+        # value it has says nothing, and the revision of the channel does.
+        spinner_csym.value = csym
+        revision_of_csym[0] += 1
+        csym_controls.data = dict(value=[csym], revision=[revision_of_csym[0]])
+
     # ── Layer line / display param changes ──────────────────────
     @reactive.effect
     @reactive.event(
-        selected_images,
+        has_images,
         input.hill_input_type,
         input.hill_m_max,
         input.hill_diameter,
@@ -1103,6 +1429,10 @@ def hill_tab_server(input, output, session):
         input.hill_rise,
     )
     def _update_layerline_figures():
+        with _held(figs[0].document):
+            _redraw_layerline_figures()
+
+    def _redraw_layerline_figures():
         # Frame sizing is managed by _resize_main_plots — don't override it here.
         for e in fig_ellipses:
             for f in figs_image:
@@ -1110,13 +1440,13 @@ def hill_tab_server(input, output, session):
                     f.renderers.remove(e)
         fig_ellipses.clear()
         _update_slider_renderers(slider_callbacks, fig_ellipses)
-        if not len(selected_images()):
+        if not has_images():
             return
         if input.hill_LL():
             curr_m_groups = hill.compute_layer_line_positions(
                 twist=input.hill_twist(),
                 rise=input.hill_rise(),
-                csym=input.hill_csym(),
+                csym=_csym(),
                 radius=input.hill_diameter() / 2,
                 tilt=input.hill_out_of_plane_tilt(),
                 cutoff_res=input.hill_cutoff_res_y(),
@@ -1166,47 +1496,54 @@ def hill_tab_server(input, output, session):
                         gl.data_source.syncable = False
                         fig_ellipses.append(gl)
 
-        # Update ranges
+        # The frame and the Bessel image depend on the sampling, the filament
+        # and the tilt, not on twist, rise or the layer lines drawn. Sending them
+        # again is most of the cost of a redraw (two 1 MB arrays to the browser),
+        # so it is done only when one of those changed.
         ny = input.hill_pny()
         nx = input.hill_pnx()
-        dsy = 1.0 / (ny // 2 * input.hill_cutoff_res_y())
-        dsx = 1.0 / (nx // 2 * input.hill_cutoff_res_x())
-        x_range = (-(nx // 2) * dsx, (nx // 2) * dsx)
-        if input.hill_fft_top_only():
-            y_range = (-(ny // 2 * 0.01) * dsy, (ny // 2 - 0.5) * dsy)
-        else:
-            y_range = (-(ny // 2 + 0.5) * dsy, (ny // 2 - 0.5) * dsy)
-
-        bessel = hill.bessel_n_image(
+        frame_key = (
             ny,
             nx,
             input.hill_cutoff_res_x(),
             input.hill_cutoff_res_y(),
-            input.hill_diameter() / 2,
+            input.hill_diameter(),
             input.hill_out_of_plane_tilt(),
+            input.hill_fft_top_only(),
         )
+        if frame_key != _layerline_frame_key[0]:
+            _layerline_frame_key[0] = frame_key
+            dsy = 1.0 / (ny // 2 * input.hill_cutoff_res_y())
+            dsx = 1.0 / (nx // 2 * input.hill_cutoff_res_x())
+            x_range = (-(nx // 2) * dsx, (nx // 2) * dsx)
+            if input.hill_fft_top_only():
+                y_range = (-(ny // 2 * 0.01) * dsy, (ny // 2 - 0.5) * dsy)
+            else:
+                y_range = (-(ny // 2 + 0.5) * dsy, (ny // 2 - 0.5) * dsy)
 
-        for f in figs:
-            f.y_range.update(start=y_range[0], end=y_range[1])
-        for f in figs_image:
-            f.x_range.update(start=x_range[0], end=x_range[1])
+            bessel = hill.bessel_n_image(
+                ny,
+                nx,
+                input.hill_cutoff_res_x(),
+                input.hill_cutoff_res_y(),
+                input.hill_diameter() / 2,
+                input.hill_out_of_plane_tilt(),
+            )
 
-        data_source_ps.data = {
-            **data_source_ps.data,
-            "x": [-nx // 2 * dsx],
-            "y": [-ny // 2 * dsy],
-            "dw": [nx * dsx],
-            "dh": [ny * dsy],
-            "bessel": [bessel],
-        }
-        data_source_pd.data = {
-            **data_source_pd.data,
-            "x": [-nx // 2 * dsx],
-            "y": [-ny // 2 * dsy],
-            "dw": [nx * dsx],
-            "dh": [ny * dsy],
-            "bessel": [bessel],
-        }
+            for f in figs:
+                f.y_range.update(start=y_range[0], end=y_range[1])
+            for f in figs_image:
+                f.x_range.update(start=x_range[0], end=x_range[1])
+
+            for source in (data_source_ps, data_source_pd):
+                source.data = {
+                    **source.data,
+                    "x": [-nx // 2 * dsx],
+                    "y": [-ny // 2 * dsy],
+                    "dw": [nx * dsx],
+                    "dh": [ny * dsy],
+                    "bessel": [bessel],
+                }
 
         _update_slider_renderers(slider_callbacks, fig_ellipses)
 
@@ -1384,8 +1721,9 @@ def hill_tab_server(input, output, session):
                             "hill_generate_2d_projection", "Generate 2D projection"
                         ),
                         value="hill_2d_proj",
-                        open=False,
-                    )
+                    ),
+                    # it holds the controls a 3D map needs, so it is open
+                    open=True,
                 ),
             ]
         return None
@@ -1407,9 +1745,7 @@ def hill_tab_server(input, output, session):
             ui.input_numeric(
                 "hill_rise_ahs", "Rise (Å):", value=input.hill_rise(), min=0.0, step=1.0
             ),
-            ui.input_numeric(
-                "hill_csym_ahs", "Csym:", value=input.hill_csym(), min=1, step=1
-            ),
+            ui.input_numeric("hill_csym_ahs", "Csym:", value=_csym(), min=1, step=1),
             ui.input_numeric(
                 "hill_apix_map",
                 "Current map pixel size (Å):",
@@ -1520,6 +1856,38 @@ def hill_tab_server(input, output, session):
                 allow_multiple_selection=True,
             )
         return ui.div("No images available")
+
+    @render.text
+    def hill_image_params_title():
+        """The title of the Image Parameters panel: whose parameters they are."""
+        labels = selected_image_labels()
+        if not len(labels):
+            return "Image Parameters"
+        label = str(labels[min(_active_position(), len(labels) - 1)])
+        if label.isdigit():
+            return f"Image Parameters (image {label})"
+        return f"Image Parameters ({label})"  # "Simulation", "Projection"
+
+    @output
+    @render.ui
+    def hill_active_image_gallery():
+        """The selected images; the one clicked here is the one the transform
+        controls below act on."""
+        return helicon.shiny.image_gallery(
+            id=session.ns("hill_active_image"),
+            label=reactive.value(
+                "Selected images (click one to set its transformation):"
+                if len(selected_images()) > 1
+                else "Selected image:"
+            ),
+            images=selected_images,
+            image_labels=selected_image_labels,
+            image_size=image_display_size,
+            justification="left",
+            enable_selection=True,
+            allow_multiple_selection=False,
+            initial_selected_indices=reactive.value([0]),
+        )
 
     # ── Image loading ────────────────────────────────────────────
 
@@ -1679,37 +2047,29 @@ def hill_tab_server(input, output, session):
             img0 = included_images[0].astype(np.float64)
             if input.hill_input_type() == "Image":
                 try:
-                    angle_auto, dy_auto, diameter_auto = (
-                        helicon.estimate_helix_rotation_center_diameter(
-                            img0, estimate_center=True, estimate_rotation=True
-                        )
+                    auto = hill.auto_upright_transform(
+                        img0, input.hill_apix(), input.hill_auto_method()
                     )
-                    angle = round(angle_auto + 90, 2)
-                    dx_val = 0.0
-                    dy_val = round(dy_auto * input.hill_apix(), 2)
-                    mr = round(diameter_auto / 2 * input.hill_apix(), 2)
+                    angle, dx_val, dy_val = auto["angle"], auto["dx"], auto["dy"]
+                    mr = auto["mask_radius"]
                     ml = 90.0
                     ui.update_slider("hill_angle", value=angle)
                     ui.update_slider("hill_dx", value=dx_val)
                     ui.update_slider("hill_dy", value=dy_val)
                     ui.update_slider("hill_mask_radius", value=mr)
                     ui.update_slider("hill_mask_len", value=ml)
-                    if angle or dx_val or dy_val or input.hill_negate():
-                        img0 = hill.transform_2d_image(
-                            img0,
-                            angle,
-                            dx_val,
-                            dy_val,
-                            input.hill_negate(),
-                            input.hill_apix(),
-                        )
-                    if mr > 0 and ml > 0 and ml <= 100:
-                        img0 = hill.mask_2d_filament(
-                            img0,
-                            mr,
-                            input.hill_apix(),
-                            ml / 100.0,
-                        )
+                    img0 = _transformed(
+                        img0,
+                        dict(
+                            apix=input.hill_apix(),
+                            negate=input.hill_negate(),
+                            angle=angle,
+                            dx=dx_val,
+                            dy=dy_val,
+                            mask_radius=mr,
+                            mask_len=ml,
+                        ),
+                    )
                 except Exception:
                     pass
             data_2d_transformed.set(img0)
@@ -1717,17 +2077,147 @@ def hill_tab_server(input, output, session):
             selected_images.set([])
             selected_image_labels.set([])
 
+    @reactive.effect(priority=10)
+    @reactive.event(input.hill_auto_method, ignore_init=True)
+    def _forget_estimates_of_the_other_method():
+        _active_orig[0] = None
+        avg_ps_pd_main_in_df.set({})
+
+    def _csym():
+        """The csym, always a whole number (see :func:`_as_csym`).
+
+        Returns
+        -------
+        int
+        """
+        value = input.hill_csym()
+        req(value is not None)
+        req(np.isfinite(value))  # an emptied box
+        return _as_csym(value)
+
+    def _selected_indices():
+        """The images selected in the gallery, as indices into ``data_all_2d``.
+
+        The gallery's selection can name images that a newly loaded, shorter
+        stack no longer has, until the gallery is drawn again; those are left
+        out, as they are from ``selected_images``, so that the two line up.
+
+        Returns
+        -------
+        list of int
+        """
+        n = len(data_all_2d())
+        return [i for i in (input.hill_select_image() or []) if i < n]
+
+    def _active_position():
+        """Position, among the selected images, of the one clicked in the
+        "Selected image(s)" gallery (the first until one is clicked).
+
+        Returns
+        -------
+        int
+            An index into ``selected_images()``.
+        """
+        try:
+            sel = input.hill_active_image()
+        except SilentException:
+            sel = None
+        n = len(selected_images())
+        if sel and 0 <= int(sel[0]) < n:
+            return int(sel[0])
+        return 0
+
+    def _current_params():
+        """What the transform controls hold, in the form saved per image.
+
+        Returns
+        -------
+        dict
+            ``apix``, ``negate``, ``angle``, ``dx``, ``dy``, ``mask_radius`` and
+            ``mask_len``, as :func:`_transformed` takes them.
+        """
+        return {
+            "apix": input.hill_apix(),
+            "negate": input.hill_negate(),
+            "angle": input.hill_angle(),
+            "dx": input.hill_dx(),
+            "dy": input.hill_dy(),
+            "mask_radius": input.hill_mask_radius(),
+            "mask_len": input.hill_mask_len(),
+        }
+
+    def _transformed(img, params):
+        """``img`` inverted, rotated, shifted and masked as ``params`` says.
+
+        Parameters
+        ----------
+        img : numpy.ndarray
+            The 2D image.
+        params : dict
+            ``apix``, and any of ``angle``, ``dx``, ``dy``, ``negate``,
+            ``mask_radius`` and ``mask_len`` (percent); what is missing is 0, so
+            that nothing is done for it.
+
+        Returns
+        -------
+        numpy.ndarray
+            The transformed image, as float64.
+        """
+        apix = params["apix"]
+        angle, dx, dy = params.get("angle", 0), params.get("dx", 0), params.get("dy", 0)
+        negate = params.get("negate", False)
+        mask_radius, mask_len = params.get("mask_radius", 0), params.get("mask_len", 0)
+        temp = img.astype(np.float64)
+        if angle or dx or dy or negate:
+            temp = hill.transform_2d_image(temp, angle, dx, dy, negate, apix)
+        if mask_radius > 0 and 0 < mask_len <= 100:
+            temp = hill.mask_2d_filament(temp, mask_radius, apix, mask_len / 100.0)
+        return temp
+
+    def _ps_scaling():
+        """How the spectra are scaled for display, as the keywords of the
+        spectrum functions: the log and Fourier filters, or the shell median.
+
+        Returns
+        -------
+        dict
+            ``shell_median``, ``log``, ``low_pass_fraction`` and
+            ``high_pass_fraction``, for :func:`hill_compute.compute_power_spectra`
+            and :func:`hill_compute.resize_rescale_power_spectra`.
+        """
+        return dict(
+            shell_median=input.hill_ps_scaling() == "shell",
+            log=input.hill_log_amp(),
+            low_pass_fraction=input.hill_lp_fraction() / 100.0,
+            high_pass_fraction=input.hill_hp_fraction() / 100.0,
+        )
+
+    def _stash_active_params():
+        """Keep what was set for the image the controls are showing, so that
+        clicking another image and coming back finds it as it was left."""
+        orig = _active_orig[0]
+        if orig is None or input.hill_is_3d() or input.hill_input_type() != "Image":
+            return
+        if not input.hill_apix() > 0:
+            return
+        avg_ps_pd_main_in_df.set({**avg_ps_pd_main_in_df(), orig: _current_params()})
+
     @reactive.effect
-    @reactive.event(input.hill_select_image)
+    @reactive.event(input.hill_select_image, input.hill_auto_method)
     def _update_selected_images():
         sel = input.hill_select_image()
         if sel is None or len(sel) == 0:
+            _active_orig[0] = None
             selected_images.set([])
             selected_image_labels.set([])
             return
         indices = list(sel)
         all_imgs = data_all_2d()
         all_labels = data_all_2d_labels()
+        # The first selected image is the one the gallery shows as active, and
+        # the one whose parameters are loaded below.
+        _stash_active_params()
+        _active_orig[0] = indices[0] if indices[0] < len(all_imgs) else None
         chosen = [all_imgs[i] for i in indices if i < len(all_imgs)]
         chosen_labels = [all_labels[i] for i in indices if i < len(all_labels)]
         selected_images.set(chosen)
@@ -1751,17 +2241,15 @@ def hill_tab_server(input, output, session):
                     sel_idx = valid_indices[0]
                     if input.hill_input_type() == "Image":
                         if sel_idx not in avg_ps_pd_main_in_df():
-                            angle_auto, dy_auto, diameter_auto = (
-                                helicon.estimate_helix_rotation_center_diameter(
-                                    chosen[0],
-                                    estimate_center=True,
-                                    estimate_rotation=True,
-                                )
+                            auto = hill.auto_upright_transform(
+                                chosen[0], input.hill_apix(), input.hill_auto_method()
                             )
-                            angle = round(angle_auto + 90, 2)
-                            dx_val = 0.0
-                            dy_val = round(dy_auto * input.hill_apix(), 2)
-                            mr = round(diameter_auto / 2 * input.hill_apix(), 2)
+                            angle, dx_val, dy_val = (
+                                auto["angle"],
+                                auto["dx"],
+                                auto["dy"],
+                            )
+                            mr = auto["mask_radius"]
                             ml = 90.0
                             ui.update_slider("hill_angle", value=angle)
 
@@ -1791,24 +2279,20 @@ def hill_tab_server(input, output, session):
                             ui.update_slider("hill_mask_len", value=ml)
 
                         # apply transform with local params
-                        temp = chosen[0].astype(np.float64)
-                        if angle or dx_val or dy_val or input.hill_negate():
-                            temp = hill.transform_2d_image(
-                                temp,
-                                angle,
-                                dx_val,
-                                dy_val,
-                                input.hill_negate(),
-                                input.hill_apix(),
+                        data_2d_transformed.set(
+                            _transformed(
+                                chosen[0],
+                                dict(
+                                    apix=input.hill_apix(),
+                                    negate=input.hill_negate(),
+                                    angle=angle,
+                                    dx=dx_val,
+                                    dy=dy_val,
+                                    mask_radius=mr,
+                                    mask_len=ml,
+                                ),
                             )
-                        if mr > 0 and ml > 0 and ml <= 100:
-                            temp = hill.mask_2d_filament(
-                                temp,
-                                mr,
-                                input.hill_apix(),
-                                ml / 100.0,
-                            )
-                        data_2d_transformed.set(temp)
+                        )
 
             # save transformation parameters for all selected images
             valid_indices = [i for i in indices if i < len(all_imgs)]
@@ -1817,11 +2301,8 @@ def hill_tab_server(input, output, session):
                 if not input.hill_inhibit_update():
                     if sel_idx not in avg_ps_pd_main_in_df():
                         if i > 0:
-                            img = all_imgs[sel_idx]
-                            angle_auto, dy_auto, diameter_auto = (
-                                helicon.estimate_helix_rotation_center_diameter(
-                                    img, estimate_center=True, estimate_rotation=True
-                                )
+                            auto = hill.auto_upright_transform(
+                                all_imgs[sel_idx], apix_val, input.hill_auto_method()
                             )
                         else:
                             pass  # already estimated above
@@ -1829,10 +2310,10 @@ def hill_tab_server(input, output, session):
                         d[sel_idx] = {
                             "apix": apix_val,
                             "negate": input.hill_negate(),
-                            "angle": round(angle_auto + 90, 2),
-                            "dx": 0.0,
-                            "dy": round(dy_auto * apix_val, 2),
-                            "mask_radius": round(diameter_auto / 2 * apix_val, 2),
+                            "angle": auto["angle"],
+                            "dx": auto["dx"],
+                            "dy": auto["dy"],
+                            "mask_radius": auto["mask_radius"],
                             "mask_len": 90.0,
                         }
                         avg_ps_pd_main_in_df.set(d)
@@ -1841,36 +2322,62 @@ def hill_tab_server(input, output, session):
     @reactive.effect
     @reactive.event(data_all_2d)
     def _clear_avg_ps_pd_main_in_df():
+        _active_orig[0] = None
         avg_ps_pd_main_in_df.set({})
 
-    # ── Multi-selection: restore saved params on dropdown change ─
+    # ── Multi-selection: the controls follow the image clicked in the gallery ─
+    def _show_transformed(img, params):
+        """Show ``img`` transformed as ``params`` says, below the controls.
+
+        Parameters
+        ----------
+        img : numpy.ndarray
+            The 2D image.
+        params : dict
+            As for :func:`_transformed`.
+        """
+        temp = _transformed(img, params)
+        hill.update_image_figure(
+            fig_transformed_img,
+            source_transformed_img,
+            temp,
+            params["apix"],
+            title="Transformed image",
+        )
+        # data_2d_transformed stays with the first image while several are
+        # selected (setting it would also re-estimate the diameter), so the
+        # auto-correlation of the image shown here is drawn from here.
+        if input.hill_input_type() == "Image":
+            _set_acf(temp)
+
     @reactive.effect
-    @reactive.event(input.hill_curr_img_in_selected_list)
+    @reactive.event(input.hill_active_image)
     def _update_current_image_from_multiselect():
         req(len(selected_images()) > 1)
         req(input.hill_apix() > 0)
-        valid = list(input.hill_select_image())
-        curr_idx = int(input.hill_curr_img_in_selected_list())
-        if curr_idx >= len(valid):
+        valid = _selected_indices()
+        pos = _active_position()
+        if pos >= len(valid):
             return
-        record = avg_ps_pd_main_in_df().get(valid[curr_idx])
+        new = valid[pos]
+        if new == _active_orig[0]:
+            return  # the controls already hold this image's parameters
+        _stash_active_params()
+        _active_orig[0] = new
+        record = avg_ps_pd_main_in_df().get(new)
         if record is None:
             return
+        record = {**record, "negate": bool(record.get("negate"))}
         ui.update_numeric("hill_apix", value=record["apix"])
         ui.update_slider("hill_angle", value=record["angle"])
         ui.update_slider("hill_dx", value=record["dx"])
         ui.update_slider("hill_dy", value=record["dy"])
         ui.update_slider("hill_mask_radius", value=record["mask_radius"])
         ui.update_slider("hill_mask_len", value=record["mask_len"])
-        ui.update_checkbox("hill_negate", value=bool(record.get("negate")))
-        img = data_all_2d()[valid[curr_idx]]
-        hill.update_image_figure(
-            fig_selected_image,
-            source_selected_image,
-            img,
-            input.hill_apix(),
-            title="Original image",
-        )
+        ui.update_checkbox("hill_negate", value=record["negate"])
+        # Shown now rather than when the controls echo the new values, which
+        # they do not when the two images happen to have the same ones.
+        _show_transformed(data_all_2d()[new], record)
 
     # ── Multi-selection: update transformed display on param change ─
     @reactive.effect
@@ -1886,81 +2393,26 @@ def hill_tab_server(input, output, session):
     def _update_transformed_from_multiselect():
         req(len(selected_images()) > 1)
         req(input.hill_apix() > 0)
-        curr_idx = int(input.hill_curr_img_in_selected_list())
-        valid = list(input.hill_select_image())
+        curr_idx = _active_position()
+        valid = _selected_indices()
         if curr_idx >= len(valid):
             return
-        all_imgs = data_all_2d()
-        temp = all_imgs[valid[curr_idx]].astype(np.float64)
-        if (
-            input.hill_angle()
-            or input.hill_dx()
-            or input.hill_dy()
-            or input.hill_negate()
-        ):
-            temp = hill.transform_2d_image(
-                temp,
-                input.hill_angle(),
-                input.hill_dx(),
-                input.hill_dy(),
-                input.hill_negate(),
-                input.hill_apix(),
-            )
-        if (
-            input.hill_mask_radius() > 0
-            and input.hill_mask_len() > 0
-            and input.hill_mask_len() <= 100
-        ):
-            temp = hill.mask_2d_filament(
-                temp,
-                input.hill_mask_radius(),
-                input.hill_apix(),
-                input.hill_mask_len() / 100.0,
-            )
-        hill.update_image_figure(
-            fig_transformed_img,
-            source_transformed_img,
-            temp,
-            input.hill_apix(),
-            title="Transformed image",
-        )
+        _show_transformed(data_all_2d()[valid[curr_idx]], _current_params())
 
     # ── Average PS & PD from selected images ─────────────────────
     @reactive.effect
     @reactive.event(input.hill_run_get_average_power_spectra)
     def _average_ps_pd_from_multiselect():
         req(len(selected_images()) > 1)
-        valid = list(input.hill_select_image())
+        _stash_active_params()  # the image being edited has not been left yet
+        valid = _selected_indices()
         all_imgs = data_all_2d()
         avg_ps = np.zeros((input.hill_pny(), input.hill_pnx()))
         avg_pd = np.zeros((input.hill_pny(), input.hill_pnx()))
         for i, sel_idx in enumerate(valid):
             img = all_imgs[sel_idx]
             record = avg_ps_pd_main_in_df().get(sel_idx, {})
-            temp = img.astype(np.float64)
-            if (
-                record.get("angle")
-                or record.get("dx")
-                or record.get("dy")
-                or record.get("negate")
-            ):
-                temp = hill.transform_2d_image(
-                    temp,
-                    record.get("angle", 0),
-                    record.get("dx", 0),
-                    record.get("dy", 0),
-                    record.get("negate", False),
-                    record.get("apix", input.hill_apix()),
-                )
-            mr = record.get("mask_radius", 0)
-            ml = record.get("mask_len", 0)
-            if mr > 0 and ml > 0 and ml <= 100:
-                temp = hill.mask_2d_filament(
-                    temp,
-                    mr,
-                    record.get("apix", input.hill_apix()),
-                    ml / 100.0,
-                )
+            temp = _transformed(img, {"apix": input.hill_apix(), **record})
             itype = input.hill_input_type()
             if itype == "Image":
                 pwr, phase = hill.compute_power_spectra(
@@ -1999,9 +2451,7 @@ def hill_tab_server(input, output, session):
                 nyquist_res=input.hill_apix() * 2,
                 cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
                 output_size=(input.hill_pny(), input.hill_pnx()),
-                log=input.hill_log_amp(),
-                low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                high_pass_fraction=input.hill_hp_fraction() / 100.0,
+                **_ps_scaling(),
                 norm=1,
             )
         )
@@ -2018,107 +2468,6 @@ def hill_tab_server(input, output, session):
             )
         )
         prev_data_from.set("avg_ps_pd")
-
-    # ── Multi-selection: use current transformed image for PS/PD ─
-    @reactive.effect
-    @reactive.event(input.hill_use_curr_transformed)
-    def _use_curr_transformed_from_multiselect():
-        req(prev_data_from() == "main")
-        req(len(selected_images()) > 1)
-        req(input.hill_apix() > 0)
-        valid = list(input.hill_select_image())
-        curr_idx = int(input.hill_curr_img_in_selected_list())
-        if curr_idx >= len(valid):
-            return
-        all_imgs = data_all_2d()
-        temp = all_imgs[valid[curr_idx]].astype(np.float64)
-        if (
-            input.hill_angle()
-            or input.hill_dx()
-            or input.hill_dy()
-            or input.hill_negate()
-        ):
-            temp = hill.transform_2d_image(
-                temp,
-                input.hill_angle(),
-                input.hill_dx(),
-                input.hill_dy(),
-                input.hill_negate(),
-                input.hill_apix(),
-            )
-        if (
-            input.hill_mask_radius() > 0
-            and input.hill_mask_len() > 0
-            and input.hill_mask_len() <= 100
-        ):
-            temp = hill.mask_2d_filament(
-                temp,
-                input.hill_mask_radius(),
-                input.hill_apix(),
-                input.hill_mask_len() / 100.0,
-            )
-        itype = input.hill_input_type()
-        if itype == "Image":
-            pwr, phase = hill.compute_power_spectra(
-                temp,
-                apix=input.hill_apix(),
-                cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
-                output_size=(input.hill_pny(), input.hill_pnx()),
-                log=input.hill_log_amp(),
-                low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                high_pass_fraction=input.hill_hp_fraction() / 100.0,
-            )
-            phase_data.set(phase)
-            ps_data.set(pwr)
-            pd_data.set(hill.compute_phase_difference_across_meridian(phase))
-        elif itype == "PS":
-            ps_data.set(
-                hill.resize_rescale_power_spectra(
-                    temp,
-                    nyquist_res=input.hill_apix() * 2,
-                    cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
-                    output_size=(input.hill_pny(), input.hill_pnx()),
-                    log=input.hill_log_amp(),
-                    low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                    high_pass_fraction=input.hill_hp_fraction() / 100.0,
-                    norm=1,
-                )
-            )
-        elif itype == "PD":
-            pd_data.set(
-                hill.resize_rescale_power_spectra(
-                    temp,
-                    nyquist_res=input.hill_apix() * 2,
-                    cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
-                    output_size=(input.hill_pny(), input.hill_pnx()),
-                    log=0,
-                    low_pass_fraction=0,
-                    high_pass_fraction=0,
-                    norm=0,
-                )
-            )
-
-    # ── Multi-selection: save current params to df ───────────────
-    @reactive.effect
-    @reactive.event(input.hill_update_transformation_params)
-    def _save_curr_params_to_df():
-        req(len(selected_images()) > 1)
-        valid = list(input.hill_select_image())
-        curr_idx = int(input.hill_curr_img_in_selected_list())
-        if curr_idx >= len(valid):
-            return
-        sel_idx = valid[curr_idx]
-        d = avg_ps_pd_main_in_df()
-        d[sel_idx] = {
-            "apix": input.hill_apix(),
-            "negate": input.hill_negate(),
-            "angle": input.hill_angle(),
-            "dx": input.hill_dx(),
-            "dy": input.hill_dy(),
-            "mask_radius": input.hill_mask_radius(),
-            "mask_len": input.hill_mask_len(),
-        }
-        avg_ps_pd_main_in_df.set(d)
 
     # ── Straightened-filament pooled averaging ───────────────────
     @reactive.effect
@@ -2172,9 +2521,7 @@ def hill_tab_server(input, output, session):
                 nyquist_res=input.hill_apix() * 2,
                 cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
                 output_size=(input.hill_pny(), input.hill_pnx()),
-                log=input.hill_log_amp(),
-                low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                high_pass_fraction=input.hill_hp_fraction() / 100.0,
+                **_ps_scaling(),
                 norm=1,
             )
         )
@@ -2193,27 +2540,42 @@ def hill_tab_server(input, output, session):
         prev_data_from.set("avg_ps_pd")
 
     # ── 2D transformation UI ─────────────────────────────────────
-    @output
+    # The Image Parameters panel starts collapsed, and Shiny does not run an output
+    # that is hidden. These two draw the pixel size, the contrast and the
+    # auto-transform that the transform, the spectra and the symmetry search all
+    # read: not drawn, hill_apix() has no value and they silently do nothing.
+    @output(suspend_when_hidden=False)
     @render.ui
-    @reactive.event(selected_image_labels)
-    def hill_select_from_multiselect_ui():
-        req(len(selected_images()) > 1)
-        return ui.input_select(
-            "hill_curr_img_in_selected_list",
-            "Transformation for:",
-            choices={
-                str(k): selected_image_labels()[k]
-                for k in range(len(selected_images()))
-            },
-        )
+    def hill_img_flags_ui():
+        """The contrast and auto-transform controls, beside "Input is:"."""
+        # Redrawn with the controls below, as the contrast box always was, so
+        # that an image of another size starts not inverted.
+        nx_curr_img()
+        ny_curr_img()
+        if input.hill_input_type() != "Image":
+            return None
+        return [
+            ui.input_checkbox(
+                "hill_negate", "Invert image contrast", value=False, width="auto"
+            ),
+            ui.tooltip(
+                ui.input_action_button(
+                    "hill_auto_transform",
+                    "Auto-transform",
+                    class_="btn-sm btn-primary",
+                ),
+                "Estimate the rotation, shift and mask of this image again "
+                "(by the method chosen under Parameters) and set the controls "
+                "to them.",
+            ),
+        ]
 
-    @output
+    @output(suspend_when_hidden=False)
     @render.ui
     def hill_img_2d_uis():
         itype = input.hill_input_type()
         if itype == "Image":
             return [
-                ui.input_checkbox("hill_negate", "Invert image contrast", value=False),
                 ui.layout_columns(
                     ui.input_numeric(
                         "hill_apix",
@@ -2312,17 +2674,30 @@ def hill_tab_server(input, output, session):
                 ),
             ]
 
-    @output
-    @render.ui
-    def hill_img_update_buttons():
-        req(len(selected_images()) > 1)
-        return ui.layout_columns(
-            ui.input_action_button("hill_use_curr_transformed", "Use Current Image"),
-            ui.input_action_button(
-                "hill_update_transformation_params", "Save Current Params"
-            ),
-            col_widths=6,
-        )
+    @reactive.effect
+    @reactive.event(input.hill_auto_transform)
+    def _auto_transform_current_image():
+        req(input.hill_input_type() == "Image")
+        req(input.hill_apix() > 0)
+        images = selected_images()
+        req(len(images) > 0)
+        try:
+            auto = hill.auto_upright_transform(
+                images[_active_position()], input.hill_apix(), input.hill_auto_method()
+            )
+        except Exception as e:
+            logger.warning("auto-transform failed: %s", e)
+            ui.notification_show(
+                f"Could not estimate the transform of this image: {e}",
+                type="warning",
+                duration=8,
+            )
+            return
+        ui.update_slider("hill_angle", value=auto["angle"])
+        ui.update_slider("hill_dx", value=auto["dx"])
+        ui.update_slider("hill_dy", value=auto["dy"])
+        ui.update_slider("hill_mask_radius", value=auto["mask_radius"])
+        ui.update_slider("hill_mask_len", value=90.0)
 
     # ── 2D transform reactive updates ───────────────────────────
     @reactive.effect(priority=10)
@@ -2366,32 +2741,7 @@ def hill_tab_server(input, output, session):
         req(input.hill_input_type() == "Image")
         req(len(selected_images()) == 1)
         req(input.hill_apix() > 0)
-        temp = selected_images()[0].astype(np.float64)
-        if (
-            input.hill_angle()
-            or input.hill_dx()
-            or input.hill_dy()
-            or input.hill_negate()
-        ):
-            temp = hill.transform_2d_image(
-                temp,
-                input.hill_angle(),
-                input.hill_dx(),
-                input.hill_dy(),
-                input.hill_negate(),
-                input.hill_apix(),
-            )
-        if (
-            input.hill_mask_radius() > 0
-            and input.hill_mask_len() > 0
-            and input.hill_mask_len() <= 100
-        ):
-            temp = hill.mask_2d_filament(
-                temp,
-                input.hill_mask_radius(),
-                input.hill_apix(),
-                input.hill_mask_len() / 100.0,
-            )
+        temp = _transformed(selected_images()[0], _current_params())
         # Skip if param key unchanged (redundant round-trip)
         key = (
             id(selected_images()[0]),
@@ -2415,6 +2765,147 @@ def hill_tab_server(input, output, session):
             title=f"Transformed Image ({nx_curr_img()}x{ny_curr_img()})",
         )
         data_2d_transformed.set(temp)
+
+    # ── Suggest csym, twist and rise from the layer lines ────────
+    symmetry_candidates = reactive.value([])
+    symmetry_message = reactive.value("")
+    symmetry_progress = reactive.value((0, 0))  # steps done, steps in all
+    # Written by the thread the search runs in, which may not touch a reactive
+    # value, and read by _poll_symmetry_progress.
+    _symmetry_steps = {"done": 0, "total": 0}
+
+    @reactive.extended_task
+    async def _symmetry_search(images, apix, radius, cutoff_res):
+        import asyncio
+
+        from ..lib import layerline_index
+
+        def progress(done, total):
+            _symmetry_steps.update(done=done, total=total)
+
+        _symmetry_steps.update(done=0, total=0)
+        # in a thread, so that the page answers; the search spreads itself
+        # over processes
+        return await asyncio.to_thread(
+            layerline_index.index_images,
+            images,
+            apix,
+            radius,
+            cutoff_res,
+            top=8,
+            progress=progress,
+        )
+
+    @reactive.effect
+    def _poll_symmetry_progress():
+        """Follow the search while it runs: the steps it reports, 3 times a second."""
+        if _symmetry_search.status() != "running":
+            symmetry_progress.set((0, 0))
+            return
+        reactive.invalidate_later(0.3)
+        symmetry_progress.set((_symmetry_steps["done"], _symmetry_steps["total"]))
+
+    @render.ui
+    def hill_symmetry_progress():
+        if _symmetry_search.status() != "running":
+            return None
+        return _progress_bar(*symmetry_progress())
+
+    @reactive.effect
+    @reactive.event(input.hill_suggest_symmetry)
+    def _start_symmetry_search():
+        if _symmetry_search.status() == "running":
+            ui.notification_show("A search is running. Wait for it.", duration=5)
+            return
+        if input.hill_is_3d() or input.hill_input_type() != "Image":
+            symmetry_message.set(
+                "The search needs 2D images, not power spectra or maps."
+            )
+            return
+        valid = _selected_indices()
+        if not valid:
+            symmetry_message.set("Select one or more images first.")
+            return
+        apix = input.hill_apix()
+        if len(valid) == 1:
+            # the transform of the image shown is the one in the controls
+            records = [
+                dict(
+                    angle=input.hill_angle(),
+                    dx=input.hill_dx(),
+                    dy=input.hill_dy(),
+                    negate=input.hill_negate(),
+                    apix=apix,
+                )
+            ]
+        else:
+            _stash_active_params()  # the image being edited has not been left yet
+            records = [avg_ps_pd_main_in_df().get(i) for i in valid]
+        images = hill.images_for_indexing(
+            [data_all_2d()[i] for i in valid], records, apix, input.hill_auto_method()
+        )
+        if len({im.shape for im in images}) > 1:
+            symmetry_message.set(
+                "The selected images differ in size; select images of one size."
+            )
+            return
+        radius = input.hill_diameter() / 2
+        cutoff = max(input.hill_cutoff_res_x(), 2.0 * apix)
+        symmetry_candidates.set([])
+        symmetry_message.set(
+            f"Searching {len(images)} image{'s' if len(images) > 1 else ''} "
+            f"(radius {radius:.0f} Å, resolution limit {cutoff:.1f} Å) ..."
+        )
+        _symmetry_search(images, apix, radius, cutoff)
+
+    @reactive.effect
+    def _symmetry_search_finished():
+        status = _symmetry_search.status()
+        if status == "success":
+            found = _symmetry_search.result()
+            symmetry_candidates.set(list(found))
+            symmetry_message.set(
+                "Click a row to use it. The hand of the helix (the sign of the twist) "
+                "cannot be seen in a power spectrum: the twists have the sign of the "
+                "current one. Candidates that put their lines at the same heights "
+                "(the same rise and csym × twist) differ only in where each line "
+                "starts, which depends on the diameter."
+                if found
+                else "No helical symmetry stood out in these images."
+            )
+        elif status == "error":
+            symmetry_message.set(f"The search failed: {_symmetry_search.error()}")
+
+    @render.ui
+    def hill_symmetry_message():
+        text = symmetry_message()
+        req(text)
+        return ui.p(text, style="font-size: 0.85em; margin: 0.4em 0;")
+
+    @render.data_frame
+    def hill_symmetry_candidates():
+        found = symmetry_candidates()
+        req(len(found))
+        with reactive.isolate():
+            sign = -1.0 if (input.hill_twist() or 0) < 0 else 1.0
+        return render.DataGrid(
+            hill.candidates_table(found, sign), selection_mode="row", width="100%"
+        )
+
+    @reactive.effect
+    @reactive.event(hill_symmetry_candidates.cell_selection)
+    def _use_symmetry_candidate():
+        try:
+            rows = list(hill_symmetry_candidates.cell_selection().get("rows", []))
+        except Exception:
+            return
+        found = symmetry_candidates()
+        req(len(rows), len(found))
+        choice = found[int(rows[0])]
+        sign = -1.0 if (input.hill_twist() or 0) < 0 else 1.0
+        ui.update_numeric("hill_csym", value=int(choice.csym))
+        ui.update_numeric("hill_rise", value=round(float(choice.rise), 3))
+        ui.update_numeric("hill_twist", value=round(sign * float(choice.twist), 3))
 
     # ── Auto-detect filament diameter ────────────────────────────
     @reactive.effect
@@ -2442,6 +2933,7 @@ def hill_tab_server(input, output, session):
         input.hill_cutoff_res_x,
         input.hill_pny,
         input.hill_pnx,
+        input.hill_ps_scaling,
         input.hill_log_amp,
         input.hill_lp_fraction,
         input.hill_hp_fraction,
@@ -2458,9 +2950,7 @@ def hill_tab_server(input, output, session):
                 apix=input.hill_apix(),
                 cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
                 output_size=(input.hill_pny(), input.hill_pnx()),
-                log=input.hill_log_amp(),
-                low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                high_pass_fraction=input.hill_hp_fraction() / 100.0,
+                **_ps_scaling(),
             )
             phase_data.set(phase)
             ps_data.set(pwr)
@@ -2472,9 +2962,7 @@ def hill_tab_server(input, output, session):
                     nyquist_res=input.hill_apix() * 2,
                     cutoff_res=(input.hill_cutoff_res_y(), input.hill_cutoff_res_x()),
                     output_size=(input.hill_pny(), input.hill_pnx()),
-                    log=input.hill_log_amp(),
-                    low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                    high_pass_fraction=input.hill_hp_fraction() / 100.0,
+                    **_ps_scaling(),
                     norm=1,
                 )
             )
@@ -2504,17 +2992,15 @@ def hill_tab_server(input, output, session):
         pwr = ps_data()
         req(pwr is not None)
         phase = phase_data()
+        # Only the columns that changed are sent (assigning a new dict sends them
+        # all, the unchanged Bessel image too), and the image as float32: these
+        # arrays are about 4 MB each and every control change sends them.
+        changed = {"image": [np.asarray(pwr, dtype=np.float32)]}
         if phase is not None:
-            data_source_ps.data = {
-                **data_source_ps.data,
-                "image": [np.asarray(pwr)],
-                "phase": [np.fmod(np.rad2deg(phase) + 360, 360).astype(np.float16)],
-            }
-        else:
-            data_source_ps.data = {
-                **data_source_ps.data,
-                "image": [np.asarray(pwr)],
-            }
+            changed["phase"] = [
+                np.fmod(np.rad2deg(phase) + 360, 360).astype(np.float32)
+            ]
+        data_source_ps.data.update(changed)
 
         ny = input.hill_pny()
         dsy = 1.0 / (ny // 2 * input.hill_cutoff_res_y())
@@ -2576,43 +3062,18 @@ def hill_tab_server(input, output, session):
         pd = pd_data()
         req(pd is not None)
         phase = phase_data()
-        data_source_pd.data = {
-            **data_source_pd.data,
-            "image": [np.asarray(pd)],
-            "phase": (
-                [np.fmod(np.rad2deg(phase) + 360, 360).astype(np.float16)]
-                if phase is not None
-                else []
-            ),
-        }
+        data_source_pd.data.update(
+            {
+                "image": [np.asarray(pd, dtype=np.float32)],
+                "phase": (
+                    [np.fmod(np.rad2deg(phase) + 360, 360).astype(np.float32)]
+                    if phase is not None
+                    else []
+                ),
+            }
+        )
 
     # ── Sidebar figure updates ──────────────────────────────────
-    @reactive.effect
-    @reactive.event(selected_images, input.hill_apix)
-    def _update_selected_image_figure():
-        req(len(selected_images()) > 0)
-        curr_img = selected_images()[0]
-        h, w = curr_img.shape
-        dx = input.hill_apix()
-        dy = input.hill_apix()
-        aspect_ratio = w * dx / (h * dy)
-        fig_selected_image.x_range.start = -w // 2 * dx
-        fig_selected_image.x_range.end = (w // 2 - 1) * dx
-        fig_selected_image.y_range.start = (h // 2 - 1) * dy
-        fig_selected_image.y_range.end = -h // 2 * dy
-        fig_selected_image.aspect_ratio = aspect_ratio
-        fig_selected_image.title.text = (
-            f"Selected Image ({nx_curr_img()}x{ny_curr_img()})"
-        )
-        source_selected_image.data = {
-            **source_selected_image.data,
-            "image": [curr_img],
-            "x": [-w // 2 * dx],
-            "y": [-h // 2 * dy],
-            "dw": [w * dx],
-            "dh": [h * dy],
-        }
-
     n_triggers = reactive.value(0)
 
     @reactive.effect
@@ -2645,6 +3106,7 @@ def hill_tab_server(input, output, session):
     @reactive.effect
     @reactive.event(
         selected_images,
+        input.hill_active_image,
         input.hill_apix,
         input.hill_angle,
         input.hill_dx,
@@ -2657,6 +3119,7 @@ def hill_tab_server(input, output, session):
         req(input.hill_input_type() in ("Image",))
         req(len(selected_images()) > 0)
         req(input.hill_apix() != 0)
+        curr_img = selected_images()[_active_position()]
         if (
             input.hill_angle()
             or input.hill_dx()
@@ -2664,7 +3127,7 @@ def hill_tab_server(input, output, session):
             or input.hill_negate()
         ):
             unmasked_data = hill.transform_2d_image(
-                selected_images()[0],
+                curr_img,
                 input.hill_angle(),
                 input.hill_dx(),
                 input.hill_dy(),
@@ -2672,7 +3135,7 @@ def hill_tab_server(input, output, session):
                 input.hill_apix(),
             )
         else:
-            unmasked_data = selected_images()[0]
+            unmasked_data = curr_img
         curr_x = np.arange(-nx_curr_img() // 2, nx_curr_img() // 2) * input.hill_apix()
         curr_ymax = np.max(unmasked_data, axis=0)
         curr_ymean = np.mean(unmasked_data, axis=0)
@@ -2690,17 +3153,16 @@ def hill_tab_server(input, output, session):
         _rp_rmin_span.location = -input.hill_mask_radius()
         _rp_rmax_span.location = input.hill_mask_radius()
 
-    @reactive.effect
-    @reactive.event(data_2d_transformed)
-    def _update_acf_data():
-        req(input.hill_input_type() in ("Image",))
-        req(data_2d_transformed() is not None)
-        ny, _nx = data_2d_transformed().shape
-        curr_acf = hill.auto_correlation(
-            data_2d_transformed(),
-            sqrt=True,
-            high_pass_fraction=0.1,
-        )
+    def _set_acf(img):
+        """Plot the auto-correlation of the transformed image ``img``.
+
+        Parameters
+        ----------
+        img : numpy.ndarray
+            The transformed 2D image.
+        """
+        ny, _nx = img.shape
+        curr_acf = hill.auto_correlation(img, sqrt=True, high_pass_fraction=0.1)
         if curr_acf is None or np.isnan(curr_acf).any():
             return
         fig_acf.y_range.start = ny // 2 * input.hill_apix()
@@ -2711,9 +3173,25 @@ def hill_tab_server(input, output, session):
             "y": np.arange(-ny // 2, ny // 2) * input.hill_apix(),
         }
 
+    @reactive.effect
+    @reactive.event(data_2d_transformed)
+    def _update_acf_data():
+        req(input.hill_input_type() in ("Image",))
+        req(data_2d_transformed() is not None)
+        _set_acf(data_2d_transformed())
+
     # ── Main plot renderer ──────────────────────────────────────
     @render_widget
     def hill_main_plots():
+        # What the browser is first sent is the widget as it was built. A change
+        # to the model before the browser has the widget (a bookmark's twist, rise
+        # and csym arrive about then) is sent as a patch to a widget that does not
+        # exist yet, and is lost: so the model is made to follow the inputs and
+        # the widget is built again from it.
+        with reactive.isolate():
+            stale = _model_follows_inputs()
+        if stale:
+            main_plot_widget.update_from_model(figs_grid)
         return main_plot_widget
 
     # ── Sidebar render functions ───────────────────────────────
@@ -2721,10 +3199,6 @@ def hill_tab_server(input, output, session):
     @render.ui
     def hill_error_display():
         return None
-
-    @render_widget
-    def hill_display_selected_image():
-        return fig_selected_image
 
     @render_widget
     def hill_display_transformed():
@@ -2890,7 +3364,7 @@ def hill_tab_server(input, output, session):
         sim = hill.simulate_helix(
             twist=input.hill_twist(),
             rise=input.hill_rise(),
-            csym=input.hill_csym(),
+            csym=_csym(),
             helical_radius=input.hill_diameter() / 2,
             ball_radius=input.hill_ball_radius_sim(),
             ny=input.hill_pny(),
@@ -2927,7 +3401,7 @@ def hill_tab_server(input, output, session):
                 apix=input.hill_apix_map(),
                 twist_degree=input.hill_twist_ahs(),
                 rise_angstrom=input.hill_rise_ahs(),
-                csym=input.hill_csym_ahs(),
+                csym=_as_csym(input.hill_csym_ahs()),
                 new_size=(
                     input.hill_length_ahs(),
                     input.hill_width_ahs(),
@@ -2967,9 +3441,13 @@ def hill_tab_server(input, output, session):
     @render.ui
     def hill_get_avg_ps_ui():
         if len(selected_images()) >= 2:
-            return ui.input_action_button(
-                "hill_run_get_average_power_spectra",
-                "Average PS & PD from selected images",
+            return ui.div(
+                ui.input_action_button(
+                    "hill_run_get_average_power_spectra",
+                    "Average PS & PD",
+                    class_="btn-primary",
+                ),
+                style="text-align: center; margin-top: 8px;",
             )
         return None
 
@@ -3005,8 +3483,8 @@ def hill_tab_server(input, output, session):
                         update_on="blur",
                     ),
                     value="hill_avg_ps_from_meta_computing_settings",
-                    open=False,
-                )
+                ),
+                open=True,
             ),
             ui.input_action_button(
                 "hill_run_avg_ps_from_meta",
@@ -3085,9 +3563,7 @@ def hill_tab_server(input, output, session):
                         input.hill_cutoff_res_x(),
                     ),
                     output_size=(input.hill_pny(), input.hill_pnx()),
-                    log=input.hill_log_amp(),
-                    low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                    high_pass_fraction=input.hill_hp_fraction() / 100.0,
+                    **_ps_scaling(),
                     norm=1,
                 )
             )
@@ -3115,6 +3591,7 @@ def hill_tab_server(input, output, session):
         input.hill_cutoff_res_x,
         input.hill_pny,
         input.hill_pnx,
+        input.hill_ps_scaling,
         input.hill_log_amp,
         input.hill_lp_fraction,
         input.hill_hp_fraction,
@@ -3134,9 +3611,7 @@ def hill_tab_server(input, output, session):
                         input.hill_cutoff_res_x(),
                     ),
                     output_size=(input.hill_pny(), input.hill_pnx()),
-                    log=input.hill_log_amp(),
-                    low_pass_fraction=input.hill_lp_fraction() / 100.0,
-                    high_pass_fraction=input.hill_hp_fraction() / 100.0,
+                    **_ps_scaling(),
                     norm=1,
                 )
             )
@@ -3172,6 +3647,108 @@ def hill_tab_server(input, output, session):
 def _init_layer_lines(fig_ellipses, figs_image):
     """Initialize layer line renderers with default values."""
     pass  # Not strictly needed; layer lines are built reactively
+
+
+# A Bokeh slider of the helix whose number can be typed in place, as on the
+# Shiny sliders of helicon.shiny.slider: double-clicking the slider's title or
+# number opens an editor on the number; Enter applies it (the range of the slider
+# follows), Escape or clicking away leaves the slider as it was. A typed number
+# is applied as the end of a drag is (``value`` then ``value_throttled``), so the
+# layer lines preview and the server is told once, by the slider's own callbacks.
+_EDITABLE_SLIDER = "helicon-editable-bokeh-slider"
+_MODEL_CLASS = "helicon-bokeh-model-"
+
+
+def _editable_slider_classes(slider):
+    """The CSS classes that make a Bokeh slider editable by
+    :data:`_BOKEH_SLIDER_EDIT_JS`: one marks it, the other names its model."""
+    return [_EDITABLE_SLIDER, f"{_MODEL_CLASS}{slider.id}"]
+
+
+# Bokeh draws its widgets in shadow DOM, out of reach of the page's selectors: a
+# double-click is found on its composed path, and the slider's model by the id
+# its host element carries.
+_BOKEH_SLIDER_EDIT_JS = """
+(function () {
+  if (window.__heliconBokehSliderEdit) { return; }
+  window.__heliconBokehSliderEdit = true;
+  var MARK = '%s', MODEL = '%s';
+
+  function modelOf(host) {
+    var id = null;
+    host.classList.forEach(function (c) {
+      if (c.indexOf(MODEL) === 0) { id = c.slice(MODEL.length); }
+    });
+    var docs = (window.Bokeh && window.Bokeh.documents) || [];
+    for (var i = docs.length - 1; id && i >= 0; i--) {
+      var model = docs[i].get_model_by_id(id);
+      if (model) { return model; }
+    }
+    return null;
+  }
+
+  function digits(step) {
+    var t = String(step);
+    if (t.indexOf('e-') >= 0) { return Math.min(6, parseInt(t.split('e-')[1], 10)); }
+    var dot = t.indexOf('.');
+    return dot < 0 ? 0 : Math.min(6, t.length - dot - 1);
+  }
+
+  document.addEventListener('dblclick', function (event) {
+    var label = null, host = null;
+    var path = event.composedPath();
+    for (var i = 0; i < path.length; i++) {
+      var el = path[i];
+      if (!el.classList) { continue; }
+      if (!label && (el.classList.contains('bk-slider-value') ||
+                     el.classList.contains('bk-slider-title'))) { label = el; }
+      if (el.classList.contains(MARK)) { host = el; break; }
+    }
+    if (!label || !host) { return; }
+    var slider = modelOf(host);
+    if (!slider) { return; }
+    event.preventDefault();
+    var shown = label.classList.contains('bk-slider-value') ? label :
+      (label.querySelector('.bk-slider-value') || label);
+    var rect = shown.getBoundingClientRect();
+    var current = Number(Number(slider.value).toFixed(Math.max(digits(slider.step), 2)));
+    var box = document.createElement('input');
+    box.type = 'text';
+    box.inputMode = 'decimal';
+    box.value = String(current);
+    Object.assign(box.style, {
+      position: 'fixed', left: (rect.left - 8) + 'px', top: (rect.top - 3) + 'px',
+      width: Math.max(rect.width + 16, 72) + 'px', height: (rect.height + 6) + 'px',
+      zIndex: 10000, fontSize: '14px', textAlign: 'center',
+      border: '1px solid #0d6efd', borderRadius: '3px', padding: '0 2px'
+    });
+    document.body.appendChild(box);
+    box.focus();
+    box.select();
+    // removing the box blurs it, which calls this again
+    var closed = false;
+    var done = function () {
+      if (closed) { return; }
+      closed = true;
+      box.remove();
+    };
+    box.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') {
+        var v = parseFloat(String(box.value).replace(/[ ,]/g, ''));
+        done();
+        if (!isFinite(v)) { return; }
+        slider.setv({value: v, value_throttled: v});
+      } else if (ev.key === 'Escape') {
+        done();
+      }
+    });
+    box.addEventListener('blur', done);
+  }, true);
+})();
+""" % (
+    _EDITABLE_SLIDER,
+    _MODEL_CLASS,
+)
 
 
 # Shared by browser previews, final commits, and server restoration.  A change is
@@ -3228,15 +3805,10 @@ function apply_values(values) {
         slider_rise.end = rise * 2;
         slider_rise.step = Math.max(slider_rise.end * 0.001, Number.EPSILON);
     }
-    spinner_pitch.low = Math.min(rise, pitch);
-    spinner_rise.high = Math.max(rise, pitch);
     controls._hill_preview = values.slice();
     if (!same(slider_twist.value, twist)) slider_twist.value = twist;
-    if (!same(spinner_twist.value, twist)) spinner_twist.value = twist;
     if (!same(slider_pitch.value, pitch)) slider_pitch.value = pitch;
-    if (!same(spinner_pitch.value, pitch)) spinner_pitch.value = pitch;
     if (!same(slider_rise.value, rise)) slider_rise.value = rise;
-    if (!same(spinner_rise.value, rise)) spinner_rise.value = rise;
     update_layer_lines(twist, pitch, rise);
 }
 
@@ -3276,9 +3848,6 @@ def _setup_helix_control_js(
     slider_twist,
     slider_pitch,
     slider_rise,
-    spinner_twist,
-    spinner_pitch,
-    spinner_rise,
     fig_ellipses,
     input_ids,
     controls,
@@ -3290,9 +3859,6 @@ def _setup_helix_control_js(
         slider_twist=slider_twist,
         slider_pitch=slider_pitch,
         slider_rise=slider_rise,
-        spinner_twist=spinner_twist,
-        spinner_pitch=spinner_pitch,
-        spinner_rise=spinner_rise,
         controls=controls,
         input_ids=input_ids,
         fig_ellipses=list(fig_ellipses),
@@ -3320,48 +3886,87 @@ def _setup_helix_control_js(
         restore_callback,
     )
     callbacks = [restore_callback]
-    control_pairs = (
-        (slider_twist, spinner_twist),
-        (slider_pitch, spinner_pitch),
-        (slider_rise, spinner_rise),
-    )
-    for origin, pair in enumerate(control_pairs):
-        for control in pair:
-            preview_callback = CustomJS(
-                args={**args, "origin": origin, "control": control},
-                code=_HELIX_CONTROL_JS
-                + """
-                preview_value(origin, control.value);
-            """,
-            )
-            commit_callback = CustomJS(
-                args={**args, "origin": origin, "control": control},
-                code=_HELIX_CONTROL_JS
-                + """
-                // Compilation or event scheduling can occasionally let the final
-                // callback run before the last preview callback.
-                if (!preview_value(origin, control.value)) return;
-                ensure_state();
-                const values = controls._hill_preview;
-                if (!controls._hill_dirty || same_values(values, controls._hill_committed)) {
-                    controls._hill_dirty = false;
-                    return;
-                }
-                controls._hill_revision += 1;
-                controls._hill_committed = values.slice();
+    for origin, control in enumerate((slider_twist, slider_pitch, slider_rise)):
+        preview_callback = CustomJS(
+            args={**args, "origin": origin, "control": control},
+            code=_HELIX_CONTROL_JS
+            + """
+            preview_value(origin, control.value);
+        """,
+        )
+        commit_callback = CustomJS(
+            args={**args, "origin": origin, "control": control},
+            code=_HELIX_CONTROL_JS
+            + """
+            // Compilation or event scheduling can occasionally let the final
+            // callback run before the last preview callback.
+            if (!preview_value(origin, control.value)) return;
+            ensure_state();
+            const values = controls._hill_preview;
+            if (!controls._hill_dirty || same_values(values, controls._hill_committed)) {
                 controls._hill_dirty = false;
-                const host = window.Shiny ? window : window.parent;
-                // Default priority coalesces this complete tuple into one Shiny batch.
-                host.Shiny.setInputValue(input_ids.twist, values[0]);
-                host.Shiny.setInputValue(input_ids.pitch, values[1]);
-                host.Shiny.setInputValue(input_ids.rise, values[2]);
-                host.Shiny.setInputValue(input_ids.helix_revision, controls._hill_revision);
-            """,
-            )
-            control.js_on_change("value", preview_callback)
-            control.js_on_change("value_throttled", commit_callback)
-            callbacks.extend((preview_callback, commit_callback))
+                return;
+            }
+            controls._hill_revision += 1;
+            controls._hill_committed = values.slice();
+            controls._hill_dirty = false;
+            const host = window.Shiny ? window : window.parent;
+            // Default priority coalesces this complete tuple into one Shiny batch.
+            host.Shiny.setInputValue(input_ids.twist, values[0]);
+            host.Shiny.setInputValue(input_ids.pitch, values[1]);
+            host.Shiny.setInputValue(input_ids.rise, values[2]);
+            host.Shiny.setInputValue(input_ids.helix_revision, controls._hill_revision);
+        """,
+        )
+        control.js_on_change("value", preview_callback)
+        control.js_on_change("value_throttled", commit_callback)
+        callbacks.extend((preview_callback, commit_callback))
     return callbacks
+
+
+def _setup_csym_control_js(spinner, controls, input_id):
+    """Send the csym box's value to the server, and take values the server sends.
+
+    Parameters
+    ----------
+    spinner : bokeh.models.Spinner
+        The csym box.
+    controls : bokeh.models.ColumnDataSource
+        ``value`` and ``revision``, written by the server.
+    input_id : str
+        The (namespaced) Shiny input that holds the csym.
+
+    Returns
+    -------
+    list of bokeh.models.CustomJS
+    """
+    from bokeh.models import CustomJS
+
+    commit = CustomJS(
+        args=dict(spinner=spinner, controls=controls, input_id=input_id),
+        code="""
+        const value = Number(spinner.value);
+        if (!Number.isInteger(value) || value < 1) {
+            // an emptied or half-typed box is not a csym: back to the last one
+            const last = controls.data.value[0];
+            if (Number.isInteger(last) && last >= 1) spinner.value = last;
+            return;
+        }
+        const host = window.Shiny ? window : window.parent;
+        host.Shiny.setInputValue(input_id, value);
+    """,
+    )
+    restore = CustomJS(
+        args=dict(spinner=spinner, controls=controls),
+        code="""
+        const value = controls.data.value[0];
+        if (Number.isInteger(value) && value >= 1 && spinner.value !== value)
+            spinner.value = value;
+    """,
+    )
+    spinner.js_on_change("value", commit)
+    controls.js_on_change("data", restore)
+    return [commit, restore]
 
 
 def _update_slider_renderers(callbacks, renderers):
