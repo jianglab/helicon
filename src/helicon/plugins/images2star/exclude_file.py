@@ -81,7 +81,7 @@ def handle(data, args, index_d, param):
 
         from helicon import convert_dataframe_file_path
 
-        sids = convert_dataframe_file_path(data_sf, col2, to="abs")
+        sids = convert_dataframe_file_path(data_sf, col2, to="real")
 
         data2 = _select_by_file(data, col1, sids, pattern, invert=True)
 

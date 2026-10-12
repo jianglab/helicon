@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sys, os, datetime, logging
+import sys, datetime, logging
 from pathlib import Path
 
 __all__ = [
@@ -122,20 +122,16 @@ def log_command_line() -> int:
     int
         0 on success, -1 on failure.
     """
-    try:
-        hist = open(".helicon.txt", "r+")
-        hist.seek(0, os.SEEK_END)
-    except OSError:
-        try:
-            hist = open(".helicon.txt", "w")
-        except OSError:
-            return -1
     from datetime import datetime
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg = f"{current_time}: {' '.join(sys.argv)}\n"
-    hist.write(msg)
-    hist.close()
+    try:
+        with open(".helicon.txt", "a") as hist:
+            hist.write(msg)
+    except OSError:
+        return -1
+    return 0
 
 
 def get_context_function_name() -> str:

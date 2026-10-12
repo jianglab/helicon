@@ -86,10 +86,16 @@ def lazy_jit(kind="njit", **kwargs):
     Importing numba takes a second or more, and compiling a decorated function at
     import would make every ``import helicon`` pay for numba whether or not the
     function is ever called. The decorated function is compiled with
-    :func:`cached_jit` the first time it is called; a module global ``prange``
+    :func:`cached_jit` the first time it is called. A module global ``prange``
     that is the builtin ``range`` (the fallback for running without numba) is
-    replaced with ``numba.prange`` just before. Without numba it runs as plain
-    Python, with a warning the first time.
+    ``numba.prange`` in the compiled copy of the function; the module's own
+    ``prange`` is left alone. Without numba it runs as plain Python, with a
+    warning the first time.
+
+    What is returned is a Python function that compiles and calls the real one,
+    not a numba dispatcher: it can be called from Python, but not from inside
+    another numba-compiled function, which cannot type it. A function that other
+    compiled functions call must be decorated with :func:`cached_jit` directly.
 
     Parameters
     ----------
@@ -131,5 +137,19 @@ def _compile(func, kind, kwargs):
         )
         return func
     if func.__globals__.get("prange") is range:
-        func.__globals__["prange"] = numba.prange
+        # numba reads globals when it compiles: a copy of the function whose
+        # globals say numba.prange, so that the module's own name is not changed
+        import types
+
+        copy = types.FunctionType(
+            func.__code__,
+            {**func.__globals__, "prange": numba.prange},
+            func.__name__,
+            func.__defaults__,
+            func.__closure__,
+        )
+        copy.__kwdefaults__ = func.__kwdefaults__
+        copy.__qualname__ = func.__qualname__
+        copy.__module__ = func.__module__
+        func = copy
     return cached_jit(getattr(numba, kind), **kwargs)(func)

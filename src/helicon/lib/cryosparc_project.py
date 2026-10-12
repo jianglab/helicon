@@ -132,8 +132,10 @@ def _containing_dir(path: str | Path) -> Path | None:
     straight out of the project to wherever the movies actually live -- there
     is no ``job.json`` above that, so every imported file lost its job.
     """
+    from .path_utils import _lexical_absolute
+
     try:
-        absolute = Path(os.path.abspath(str(path)))
+        absolute = _lexical_absolute(Path(path))
     except (OSError, ValueError):
         return None
     try:

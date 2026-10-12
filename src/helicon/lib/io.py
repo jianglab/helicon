@@ -1241,7 +1241,7 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
     if format in ["v3", "relion3"]:
         star_build_opticsgroup(data2)
         remove_invalid_opticsgroup_parameters(data2)
-        if "rlnImageName" not in data and "rlnMicrographName" in data:
+        if "rlnImageName" not in data2 and "rlnMicrographName" in data2:
             data_block_tag = "data_micrographs"
         else:
             data_block_tag = "data_particles"
@@ -1252,10 +1252,24 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
     data2 = dataframe_guess_data_type(data2)
 
     if hasattr(starFile, "read") and callable(starFile.read):
-        fp = starFile
+        _write_star_blocks(starFile, data2, data_block_tag)
     else:
-        fp = open(starFile, "wt")
+        with open(starFile, "wt") as fp:
+            _write_star_blocks(fp, data2, data_block_tag)
 
+
+def _write_star_blocks(fp, data2: pd.DataFrame, data_block_tag: str) -> None:
+    """Write the optics block (if any) and the data block of ``data2`` to ``fp``.
+
+    Parameters
+    ----------
+    fp : file-like
+        Open for writing; left open.
+    data2 : pd.DataFrame
+        In RELION convention.
+    data_block_tag : str
+        ``"data_particles"``, ``"data_micrographs"`` or ``"data_"``.
+    """
     try:
         optics = data2.attrs.get("optics")
         if optics is not None and len(optics) > 0:

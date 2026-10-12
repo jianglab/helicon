@@ -54,7 +54,7 @@ def handle(data, args, index_d, param):
 
         from helicon import convert_dataframe_file_path
 
-        tmp = convert_dataframe_file_path(data, attr, to="abs")
+        tmp = convert_dataframe_file_path(data, attr, to="real")
         retained = tmp.map(tmp.value_counts() >= minN)
         data2 = data[retained]
         if len(data2) < 1:

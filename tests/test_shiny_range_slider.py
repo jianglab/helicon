@@ -157,7 +157,7 @@ def _edit(page, slider, side, text):
         page.mouse.dblclick(x, b["y"] + b["height"] / 2)
     else:
         box.locator(".irs-from" if side == "from" else ".irs-to").dblclick()
-    page.keyboard.press("Control+A")
+    page.keyboard.press("ControlOrMeta+A")
     page.keyboard.type(text)
 
 
@@ -215,7 +215,7 @@ class TestEditing:
             "xpath=ancestor::div[contains(@class,'helicon-editable-slider')]"
         )
         box.locator(".irs-single").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("75")
         page.keyboard.press("Enter")
         page.wait_for_function(
@@ -224,7 +224,7 @@ class TestEditing:
         assert "band=200,300 other=2,8" in _shown(page)
         # beyond the end
         box.locator(".irs-single").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("500")
         page.keyboard.press("Enter")
         page.wait_for_function(
@@ -232,7 +232,7 @@ class TestEditing:
         )
         # Escape leaves it
         box.locator(".irs-single").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("5")
         page.keyboard.press("Escape")
         time.sleep(0.5)
@@ -253,7 +253,7 @@ class TestEditing:
             page.mouse.dblclick(
                 b["x"] + b["width"] * fraction, b["y"] + b["height"] / 2
             )
-            page.keyboard.press("Control+A")
+            page.keyboard.press("ControlOrMeta+A")
             page.keyboard.type(text)
             page.keyboard.press("Enter")
 
@@ -263,7 +263,7 @@ class TestEditing:
         )
         # now they differ and are shown apart: the lower number is its own label
         box.locator(".irs-from").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("10")
         page.keyboard.press("Enter")
         page.wait_for_function(
@@ -380,18 +380,18 @@ class TestEndsEditing:
 
         assert ends() == [0, 100]
         box.locator(".irs-max").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("250")
         page.keyboard.press("Enter")
         assert ends() == [0, 250]
         box.locator(".irs-min").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("20")
         page.keyboard.press("Enter")
         assert ends() == [20, 250]
         # an end past the other one is refused
         box.locator(".irs-max").dblclick()
-        page.keyboard.press("Control+A")
+        page.keyboard.press("ControlOrMeta+A")
         page.keyboard.type("5")
         page.keyboard.press("Enter")
         assert ends() == [20, 250]

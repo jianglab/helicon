@@ -290,6 +290,10 @@ def _macos_native_windows() -> list:
     app = QApplication.instance()
     if app is None:
         return []
+    # winId() is an NSView only on Qt's cocoa platform; under offscreen or
+    # minimal it is not a pointer to anything, and messaging it crashes
+    if app.platformName() != "cocoa":
+        return []
     windows = []
     for widget in app.topLevelWidgets():
         if widget.isVisible() and widget.winId():

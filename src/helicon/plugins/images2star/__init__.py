@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 import importlib
+import logging
 import pkgutil
 from pathlib import Path
-
 
 # Export helpers for backward compatibility
 # (utility functions moved to lib/io.py and lib/analysis.py)
@@ -20,7 +20,11 @@ def _discover_plugins():
             continue
         try:
             mod = importlib.import_module(f".{modname}", __package__)
-        except ImportError:
+        except ImportError as e:
+            # its option is then missing from the command line: say why
+            logging.getLogger(__name__).warning(
+                "images2star plugin %r is not available: %s", modname, e
+            )
             continue
         if hasattr(mod, "option_name") and hasattr(mod, "handle"):
             plugins[mod.option_name] = mod

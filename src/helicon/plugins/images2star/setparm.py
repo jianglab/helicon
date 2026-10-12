@@ -4,7 +4,6 @@ from __future__ import annotations
 import helicon
 from helicon.lib.exceptions import HeliconError
 
-
 option_name = "setParm"
 
 
@@ -46,13 +45,12 @@ def handle(data, args, index_d, param):
             )
         for i in range(len(param) // 2):
             var, val = param[2 * i : 2 * (i + 1)]
-            if var in helicon.Relion_OpticsGroup_Parameters:
-                try:
-                    data.attrs["optics"].loc[:, var] = helicon.guess_data_type(val)(val)
-                except:
-                    data.loc[:, var] = helicon.guess_data_type(val)(val)
+            value = helicon.guess_data_type(val)(val)
+            optics = data.attrs.get("optics")
+            if var in helicon.Relion_OpticsGroup_Parameters and optics is not None:
+                optics.loc[:, var] = value
             else:
-                data.loc[:, var] = helicon.guess_data_type(val)(val)
+                data.loc[:, var] = value
         index_d[option_name] += 1
     return data, index_d
 

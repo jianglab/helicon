@@ -79,10 +79,10 @@ def handle(data, args, index_d, param):
         from helicon import convert_dataframe_file_path
 
         data["sbpl_rlnMicrographName"] = convert_dataframe_file_path(
-            data, "rlnMicrographName", to="abs"
+            data, "rlnMicrographName", to="real"
         )
         data_sf["sbpl_rlnMicrographName"] = convert_dataframe_file_path(
-            data_sf, "rlnMicrographName", to="abs"
+            data_sf, "rlnMicrographName", to="real"
         )
 
         from scipy.spatial import distance

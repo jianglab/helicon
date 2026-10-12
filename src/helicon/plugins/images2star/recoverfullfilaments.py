@@ -190,7 +190,9 @@ def handle(data, args, index_d, param):
 
         if fullStarFile is None:
 
-            def trace_back_to_extract_job(inputStarFile, forcePickJob=0, history=[]):
+            def trace_back_to_extract_job(inputStarFile, forcePickJob=0, history=None):
+                if history is None:
+                    history = []
                 history.append(str(inputStarFile))
                 new_inputStarFile = get_input_star_file(inputStarFile)
                 if new_inputStarFile is None:
@@ -294,10 +296,10 @@ def handle(data, args, index_d, param):
         if matchBy == "coords":
             mgraph_attr = "rlnMicrographName_abs"
             data.loc[:, mgraph_attr] = convert_dataframe_file_path(
-                data, "rlnMicrographName", to="abs"
+                data, "rlnMicrographName", to="real"
             )
             data2.loc[:, mgraph_attr] = convert_dataframe_file_path(
-                data2, "rlnMicrographName", to="abs"
+                data2, "rlnMicrographName", to="real"
             )
             missing_micrographs = set(data[mgraph_attr]) - set(data2[mgraph_attr])
             if missing_micrographs:
@@ -333,10 +335,10 @@ def handle(data, args, index_d, param):
                 )
         elif matchBy == "ends":
             data.loc[:, "rlnMicrographName_abs"] = convert_dataframe_file_path(
-                data, "rlnMicrographName", to="abs"
+                data, "rlnMicrographName", to="real"
             )
             data2.loc[:, "rlnMicrographName_abs"] = convert_dataframe_file_path(
-                data2, "rlnMicrographName", to="abs"
+                data2, "rlnMicrographName", to="real"
             )
             if not (
                 set(data["rlnMicrographName_abs"]).issubset(
@@ -439,8 +441,8 @@ def handle(data, args, index_d, param):
                             fullStarFile,
                         )
         else:
-            images_abs = convert_dataframe_file_path(data, "rlnImageName", to="abs")
-            images2_abs = convert_dataframe_file_path(data2, "rlnImageName", to="abs")
+            images_abs = convert_dataframe_file_path(data, "rlnImageName", to="real")
+            images2_abs = convert_dataframe_file_path(data2, "rlnImageName", to="real")
             n_missing = int((~images_abs.isin(set(images2_abs))).sum())
             if n_missing:
                 raise HeliconError(

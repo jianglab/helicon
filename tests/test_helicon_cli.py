@@ -173,6 +173,9 @@ class TestOnlyTheCommandThatRunsIsImported:
             lambda name, *a: loaded.append(name.rsplit(".", 1)[-1]) or real(name, *a),
         )
         monkeypatch.setattr(sys, "argv", argv)
+        # argparse (3.14) names the program "python -m pytest" when the tests
+        # are run with python -m, instead of taking it from sys.argv
+        monkeypatch.setattr(sys.modules["__main__"], "__spec__", None, raising=False)
         monkeypatch.setattr(helicon, "has_napari", lambda: True)
         monkeypatch.setattr(helicon, "has_shiny", lambda: True)
         monkeypatch.setattr(helicon, "has_streamlit", lambda: False)

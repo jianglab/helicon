@@ -48,7 +48,7 @@ def _select_by_file(data, col1, sids, pattern, invert=False):
     """
     from helicon import convert_dataframe_file_path
 
-    dids = convert_dataframe_file_path(data, col1, to="abs")
+    dids = convert_dataframe_file_path(data, col1, to="real")
     dids = dids.apply(lambda row: row.lstrip("0"))
     sids = sids.apply(lambda row: row.lstrip("0"))
 
@@ -118,7 +118,7 @@ def handle(data, args, index_d, param):
 
         from helicon import convert_dataframe_file_path
 
-        sids = convert_dataframe_file_path(data_sf, col2, to="abs")
+        sids = convert_dataframe_file_path(data_sf, col2, to="real")
 
         data2 = _select_by_file(data, col1, sids, pattern, invert=False)
 

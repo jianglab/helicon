@@ -53,12 +53,15 @@ def set_angle_range(
 ) -> float | np.ndarray:
     """Wrap an angle or array of angles into a specified range.
 
+    The range is half-open, ``[low, high)``: ``high`` is the same angle as
+    ``low`` and is returned as ``low``.
+
     Parameters
     ----------
     angle : float or np.ndarray
         Input angle(s).
     range : sequence of float, optional
-        Target ``[low, high]`` range. Defaults to ``[-180, 180]``.
+        Target ``[low, high)`` range. Defaults to ``[-180, 180)``.
 
     Returns
     -------
@@ -67,18 +70,12 @@ def set_angle_range(
     """
     v0, v1 = range[0], range[-1]
     delta = v1 - v0
+    ret = np.mod(np.asarray(angle) - v0, delta) + v0
+    # rounding can leave a tiny negative offset at exactly one period
+    ret = np.where(ret >= v1, ret - delta, ret)
     if isinstance(angle, np.ndarray):
-        pos = angle > v0
-        neg = angle <= v0
-        ret = np.empty_like(angle)
-        ret[pos] = np.fmod(angle[pos] - v0, delta) + v0
-        ret[neg] = v1 - np.fmod(v0 - angle[neg], delta)
-    else:
-        if angle > v0:
-            ret = np.fmod(angle - v0, delta) + v0
-        else:
-            ret = v1 - np.fmod(v0 - angle, delta)
-    return ret
+        return ret.astype(angle.dtype, copy=False)
+    return ret[()]
 
 
 def set_to_periodic_range(v: float, min: float = -180, max: float = 180) -> float:

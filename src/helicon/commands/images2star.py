@@ -411,12 +411,14 @@ def join_filaments_from_multiple_files(
     attrs = data.attrs
     n0 = len(data)
     if "rlnImageName" in data:
-        image_abs = convert_dataframe_file_path(data, "rlnImageName", to="abs")
+        image_abs = convert_dataframe_file_path(data, "rlnImageName", to="real")
         data = data[~image_abs.duplicated(keep="first")].reset_index(drop=True)
     n_duplicates = n0 - len(data)
 
     mgraph_attr = helicon.unique_attr_name(data, attr_prefix="rlnMicrographName_abs")
-    data[mgraph_attr] = convert_dataframe_file_path(data, "rlnMicrographName", to="abs")
+    data[mgraph_attr] = convert_dataframe_file_path(
+        data, "rlnMicrographName", to="real"
+    )
     piece_attrs = [mgraph_attr, source_index_attr, "rlnHelicalTubeID"]
     n_pieces = data.groupby(piece_attrs, sort=False).ngroups
     apix = getPixelSize(

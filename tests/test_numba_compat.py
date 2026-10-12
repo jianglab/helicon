@@ -132,19 +132,60 @@ class TestLazyJit:
         ]
         assert isinstance(held[0][0], numba.core.registry.CPUDispatcher)
 
-    def test_prange_becomes_numba_prange_when_compiled(self):
+    def test_the_compiled_copy_has_numba_prange_and_the_module_keeps_its_own(self):
         pytest.importorskip("numba")
         import numba
+        import numpy as np
 
         from helicon.lib import transforms
-
-        assert transforms.prange in (range, numba.prange)
-        import numpy as np
 
         data = np.zeros((4, 4, 4), dtype=np.float32)
         data[2, 2, 2] = 1.0
         transforms.apply_helical_symmetry(data, 1.0, 30.0, 1.0)
-        assert transforms.prange is numba.prange
+        # the module's own name is not changed by compiling its function
+        assert transforms.prange is range
+
+    def test_a_function_that_uses_prange_runs_compiled_without_touching_globals(self):
+        pytest.importorskip("numba")
+        import numba
+        import numpy as np
+
+        from helicon.lib.numba_compat import lazy_jit
+
+        namespace = {"prange": range, "lazy_jit": lazy_jit, "np": np}
+        exec(
+            "@lazy_jit('njit', parallel=True)\n"
+            "def total(a):\n"
+            "    s = 0.0\n"
+            "    for i in prange(a.shape[0]):\n"
+            "        s += a[i]\n"
+            "    return s\n",
+            namespace,
+        )
+        total = namespace["total"]
+        assert total(np.arange(10.0)) == 45.0
+        assert namespace["prange"] is range  # the module's name, as it was
+        compiled = [
+            c.cell_contents
+            for c in total.__closure__
+            if isinstance(c.cell_contents, list)
+        ][0][0]
+        assert compiled.py_func.__globals__["prange"] is numba.prange
+
+    def test_the_wrapper_is_not_a_numba_dispatcher(self):
+        # so it cannot be called from another compiled function, which the
+        # docstring says
+        import inspect
+
+        from helicon.lib.numba_compat import lazy_jit
+
+        assert "not from inside" in inspect.getdoc(lazy_jit)
+
+        @lazy_jit("njit")
+        def f(x):
+            return x
+
+        assert not hasattr(f, "signatures")
 
     def test_without_numba_it_runs_as_python(self, monkeypatch, caplog):
         import builtins

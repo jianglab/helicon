@@ -988,3 +988,32 @@ class TestTiledDenoising:
         )
         assert result.shape == (63, 63)
         assert np.isfinite(result).all()
+
+
+class TestDenoiseLooksCurvepyUpOnce:
+    """curvepy is looked up (a stdout redirect and a from-import) once per image,
+    not once for every wedge of every scale."""
+
+    def test_one_lookup_for_all_the_wedges(self, monkeypatch):
+        from helicon.lib import curvelet
+
+        calls = []
+
+        def fake_curvepy():
+            calls.append(1)
+            return None, lambda wedge, t: np.where(np.abs(wedge) > t, wedge, 0.0)
+
+        monkeypatch.setattr(curvelet, "_curvepy", fake_curvepy)
+
+        class Grid:
+            def inverse_transform(self, coeffs):
+                return np.zeros((4, 4))
+
+        rng = np.random.default_rng(0)
+        coeffs = [[rng.standard_normal((4, 4)) for _ in range(6)] for _ in range(4)]
+        thresholds = [[0.5] * 6 for _ in range(4)]
+        result, retained = curvelet._denoise(
+            np.zeros((4, 4)), Grid(), 1.0, thresholds=thresholds, coeffs=coeffs
+        )
+        assert len(calls) == 1  # 24 wedges
+        assert 0.0 < retained < 100.0

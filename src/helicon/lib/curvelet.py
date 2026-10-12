@@ -218,6 +218,7 @@ def _denoise(
     if thresholds is None:
         thresholds = _compute_thresholds_mad(coeffs, sigma_scale)
 
+    soft_threshold = _curvepy()[1]  # once, not for every wedge
     total = 0
     kept = 0
     new_coeffs = []
@@ -225,7 +226,7 @@ def _denoise(
         new_scale = []
         for w, wedge in enumerate(scale):
             T = thresholds[i][w]
-            filtered = _curvepy()[1](wedge, T)
+            filtered = soft_threshold(wedge, T)
             new_scale.append(filtered)
             total += wedge.size
             kept += np.count_nonzero(filtered)
@@ -442,6 +443,8 @@ def _move_grid_to_device(grid, device):
     MPS does not support float64 or int64, so those are downcast to float32 /
     int32. For CUDA the original dtypes are preserved.
     """
+    import dataclasses
+
     torch = _ensure_torch()
 
     def _to(item):
@@ -455,6 +458,14 @@ def _move_grid_to_device(grid, device):
             return tuple(_to(x) for x in item)
         if isinstance(item, list):
             return [_to(x) for x in item]
+        if dataclasses.is_dataclass(item) and not isinstance(item, type):
+            # a SparseWindow of a newer curvelets: its index and value tensors
+            return dataclasses.replace(
+                item,
+                **{
+                    f.name: _to(getattr(item, f.name)) for f in dataclasses.fields(item)
+                },
+            )
         return item
 
     grid._windows = _to(grid._windows)
@@ -1905,8 +1916,8 @@ def curvelet_denoise_3d_udct_tiled(
     output[mask] /= weights[mask]
 
     if outdir is not None:
-        os.makedirs(outdir, exist_ok=True)
-        mmap_path = os.path.join(outdir, "curvelet_denoised_tiled.npy")
+        Path(outdir).mkdir(parents=True, exist_ok=True)
+        mmap_path = Path(outdir) / "curvelet_denoised_tiled.npy"
         output_mmap = np.memmap(mmap_path, dtype=np.float64, mode="w+", shape=vol.shape)
         if vmax > vmin:
             output_mmap[:] = output * (vmax - vmin) + vmin
@@ -2312,8 +2323,8 @@ def curvelet_denoise_3d_mct_tiled(
     output[mask] /= weights[mask]
 
     if outdir is not None:
-        os.makedirs(outdir, exist_ok=True)
-        mmap_path = os.path.join(outdir, "curvelet_denoised_mct_tiled.npy")
+        Path(outdir).mkdir(parents=True, exist_ok=True)
+        mmap_path = Path(outdir) / "curvelet_denoised_mct_tiled.npy"
         output_mmap = np.memmap(mmap_path, dtype=np.float64, mode="w+", shape=vol.shape)
         if vmax > vmin:
             output_mmap[:] = output * (vmax - vmin) + vmin

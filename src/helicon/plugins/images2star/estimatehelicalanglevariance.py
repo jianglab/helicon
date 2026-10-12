@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import helicon
 import numpy as np
-from matplotlib.figure import Figure
+
+if TYPE_CHECKING:  # matplotlib is imported when a figure is made, not with the plugins
+    from matplotlib.figure import Figure
 
 
 option_name = "estimateHelicalAngleVariance"
@@ -71,6 +74,8 @@ def _hexbin(fig, ax, x, y, *, label: str) -> None:
 
 def _build_figure(data, metrics: dict) -> Figure:
     """Build the existing 4x7 diagnostic dashboard without selecting a GUI backend."""
+    from matplotlib.figure import Figure
+
     figure = Figure(figsize=(33, 14), constrained_layout=True)
     axes = figure.subplots(nrows=4, ncols=7, squeeze=False)
 
@@ -359,7 +364,7 @@ def estimate_helical_angle_variance(
 
     result = data.copy()
     result.loc[:, "rlnImageName_abs"] = (
-        convert_dataframe_file_path(result, "rlnImageName", to="abs")
+        convert_dataframe_file_path(result, "rlnImageName", to="real")
         .str.split("@", expand=True)
         .iloc[:, -1]
     )

@@ -261,13 +261,16 @@ def _tolerate_unreadable_metadata(validate: Any) -> Any:
 
 def _dir_size(cache_dir: Any) -> int:
     """Bytes used by *cache_dir*, symlinks and unreadable entries ignored."""
+    import stat
+
     total = 0
-    for root, _dirs, files in os.walk(str(cache_dir)):
-        for name in files:
-            try:
-                total += os.stat(os.path.join(root, name)).st_size
-            except OSError:
-                pass
+    for path in Path(cache_dir).rglob("*"):
+        try:
+            info = path.lstat()  # a symlink is not followed, nor counted
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            total += info.st_size
     return total
 
 

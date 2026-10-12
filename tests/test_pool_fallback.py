@@ -117,3 +117,38 @@ class TestWorkersFitTheMemory:
     def test_a_big_machine_keeps_its_workers(self, monkeypatch):
         n, _ = self._workers(monkeypatch, 1_000_000, 50, machine_gb=256.0, cpus=8)
         assert n == 8
+
+
+class TestWorkersReadTheSharedPairs:
+    def test_the_pairs_come_back_from_the_files_unchanged(self, pairs, tmp_path):
+        import dataclasses
+
+        rest = ph._share_pairs(pairs, tmp_path)
+        try:
+            ph._init_pairs_worker(tmp_path, rest)
+            got = ph._POOL_PAIRS[0]
+            for f in dataclasses.fields(pairs):
+                a, b = getattr(pairs, f.name), getattr(got, f.name)
+                if isinstance(a, np.ndarray):
+                    np.testing.assert_array_equal(a, b)
+                else:
+                    assert a == b, f.name
+            assert not got.D.flags.writeable  # mapped read-only, shared
+        finally:
+            ph._POOL_PAIRS.clear()
+
+    def test_worker_processes_give_the_result_of_one_process(
+        self, pairs, monkeypatch, caplog
+    ):
+        tasks = [
+            dict(periods=np.arange(380.0, 420.0, 2.0), length_scale=s)
+            for s in (400.0, 800.0, 1600.0)
+        ]
+        monkeypatch.setattr(ph, "_pool_workers", lambda pairs, n: 1)
+        serial = ph._estimate_periods(pairs, tasks)
+        monkeypatch.setattr(ph, "_pool_workers", lambda pairs, n: 2)
+        with caplog.at_level("WARNING"):
+            parallel = ph._estimate_periods(pairs, tasks)
+        assert "terminated" not in caplog.text  # the pool ran, it did not fall back
+        assert parallel == pytest.approx(serial)
+        assert ph._POOL_PAIRS == []

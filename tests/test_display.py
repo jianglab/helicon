@@ -4240,6 +4240,12 @@ class TestPanelToggle:
         napari = pytest.importorskip("napari")
         from vispy.app.canvas import MouseEvent
 
+        # a napari canvas needs OpenGL: under the offscreen/minimal Qt platforms,
+        # which other test modules select for the whole session when they are
+        # collected, vispy's first GL call crashes the interpreter
+        if qapp.platformName() in ("offscreen", "minimal"):
+            pytest.skip(f"no OpenGL under the {qapp.platformName()!r} Qt platform")
+
         viewer = napari.Viewer(show=False)
         try:
             camera = viewer.window._qt_viewer.canvas.view.camera
@@ -7066,3 +7072,14 @@ class TestNaturalNameSort(object):
             for row in range(model.rowCount())
         ]
         assert shown == ["J1", "J2", "J3", "J9", "J10", "J11", "J20", "J100"]
+
+
+class TestMacosNativeWindows:
+    def test_nothing_is_messaged_unless_qt_runs_on_cocoa(self, qapp, monkeypatch):
+        from helicon.lib.gui import macos
+
+        calls = []
+        monkeypatch.setattr(macos, "_macos_msg", lambda *a, **k: calls.append(a))
+        monkeypatch.setattr(type(qapp), "platformName", lambda self: "offscreen")
+        assert macos._macos_native_windows() == []
+        assert calls == []

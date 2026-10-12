@@ -220,6 +220,34 @@ def has_curvelet_udct_gpu() -> bool:
         return False
 
 
+def _numba_thread_limit() -> int | None:
+    """The number of threads numba will run, without importing numba for it.
+
+    Importing numba takes a second or more. numba's own rule is the number of
+    CPUs the process may run on (its affinity), unless ``NUMBA_NUM_THREADS`` says
+    otherwise; when numba has already been imported its answer is used.
+
+    Returns
+    -------
+    int or None
+        None when numba is not installed, so that it limits nothing.
+    """
+    import importlib.util
+    import os
+    import sys
+
+    if "numba" in sys.modules:
+        return int(sys.modules["numba"].config.NUMBA_NUM_THREADS)
+    if importlib.util.find_spec("numba") is None:
+        return None
+    if os.environ.get("NUMBA_NUM_THREADS"):
+        return int(os.environ["NUMBA_NUM_THREADS"])
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # macOS and Windows have no affinity call
+        return max(1, os.cpu_count() or 1)
+
+
 def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
     """Return the number of available CPUs accounting for SLURM, numba, and memory.
 
@@ -242,15 +270,10 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
         import psutil
 
         cpu = max(1, int(psutil.cpu_count() * (1 - psutil.cpu_percent() / 100)))
-    # numba's thread limit, without importing numba (a second or more) for it:
-    # it is what NUMBA_NUM_THREADS says, or every CPU
-    import sys
-
     try:
-        if "numba" in sys.modules:
-            cpu = min(cpu, int(sys.modules["numba"].config.NUMBA_NUM_THREADS))
-        elif os.environ.get("NUMBA_NUM_THREADS"):
-            cpu = min(cpu, int(os.environ["NUMBA_NUM_THREADS"]))
+        limit = _numba_thread_limit()
+        if limit is not None:
+            cpu = min(cpu, limit)
     except Exception:
         pass
 

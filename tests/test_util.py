@@ -32,6 +32,27 @@ class TestUtil(object):
         assert util.set_angle_range(-200, range=[-180, 180]) == pytest.approx(160)
         assert util.set_angle_range(20, range=[-180, 180]) == pytest.approx(20)
 
+    def test_set_angle_range_is_half_open_and_the_ends_are_one_angle(self):
+        # [low, high): high is low, from either side
+        assert util.set_angle_range(-180) == -180
+        assert util.set_angle_range(180) == -180
+        assert util.set_angle_range(540) == -180
+        assert util.set_angle_range(-540) == -180
+        assert util.set_angle_range(0, range=(0, 360)) == 0
+        assert util.set_angle_range(360, range=(0, 360)) == 0
+        assert util.set_angle_range(-90, range=(0, 360)) == pytest.approx(270)
+
+    def test_set_angle_range_of_an_array_matches_the_scalar_and_keeps_dtype(self):
+        import numpy as np
+
+        angles = np.array([-540.0, -200.0, -180.0, -1e-20, 0.0, 179.0, 180.0, 200.0])
+        out = util.set_angle_range(angles)
+        assert out.dtype == angles.dtype
+        assert np.all((out >= -180) & (out < 180))
+        np.testing.assert_allclose(out, [util.set_angle_range(a) for a in angles])
+        f32 = util.set_angle_range(angles.astype(np.float32))
+        assert f32.dtype == np.float32
+
     def test_set_to_periodic_range(self):
         assert util.set_to_periodic_range(200, min=-180, max=180) == pytest.approx(-160)
         assert util.set_to_periodic_range(-200, min=-180, max=180) == pytest.approx(160)

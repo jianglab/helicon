@@ -45,10 +45,7 @@ def handle(data, args, index_d, param):
     """
     if len(param) >= 1:
         starFile = param[0]
-        try:
-            vars = param[1:]
-        except:
-            vars = []  # copy all parameters if a list is not specified
+        vars = param[1:]  # empty: copy all parameters
 
         data.convention = "relion"
         data = data.drop_duplicates(subset=["rlnImageName"], keep="last", inplace=False)
@@ -107,10 +104,10 @@ def handle(data, args, index_d, param):
         from helicon import convert_dataframe_file_path
 
         data.loc[:, "rlnImageName_abs"] = convert_dataframe_file_path(
-            data, "rlnImageName", to="abs"
+            data, "rlnImageName", to="real"
         )
         data2.loc[:, "rlnImageName_abs"] = convert_dataframe_file_path(
-            data2, "rlnImageName", to="abs"
+            data2, "rlnImageName", to="real"
         )
         data.set_index(["rlnImageName_abs"], inplace=True)
         data2.set_index(["rlnImageName_abs"], inplace=True)

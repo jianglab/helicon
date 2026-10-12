@@ -133,16 +133,8 @@ class AnisotropicGaussianSet:
         self.centers = centers.to(torch.float32)
         self.sigmas = sigmas.to(torch.float32)
         self.quaternions = quaternions.to(torch.float32)
-        try:
-            assert (
-                amplitudes.device
-                == centers.device
-                == sigmas.device
-                == quaternions.device
-            )
-            self.device = amplitudes.device
-        except:
-            self.device = None
+        devices = {amplitudes.device, centers.device, sigmas.device, quaternions.device}
+        self.device = amplitudes.device if len(devices) == 1 else None
         self.to(device)
 
     def __len__(self):
@@ -555,11 +547,8 @@ class IsotropicGaussianSet:
         self.amplitudes = amplitudes.to(torch.float32)
         self.centers = centers.to(torch.float32)
         self.sigmas = sigmas.to(torch.float32)
-        try:
-            assert amplitudes.device == centers.device == sigmas.device
-            self.device = amplitudes.device
-        except:
-            self.device = None
+        devices = {amplitudes.device, centers.device, sigmas.device}
+        self.device = amplitudes.device if len(devices) == 1 else None
         self.to(device)
 
     def __len__(self):

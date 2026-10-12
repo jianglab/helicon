@@ -373,6 +373,33 @@ def file_ready(
         return 0
 
 
+_PATH_FORMATS = "current absolute abs real relative rel shortest".split()
+
+
+def _lexical_absolute(path: Path) -> Path:
+    """``path`` made absolute and with ``.`` and ``..`` folded away, symlinks left alone.
+
+    What ``os.path.abspath`` does, which ``Path.resolve()`` does not: it follows no
+    symlink, so a path that goes through a link keeps the link's name.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+
+    Returns
+    -------
+    pathlib.Path
+    """
+    parts = []
+    for part in path.absolute().parts[1:]:
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part != ".":
+            parts.append(part)
+    return Path(path.absolute().anchor, *parts)
+
+
 def convert_file_path(
     filenames, to: str = "current", relpath_start: str = "."
 ) -> pd.Series:
@@ -383,8 +410,9 @@ def convert_file_path(
     filenames : pd.Series
         Series of file paths.
     to : str, optional
-        Target format: "current", "absolute"/"abs"/"real",
-        "relative"/"rel", or "shortest". Defaults to "current" (no-op).
+        Target format: "current", "absolute"/"abs" (symlinks kept),
+        "real" (symlinks followed), "relative"/"rel", or "shortest". Defaults to
+        "current" (no-op).
     relpath_start : str, optional
         Base path for relative conversion.
 
@@ -392,22 +420,32 @@ def convert_file_path(
     -------
     pd.Series
         Converted file paths.
+
+    Raises
+    ------
+    ValueError
+        For a ``to`` that is not one of the formats above.
+    TypeError
+        If ``filenames`` is not a Series.
     """
     import pandas as pd
-    import pandas as pd
 
+    if to not in _PATH_FORMATS:
+        raise ValueError(f"unknown path format {to!r}; choose from {_PATH_FORMATS}")
     if to == "current":
         return filenames
-    assert to in "current absolute abs real relative rel shortest".split()
-    assert isinstance(filenames, pd.Series)
+    if not isinstance(filenames, pd.Series):
+        raise TypeError(f"filenames must be a pandas Series, not {type(filenames)}")
     names = filenames.unique()
     mapping = {}
 
     for name in names:
         p = Path(name)
         p_abs = p.resolve()
-        if to in ["real", "absolute", "abs"]:
+        if to == "real":
             name2 = p_abs.as_posix()
+        elif to in ["absolute", "abs"]:
+            name2 = _lexical_absolute(p).as_posix()
         else:
             try:
                 name2_rel = p_abs.relative_to(relpath_start).as_posix()

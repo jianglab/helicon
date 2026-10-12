@@ -134,13 +134,16 @@ class TestRefineTwistRiseSymmetryOffset:
         da, cn = 2.0, 2
         acf = np.zeros((64, int(360 / da)))
         seen = []
-        real = hi3d_core.map_coordinates
+        import scipy.ndimage
+
+        real = scipy.ndimage.map_coordinates
 
         def spy(img, coords, *args, **kwargs):
             seen.append(np.array(coords[1]))
             return real(img, coords, *args, **kwargs)
 
-        monkeypatch.setattr(hi3d_core, "map_coordinates", spy)
+        # refine_twist_rise imports it when it runs
+        monkeypatch.setattr(scipy.ndimage, "map_coordinates", spy)
         hi3d_core.refine_twist_rise(acf, da, 1.0, 10.0, 4.0, cn)
         px = seen[0]
         nx = acf.shape[1]

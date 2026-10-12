@@ -45,10 +45,7 @@ def handle(data, args, index_d, param):
     """
     if param != "no":
         # choices = "no auto EPU serialEM_pncc".split()
-        try:
-            optics_orig = data.attrs["optics"]
-        except:
-            optics_orig = None
+        optics_orig = data.attrs.get("optics")
         if optics_orig is None:
             raise HeliconError("\\tdata_optics block must be available")
 
