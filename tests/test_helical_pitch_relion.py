@@ -132,9 +132,17 @@ class TestMpi:
             tmp_path / "bin" / "mpirun"
         )
 
-    def test_the_environment_can_name_mpirun(self, monkeypatch):
-        monkeypatch.setenv("HELICON_MPIRUN", "/bin/true")
-        assert relion._mpirun_for("/x/relion_reconstruct_mpi") == "/bin/true"
+    def test_the_environment_can_name_mpirun(self, monkeypatch, tmp_path):
+        # any executable file: /bin/true is not there on every system (macOS)
+        mpirun = tmp_path / "my_mpirun"
+        mpirun.write_text("#!/bin/sh\n")
+        mpirun.chmod(0o755)
+        monkeypatch.setenv("HELICON_MPIRUN", str(mpirun))
+        assert relion._mpirun_for("/x/relion_reconstruct_mpi") == str(mpirun)
+
+    def test_a_named_mpirun_that_does_not_exist_is_none(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HELICON_MPIRUN", str(tmp_path / "missing"))
+        assert relion._mpirun_for("/x/relion_reconstruct_mpi") is None
 
     def test_processes_are_limited_by_cpus_memory_and_segments(self, monkeypatch):
         import helicon

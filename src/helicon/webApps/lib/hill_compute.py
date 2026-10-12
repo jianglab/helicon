@@ -9,14 +9,10 @@ from __future__ import annotations
 import functools
 
 import numpy as np
-from scipy.ndimage import map_coordinates, affine_transform
-from scipy.special import jnp_zeros
-from scipy.optimize import minimize
 from itertools import product
 
 
 import helicon
-
 
 # ── Bessel functions ─────────────────────────────────────────────
 
@@ -24,6 +20,8 @@ import helicon
 @helicon.cache(cache_dir=str(helicon.cache_dir / "hill"), expires_after=7, verbose=0)
 def bessel_1st_peak_positions(n_max: int = 100) -> np.ndarray:
     """Table of first peak positions of Bessel functions Jn for n=0..n_max."""
+    from scipy.special import jnp_zeros
+
     ret = np.zeros(n_max + 1, dtype=np.float32)
     for i in range(1, n_max + 1):
         ret[i] = jnp_zeros(i, 1)[0]
@@ -197,15 +195,15 @@ def shell_median_ratio(amplitude: np.ndarray, cutoff_res) -> np.ndarray:
         The ratio, 1 at the median of every shell. A shell whose median is 0
         (nothing there) comes out 0.
     """
+    from helicon.lib import rings
+
     amplitude = np.abs(amplitude)
     cutoff = tuple(float(r) for r in cutoff_res)
     shells = fourier_shells(amplitude.shape, cutoff)
-    order, starts, ends = _shell_pixels(amplitude.shape, cutoff)
-    in_shell_order = amplitude.ravel()[order]
-    medians = np.zeros(len(starts))
-    for k, (start, end) in enumerate(zip(starts, ends)):
-        medians[k] = np.median(in_shell_order[start:end])  # the mean of two, if even
-    divisor = medians[shells.ravel()].reshape(amplitude.shape)
+    medians = np.nan_to_num(  # a shell nothing falls in has no median: 0
+        rings.grouped_median(amplitude, _shell_pixels(amplitude.shape, cutoff))
+    )
+    divisor = medians[shells]
     return np.divide(
         amplitude,
         divisor,
@@ -216,10 +214,9 @@ def shell_median_ratio(amplitude: np.ndarray, cutoff_res) -> np.ndarray:
 
 @functools.lru_cache(maxsize=4)
 def _shell_pixels(shape: tuple, cutoff_res: tuple):
-    """The pixels of each Fourier shell, as slices of one ordering.
+    """The pixels of each Fourier shell, worked out once per grid.
 
-    Which pixels are in a shell depends only on the grid, not on the spectrum, so
-    it is worked out once and each call only takes the median of each slice.
+    Which pixels are in a shell depends only on the grid, not on the spectrum.
 
     Parameters
     ----------
@@ -230,20 +227,15 @@ def _shell_pixels(shape: tuple, cutoff_res: tuple):
 
     Returns
     -------
-    order : numpy.ndarray
-        The flat pixel indices sorted by shell.
-    starts, ends : numpy.ndarray
-        Where each shell begins and ends in ``order``, one entry per shell number
-        from 0 to the last (a shell number nothing falls in gets an empty slice).
+    helicon.lib.rings.GroupIndex
+        For :func:`helicon.lib.rings.grouped_median`.
     """
-    shells = fourier_shells(shape, cutoff_res).ravel()
-    order = np.argsort(shells, kind="stable")
-    counts = np.bincount(shells, minlength=shells.max() + 1)
-    ends = np.cumsum(counts)
-    starts = ends - counts
-    for array in (order, starts, ends):
+    from helicon.lib import rings
+
+    index = rings.group_index(fourier_shells(shape, cutoff_res))
+    for array in index:
         array.setflags(write=False)  # shared through the cache
-    return order, starts, ends
+    return index
 
 
 def normalize_shell_scaled(ratio: np.ndarray, clip_percentile: float = 99.5):
@@ -369,6 +361,8 @@ def resize_rescale_power_spectra(
     With ``shell_median`` it is divided shell by shell by the median
     (:func:`shell_median_ratio`) instead of being log-transformed and filtered.
     """
+    from scipy.ndimage import map_coordinates
+
     ny, nx = data.shape
     ony, onx = output_size
     res_y, res_x = cutoff_res
@@ -550,6 +544,8 @@ def rotate_shift_image(
     data, angle=0, pre_shift=(0, 0), post_shift=(0, 0), rotation_center=None, order=1
 ):
     """Rotate and shift a 2D image."""
+    from scipy.ndimage import affine_transform
+
     ny, nx = data.shape
     if angle == 0 and list(pre_shift) == [0, 0] and list(post_shift) == [0, 0]:
         return data * 1.0
@@ -647,6 +643,8 @@ def estimate_radial_range(data, thresh_ratio=0.1):
 @functools.lru_cache(maxsize=128)
 def _radial_range_of_profile(profile_bytes, thresh_ratio):
     """:func:`estimate_radial_range` for a profile given as float32 bytes."""
+    from scipy.optimize import minimize
+
     proj_y = np.frombuffer(profile_bytes, dtype=np.float32).astype(np.float64)
     n = len(proj_y)
     background = np.mean(proj_y[[0, 1, 2, -3, -2, -1]])

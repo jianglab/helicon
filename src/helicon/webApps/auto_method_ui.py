@@ -2,7 +2,11 @@
 
 HILL, DeNovo3D and HelicalProjection offer the same choice in their Parameters
 tab, each declaring the select box itself (so that its bookmark entry can be
-checked against it) with the label, choices and explanation kept here.
+checked against it) with the label, choices and explanation kept here. The choice
+reaches the tab's own automatic straightening (the Auto Transform of DeNovo3D and
+helicalProjection, and HILL's auto-transform and symmetry search); the other
+estimates of the filament in the apps, such as DeNovo3D's guess of the tube
+diameter in the pipeline, measure something else and are not affected.
 """
 
 from .lib import helix_transform
@@ -19,5 +23,8 @@ HELP = (
     "that makes the image summed along the filament sharpest, and the centre is "
     "where the two sides of the layer lines agree in phase; it takes no "
     "threshold, does not care whether the filament is bright or dark, and "
-    "holds up better in noisy images."
+    "holds up better in noisy images. "
+    "It sets how this tab straightens and centres filaments automatically; "
+    "other estimates of a filament made elsewhere (DeNovo3D's guess of the "
+    "tube diameter, for example) are separate."
 )

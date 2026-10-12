@@ -93,11 +93,16 @@ class TestTwist:
 
 
 class TestTheMap:
-    def test_with_many_turns_the_twist_counts_whole_subunits(self):
+    def test_with_many_turns_the_twist_counts_whole_subunits(self, monkeypatch):
+        seen = {}
+
+        def fake(images, twist, csym, rise, **kwargs):
+            seen["twist"] = twist
+            return {"twist": twist}
+
+        monkeypatch.setattr(maps, "_reconstruct_projection", fake)
         images = [np.zeros((32, 48), np.float32) for _ in range(3)]
-        for im in images:
-            im[12:20] = 1.0
-        out = maps.reconstruct_map(
+        maps.reconstruct_map(
             images,
             [0.0, 120.0, 240.0],
             1116.0,
@@ -105,10 +110,10 @@ class TestTheMap:
             21.8,
             left_handed=False,
             apix=5.0,
-            method="backprojection",
+            method="projection",
             turns=25,
         )
-        assert out["twist"] == pytest.approx(25 * 360.0 / (6 * 51))
+        assert seen["twist"] == pytest.approx(25 * 360.0 / (6 * 51))
 
     def test_one_turn_keeps_the_amyloid_formula(self):
         images = [np.zeros((32, 48), np.float32) for _ in range(3)]
@@ -154,3 +159,46 @@ class TestTheTab:
         assert "lattice.twist(r.period, rise, c, lat)" in src
         assert '"projection"\n                if job["turns"] > 1' in src
         assert 'ui.update_numeric("rise", value=round(float(lat.rise), 2))' in src
+
+
+def _self_match_by_shifting(images, apix, step=0.1):
+    """The self-match curve as it was first written: every shift made explicitly."""
+    ims = [np.asarray(im, dtype=float) for im in images]
+    ny, nx = ims[0].shape
+    rows = slice(int(ny * 0.15), int(ny * 0.85))
+    xs = [im[rows] - im[rows].mean() for im in ims]
+    shifts_px = np.arange(2.0, 0.45 * nx + 1e-9, step)
+    out = []
+    for d in shifts_px:
+        i0 = int(np.floor(d))
+        f = d - i0
+        values = []
+        for x in xs:
+            a = x[:, : nx - i0 - 1]
+            b = (1.0 - f) * x[:, i0 : nx - 1] + f * x[:, i0 + 1 : nx]
+            a, b = a - a.mean(), b - b.mean()
+            values.append(
+                (a * b).sum() / np.sqrt((a * a).sum() * (b * b).sum() + 1e-30)
+            )
+        out.append(np.mean(values))
+    return shifts_px * apix, np.array(out)
+
+
+class TestSelfMatch:
+    def test_it_agrees_with_shifting_every_average_explicitly(self):
+        images = _averages(n=3)
+        shifts, corr = hl.self_match(images, APIX)
+        ref_shifts, ref = _self_match_by_shifting(images, APIX)
+        np.testing.assert_allclose(shifts, ref_shifts)
+        np.testing.assert_allclose(corr, ref, atol=1e-9)
+
+    def test_it_agrees_for_an_odd_width_and_unequal_rows_and_columns(self):
+        rng = np.random.default_rng(0)
+        images = [rng.normal(size=(37, 91)) + k for k in range(2)]
+        _, corr = hl.self_match(images, 2.0)
+        _, ref = _self_match_by_shifting(images, 2.0)
+        np.testing.assert_allclose(corr, ref, atol=1e-9)
+
+    def test_max_shift_shortens_the_curve(self):
+        shifts, corr = hl.self_match(_averages(n=1), APIX, max_shift=100.0)
+        assert shifts[-1] <= 100.0 and len(corr) == len(shifts)

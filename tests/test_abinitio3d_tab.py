@@ -1290,3 +1290,47 @@ class TestMapFigure:
         assert refs["Classes at their azimuths"] == ("x domain", "y domain")
         assert refs["Map projection"] == ("x3 domain", "y3 domain")
         assert refs["z section"] == ("x2 domain", "y2 domain")
+
+
+class TestMapMethodWhenTheHelixTurnsManyTimes:
+    """Back-projection has only the ring angles to go on, which cannot place the
+    averages of a helix that turns many times per repeat: it is not used, and the
+    map's title says so."""
+
+    def _source(self):
+        from pathlib import Path
+
+        from helicon.webApps.tabs import abinitio3d_tab
+
+        return Path(abinitio3d_tab.__file__).read_text(encoding="utf-8")
+
+    def test_the_names_of_the_methods_are_in_one_place(self):
+        from helicon.webApps.tabs import abinitio3d_tab as tab
+
+        assert set(tab._MAP_METHODS) == {"joint", "gauss", "backprojection"}
+        # "joint" stays the key of elastic net, for older bookmarks
+        assert tab._MAP_METHODS["joint"].endswith("elasticnet")
+        assert "_MAP_METHODS,\n" in self._source()  # the radio takes them from here
+
+    def test_the_title_names_the_method_that_was_not_used(self):
+        src = self._source()
+        title = src[src.index("turns per repeat: placed by projection") :][:700]
+        assert 'm.get("method_asked") == "backprojection"' in title
+        assert "_MAP_METHODS['backprojection']" in title
+
+    def test_the_job_records_the_method_that_was_asked_for(self):
+        assert 'out["method_asked"] = job["method"]' in self._source()
+
+
+class TestClassPositions:
+    def test_class_numbers_are_one_based_and_ids_zero_based(self):
+        from helicon.webApps.tabs import abinitio3d_tab as tab
+
+        # displayed ids 5, 7, 9 sit at positions 0, 1, 2; class numbers are id + 1
+        assert tab._class_positions([6, 10, 8], [5, 7, 9]) == [0, 2, 1]
+
+    def test_a_class_that_is_not_displayed_is_an_error(self):
+        from helicon.webApps.tabs import abinitio3d_tab as tab
+
+        with pytest.raises(KeyError):
+            tab._class_positions([99], [5, 7, 9])

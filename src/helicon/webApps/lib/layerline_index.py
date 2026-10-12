@@ -293,16 +293,34 @@ def _centred_cross_meridian(image, cutoff_res, apix):
     both stand out of the noise, with the offset of the axis from the middle of
     the box taken out. Its real part is positive for even orders and negative
     for odd ones.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        2D image of a straight filament, the helical axis along the rows.
+    cutoff_res : float
+        Resolution limit, A.
+    apix : float
+        Pixel size, A.
+
+    Returns
+    -------
+    excess : numpy.ndarray
+        ``power / noise - 1`` in the layout of ``rfft2``.
+    rows : numpy.ndarray
+        The layer-line rows, 1 to ``ny // 2 - 1``.
+    signed : numpy.ndarray
+        The complex signed strength of each of those rows.
     """
     from . import helix_transform
 
     ny, nx = image.shape
     img = np.roll(np.asarray(image, dtype=float) - np.mean(image), -(nx // 2), axis=1)
-    # _meridian_offset takes the filament horizontal and gives the offset across it
-    offset = helix_transform._meridian_offset(img.T)
+    # meridian_offset takes the filament horizontal and gives the offset across it
+    offset = helix_transform.meridian_offset(img.T)
     F = np.fft.fft2(img)
     power = np.abs(np.fft.rfft2(img)) ** 2
-    excess = power / helix_transform._ring_noise(power) - 1.0
+    excess = power / helix_transform.ring_noise(power) - 1.0
     k_max = int(nx * apix / cutoff_res)
     xs = np.arange(1, min(k_max, nx // 2 - 1) + 1)
     rows = np.arange(1, ny // 2)
@@ -440,16 +458,41 @@ def _score(spectra, csym, twist, rise, radii, model="mask"):
     ``model`` says what the lines are and how a fit is measured: ``"orders"`` the
     agreement of the lowest order the helix puts on each strong line with the order
     measured there (:meth:`_Spectra.order_agreement`), which may be negative;
-    ``"lines"`` every
-    line of the lattice with its own amplitude and the ``J_n**2`` profile of its
-    order along X, the fit being the sum of the squares of their significances;
-    ``"mask"`` the
-    lines kept from where each order starts (``layerlines.layer_line_mask``) and
-    the contrast of the transform on them; ``"onset"`` the same lines, and the F1
-    of where they are against where the transform is (missing and extra lines
-    both count against); ``"bessel"`` the whole ``J_n**2`` profile of each line and
-    the correlation with the transform. The first is quick, for the first pass over
-    many helices.
+    ``"lines"`` every line of the lattice with its own amplitude and the ``J_n**2``
+    profile of its order along X, the fit being the sum of the squares of their
+    significances; ``"mask"`` the lines kept from where each order starts
+    (``layerlines.layer_line_mask``) and the contrast of the transform on them;
+    ``"onset"`` the same lines, and the F1 of where they are against where the
+    transform is (missing and extra lines both count against); ``"bessel"`` the
+    whole ``J_n**2`` profile of each line and the correlation with the transform.
+    The first is quick, for the first pass over many helices.
+
+    Parameters
+    ----------
+    spectra : _Spectra
+        From :func:`prepare`.
+    csym : int
+        Rotational symmetry of the helix.
+    twist : float
+        Degrees.
+    rise : float
+        A.
+    radii : sequence of float
+        The radii to try, A; only the first for the models that do not use it to rank
+        them.
+    model : str, optional
+        One of :data:`MODELS`. Defaults to ``"mask"``.
+
+    Returns
+    -------
+    score : float
+        ``fit * parity``; 0 for a helix whose parities disagree with the phases.
+    fit : float
+        How well the lines fit the transform, by ``model``.
+    parity : float
+        The parity agreement (:func:`parity_agreement`), from -1 to 1.
+    radius : float
+        The radius, A, at which it fitted best.
     """
     from helicon.lib import layerlines
 
@@ -509,13 +552,46 @@ def _stacked_rings(csym, twist, tolerance):
     Such a helix is a stack of rings with no turn between them: its lines are all
     at ``m / rise`` and all of order 0, which the meridian and the equator of any
     helix fill, so it says nothing about the helical symmetry.
+
+    Parameters
+    ----------
+    csym : int
+        Rotational symmetry.
+    twist : float
+        Degrees.
+    tolerance : float
+        Degrees.
+
+    Returns
+    -------
+    bool
     """
     turn = (csym * twist) % 360.0
     return min(turn, 360.0 - turn) <= tolerance
 
 
 def _first_pass(spectra, csym, twists, rises, radius, tolerance=0.0):
-    """The first-pass scores of one symmetry over some twists and all rises (a worker's share)."""
+    """The first-pass scores of one symmetry over some twists and all rises (a worker's share).
+
+    Parameters
+    ----------
+    spectra : _Spectra
+        From :func:`prepare`.
+    csym : int
+        The symmetry.
+    twists, rises : sequence of float
+        Degrees and A.
+    radius : float
+        A.
+    tolerance : float, optional
+        Twists within this many degrees of a stack of rings (:func:`_stacked_rings`)
+        are skipped. Defaults to 0.
+
+    Returns
+    -------
+    list of tuple
+        ``(score, contrast, csym, twist, rise)`` for each helix with a positive score.
+    """
     from threadpoolctl import threadpool_limits
 
     found = []
@@ -543,21 +619,24 @@ def _pool_context():
     seconds, and slower when many do it at once; and the server is a process of
     its own, so forking it is safe where forking a web server running threads is
     not. Where there is no fork server (Windows) they are spawned.
-    """
-    import multiprocessing as mp
 
-    try:
-        context = mp.get_context("forkserver")
-    except ValueError:
-        return mp.get_context("spawn")
-    context.set_forkserver_preload(
-        [__name__, "helicon.lib.layerlines", "scipy.special"]
-    )
-    return context
+    Returns
+    -------
+    multiprocessing.context.BaseContext
+    """
+    from .pools import pool_context
+
+    return pool_context()
 
 
 def _init_worker(spectra):
-    """Give a worker process the spectra once, not with every share of the work."""
+    """Give a worker process the spectra once, not with every share of the work.
+
+    Parameters
+    ----------
+    spectra : _Spectra
+        From :func:`prepare`.
+    """
     _WORKER_SPECTRA[:] = [spectra]
 
 
@@ -568,7 +647,31 @@ def _first_pass_in_worker(csym, twists, rises, radius, tolerance):
 def _run_first_pass(
     spectra, csyms, twists, rises, radius, workers, progress, step_twist=1.0
 ):
-    """All of the first pass, in ``workers`` processes when it is worth it."""
+    """All of the first pass, in ``workers`` processes when it is worth it.
+
+    Parameters
+    ----------
+    spectra : _Spectra
+        From :func:`prepare`.
+    csyms : list of int
+        The symmetries to try.
+    twists, rises : numpy.ndarray
+        Degrees and A.
+    radius : float
+        A.
+    workers : int or None
+        Processes; None to time a sample and give each a few seconds of work.
+    progress : callable or None
+        ``progress(done, total)``, called as the shares finish.
+    step_twist : float, optional
+        Degrees between twists; a symmetry skips the twists within ``csym *
+        step_twist`` of a stack of rings. Defaults to 1.
+
+    Returns
+    -------
+    list of tuple
+        The first-pass scores, as :func:`_first_pass` returns them.
+    """
     import logging
 
     estimate = None

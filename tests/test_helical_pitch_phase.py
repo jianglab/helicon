@@ -193,7 +193,12 @@ class TestHeterogeneity:
         r = ph.estimate_period(pairs)
         # a range that excludes the true period: every fit runs into its edge
         fits = ph.filament_periods(pairs, r["phases"], 500.0, rel_range=0.1)
-        assert np.all(np.isnan(fits["period"]))
+        # a curve of noise alone can have a hump inside so short a range, by
+        # chance, in a couple of filaments of 200; what must not happen is a
+        # period on the edge, or most filaments reporting one
+        assert np.isnan(fits["period"]).mean() > 0.95
+        found = fits["period"][np.isfinite(fits["period"])]
+        assert np.all((found > 450.0) & (found < 550.0))
 
 
 class TestGroups:
@@ -559,8 +564,22 @@ class TestLongRepeats:
         return make_params(n_fil=120, period=2400.0, n_seg=180, step=20.0, seed=5)
 
     def test_found_when_the_search_reaches_it(self, long_repeat):
-        r = ph.analyze(long_repeat, n_boot=2, max_sep=360.0 * 4.75 / 0.3)
+        # pairs are weighted by exp(-d^2 / 2 L^2): at the default L of 800 A the
+        # pairs one repeat apart count 1/90 as much as the ones half a repeat
+        # apart, and the half repeat scores about the same (the double_ratio
+        # warning exists for that). L is set to the repeat here, as these
+        # synthetic tracks have no error that grows with distance.
+        r = ph.analyze(
+            long_repeat, n_boot=2, max_sep=360.0 * 4.75 / 0.3, length_scale=2400.0
+        )
         assert r.period == pytest.approx(2400.0, rel=0.02)
+
+    def test_the_default_weighting_is_flagged_when_it_picks_half_the_repeat(
+        self, long_repeat
+    ):
+        r = ph.analyze(long_repeat, n_boot=2, max_sep=360.0 * 4.75 / 0.3)
+        if r.period < 1800.0:  # the half repeat
+            assert r.double_ratio >= ph.DOUBLE_RATIO_WARN
 
     def test_missed_by_the_old_fixed_limit(self, long_repeat):
         r = ph.analyze(long_repeat, n_boot=2, max_sep=1500.0)

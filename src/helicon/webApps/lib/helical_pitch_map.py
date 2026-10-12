@@ -400,7 +400,8 @@ def reconstruct_map(
     apix : float
         Pixel size of ``images``, in A.
     helical_sym_order : int, optional
-        Back-projection only; the joint fit imposes the full helical symmetry.
+        Back-projection only; the joint fit and projection matching impose the
+        full helical symmetry.
         1 imposes no helical symmetry: every image is used
         once. Larger, every image is used that many times along the filament
         according to the twist, rise and cyclic symmetry, and the map is then
@@ -415,7 +416,10 @@ def reconstruct_map(
         against the map by projection matching (``denovo3d_joint.joint_refine``,
         starting from them all at one azimuth), the map rebuilt from all of them,
         and so on until the placements settle; the map is then solved once more
-        with ``algorithm`` at those placements. ``"joint"`` is the denovo3D joint fit (elastic net unless ``algorithm``
+        with ``algorithm`` at those placements. Like ``"joint"`` it imposes the
+        full helical symmetry, so ``helical_sym_order`` has no effect, and the
+        placements are already refined, so ``rounds`` has none either.
+        ``"joint"`` is the denovo3D joint fit (elastic net unless ``algorithm``
         says otherwise), which imposes the full helical symmetry (and the cyclic
         symmetry, if ``impose_csym``) and takes ``algorithm`` and
         ``length_in_rises`` into account; it agreed better with
@@ -423,7 +427,7 @@ def reconstruct_map(
         order of 81). ``"backprojection"`` uses each average
         ``helical_sym_order`` times. Defaults to the joint fit.
     rounds : int, optional
-        With 2, each average is aligned to the side projection of the first
+        Not used by ``method="projection"``. With 2, each average is aligned to the side projection of the first
         map -- azimuth and in-plane rotation, by the sliding correlation the
         denovo3D and helicalProjection tabs use -- and the map is rebuilt from
         the aligned averages. Defaults to 1: measured against the deposited map
@@ -444,9 +448,9 @@ def reconstruct_map(
         is a view at ``turns * phi / csym``; above 1 the twist is
         ``turns * 360 / (csym * n)`` with ``n`` the whole number of subunits
         nearest ``repeat / rise``, since the views come back only after whole
-        subunits. Defaults to 1, a slowly twisting helix. Above 1 an error in the ring angles is multiplied by
-        ``turns / csym`` in the azimuths, which then cannot be taken from the
-        ring: use ``method="projection"``.
+        subunits. Defaults to 1, a slowly twisting helix. Above 1 an error in the
+        ring angles is multiplied by ``turns / csym`` in the azimuths, which then cannot be taken from the
+        ring: ``method="projection"`` is required.
 
     Returns
     -------
@@ -457,10 +461,21 @@ def reconstruct_map(
         projection of the map), ``projection`` (the side projection over about
         1.2 pitches), ``tiles`` (the averages at their alignments on the same
         canvas), ``z_view`` (the middle z section), ``phis``, ``alignments``.
+
+    Raises
+    ------
+    ValueError
+        For ``turns`` above 1 with a method other than ``"projection"``.
     """
     csym = int(max(csym, 1))
     sign = -1.0 if left_handed else 1.0
     turns = int(max(turns, 1))
+    if turns > 1 and method != "projection":
+        raise ValueError(
+            f"with {turns} turns per repeat the ring angles are multiplied by "
+            f"{turns}/csym and cannot place the averages: use method='projection', "
+            f"not {method!r}"
+        )
     if turns > 1:
         # the views come back after a whole number of subunits, n * twist being
         # close to turns * 360 / csym (helical_pitch_lattice.periods_per_repeat)
@@ -475,12 +490,12 @@ def reconstruct_map(
             twist,
             csym if impose_csym else 1,
             rise,
-            apix,
-            length_in_rises,
-            algorithm,
-            output_box,
-            output_apix,
-            cpu,
+            apix=apix,
+            length_in_rises=length_in_rises,
+            algorithm=algorithm,
+            output_box=output_box,
+            output_apix=output_apix,
+            cpu=cpu,
         )
     if method == "joint":
         return _reconstruct_joint(
@@ -645,14 +660,14 @@ def _reconstruct_joint(
         info,
         phis,
         alignments,
-        twist,
-        rise,
-        csym,
-        apix2d,
-        apix3d,
-        output_box,
-        output_apix,
-        cpu,
+        twist=twist,
+        rise=rise,
+        csym=csym,
+        apix2d=apix2d,
+        apix3d=apix3d,
+        output_box=output_box,
+        output_apix=output_apix,
+        cpu=cpu,
     )
 
 
@@ -685,6 +700,7 @@ def _finish_joint(
     info,
     phis,
     alignments,
+    *,
     twist,
     rise,
     csym,
@@ -744,6 +760,7 @@ def _reconstruct_projection(
     twist,
     csym,
     rise,
+    *,
     apix,
     length_in_rises,
     algorithm,
@@ -798,12 +815,12 @@ def _reconstruct_projection(
         info,
         phis,
         alignments,
-        twist,
-        rise,
-        csym,
-        apix2d,
-        apix3d,
-        output_box,
-        output_apix,
-        cpu,
+        twist=twist,
+        rise=rise,
+        csym=csym,
+        apix2d=apix2d,
+        apix3d=apix3d,
+        output_box=output_box,
+        output_apix=output_apix,
+        cpu=cpu,
     )

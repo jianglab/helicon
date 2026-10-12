@@ -223,22 +223,52 @@ def noise_power(power, mask, floor=0.02, min_count=12):
     numpy.ndarray
         The mean noise power of each pixel, the shape of ``power``.
     """
-    ny, nx2 = power.shape
-    fy = np.fft.fftfreq(ny)[:, None] * ny
-    fx = np.arange(nx2)[None, :].astype(float)
-    ring = np.rint(np.hypot(fy, fx)).astype(int)
-    n_ring = int(ring.max()) + 1
+    from helicon.lib import rings
+
+    ring = rings.rfft2_rings(power.shape)
     off = mask < floor
-    est = np.full(n_ring, np.nan)
-    for r in range(n_ring):
-        sel = off & (ring == r)
-        if sel.sum() >= min_count:
-            est[r] = np.median(power[sel]) / np.log(2.0)
+    n_ring = int(ring.max()) + 1
+    medians = rings.grouped_median(
+        power[off], rings.group_index(ring[off], n_ring), min_count=min_count
+    )
+    est = medians / np.log(2.0)
     ok = np.flatnonzero(np.isfinite(est))
     if len(ok) == 0:
         return np.zeros_like(power)
     est = np.interp(np.arange(n_ring), ok, est[ok])
     return est[ring]
+
+
+def signal_power(power, noise, smooth=(3, 5)):
+    """The signal power at every pixel of an ``rfft2``: its local mean power less the noise.
+
+    A pixel alone has the spread of an exponential, and weighting it by itself
+    leaves the noise that happens to stand out ("musical noise"), so the power is
+    averaged over a neighbourhood first.
+
+    Parameters
+    ----------
+    power : numpy.ndarray
+        ``|rfft2(image)|**2``.
+    noise : numpy.ndarray
+        The noise power of each pixel (:func:`noise_power`).
+    smooth : tuple of int, optional
+        Size of the neighbourhood (rows, columns). Defaults to (3, 5).
+
+    Returns
+    -------
+    numpy.ndarray
+        The signal power, 0 where the mean is below the noise.
+    """
+    from scipy import ndimage as ndi
+
+    # The rows of an rfft2 are periodic. Its columns run from 0 to Nyquist and
+    # are not: wrapping them would average the highest frequencies into the
+    # neighbourhood of the zero frequency, where the equator and the strongest
+    # layer lines are. They are reflected instead (the transform is symmetric
+    # about its first column).
+    mean = ndi.uniform_filter(power, size=smooth, mode=("wrap", "reflect"))
+    return np.maximum(mean - noise, 0.0)
 
 
 def layer_line_filter(
@@ -298,16 +328,9 @@ def layer_line_filter(
     )
     F = np.fft.rfft2(img)
     if wiener:
-        from scipy import ndimage as ndi
-
         power = np.abs(F) ** 2
         noise = strength * noise_power(power, mask)
-        # the signal power is the local mean power less the noise: a pixel alone
-        # has the spread of an exponential, and weighting it by itself leaves
-        # the noise that happens to stand out ("musical noise")
-        signal = np.maximum(
-            ndi.uniform_filter(power, size=smooth, mode="wrap") - noise, 0.0
-        )
+        signal = signal_power(power, noise, smooth)
         mask = mask * signal / np.maximum(signal + noise, 1e-30)
     out = np.fft.irfft2(F * mask, s=img.shape)
     # an rfft2 column other than 0 and Nyquist stands for two of the full transform

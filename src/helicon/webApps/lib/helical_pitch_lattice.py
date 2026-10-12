@@ -68,6 +68,12 @@ class Lattice:
 def self_match(images, apix, max_shift=None, step=0.1):
     """Mean correlation of straightened class averages with themselves shifted along the axis.
 
+    The correlation at a shift of ``d`` pixels is that of the average with the
+    average shifted by ``d`` (linear interpolation between neighbouring columns),
+    both with the mean of their overlap removed. All the shifts are worked out
+    together from sums over the columns and the row-wise autocorrelation, one FFT
+    per average, so that the cost does not grow with the number of shifts.
+
     Parameters
     ----------
     images : sequence of numpy.ndarray
@@ -90,23 +96,43 @@ def self_match(images, apix, max_shift=None, step=0.1):
     ims = [np.asarray(im, dtype=float) for im in images]
     ny, nx = ims[0].shape
     rows = slice(int(ny * 0.15), int(ny * 0.85))  # the filament, not the background
-    xs = [im[rows] - im[rows].mean() for im in ims]
     max_px = (0.45 * nx) if max_shift is None else min(max_shift / apix, 0.45 * nx)
     shifts_px = np.arange(2.0, max_px + 1e-9, step)
-    out = np.empty(len(shifts_px))
-    for k, d in enumerate(shifts_px):
-        i0 = int(np.floor(d))
-        f = d - i0
-        values = []
-        for x in xs:
-            a = x[:, : nx - i0 - 1]
-            b = (1.0 - f) * x[:, i0 : nx - 1] + f * x[:, i0 + 1 : nx]
-            a, b = a - a.mean(), b - b.mean()
-            values.append(
-                (a * b).sum() / np.sqrt((a * a).sum() * (b * b).sum() + 1e-30)
-            )
-        out[k] = float(np.mean(values))
-    return shifts_px * apix, out
+    i0 = np.floor(shifts_px).astype(int)
+    f = shifts_px - i0
+    length = nx - i0 - 1  # columns of the overlap
+    total = np.zeros(len(shifts_px))
+    for im in ims:
+        x = im[rows] - im[rows].mean()
+        n_rows = x.shape[0]
+        n = n_rows * length  # pixels of the overlap
+        # sums over the rows, then cumulated along the columns: c1[k] = sum of
+        # columns < k, and likewise for the squares and for neighbour products
+        c1 = np.concatenate(([0.0], np.cumsum(x.sum(axis=0))))
+        c2 = np.concatenate(([0.0], np.cumsum((x * x).sum(axis=0))))
+        cx = np.concatenate(([0.0], np.cumsum((x[:, :-1] * x[:, 1:]).sum(axis=0))))
+        # R[k]: sum over all the pixels of x[., c] * x[., c + k]
+        spectrum = np.fft.rfft(x, 2 * nx, axis=1)
+        r = np.fft.irfft(spectrum.real**2 + spectrum.imag**2, 2 * nx, axis=1).sum(
+            axis=0
+        )
+        # a = columns 0 .. length - 1; b = (1 - f) * columns i0 .. and f * i0 + 1 ..
+        # (the lag-i0 product loses the pair that would end beyond the last column)
+        edge = (x[:, nx - 1 - i0] * x[:, nx - 1 : nx]).sum(axis=0)
+        sum_a = c1[length]
+        sum_b = (1 - f) * (c1[nx - 1] - c1[i0]) + f * (c1[nx] - c1[i0 + 1])
+        sum_aa = c2[length]
+        sum_bb = (
+            (1 - f) ** 2 * (c2[nx - 1] - c2[i0])
+            + 2 * f * (1 - f) * (cx[nx - 1] - cx[i0])
+            + f**2 * (c2[nx] - c2[i0 + 1])
+        )
+        sum_ab = (1 - f) * (r[i0] - edge) + f * r[i0 + 1]
+        numerator = sum_ab - sum_a * sum_b / n
+        var_a = sum_aa - sum_a**2 / n
+        var_b = sum_bb - sum_b**2 / n
+        total += numerator / np.sqrt(var_a * var_b + 1e-30)
+    return shifts_px * apix, total / len(ims)
 
 
 def _peaks(shifts, corr, min_prominence=MIN_PROMINENCE):

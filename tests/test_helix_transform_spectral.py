@@ -39,7 +39,7 @@ def _left_over(clean, rotation, shift):
         out = helicon.transform_image(image=out, post_translation=(shift, 0))
     tilt = ht._sharpness_rotation(out)
     straight = helicon.transform_image(image=out, rotation=tilt) if tilt else out
-    return abs(tilt), abs(ht._meridian_offset(straight))
+    return abs(tilt), abs(ht.meridian_offset(straight))
 
 
 class TestSpectralEstimate:
@@ -222,3 +222,11 @@ class TestTheControl:
             assert "auto_method_ui.CHOICES" in src, tab
         projection = (root / "helical_projection_tab.py").read_text()
         assert re.search(r'"auto_method": \("auto_method", "threshold"\)', projection)
+
+
+class TestTheControlSaysWhatItCovers:
+    def test_the_help_names_the_scope_and_what_is_outside_it(self):
+        from helicon.webApps import auto_method_ui
+
+        assert "straightens and centres filaments automatically" in auto_method_ui.HELP
+        assert "tube diameter" in auto_method_ui.HELP  # a separate estimate

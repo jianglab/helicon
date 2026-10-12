@@ -11,7 +11,6 @@ import math
 from typing import Any
 
 import numpy as np
-from scipy.ndimage import map_coordinates
 
 # shared with helicon.helical_background, which reads a map's solvent from it
 from helicon.lib.analysis import compute_radial_profile  # noqa: F401
@@ -315,6 +314,8 @@ def cylindrical_projection(
     -------
     cylproj : (nz_out, n_theta) array
     """
+    from scipy.ndimage import map_coordinates
+
     assert map3d.shape[0] > 1
     nz, ny, nx = map3d.shape
     if rmax <= rmin:
@@ -858,6 +859,8 @@ def refine_twist_rise(
     -------
     twist_opt, rise_opt
     """
+    from scipy.ndimage import map_coordinates
+
     from scipy.optimize import minimize
 
     if rise <= 0:

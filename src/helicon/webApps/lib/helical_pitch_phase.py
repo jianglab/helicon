@@ -787,10 +787,11 @@ def synthetic_labels(pairs, period, n_classes, noise=0.3, rng=None):
     return labels
 
 
-# The pairs handed to the processes of _estimate_periods; they inherit it when
-# forked rather than receiving a copy. One estimate at a time uses it: the web
+# The pairs _estimate_one reads. In a worker process it is set once, by
+# _init_pairs_worker, from files; in the calling process it is set while the fits
+# are done there one at a time, and one estimate at a time may do that: the web
 # app runs each session's estimate in a thread of its own, and a second one
-# setting it before the first's processes were forked would hand them its pairs.
+# setting it meanwhile would hand the first its pairs.
 _POOL_PAIRS = []
 _POOL_PAIRS_LOCK = threading.Lock()
 
@@ -831,6 +832,46 @@ def _pool_workers(pairs, n_tasks):
     return max(1, min(cpu, int(n_tasks)))
 
 
+def _share_pairs(pairs, folder):
+    """Write the arrays of ``pairs`` to ``folder``, one .npy file each.
+
+    Worker processes map the files (:func:`_init_pairs_worker`), so that the pairs,
+    hundreds of megabytes for a large dataset, are in memory once however many
+    workers there are, and are not pickled to each.
+
+    Parameters
+    ----------
+    pairs : SegmentPairs
+    folder : pathlib.Path
+        An existing, empty directory.
+
+    Returns
+    -------
+    dict
+        The fields that are not arrays, to give to :func:`_init_pairs_worker`.
+    """
+    import dataclasses
+
+    rest = {}
+    for f in dataclasses.fields(pairs):
+        value = getattr(pairs, f.name)
+        if isinstance(value, np.ndarray) and value.dtype != object:
+            np.save(folder / f"{f.name}.npy", value)
+        else:
+            rest[f.name] = value
+    return rest
+
+
+def _init_pairs_worker(folder, rest):
+    """Give a worker process the pairs written by :func:`_share_pairs`, mapped read-only."""
+    from pathlib import Path
+
+    fields = dict(rest)
+    for path in Path(folder).glob("*.npy"):
+        fields[path.stem] = np.load(path, mmap_mode="r")
+    _POOL_PAIRS[:] = [SegmentPairs(**fields)]
+
+
 def _estimate_periods(pairs, tasks):
     """The period of each of ``tasks`` (keyword arguments of estimate_period).
 
@@ -840,30 +881,38 @@ def _estimate_periods(pairs, tasks):
     the number of processes.
     """
     workers = _pool_workers(pairs, len(tasks))
-    import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
     from concurrent.futures.process import BrokenProcessPool
 
+    if workers > 1:
+        import tempfile
+        from pathlib import Path
+
+        from .pools import pool_context
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="helicon_pairs_") as folder:
+                rest = _share_pairs(pairs, Path(folder))
+                with ProcessPoolExecutor(
+                    workers,
+                    mp_context=pool_context(),
+                    initializer=_init_pairs_worker,
+                    initargs=(folder, rest),
+                ) as pool:
+                    return list(pool.map(_estimate_one, tasks))
+        except BrokenProcessPool:
+            # a worker was killed (typically out of memory with many classes):
+            # the fits are independent, so do them here, one at a time, rather
+            # than fail
+            logger.warning(
+                "a worker process of the period fits was terminated; "
+                "repeating the %d fits one at a time",
+                len(tasks),
+            )
     with _POOL_PAIRS_LOCK:
         _POOL_PAIRS[:] = [pairs]
         try:
-            if workers == 1:
-                return [_estimate_one(t) for t in tasks]
-            try:
-                with ProcessPoolExecutor(
-                    workers, mp_context=mp.get_context("fork")
-                ) as pool:
-                    return list(pool.map(_estimate_one, tasks))
-            except BrokenProcessPool:
-                # a worker was killed (typically out of memory with many classes,
-                # or a fork that a library does not survive): the fits are
-                # independent, so do them here, one at a time, rather than fail
-                logger.warning(
-                    "a worker process of the period fits was terminated; "
-                    "repeating the %d fits one at a time",
-                    len(tasks),
-                )
-                return [_estimate_one(t) for t in tasks]
+            return [_estimate_one(t) for t in tasks]
         finally:
             _POOL_PAIRS.clear()
 

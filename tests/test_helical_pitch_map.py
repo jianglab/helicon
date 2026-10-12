@@ -106,3 +106,38 @@ class TestReconstruct:
         m = maps.reconstruct_map(prepared, az * 2, 700.0, 2, 4.75, apix=5.0)
         assert 0.0 < m["score"] <= 1.0 and m["volume"].ndim == 3
         assert m["volume"].shape[0] < 20  # a few rises: the symmetry does the rest
+
+
+class TestManyTurnsNeedProjectionMatching:
+    """With more than one turn per repeat the ring angles are multiplied by
+    turns/csym, and cannot place the averages."""
+
+    def _call(self, **kwargs):
+        _, az, images = _classes(n=4)
+        return maps.reconstruct_map(images, az, 1400.0, 2, 21.8, apix=5.0, **kwargs)
+
+    @pytest.mark.parametrize("method", ["joint", "backprojection"])
+    def test_a_ring_angle_method_is_refused(self, method):
+        with pytest.raises(ValueError, match="projection"):
+            self._call(method=method, turns=25)
+
+    def test_the_error_says_which_method_was_given(self):
+        with pytest.raises(ValueError, match="'backprojection'"):
+            self._call(method="backprojection", turns=3)
+
+    def test_projection_matching_is_accepted(self, monkeypatch):
+        seen = {}
+
+        def fake(images, twist, csym, rise, *args, **kwargs):
+            seen["twist"], seen["csym"] = twist, csym
+            return "map"
+
+        monkeypatch.setattr(maps, "_reconstruct_projection", fake)
+        assert self._call(method="projection", turns=25) == "map"
+        # 25 turns of 360/2 over round(1400 / 21.8) = 64 subunits, left-handed
+        assert seen["twist"] == pytest.approx(-360.0 * 25 / (2 * 64))
+
+    def test_one_turn_is_not_restricted(self):
+        # an amyloid, as before: the ring angles are enough, and no error
+        out = self._call(method="joint", turns=1, length_in_rises=0)
+        assert out["twist"] == pytest.approx(-360.0 * 21.8 / (2 * 1400.0))

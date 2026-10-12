@@ -15,7 +15,6 @@ import numpy as np
 
 import helicon
 
-
 # The ways of finding a filament's orientation and centre; the first is the default.
 METHODS = {
     "threshold": "Threshold and moments",
@@ -24,25 +23,28 @@ METHODS = {
 DEFAULT_METHOD = "threshold"
 
 
-def _ring_noise(power):
+def ring_noise(power):
     """Mean noise power of every pixel of an ``rfft2``: the median of its ring over ``ln 2``.
 
     Signal fills few pixels of a ring, so the median is the noise; for complex
     Gaussian noise the power is exponential and its median is ``ln 2`` of its mean.
+
+    Parameters
+    ----------
+    power : numpy.ndarray
+        ``|rfft2(image)|**2``.
+
+    Returns
+    -------
+    numpy.ndarray
+        The noise power at every pixel, the shape of ``power``; rings with too few
+        pixels for a median take their neighbours' by interpolation.
     """
-    ny, nx2 = power.shape
-    fy = np.fft.fftfreq(ny)[:, None] * ny
-    fx = np.arange(nx2)[None, :].astype(float)
-    ring = np.rint(np.hypot(fy, fx)).astype(int)
-    order = np.argsort(ring, axis=None, kind="stable")
-    sorted_ring = ring.ravel()[order]
-    sorted_power = power.ravel()[order]
-    bounds = np.searchsorted(sorted_ring, np.arange(ring.max() + 2))
-    noise = np.full(ring.max() + 1, np.nan)
-    for r in range(len(noise)):
-        lo, hi = bounds[r], bounds[r + 1]
-        if hi - lo > 3:
-            noise[r] = np.median(sorted_power[lo:hi]) / np.log(2.0)
+    from helicon.lib import rings
+
+    ring = rings.rfft2_rings(power.shape)
+    medians = rings.grouped_median(power, rings.group_index(ring), min_count=4)
+    noise = medians / np.log(2.0)
     ok = np.flatnonzero(np.isfinite(noise))
     noise = np.interp(np.arange(len(noise)), ok, noise[ok])
     return np.maximum(noise[ring], 1e-30)
@@ -80,7 +82,7 @@ def _sharpness_rotation(data, max_size=128):
     return helicon.set_to_periodic_range(best, min=-90, max=90)
 
 
-def _meridian_offset(image, max_shift=None, resolution=0.01, band=0.25):
+def meridian_offset(image, max_shift=None, resolution=0.01, band=0.25):
     """How far the helical axis is from the middle of the box, in pixels, across the rows.
 
     Along the axis (the columns of ``image``), the transform of a helix has layer
@@ -120,7 +122,7 @@ def _meridian_offset(image, max_shift=None, resolution=0.01, band=0.25):
     n = img.shape[1]
     img = np.roll(img - img.mean(), -(n // 2), axis=1)
     F = np.fft.rfft2(img)
-    excess = np.maximum(np.abs(F) ** 2 / _ring_noise(np.abs(F) ** 2) - 1.0, 0.0)
+    excess = np.maximum(np.abs(F) ** 2 / ring_noise(np.abs(F) ** 2) - 1.0, 0.0)
     ny = img.shape[0]
     rows = np.arange(0, ny // 2 + 1)
     mirror = (-rows) % ny
@@ -193,7 +195,7 @@ def spectral_rotation_center_diameter(
 
     The orientation is the one that makes the projection along the filament
     sharpest (:func:`_sharpness_rotation`) and the centre is where the phases
-    across the meridian agree (:func:`_meridian_offset`). Neither takes a
+    across the meridian agree (:func:`meridian_offset`). Neither takes a
     threshold, neither assumes a bright filament on a dark background, and
     both hold up in noise where a threshold fails.
 
@@ -227,7 +229,7 @@ def spectral_rotation_center_diameter(
 
     rotation = _sharpness_rotation(data) if estimate_rotation else 0.0
     straight = turned(data, rotation)
-    shift = -_meridian_offset(straight) if estimate_center else 0.0
+    shift = -meridian_offset(straight) if estimate_center else 0.0
     centred = moved(straight, shift)
     if estimate_rotation:
         # the first rotation was measured with an off-centre filament, which the

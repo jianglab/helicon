@@ -342,6 +342,14 @@ _PLOT_BOX = (
 # The map figure: the width (px) it is laid out for, and the share of it that the
 # strips of classes and map projection take, the z section the rest.
 _MAP_PLOT_WIDTH = 900
+
+# The reconstruction methods of the map. "joint" is kept as the key of elastic net,
+# so that older bookmarks still name it.
+_MAP_METHODS = {
+    "joint": "Linear regression - elasticnet",
+    "gauss": "Linear regression - gauss",
+    "backprojection": "Back-projection",
+}
 _MAP_STRIP_SHARE = 0.72
 
 
@@ -438,6 +446,12 @@ def _map_figure(m, title):
         height=int(round(70 + sum(strip_px) + gap_px)),
     )
     return fig
+
+
+def _class_positions(class_ids, ids):
+    """Where in ``ids`` each of the 1-based ``class_ids`` is (``ids`` are 0-based)."""
+    position = {int(c): i for i, c in enumerate(ids)}
+    return [position[int(c) - 1] for c in class_ids]
 
 
 def _tip(element, text, placement="top"):
@@ -735,13 +749,7 @@ def abinitio3d_tab_ui():
                     ui.input_radio_buttons(
                         "map_method",
                         "Reconstruction Method",
-                        {
-                            # "joint" kept as the key of elastic net, so older
-                            # bookmarks still name it
-                            "joint": "Linear regression - elasticnet",
-                            "gauss": "Linear regression - gauss",
-                            "backprojection": "Back-projection",
-                        },
+                        _MAP_METHODS,
                         selected="joint",
                     ),
                     ui.div(
@@ -1684,8 +1692,7 @@ def abinitio3d_tab_server(input, output, session):
     def _lattice(job, result):
         """The subunit lattice the ring's class averages show, or None (as for an amyloid)."""
         try:
-            position = {int(c): i for i, c in enumerate(job["ids"])}
-            at = [position[int(c) - 1] for c in result.class_ids]
+            at = _class_positions(result.class_ids, job["ids"])
             straight = maps.straighten_classes(
                 [job["images"][i] for i in at],
                 result.class_zdir,
@@ -1701,8 +1708,7 @@ def abinitio3d_tab_server(input, output, session):
         """The ring against the registered class averages; None if it cannot be made."""
         try:
             progress.inc(1, message="comparing with the registered class averages")
-            position = {int(c): i for i, c in enumerate(job["ids"])}
-            at = [position[int(c) - 1] for c in result.class_ids]
+            at = _class_positions(result.class_ids, job["ids"])
             return pixel.class_pixel_check(
                 [job["images"][i] for i in at],
                 result.class_zdir,
@@ -1933,8 +1939,7 @@ def abinitio3d_tab_server(input, output, session):
         if check is None or job.get("images") is None:
             return
         try:
-            position = {int(c): i for i, c in enumerate(job["ids"])}
-            ring = [position[int(c) - 1] for c in r.class_ids]
+            ring = _class_positions(r.class_ids, job["ids"])
             # the best-fitting candidates first, as many as are worth the time
             order = sorted(
                 (pos for pos in found if job["ids"][pos] + 1 in placed),
@@ -4209,6 +4214,7 @@ def abinitio3d_tab_server(input, output, session):
             cpu=max(1, int(helicon.available_cpu())),
         )
         out["turns"] = job["turns"]
+        out["method_asked"] = job["method"]
         return out
 
     def _map_apply(job, result):
@@ -4242,16 +4248,16 @@ def abinitio3d_tab_server(input, output, session):
     def run_map():
         r = phase_result()
         req(r is not None)
-        position = {int(c): i for i, c in enumerate(displayed_class_ids())}
         images = displayed_class_images()
-        at = [position[int(c)] for c in map(lambda k: int(k) - 1, r.class_ids)]
+        at = _class_positions(r.class_ids, displayed_class_ids())
+        rise = helicon.shiny.clamp_number(input.rise(), 4.75, 0.01, 1000.0, float)
         map_task.invoke(
             dict(
                 phase_result=r,
                 images=[images[i] for i in at],
                 apix=float(data_all()[1]),
                 csym=helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12),
-                rise=float(input.rise()),
+                rise=rise,
                 left_handed=input.map_hand() == "left",
                 hsym=helicon.shiny.clamp_number(input.map_hsym(), 1, 1, 1000),
                 impose_csym=bool(input.map_csym()),
@@ -4260,7 +4266,7 @@ def abinitio3d_tab_server(input, output, session):
                 # are not precise enough to place the averages, which are then
                 # placed by projection matching
                 turns=lattice.periods_per_repeat(
-                    r.period, float(input.rise()), getattr(r, "lattice", None)
+                    r.period, rise, getattr(r, "lattice", None)
                 )[0],
                 rounds=2 if input.map_refine() else 1,
             )
@@ -4296,6 +4302,13 @@ def abinitio3d_tab_server(input, output, session):
             + (
                 f" \u00b7 {m['turns']} turns per repeat: placed by projection "
                 "matching"
+                + (
+                    # the ring angles cannot place the averages, which is all
+                    # back-projection has to go on: it is not used
+                    f" ({_MAP_METHODS['backprojection']} is not used then)"
+                    if m.get("method_asked") == "backprojection"
+                    else ""
+                )
                 if m.get("turns", 1) > 1
                 else ""
             )

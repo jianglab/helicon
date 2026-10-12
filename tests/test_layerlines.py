@@ -217,3 +217,31 @@ class TestWienerGain:
         clean = _helix()
         out, _ = L.layer_line_filter(clean, 2.3438, 29.4, 21.92, 6, 77.6)
         assert _error(out, clean) < 0.15
+
+
+class TestSignalPower:
+    def test_the_highest_frequencies_do_not_leak_into_the_zero_frequency(self):
+        power = np.zeros((16, 9))
+        power[:, -1] = 1000.0  # the Nyquist column, all noise
+        signal = L.signal_power(power, np.zeros_like(power))
+        assert np.all(signal[:, :3] == 0)  # nothing wrapped round to column 0 to 2
+        assert signal[:, -1].max() > 0
+
+    def test_the_rows_are_periodic(self):
+        power = np.zeros((16, 9))
+        power[-1, 4] = 90.0  # the last row is next to the first
+        signal = L.signal_power(power, np.zeros_like(power), smooth=(3, 1))
+        assert signal[0, 4] == pytest.approx(30.0)
+        assert signal[1, 4] == 0.0
+
+    def test_the_noise_is_taken_out_and_nothing_goes_below_zero(self):
+        power = np.full((8, 5), 10.0)
+        signal = L.signal_power(power, np.full_like(power, 4.0))
+        assert np.allclose(signal, 6.0)
+        assert L.signal_power(power, np.full_like(power, 40.0)).max() == 0.0
+
+    def test_the_filter_uses_it(self):
+        import inspect
+
+        assert "signal_power(" in inspect.getsource(L.layer_line_filter)
+        assert 'mode="wrap"' not in inspect.getsource(L)
