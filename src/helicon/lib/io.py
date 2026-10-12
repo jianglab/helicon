@@ -350,24 +350,6 @@ def assign_beamshifts_to_cluster(
     return cluster_labels
 
 
-try:
-    from numba import jit, set_num_threads, prange
-except ImportError:
-    logger.warning(
-        "failed to load numba. The program will run correctly but will be much slower. Run 'pip install numba' to install numba and speed up the program"
-    )
-
-    def jit(*args: Any, **kwargs: Any) -> Any:
-        """No-op numba.jit fallback when numba is not installed."""
-        return lambda f: f
-
-    def set_num_threads(n: int) -> None:
-        """No-op numba.set_num_threads fallback when numba is not installed."""
-        return
-
-    prange = range
-
-
 ########################################################################################################################
 
 

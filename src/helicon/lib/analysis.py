@@ -7,19 +7,15 @@ import helicon
 
 logger = logging.getLogger(__name__)
 
-try:  # pragma: no cover - depends on optional numba install
-    from numba import njit
+from .numba_compat import has_numba, lazy_jit
 
-    from .numba_compat import cached_jit
-
-    _HAS_NUMBA = True
-except ImportError:  # pragma: no cover - depends on optional numba install
-    _HAS_NUMBA = False
+# numba itself is imported, and these functions compiled, on their first call
+_HAS_NUMBA = has_numba()
 
 
 if _HAS_NUMBA:
 
-    @cached_jit(njit, nogil=True)
+    @lazy_jit("njit", nogil=True)
     def _fsc_shell_reduce(F1r, F2r, shell_flat, nshells):
         """Single-pass, numba-accelerated shell-binned FSC reduction.
 
@@ -56,7 +52,7 @@ if _HAS_NUMBA:
 
 if _HAS_NUMBA:
 
-    @cached_jit(njit, nogil=True)
+    @lazy_jit("njit", nogil=True)
     def _fsc_shell_sum(flat_num, flat_den1, flat_den2, shell_flat, nshells):
         """One-pass shell-binned accumulation over precomputed products.
 

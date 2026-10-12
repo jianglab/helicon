@@ -197,25 +197,24 @@ from .lib.util import (
     set_to_periodic_range,
 )
 
-if has_curvelet_fdct():
-    from .lib.curvelet import (
-        curvelet_denoise_fdct,
-        curvelet_denoise_batch_fdct,
-        curvelet_denoise_fdct_tiled,
-    )
-if has_curvelet_udct():
-    from .lib.curvelet import (
-        curvelet_denoise_udct,
-        curvelet_denoise_batch_udct,
-        curvelet_denoise_3d_udct,
-        curvelet_denoise_3d_udct_tiled,
-        curvelet_denoise_3d_mct,
-        curvelet_denoise_3d_mct_tiled,
-        curvelet_denoise_mct,
-        curvelet_denoise_batch_mct,
-        curvelet_denoise_udct_tiled,
-        curvelet_denoise_mct_tiled,
-    )
+# The curvelet denoisers need curvepy or curvelets, whose import (numba, h5py)
+# takes seconds: they are looked up on first use (PEP 562 below), not imported
+# with helicon. A name is there only if its package is installed, as before.
+_LAZY_FROM_CURVELET = {
+    "curvelet_denoise_fdct": "fdct",
+    "curvelet_denoise_batch_fdct": "fdct",
+    "curvelet_denoise_fdct_tiled": "fdct",
+    "curvelet_denoise_udct": "udct",
+    "curvelet_denoise_batch_udct": "udct",
+    "curvelet_denoise_3d_udct": "udct",
+    "curvelet_denoise_3d_udct_tiled": "udct",
+    "curvelet_denoise_3d_mct": "udct",
+    "curvelet_denoise_3d_mct_tiled": "udct",
+    "curvelet_denoise_mct": "udct",
+    "curvelet_denoise_batch_mct": "udct",
+    "curvelet_denoise_udct_tiled": "udct",
+    "curvelet_denoise_mct_tiled": "udct",
+}
 # The Gaussian representations need torch, which is imported only when one of
 # them is first used (PEP 562 below), not with helicon: torch bundles its own
 # OpenMP runtime, and a second libomp next to the one numpy/scipy/numba use
@@ -247,6 +246,18 @@ def __getattr__(name):
             ) from e
         globals()[name] = shiny  # resolved once
         return shiny
+    if name in _LAZY_FROM_CURVELET:
+        available = {"fdct": has_curvelet_fdct, "udct": has_curvelet_udct}
+        if not available[_LAZY_FROM_CURVELET[name]]():
+            raise AttributeError(
+                f"module 'helicon' has no attribute {name!r} "
+                "(the curvelet package it needs is not installed)"
+            )
+        from .lib import curvelet
+
+        value = getattr(curvelet, name)
+        globals()[name] = value  # resolved once
+        return value
     if name in _LAZY_FROM_GAUSS:
         try:
             from .lib import gauss

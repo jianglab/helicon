@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 
 import numpy as np
 
-from helicon.lib.system import has_curvelet_fdct, has_curvelet_udct_gpu
+from helicon.lib.system import has_curvelet_udct_gpu
 
 # torch is imported lazily rather than here at module level.  It is only ever
 # needed by the GPU-backed denoisers, and it bundles its own libomp; loading a
@@ -98,18 +98,25 @@ __all__ = [
 
 _GRID_CACHE: dict[tuple[int, int, int], object] = {}
 
-# curvepy prints "Curvepy accelerated with Cython" at import time;
-# suppress it so it doesn't clutter user output.
-if has_curvelet_fdct():
+
+def _curvepy():
+    """``(CurveletFrequencyGrid, soft_threshold)`` from curvepy, imported on first use.
+
+    curvepy pulls in numba and h5py (seconds), so it is not imported with this
+    module; it also prints "Curvepy accelerated with Cython" when imported, which
+    is kept out of the user's output.
+    """
     with redirect_stdout(io.StringIO()):
         from curvepy.curvepy import CurveletFrequencyGrid
         from curvepy.denoise import soft_threshold
+    return CurveletFrequencyGrid, soft_threshold
 
 
 def _get_grid(shape: tuple[int, int], num_scales: int):
     key = (shape[0], shape[1], num_scales)
     if key not in _GRID_CACHE:
-        _GRID_CACHE[key] = CurveletFrequencyGrid(shape[0], shape[1], scales=num_scales)
+        grid_class = _curvepy()[0]
+        _GRID_CACHE[key] = grid_class(shape[0], shape[1], scales=num_scales)
     return _GRID_CACHE[key]
 
 
@@ -218,7 +225,7 @@ def _denoise(
         new_scale = []
         for w, wedge in enumerate(scale):
             T = thresholds[i][w]
-            filtered = soft_threshold(wedge, T)
+            filtered = _curvepy()[1](wedge, T)
             new_scale.append(filtered)
             total += wedge.size
             kept += np.count_nonzero(filtered)

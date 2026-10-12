@@ -49,35 +49,18 @@ __all__ = [
 
 from .filters import low_high_pass_filter, normalize_percentile
 
-try:
-    from numba import jit, set_num_threads, prange
+from .numba_compat import lazy_jit, set_num_threads
 
-    from .numba_compat import cached_jit
-except ImportError:
-    import warnings
-
-    warnings.warn(
-        "numba not available; apply_helical_symmetry will be much slower. "
-        "Install numba with 'pip install numba' or 'conda install numba'."
-    )
-
-    def jit(*args, **kwargs):
-        return lambda f: f
-
-    def cached_jit(_jit, **kwargs):
-        return lambda f: f
-
-    def set_num_threads(n: int):
-        return
-
-    prange = range
+# numba.prange when the function below is compiled (on its first call); plain
+# range when it runs without numba
+prange = range
 
 
 _USE_NUMBA_PARALLEL = platform.system() != "Darwin"
 
 
-@cached_jit(
-    jit,
+@lazy_jit(
+    "jit",
     nopython=True,
     nogil=True,
     parallel=_USE_NUMBA_PARALLEL,

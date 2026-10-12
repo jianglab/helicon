@@ -242,10 +242,15 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
         import psutil
 
         cpu = max(1, int(psutil.cpu_count() * (1 - psutil.cpu_percent() / 100)))
-    try:
-        import numba
+    # numba's thread limit, without importing numba (a second or more) for it:
+    # it is what NUMBA_NUM_THREADS says, or every CPU
+    import sys
 
-        cpu = min(cpu, int(numba.config.NUMBA_NUM_THREADS))
+    try:
+        if "numba" in sys.modules:
+            cpu = min(cpu, int(sys.modules["numba"].config.NUMBA_NUM_THREADS))
+        elif os.environ.get("NUMBA_NUM_THREADS"):
+            cpu = min(cpu, int(os.environ["NUMBA_NUM_THREADS"]))
     except Exception:
         pass
 

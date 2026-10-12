@@ -62,3 +62,74 @@ def cached_jit(jit, **kwargs):
             return jit(cache=False, **kwargs)(func)
 
     return decorate
+
+
+def has_numba():
+    """Whether numba can be imported, without importing it (which takes a second or more)."""
+    import importlib.util
+
+    return importlib.util.find_spec("numba") is not None
+
+
+def set_num_threads(n):
+    """``numba.set_num_threads``, importing numba only now; nothing without numba."""
+    try:
+        import numba
+    except ImportError:
+        return
+    numba.set_num_threads(max(1, min(int(n), int(numba.config.NUMBA_NUM_THREADS))))
+
+
+def lazy_jit(kind="njit", **kwargs):
+    """Compile a function with numba on its first call, not when its module is imported.
+
+    Importing numba takes a second or more, and compiling a decorated function at
+    import would make every ``import helicon`` pay for numba whether or not the
+    function is ever called. The decorated function is compiled with
+    :func:`cached_jit` the first time it is called; a module global ``prange``
+    that is the builtin ``range`` (the fallback for running without numba) is
+    replaced with ``numba.prange`` just before. Without numba it runs as plain
+    Python, with a warning the first time.
+
+    Parameters
+    ----------
+    kind : str, optional
+        The numba decorator: ``"njit"`` or ``"jit"`` (with ``nopython=True`` in
+        ``kwargs``). Defaults to ``"njit"``.
+    **kwargs
+        Passed to the decorator, besides ``cache``.
+    """
+    import functools
+    import threading
+
+    def decorate(func):
+        compiled = []
+        lock = threading.Lock()
+
+        @functools.wraps(func)
+        def wrapper(*args, **kw):
+            if not compiled:
+                with lock:
+                    if not compiled:
+                        compiled.append(_compile(func, kind, kwargs))
+            return compiled[0](*args, **kw)
+
+        wrapper.py_func = func
+        return wrapper
+
+    return decorate
+
+
+def _compile(func, kind, kwargs):
+    try:
+        import numba
+    except ImportError:
+        logger.warning(
+            "numba is not installed: %s runs as plain Python, much more slowly. "
+            "Install numba ('pip install numba') to speed it up.",
+            func.__qualname__,
+        )
+        return func
+    if func.__globals__.get("prange") is range:
+        func.__globals__["prange"] = numba.prange
+    return cached_jit(getattr(numba, kind), **kwargs)(func)
