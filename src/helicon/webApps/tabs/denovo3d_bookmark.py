@@ -18,6 +18,7 @@ BOOKMARK_DEFAULTS = {
     "server_images": ("dn_server_images", ""),
     "is_3d": ("dn_is_3d", False),
     "ignore_blank": ("dn_ignore_blank", True),
+    "auto_method": ("dn_auto_method", "threshold"),
     "plot_scores": ("dn_plot_scores", True),
     "show_download": ("dn_show_download_buttons", False),
     "match_input_box": ("dn_match_input_box", True),

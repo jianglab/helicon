@@ -65,6 +65,7 @@ MODE_AUTOSTITCH = "Stitch automatically"
 from .denovo3d_bookmark import _urls, _url_key  # noqa: E402,F401
 
 from .denovo3d_bookmark import BOOKMARK_DEFAULTS  # noqa: E402
+from .. import auto_method_ui  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -505,6 +506,18 @@ def denovo3d_tab_ui():
                         ),
                         col_widths=6,
                         style="align-items: flex-end;",
+                    ),
+                    ui.layout_columns(
+                        ui.tooltip(
+                            ui.input_select(
+                                "dn_auto_method",
+                                auto_method_ui.LABEL,
+                                choices=auto_method_ui.CHOICES,
+                                selected=auto_method_ui.DEFAULT,
+                            ),
+                            auto_method_ui.HELP,
+                        ),
+                        col_widths=6,
                     ),
                     ui.layout_columns(
                         ui.input_numeric(
@@ -2982,6 +2995,7 @@ def denovo3d_tab_server(input, output, session):
             estimate_rotation=estimate_rotation,
             estimate_center=estimate_center,
             crop_factor=1.2 if input_data().is_3d else 2.0,
+            method=input.dn_auto_method(),
         )
         tmp = np.array([(r, s, auto.diameter) for r, s in auto.per_image])
         diameter = auto.diameter

@@ -19,7 +19,7 @@ from shiny.types import SilentException
 import plotly.express as px
 
 
-from .. import deployment
+from .. import auto_method_ui, deployment
 from ..lib import helical_projection_compute as compute
 from ..lib import helix_transform
 from ..lib import map_gauss_fit
@@ -113,6 +113,7 @@ BOOKMARK_DEFAULTS = {
     "server_map": ("server_map", ""),
     "mode_maps": ("input_mode_maps", "url"),
     "ignore_blank": ("ignore_blank", True),
+    "auto_method": ("auto_method", "threshold"),
     "show_pdb": ("show_pdb", False),
     "use_curated": ("use_curated_helical_parameters", True),
     "show_twist_star": ("show_twist_star", True),
@@ -180,6 +181,15 @@ def helical_projection_tab_ui():
                         ui.layout_columns(
                             ui.input_checkbox(
                                 "ignore_blank", "Ignore blank input images", value=True
+                            ),
+                            ui.tooltip(
+                                ui.input_select(
+                                    "auto_method",
+                                    auto_method_ui.LABEL,
+                                    choices=auto_method_ui.CHOICES,
+                                    selected=auto_method_ui.DEFAULT,
+                                ),
+                                auto_method_ui.HELP,
                             ),
                             ui.input_checkbox(
                                 "show_pdb", "Show PDB ids in EMDB table", value=False
@@ -995,9 +1005,13 @@ def helical_projection_tab_server(input, output, session):
     def _auto_transforms(keys, images_by_key):
         """The automatic transform for these images, each measured on its own."""
         made = {}
+        with reactive.isolate():
+            method = input.auto_method()
         for key in keys:
             image = images_by_key[key]
-            auto = helix_transform.auto_transform([image], cache=auto_transform_cache)
+            auto = helix_transform.auto_transform(
+                [image], cache=auto_transform_cache, method=method
+            )
             rotation, shift = auto.per_image[0]
             made[key] = helix_transform.ImageTransform(
                 rotation=float(rotation),
