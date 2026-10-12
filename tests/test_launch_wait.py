@@ -125,3 +125,46 @@ class TestLaunchOpensWhenServing:
             "x.y:app", block=True, url_callback=lambda u: seen.append("server" in box)
         )
         assert seen == [True]
+
+
+class TestReloadWatchesThePackage:
+    """``--reload`` watches the app's package, not only the app's directory."""
+
+    @staticmethod
+    def _command(monkeypatch, reload):
+        import subprocess
+
+        seen = {}
+
+        class Proc:
+            stdout = iter(())
+
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        def popen(cmd, *a, **k):
+            seen["cmd"] = cmd
+            return Proc()
+
+        monkeypatch.setattr(subprocess, "Popen", popen)
+        shiny.launch_shiny_app("helicon.webApps.app:app", block=False, reload=reload)
+        return seen["cmd"]
+
+    def test_the_whole_package_is_watched(self, monkeypatch):
+        from pathlib import Path
+
+        import helicon
+
+        cmd = self._command(monkeypatch, reload=True)
+        assert "--reload" in cmd
+        watched = Path(cmd[cmd.index("--reload-dir") + 1])
+        assert watched == Path(helicon.__file__).parent
+        # ... which holds the app's own directory
+        assert Path(cmd[cmd.index("--app-dir") + 1]).is_relative_to(watched)
+
+    def test_nothing_is_watched_without_reload(self, monkeypatch):
+        cmd = self._command(monkeypatch, reload=False)
+        assert "--reload" not in cmd and "--reload-dir" not in cmd

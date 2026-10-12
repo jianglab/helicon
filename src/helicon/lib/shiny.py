@@ -1024,8 +1024,9 @@ def launch_shiny_app(
     query_params : dict, optional
         URL query parameters to append when opening the browser.
     reload : bool, optional
-        If True, run in dev mode with auto-reload on the app's directory.
-        Defaults to False.
+        If True, run in dev mode with auto-reload on the app's directory and,
+        for a module path like "package.module:app", on the whole package
+        (recursively). Defaults to False.
     url_callback : callable, optional
         If given, called with the final app URL (including query params)
         instead of opening the browser.  Used by the file browser to record
@@ -1065,6 +1066,13 @@ def launch_shiny_app(
                 break
         if app_dir is not None:
             cmd += ["--app-dir", app_dir]
+        if reload:
+            # Shiny watches only the app's own directory; the app is built from
+            # the rest of its package (helicon/lib, ...) too, so watch all of it
+            # (recursively).
+            top = importlib.util.find_spec(parts[0])
+            if top is not None and top.origin is not None:
+                cmd += ["--reload-dir", str(Path(top.origin).parent)]
     elif reload:
         app_dir = str(Path(str(app_file)).parent)
         cmd += ["--app-dir", app_dir]
