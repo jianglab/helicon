@@ -47,6 +47,14 @@ MODELS = ("orders", "mask", "lines", "onset", "bessel")
 # the share of the first pass a worker process should have, in seconds: more
 # than its start-up
 SECONDS_PER_WORKER = 4.0
+# a predicted line is there if the transform along it is this many noise sigmas
+LINE_Z_MIN = 3.0
+# the share of its predicted lines the transform has, to this power, multiplies the
+# score of a helix: a lattice with lines where the transform has gaps loses much
+PRECISION_POWER = 2.0
+# the share of the best member's order agreement a member of a lattice (the same
+# line heights, another csym) reaches, to this power, is what it keeps of the score
+MEMBER_POWER = 2.0
 # the transform is there where it stands this many noise sigmas out of the noise
 ONSET_SIGMA = 3.0
 # the radius is only known roughly; these multiples of it are tried
@@ -65,7 +73,9 @@ class Candidate:
     rise : float
         A.
     score : float
-        ``profile * parity``; compare candidates of one search only.
+        ``profile * parity``, less what its extra lines cost (the share of its
+        predicted lines that the transform has, squared: see
+        :meth:`_Spectra.line_precision`); compare candidates of one search only.
     profile : float
         How well the lines of this helix fit the transform: the F1 of the ``"onset"``
         model, or the contrast or correlation of the others.
@@ -88,8 +98,12 @@ class Candidate:
 class _Spectra:
     """What the search needs of a set of images, summed over them."""
 
-    def __init__(self, shape, apix, cutoff_res, excess, rows, signed, n_images):
+    def __init__(
+        self, shape, apix, cutoff_res, excess, rows, signed, n_images, density=None
+    ):
         self.shape = shape
+        # the radial density of the helix, (r, rho), from the images (radial_density)
+        self.density = density
         self.apix = apix
         self.cutoff_res = cutoff_res
         self.excess = excess  # power / noise - 1, in the layout of rfft2, summed
@@ -165,17 +179,25 @@ class _Spectra:
         """
         from scipy.special import jv
 
-        key = round(float(radius), 3)
+        key = "density" if self.density is not None else round(float(radius), 3)
         cache = self.__dict__.setdefault("_orders", {})
         if key in cache:
             return cache[key]
         ny = self.shape[0]
         n_columns = int(np.searchsorted(self._fx, 1.0 / self.cutoff_res, side="right"))
         fx = self._fx[:n_columns]
-        n_max = int(2.0 * np.pi * radius * fx[-1]) + 8
-        shapes = np.array(
-            [jv(n, 2.0 * np.pi * radius * fx) ** 2 for n in range(n_max + 1)]
-        )
+        if self.density is not None:
+            r, rho = self.density
+            r_out = float(r[np.flatnonzero(rho > 0)[-1]]) if (rho > 0).any() else radius
+            n_max = int(2.0 * np.pi * r_out * fx[-1]) + 8
+            shapes = np.array(
+                [self.order_profile(n, fx) ** 2 for n in range(n_max + 1)]
+            )
+        else:
+            n_max = int(2.0 * np.pi * radius * fx[-1]) + 8
+            shapes = np.array(
+                [jv(n, 2.0 * np.pi * radius * fx) ** 2 for n in range(n_max + 1)]
+            )
         shapes /= np.maximum(np.linalg.norm(shapes, axis=1, keepdims=True), 1e-30)
         found = []
         last_row = min(int(ny * self.apix / self.cutoff_res), ny // 2 - 1)
@@ -194,6 +216,31 @@ class _Spectra:
         ]
         cache[key] = lines
         return lines
+
+    def order_profile(self, n, fx):
+        """The amplitude along X of a layer line of order ``n`` for the radial density of the images.
+
+        ``G_n(X) = integral of rho(r) J_n(2 pi r X) 2 pi r dr``: what a single
+        shell of radius ``R`` gives (``J_n(2 pi R X)``) summed over the radii of the
+        density, so that a helix that is not a thin shell has the lobes and onsets
+        its own density gives, and no radius has to be assumed.
+
+        Parameters
+        ----------
+        n : int
+            The Bessel order.
+        fx : numpy.ndarray
+            The X frequencies, 1/A.
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+        from scipy.special import jv
+
+        r, rho = self.density
+        w = np.maximum(rho, 0.0) * r * (r[1] - r[0])
+        return (w[:, None] * jv(n, 2.0 * np.pi * r[:, None] * fx[None, :])).sum(axis=0)
 
     def order_agreement(self, heights, orders, radius):
         """How well the lowest order a helix puts on each strong line agrees with the order measured there.
@@ -267,6 +314,41 @@ class _Spectra:
             out.append(along / np.sqrt(norm * (weight**2).sum() * self.n_images))
         return np.array(out)
 
+    def line_precision(self, heights, orders, radius, z_min=LINE_Z_MIN):
+        """The share of the lines a helix predicts that the transform has.
+
+        A helix whose lattice holds every line of another and more (C3 at 30 degrees
+        has the lines of C6 at 30 and, between them, those of the odd multiples of
+        3) puts the extra lines where the transform has a gap. They cost it
+        nothing in the contrast of the lines it has right, so they are counted here:
+        a line is there if the transform along its rows, whatever its profile along
+        X, is ``z_min`` noise sigmas or more (:meth:`line_profiles` with ``flat``).
+        Only the lines that can be read are counted: those whose rows are within the
+        transform and the resolution limit, and that can carry signal at the radius.
+
+        Parameters
+        ----------
+        heights, orders : numpy.ndarray
+            The lines of the helix (``layerlines.layer_line_heights``, with the
+            radius, so that the lines that cannot carry signal are left out).
+        radius : float
+            A.
+        z_min : float, optional
+            Defaults to :data:`LINE_Z_MIN`.
+
+        Returns
+        -------
+        float
+            From 0 to 1; 1 when no line can be read.
+        """
+        keep = np.asarray(heights) > 0
+        z = self.line_profiles(
+            np.asarray(heights)[keep], np.asarray(orders)[keep], radius, flat=True
+        )
+        if len(z) == 0:
+            return 1.0
+        return float(np.mean(z >= z_min))
+
     def contrast(self, model):
         """Correlation of the excess with ``model``, once the mean of the model over each ring is taken out.
 
@@ -311,6 +393,11 @@ def _centred_cross_meridian(image, cutoff_res, apix):
         The layer-line rows, 1 to ``ny // 2 - 1``.
     signed : numpy.ndarray
         The complex signed strength of each of those rows.
+    quality : float
+        The signal-weighted mean cosine of twice the phase difference (1 at 0 or 180
+        degrees, 0 for random phases) over the strongest 5% of the pixels, from -1
+        to 1: how clean the phase difference of the image is (the dark lines of the PD plot of HILL,
+        against its mosaic).
     """
     from . import helix_transform
 
@@ -332,10 +419,96 @@ def _centred_cross_meridian(image, cutoff_res, apix):
     )
     phasor = weight * cross / np.maximum(np.abs(cross), 1e-30)
     phasor = phasor * np.exp(4j * np.pi * xs[None, :] / nx * offset)
-    return excess, rows, phasor.sum(axis=1)
+    # cos(2 phase difference): 1 at 0 or 180 degrees, -1 at 90, 0 for random phases
+    c2 = ((phasor / np.maximum(weight, 1e-30)) ** 2).real
+    strong = weight > np.percentile(weight, 95)
+    quality = float(
+        (weight[strong] * c2[strong]).sum() / max(weight[strong].sum(), 1e-30)
+    )
+    return excess, rows, phasor.sum(axis=1), quality
 
 
-def prepare(images, apix, cutoff_res):
+def radial_density(images, apix, cutoff_res):
+    """The radial density of the helix: its circular average, from the axial average of the images.
+
+    The mean of a straightened image along the axis is the projection of the helix
+    averaged along its axis, which is a tube with the density of a circular
+    average. The profile across it is centred (the filament may be off the middle
+    by a fraction of a pixel), made even and taken to zero at the edges. It is then
+    fitted by a sum of thin cylindrical shells, one every ``apix``, each as wide as
+    the resolution limit lets a shell be, with the density of each shell not
+    negative (non-negative least squares on the shells' own projections). The
+    inverse Abel transform would give the same density but amplify the noise into
+    ripples and negative densities.
+
+    Parameters
+    ----------
+    images : sequence of numpy.ndarray
+        Straightened images, the helical axis along the rows.
+    apix : float
+        Pixel size, A.
+    cutoff_res : float
+        Resolution limit, A.
+
+    Returns
+    -------
+    r : numpy.ndarray
+        Radii, A, from 0 in steps of ``apix``, as far as half the width of the box.
+    rho : numpy.ndarray
+        The density at those radii (arbitrary scale, not negative).
+    """
+    from scipy.optimize import nnls
+
+    nx = images[0].shape[1]
+    profile = np.mean(
+        [np.mean(np.asarray(i, dtype=float), axis=0) for i in images], axis=0
+    )
+    edge = max(nx // 16, 2)
+    profile = profile - 0.5 * (profile[:edge].mean() + profile[-edge:].mean())
+    x = np.arange(nx, dtype=float)
+    # the centre: where the profile is most alike its own mirror image
+    shifts = np.arange(-(nx // 8), nx // 8 + 1)
+    match = np.array(
+        [
+            np.dot(
+                profile, np.interp(2.0 * (nx // 2 + s) - x, x, profile, left=0, right=0)
+            )
+            for s in shifts
+        ]
+    )
+    k = int(np.argmax(match))
+    shift = float(shifts[k])
+    if 0 < k < len(shifts) - 1:  # to a fraction of a pixel
+        a, b, c = match[k - 1], match[k], match[k + 1]
+        if a - 2.0 * b + c < 0:
+            shift += 0.5 * (a - c) / (a - 2.0 * b + c)
+    centre = nx // 2 + shift
+    half = nx // 2
+    xs = np.arange(0, half + 1, dtype=float)  # pixels from the centre
+    even = 0.5 * (
+        np.interp(centre + xs, x, profile, right=0)
+        + np.interp(centre - xs, x, profile, left=0)
+    )
+    r = xs * apix
+    # the projection of a shell of radius r_k and Gaussian thickness: its density
+    # integrated along the line of sight (y), on a grid of half a pixel
+    sigma = 0.5 * cutoff_res
+    y = np.arange(0.0, 2.0 * half * apix, 0.5 * apix)
+    wy = np.where(y == 0, 1.0, 2.0) * 0.5 * apix  # both signs of y
+    radius = np.hypot(r[:, None, None], y[None, None, :])  # (x, 1, y)
+    basis = np.empty((len(r), len(r)))
+    for kk, rk in enumerate(r):
+        basis[:, kk] = (np.exp(-0.5 * ((radius[:, 0, :] - rk) / sigma) ** 2) * wy).sum(
+            axis=1
+        )
+    # a whisper of ridge keeps the shells from splitting a peak into spikes
+    ridge = 1e-3 * np.abs(basis).max()
+    A = np.vstack([basis, ridge * np.eye(len(r))])
+    rho, _ = nnls(A, np.concatenate([even, np.zeros(len(r))]))
+    return r, rho
+
+
+def prepare(images, apix, cutoff_res, radial=False, pd_weight=None):
     """The spectra of a set of images of one helix, summed.
 
     Parameters
@@ -347,6 +520,21 @@ def prepare(images, apix, cutoff_res):
         Pixel size, A.
     cutoff_res : float
         Resolution limit, A.
+    radial : bool, optional
+        Whether to take the radial density of the helix from the images
+        (:func:`radial_density`) for the Bessel profile of each layer line, instead
+        of a single radius given by the user. Defaults to False: on the 13 default
+        class averages of HILL it was worse than the radius (see :func:`index_images`).
+    pd_weight : {None, "image"}, optional
+        How the phase difference across the meridian (PD) says how far each image
+        is to be believed. ``"image"``: an image counts with the square of the
+        coherence of its PD (the cosine of twice the phase difference over its
+        strongest 5% of pixels), so that images with a clean PD (the dark lines of
+        HILL's PD plot) outweigh those with a mosaic. On the 13 default class
+        averages of HILL it left the right answer as it was and widened the margin
+        of the best candidate over the second by 5 to 10%; weighting each pixel of
+        the power by the local coherence as well was worse (C6 first on 7 of 13
+        single images, from 10). Defaults to None: all alike.
 
     Returns
     -------
@@ -363,11 +551,28 @@ def prepare(images, apix, cutoff_res):
     if any(i.shape != images[0].shape for i in images):
         raise ValueError("the images must all have the same shape")
     excess, signed = 0.0, 0.0
+    weights = []
     for image in images:
-        e, rows, s = _centred_cross_meridian(image, cutoff_res, apix)
-        excess, signed = excess + e, signed + s
+        e, rows, s, quality = _centred_cross_meridian(image, cutoff_res, apix)
+        w = max(quality, 0.0) ** 2 if pd_weight == "image" else 1.0
+        excess, signed = excess + w * e, signed + w * s
+        weights.append(w)
+    density = radial_density(images, apix, cutoff_res) if radial else None
+    # noise adds in quadrature: the z-scores are scaled by the root of the sum of the
+    # squares of the weights, which is the number of images when they are equal
+    w = np.array(weights)
+    if w.sum() <= 0:  # no image has a clean phase difference
+        raise ValueError("no image has a phase difference to weigh by")
+    n_effective = float((w**2).sum()) if pd_weight == "image" else len(images)
     return _Spectra(
-        images[0].shape, apix, cutoff_res, excess, rows, signed, len(images)
+        images[0].shape,
+        apix,
+        cutoff_res,
+        excess,
+        rows,
+        signed,
+        n_effective,
+        density=density,
     )
 
 
@@ -759,6 +964,8 @@ def index_images(
     model="orders",
     workers=None,
     progress=None,
+    radial_profile=False,
+    pd_weight=None,
 ):
     """Search for the csym, twist and rise of a helix from its straightened images.
 
@@ -818,6 +1025,23 @@ def index_images(
         1 runs it here.
     progress : callable, optional
         ``progress(done, total)``, called as the shares of the first pass finish.
+    radial_profile : bool, optional
+        For the ``"orders"`` model: read the Bessel order of each strong line against
+        the radial density of the helix taken from the images themselves (the axial
+        average of a straightened image is the projection of its circular average:
+        :func:`radial_density`), not against a single shell of the given ``radius``.
+        The radius has to be estimated and decides which of C4, C6 and C8 is read
+        (a radius off by the ratio of two orders swaps them), which is what this
+        was to avoid. It does not help yet: on each of the 13 default class averages
+        of HILL, searched alone, the radius of HILL (77.6 A) put C6 first on 10, the
+        density of the image on 8 (image 11, one of the best, fell to third), and a
+        single radius from the density, its centroid (80 to 86 A) on 8 and its peak
+        (65 to 96 A) on 3. The density is a circular average that gives every
+        layer line the same radial profile; a real helix does not. Defaults to False.
+
+    pd_weight : {None, "image"}, optional
+        Whether the coherence of the phase difference across the meridian weighs the
+        images of the pooled spectra; see :func:`prepare`.
 
     Returns
     -------
@@ -837,7 +1061,11 @@ def index_images(
     """
     if model not in MODELS:
         raise ValueError(f"model must be one of {MODELS}, not {model!r}")
-    spectra = prepare(images, apix, cutoff_res)
+    from helicon.lib import layerlines
+
+    spectra = prepare(
+        images, apix, cutoff_res, radial=radial_profile, pd_weight=pd_weight
+    )
     radii = (
         [radius * f for f in RADIUS_FACTORS]
         if model in ("bessel", "lines")
@@ -912,15 +1140,38 @@ def index_images(
             members = members_by("mask", [radius])
         if not members:
             continue
-        # the best member takes the lattice's score, the others less, by how far
-        # their fits fall short of it in units of the spread of the fits
+        # the best member takes the lattice's score, the others less. Members of a
+        # lattice have the same line heights and differ in the order of each line,
+        # which is read from where it starts along X: what a wrong member gets
+        # wrong is the strong lines it gives another order, so it loses with the
+        # share of the best member's agreement it reaches, squared (none at all
+        # when it disagrees with the transform on net)
         fits = np.array([m[0] for m in members])
         top_fit, spread = fits.max(), max(fits.max() - fits.min(), 1e-12)
         for fit, other, t, parity, rad in members:
-            share = 1.0 - 0.5 * (top_fit - fit) / spread
+            if model == "orders" and top_fit > 0:
+                share = min(max(fit, 0.0) / top_fit, 1.0) ** MEMBER_POWER
+            else:
+                share = 1.0 - 0.5 * (top_fit - fit) / spread
+            # lines it predicts where the transform has none
+            lines = layerlines.layer_line_heights(
+                t,
+                rise,
+                other,
+                y_max=1.0 / cutoff_res,
+                radius=rad,
+                x_max=1.0 / cutoff_res,
+            )
+            precision = spectra.line_precision(*lines, rad) ** PRECISION_POWER
             best.append(
                 Candidate(
-                    other, t, rise, place_contrast * parity * share, fit, parity, rad
+                    other,
+                    t,
+                    rise,
+                    place_contrast * parity * share * precision,
+                    fit,
+                    parity,
+                    rad,
                 )
             )
     best.sort(key=lambda c: -c.score)

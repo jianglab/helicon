@@ -231,3 +231,185 @@ class TestHillCandidates:
         # a chosen row sets the three values HILL draws its layer lines from
         for name in ("hill_csym", "hill_rise", "hill_twist"):
             assert f'ui.update_numeric("{name}"' in src
+
+
+class TestExtraLines:
+    """A lattice with the lines of the helix and others between them is not the helix."""
+
+    RADIUS = 77.6
+
+    def _precision(self, spectra, twist, rise, csym):
+        heights, orders = layerlines.layer_line_heights(
+            twist,
+            rise,
+            csym,
+            y_max=1.0 / CUTOFF,
+            radius=self.RADIUS,
+            x_max=1.0 / CUTOFF,
+        )
+        return spectra.line_precision(heights, orders, self.RADIUS)
+
+    def test_the_lattice_of_the_helix_has_all_its_lines_and_a_finer_one_does_not(self):
+        # the same twist and rise with half the symmetry: C6's lines and, between
+        # them, the odd multiples of 3
+        spectra = li.prepare([_helix()], APIX, CUTOFF)
+        assert self._precision(spectra, 30.0, 21.92, 6) == pytest.approx(1.0)
+        assert self._precision(spectra, 30.0, 21.92, 3) < 0.6
+
+    def test_noise_hides_weak_lines_of_both_alike(self):
+        spectra = li.prepare([_helix(noise=1.0)], APIX, CUTOFF)
+        right = self._precision(spectra, 30.0, 21.92, 6)
+        finer = self._precision(spectra, 30.0, 21.92, 3)
+        assert right > 1.5 * finer
+
+    def test_a_helix_with_no_readable_line_loses_nothing(self):
+        spectra = li.prepare([_helix()], APIX, CUTOFF)
+        assert spectra.line_precision(np.array([]), np.array([]), self.RADIUS) == 1.0
+
+    def test_the_finer_lattice_is_not_a_candidate_with_a_score_near_the_helix(self):
+        found = li.index_images(
+            [_helix(noise=0.5)],
+            APIX,
+            self.RADIUS,
+            CUTOFF,
+            csyms=(3, 6),
+            twists=(10.0, 50.0),
+            rises=(15.0, 30.0),
+            step_twist=2.0,
+            step_rise=1.0,
+            top=8,
+            lattices=6,
+            refine=False,
+            workers=1,
+        )
+        best = found[0]
+        assert (best.csym, round(best.twist)) == (6, 30)
+        for c in found[1:]:
+            near = abs(c.rise - best.rise) < 1.5 and abs(c.csym * c.twist - 180) < 8
+            if c.csym == 3 and near:
+                assert c.score < 0.5 * best.score
+
+    def test_the_cost_is_documented_and_squared(self):
+        assert li.PRECISION_POWER == 2.0
+        assert li.LINE_Z_MIN == 3.0
+
+
+class TestRadialDensity:
+    """The radial density of the helix from the axial average of its images."""
+
+    @staticmethod
+    def _tube(radius=60.0, nx=128, ny=64, apix=4.0, offset=0.0):
+        x = (np.arange(nx) - nx // 2 - offset) * apix
+        # the projection of a thin shell: limb brightening at +-radius
+        inside = np.abs(x) < radius
+        profile = np.where(
+            inside, 1.0 / np.sqrt(np.maximum(radius**2 - x**2, 1.0)), 0.0
+        )
+        profile = np.minimum(profile, 3.0 / radius)
+        return np.tile(profile, (ny, 1))
+
+    def test_a_shell_has_its_density_at_its_radius(self):
+        r, rho = li.radial_density([self._tube(60.0)], 4.0, 8.0)
+        assert r[0] == 0.0 and r[1] == pytest.approx(4.0)
+        assert (rho >= 0).all()
+        assert r[np.argmax(rho)] == pytest.approx(60.0, abs=8.0)
+        assert rho[r > 90.0].max() < 0.1 * rho.max()
+
+    def test_an_off_centre_filament_is_centred_first(self):
+        _, rho = li.radial_density([self._tube(60.0, offset=3.0)], 4.0, 8.0)
+        r = np.arange(len(rho)) * 4.0
+        assert r[np.argmax(rho)] == pytest.approx(60.0, abs=8.0)
+
+    def test_the_profile_of_an_order_follows_the_density(self):
+        from scipy.special import jv
+
+        spectra = li.prepare([_helix()], APIX, CUTOFF)
+        spectra.density = (
+            np.arange(0, 160.0, 2.0),
+            np.exp(-0.5 * ((np.arange(0, 160.0, 2.0) - 70.0) / 2.0) ** 2),
+        )
+        fx = np.linspace(0.005, 0.07, 30)
+        g = spectra.order_profile(6, fx)
+        shell = jv(6, 2.0 * np.pi * 70.0 * fx)
+        assert np.corrcoef(g, shell)[0, 1] > 0.98
+
+    def test_the_radius_is_what_the_search_uses_unless_asked(self):
+        assert li.prepare([_helix()], APIX, CUTOFF).density is None
+        assert li.prepare([_helix()], APIX, CUTOFF, radial=True).density is not None
+
+
+class TestMembersOfALattice:
+    """C4, C6 and C8 at one csym * twist have the same lines: the wrong ones keep little."""
+
+    def test_the_share_a_member_keeps_is_the_square_of_its_agreement(self):
+        assert li.MEMBER_POWER == 2.0
+        found = li.index_images(
+            [_helix(noise=0.5)],
+            APIX,
+            77.6,
+            CUTOFF,
+            csyms=(3, 4, 6, 8),
+            twists=(10.0, 50.0),
+            rises=(15.0, 30.0),
+            step_twist=2.0,
+            step_rise=1.0,
+            top=8,
+            lattices=3,
+            refine=False,
+            workers=1,
+        )
+        best = found[0]
+        assert best.csym == 6
+        same_lines = [
+            c
+            for c in found[1:]
+            if abs(c.rise - best.rise) < 1.0
+            and abs(c.csym * c.twist - 6 * best.twist) < 6
+        ]
+        assert same_lines
+        for c in same_lines:
+            ratio = max(c.profile, 0.0) / best.profile
+            # score = lattice score x parity x ratio**2: far below the best
+            assert c.score <= best.score * min(ratio, 1.0) ** 2 * 1.05
+
+
+class TestPhaseDifferenceQuality:
+    """How clean the phase difference across the meridian is says how far an image is believed."""
+
+    def test_a_clean_image_has_a_cleaner_phase_difference_than_a_noisy_one(self):
+        clean = li._centred_cross_meridian(_helix(), CUTOFF, APIX)[3]
+        noisy = li._centred_cross_meridian(_helix(noise=3.0), CUTOFF, APIX)[3]
+        assert -1.0 <= noisy < clean <= 1.0
+        assert clean > 0.5
+
+    def test_unweighted_pooling_counts_every_image_alike(self):
+        images = [_helix(noise=0.5, seed=s) for s in range(3)]
+        spectra = li.prepare(images, APIX, CUTOFF)
+        assert spectra.n_images == 3
+
+    def test_weighting_by_the_phase_difference_lets_the_clean_image_outweigh(self):
+        clean, noisy = _helix(noise=0.3), _helix(noise=4.0, seed=1)
+        flat = li.prepare([clean, noisy], APIX, CUTOFF)
+        weighted = li.prepare([clean, noisy], APIX, CUTOFF, pd_weight="image")
+        # the effective number of images falls when one is believed more
+        assert weighted.n_images < flat.n_images
+        assert weighted.n_images > 0
+
+    def test_search_takes_the_option(self):
+        found = li.index_images(
+            [_helix(noise=0.5), _helix(noise=0.5, seed=1)],
+            APIX,
+            77.6,
+            CUTOFF,
+            csyms=(6,),
+            twists=(20.0, 40.0),
+            rises=(18.0, 26.0),
+            step_twist=2.0,
+            step_rise=1.0,
+            top=2,
+            lattices=2,
+            refine=False,
+            workers=1,
+            pd_weight="image",
+        )
+        assert found and found[0].csym == 6
