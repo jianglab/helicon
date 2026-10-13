@@ -375,7 +375,8 @@ def process_one_task(
         else:
             pitch_pixel = int(np.ceil(2 * rise / apix2d_orig))
         new_length = max(nx_orig, int(pitch_pixel * 1.2))
-        cpu = helicon.available_cpu()
+        # no more threads than this job was given: many jobs run side by side
+        cpu = min(helicon.available_cpu(), max(1, int(n_cpu)))
         # Symmetrise the rendered volume. The Gaussian solver renders its
         # screw copies into the slab, so the slab is axially continuous and
         # this resampling has nothing to alias.

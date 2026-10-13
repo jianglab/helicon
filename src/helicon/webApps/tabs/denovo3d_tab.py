@@ -28,7 +28,7 @@ from shiny.types import SilentException
 
 from .. import deployment, map_viewers
 
-from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register
+from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register, pools
 from ..lib import helix_transform
 from ..lib.helix_transform import (
     estimate_helix_rotation_center_diameter as _estimate_helix_rotation_center_diameter,
@@ -3594,6 +3594,7 @@ def denovo3d_tab_server(input, output, session):
             list(images),
             input.dn_rec_algorithm(),
             is_scan=pair is None and n_pairs > 1,
+            threads=n_threads_per_job,
         )
 
     @reactive.effect
@@ -3628,6 +3629,7 @@ def denovo3d_tab_server(input, output, session):
         images=None,
         rec_algorithm=None,
         is_scan=False,
+        threads=1,
     ):
         log = _denovo3d_logger()
 
@@ -3639,18 +3641,19 @@ def denovo3d_tab_server(input, output, session):
                 )
 
                 from time import time
-                from concurrent.futures import ThreadPoolExecutor
 
-                # The tasks run in threads, and their results are awaited on
-                # the event loop: concurrent.futures.as_completed would block
-                # it between results (seconds each), and with it every other
-                # session. Leaving the pool does not wait for running tasks
-                # either, which a "with" block would after a Stop.
-                executor = ThreadPoolExecutor(max_workers=cpu)
+                # The tasks run in worker processes, and their results are
+                # awaited on the event loop in steps of 0.2 s: a blocking wait
+                # would stop every other session between results (seconds
+                # each), and would not see a Stop until a task had finished. A
+                # Stop ends the workers themselves, at once: a task in a thread
+                # cannot be interrupted, and ran on, using the CPUs.
+                pool = pools.TaskPool(min(cpu, len(tasks)), threads=threads)
                 waiting = []
+                stopped = False
                 try:
                     future_tasks = [
-                        executor.submit(denovo3d_pipeline.process_one_task, *task)
+                        pool.submit(denovo3d_pipeline.process_one_task, *task)
                         for task in tasks
                     ]
                     t0 = time()
@@ -3659,46 +3662,55 @@ def denovo3d_tab_server(input, output, session):
                     update_interval = max(1, len(tasks) // 20)
 
                     waiting = [asyncio.wrap_future(f) for f in future_tasks]
-                    for completed_task in asyncio.as_completed(waiting):
-                        try:
-                            result, error = await completed_task, None
-                        except Exception:
-                            result, error = None, traceback.format_exc()
+                    pending = set(waiting)
+                    while pending and not stopped:
+                        finished, pending = await asyncio.wait(
+                            pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
+                        )
                         if abort_ref[0] is True:
                             log.warning("User aborted the denovo3D run early.")
+                            stopped = True
                             break
+                        for completed_task in finished:
+                            try:
+                                result, error = completed_task.result(), None
+                            except Exception:
+                                result, error = None, traceback.format_exc()
 
-                        if error is not None:
-                            log.error("Task raised an exception:\n%s", error)
-                            n_discarded += 1
-                            continue
-                        if result is None:
-                            n_discarded += 1
-                            continue
+                            if error is not None:
+                                log.error("Task raised an exception:\n%s", error)
+                                n_discarded += 1
+                                continue
+                            if result is None:
+                                n_discarded += 1
+                                continue
 
-                        results.append(result)
-                        t1 = time()
-                        remaining = (
-                            (len(tasks) - len(results) - n_discarded)
-                            / max(len(results), 1)
-                            * (t1 - t0)
-                        )
-                        p.set(
-                            len(results) + n_discarded,
-                            message=f"Completed {len(results) + n_discarded}/{len(tasks)}",
-                            detail=f"{helicon.timedelta2string(remaining)} remaining",
-                        )
+                            results.append(result)
+                            t1 = time()
+                            remaining = (
+                                (len(tasks) - len(results) - n_discarded)
+                                / max(len(results), 1)
+                                * (t1 - t0)
+                            )
+                            p.set(
+                                len(results) + n_discarded,
+                                message=f"Completed {len(results) + n_discarded}/{len(tasks)}",
+                                detail=f"{helicon.timedelta2string(remaining)} remaining",
+                            )
 
-                        if len(results) % update_interval == 0:
-                            reconstruction_results_raw.set(list(results))
-                            reconstruction_results.set(_rank(results, n_images))
+                            if len(results) % update_interval == 0:
+                                reconstruction_results_raw.set(list(results))
+                                reconstruction_results.set(_rank(results, n_images))
 
                     t_final = time()
                     log.info("reconstruction time: %s", t_final - t0)
                 finally:
                     for w in waiting:
                         w.cancel()  # those not awaited (after a Stop)
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    if stopped:
+                        pool.stop()
+                    else:
+                        pool.shutdown()
 
             if n_discarded:
                 log.info(
@@ -3753,11 +3765,15 @@ def denovo3d_tab_server(input, output, session):
                     )
 
                 loop = asyncio.get_running_loop()
-                with ThreadPoolExecutor(max_workers=1) as pool:
+                # Not a "with" block: leaving one waits for the thread, and a Stop
+                # must not. The thread sees the flag at its next pair of images
+                # (see _on_pair) and ends by itself; nothing waits for it.
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
                     future = loop.run_in_executor(pool, _work)
                     with ui.Progress(min=0, max=1) as pm:
                         pm.set(0, message="Matching projections across images")
-                        while not future.done():
+                        while not future.done() and not abort_ref[0]:
                             await asyncio.sleep(0.1)
                             if seen["n"]:
                                 pm.set(
@@ -3766,7 +3782,10 @@ def denovo3d_tab_server(input, output, session):
                                     detail=f"twist {seen['twist']:.3f}"
                                     f" ({seen['i'] + 1}/{seen['n']})",
                                 )
-                        matched, composites = await future
+                        if not abort_ref[0]:
+                            matched, composites = await future
+                finally:
+                    pool.shutdown(wait=False, cancel_futures=True)
 
                 if abort_ref[0]:
                     projmatch_composites.set({})
@@ -3815,7 +3834,15 @@ def denovo3d_tab_server(input, output, session):
 
             if display_model and results and not abort_ref[0]:
                 results = await _redraw_with(
-                    tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
+                    tasks,
+                    results,
+                    ranked,
+                    top_n,
+                    display_model,
+                    cpu,
+                    abort_ref,
+                    log,
+                    threads,
                 )
                 reconstruction_results_raw.set(list(results))
                 ranked = await _rank_final(results, log)
@@ -3841,7 +3868,7 @@ def denovo3d_tab_server(input, output, session):
                 pass
 
     async def _redraw_with(
-        tasks, results, ranked, top_n, display_model, cpu, abort_ref, log
+        tasks, results, ranked, top_n, display_model, cpu, abort_ref, log, threads=1
     ):
         """Re-solve the displayed twist/rise pairs with another solver.
 
@@ -3857,8 +3884,6 @@ def denovo3d_tab_server(input, output, session):
             that were not displayed, and any re-solve that failed, are left as
             they were.
         """
-        from concurrent.futures import ThreadPoolExecutor
-
         redo, slot = _display_redraw_plan(tasks, results, ranked, top_n, display_model)
         if not redo:
             return results
@@ -3869,40 +3894,51 @@ def denovo3d_tab_server(input, output, session):
         results = list(results)
         with ui.Progress(min=0, max=len(redo)) as p:
             p.set(message=f"Reconstructing with {display_model}", detail="for display")
-            # awaited on the event loop, as in the search above
-            executor = ThreadPoolExecutor(max_workers=cpu)
+            # in worker processes, awaited on the event loop in steps, as in the
+            # search above: a Stop ends them at once
+            pool = pools.TaskPool(min(cpu, len(redo)), threads=threads)
             waiting = []
+            stopped = False
             try:
                 futures = [
-                    executor.submit(denovo3d_pipeline.process_one_task, *t)
-                    for t in redo
+                    pool.submit(denovo3d_pipeline.process_one_task, *t) for t in redo
                 ]
                 done = 0
                 waiting = [asyncio.wrap_future(f) for f in futures]
-                for completed_task in asyncio.as_completed(waiting):
-                    try:
-                        result, error = await completed_task, None
-                    except Exception:
-                        result, error = None, traceback.format_exc()
+                pending = set(waiting)
+                while pending and not stopped:
+                    finished, pending = await asyncio.wait(
+                        pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
+                    )
                     if abort_ref[0] is True:
+                        stopped = True
                         break
-                    done += 1
-                    p.set(done, message=f"Reconstructed {done}/{len(redo)}")
-                    if error is not None:
-                        log.error(
-                            "Display reconstruction raised an exception:\n%s", error
-                        )
-                        continue
-                    if result is None:
-                        continue
-                    i = slot.get(_display_key(result[2]))
-                    if i is not None:
-                        # Score and parameters from the search, images from here.
-                        results[i] = (results[i][0], result[1], results[i][2])
+                    for completed_task in finished:
+                        try:
+                            result, error = completed_task.result(), None
+                        except Exception:
+                            result, error = None, traceback.format_exc()
+                        done += 1
+                        p.set(done, message=f"Reconstructed {done}/{len(redo)}")
+                        if error is not None:
+                            log.error(
+                                "Display reconstruction raised an exception:\n%s",
+                                error,
+                            )
+                            continue
+                        if result is None:
+                            continue
+                        i = slot.get(_display_key(result[2]))
+                        if i is not None:
+                            # Score and parameters from the search, images from here.
+                            results[i] = (results[i][0], result[1], results[i][2])
             finally:
                 for w in waiting:
                     w.cancel()  # those not awaited (after a Stop)
-                executor.shutdown(wait=False, cancel_futures=True)
+                if stopped:
+                    pool.stop()
+                else:
+                    pool.shutdown()
         return results
 
     @reactive.effect

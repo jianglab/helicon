@@ -32,7 +32,9 @@ class TestNoBlockingWaits:
         src = _src(denovo3d_tab)
         # the search pools; the ranking's one-thread pool is awaited inside it
         assert "with ThreadPoolExecutor(max_workers=cpu)" not in src
-        assert src.count("executor.shutdown(wait=False, cancel_futures=True)") >= 2
+        # worker processes, stopped (killed) at once instead of awaited
+        assert src.count("pools.TaskPool(") >= 2
+        assert src.count("pool.stop()") >= 2
 
 
 class TestLongWorkInBackgroundTasks:

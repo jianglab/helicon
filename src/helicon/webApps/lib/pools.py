@@ -14,6 +14,7 @@ PRELOAD = (
     "helicon.webApps.lib.layerline_index",
     "helicon.webApps.lib.helical_pitch_phase",
     "helicon.lib.layerlines",
+    "helicon.webApps.lib.denovo3d_pipeline",
     "scipy.special",
 )
 
@@ -37,3 +38,75 @@ def pool_context():
         return mp.get_context("spawn")
     context.set_forkserver_preload(list(PRELOAD))
     return context
+
+
+def _limit_threads(threads):
+    """Initialiser of a worker: at most ``threads`` threads in its BLAS and numba."""
+    import os
+
+    n = str(max(1, int(threads)))
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[name] = n
+    os.environ.setdefault("NUMBA_NUM_THREADS", n)
+    try:
+        from threadpoolctl import threadpool_limits
+
+        global _LIMITS
+        _LIMITS = threadpool_limits(limits=int(n))  # held for the life of the worker
+    except Exception:  # pragma: no cover - the limits are an optimisation
+        pass
+    try:
+        from helicon.lib.numba_compat import set_num_threads
+
+        set_num_threads(int(n))
+    except Exception:  # pragma: no cover
+        pass
+
+
+_LIMITS = None
+
+
+class TaskPool:
+    """Worker processes for tasks that a Stop has to end at once.
+
+    A task running in a thread cannot be interrupted: after a Stop it ran on, took
+    the CPUs, and was waited for. A task in a process can be ended by ending the
+    process. The pool is for one run: after :meth:`stop` it is not used again.
+
+    Parameters
+    ----------
+    max_workers : int
+        Number of worker processes.
+    threads : int, optional
+        Threads each worker may use (in BLAS and numba), so that the workers
+        together do not use more CPUs than there are. Defaults to 1.
+    """
+
+    def __init__(self, max_workers, threads=1):
+        from concurrent.futures import ProcessPoolExecutor
+
+        self._executor = ProcessPoolExecutor(
+            max_workers=max(1, int(max_workers)),
+            mp_context=pool_context(),
+            initializer=_limit_threads,
+            initargs=(threads,),
+        )
+
+    def submit(self, fn, *args):
+        """A ``concurrent.futures.Future`` of ``fn(*args)`` run in a worker."""
+        return self._executor.submit(fn, *args)
+
+    def stop(self):
+        """End the tasks at once: those waiting are dropped, the workers killed."""
+        executor = self._executor
+        workers = list((getattr(executor, "_processes", None) or {}).values())
+        executor.shutdown(wait=False, cancel_futures=True)
+        for worker in workers:
+            try:
+                worker.kill()
+            except Exception:  # already gone
+                pass
+
+    def shutdown(self):
+        """Let the pool go without waiting for its tasks (a run that is done)."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
