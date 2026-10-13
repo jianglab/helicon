@@ -1198,12 +1198,62 @@ class TestHeldDocumentChanges:
         assert len(fig.renderers) == 20 and len(events) <= 3
 
 
+class TestDiameterOnTheInputsTab:
+    """The diameter is a slider below the profile plot, drawn on it as dashed lines."""
+
+    def test_it_is_a_slider_below_the_profile_and_not_in_parameters(self):
+        html = str(hill_tab.hill_tab_ui("hill"))
+        profile = html.index('id="hill-hill_plot_radial_profile"')
+        slider = html.index('id="hill-hill_diameter"')
+        params = html.index('id="hill-hill_params_accordion"')
+        assert profile < slider < params
+        assert 'class="js-range-slider' in html[slider - 400 : slider + 400]
+        assert html.count('id="hill-hill_diameter"') == 1
+        # the mask radius on its left, in the same row, once in the page
+        mask = html.index('id="hill-hill_mask_radius"')
+        assert profile < mask < slider
+        assert html.count('id="hill-hill_mask_radius"') == 1
+
+    def test_the_lines_follow_it_and_the_estimate_moves_it(self):
+        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        assert "_rp_diameter_spans[0].location = -half" in src
+        assert 'ui.update_slider(\n            "hill_diameter"' in src
+        assert 'ui.update_numeric("hill_diameter"' not in src
+
+    def test_labels_and_the_image_title_are_as_asked(self):
+        import numpy as np
+
+        html = str(hill_tab.hill_tab_ui("hill"))
+        assert "Tube/filament diameter (Å)" in html
+        fig, _ = hill_tab.hill.create_image_figure(
+            np.zeros((8, 8)), 1.0, 1.0, title="t"
+        )
+        assert fig.title.text_font_size == "18px"  # the default is what it was
+        fig, _ = hill_tab.hill.create_image_figure(
+            np.zeros((8, 8)), 1.0, 1.0, title="t", title_font_size="14px"
+        )
+        assert fig.title.text_font_size == "14px"
+        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        assert 'title_font_size="14px"' in src
+
+    def test_the_profile_lines_up_with_the_image_above_it(self):
+        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        # the toolbar takes no width: above the plot, and only under the mouse
+        assert 'fig_radial_profile.toolbar_location = "above"' in src
+        assert "fig_radial_profile.toolbar.autohide = True" in src
+        # the image's x range, copied (two Bokeh documents cannot share one)
+        assert (
+            "fig_radial_profile.x_range.start = fig_transformed_img.x_range.start"
+            in src
+        )
+        assert "_fig.min_border_left = _fig.min_border_right = _ALIGNED_BORDER" in src
+
+
 class TestParametersTabIsGroupedByFunction:
     """One panel per function, and every input of the tab in exactly one."""
 
     GROUPS = {
         "hill_params_symmetry": [
-            "hill_diameter",
             "hill_out_of_plane_tilt",
             "hill_use_twist_pitch",
         ],

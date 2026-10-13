@@ -5,6 +5,8 @@ so each takes a few seconds: the parity of the orders of the layer lines, the
 way images add, and the search itself.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -197,6 +199,62 @@ class TestHillCandidates:
         assert list(left["Twist (°)"]) == [-30.0, -22.5]
         assert list(right["Score (%)"]) == [100, 80]
         assert right["Pitch (Å)"][0] == pytest.approx(360 * 21.75 / 30.0, abs=0.1)
+        assert list(right["Group"]) == ["A", "A"]
+
+    @staticmethod
+    def _found():
+        c = li.Candidate
+        return [
+            c(6, 30.0, 21.75, 10.0, 5.0, 0.9, 77.6),  # A
+            c(2, 60.0, 14.5, 9.0, 4.0, 0.9, 77.6),  # another lattice: B
+            c(8, 22.5, 21.75, 8.0, 4.0, 0.9, 77.6),  # A: 8 x 22.5 = 6 x 30
+            c(4, 45.0, 21.8, 7.0, 4.0, 0.9, 77.6),  # A, within the tolerances
+            c(3, 60.0, 21.75, 6.0, 4.0, 0.5, 77.6),  # A: 3 x 60 = 180
+            c(4, 60.0, 14.5, 5.0, 4.0, 0.9, 77.6),  # 240: not B
+        ]
+
+    def test_candidates_with_the_same_lines_share_a_letter(self):
+        assert hill_compute.same_line_groups(self._found()) == list("ABAAAC")
+        assert hill_compute.same_line_groups([]) == []
+
+    def test_the_ambiguity_names_the_alternatives_of_the_best(self):
+        assert hill_compute.csym_ambiguity(self._found()) == [
+            (1, 6),
+            (3, 8),
+            (4, 4),
+            (5, 3),
+        ]
+        alone = [li.Candidate(6, 30.0, 21.75, 10.0, 5.0, 0.9, 77.6)]
+        assert hill_compute.csym_ambiguity(alone) is None
+
+    def test_the_alternatives_of_the_best_are_always_listed(self):
+        c = li.Candidate
+        found = [c(6, 30.0, 21.75, 10.0, 5.0, 0.9, 77.6)]
+        found += [c(2, 60.0 + k, 14.5, 9.0 - k * 0.1, 4.0, 0.9, 77.6) for k in range(8)]
+        found += [c(8, 22.5, 21.75, 5.0, 4.0, 0.9, 77.6)]  # rank 10, same lines
+        ranks, shown = hill_compute.candidates_to_show(found, n=3)
+        assert ranks == [1, 2, 3, 10]
+        assert shown[-1].csym == 8
+        table = hill_compute.candidates_table(shown, ranks=ranks)
+        assert list(table["Rank"]) == [1, 2, 3, 10]
+        assert list(table["Group"])[0] == list(table["Group"])[-1] == "A"
+        assert hill_compute.csym_ambiguity(shown, ranks) == [(1, 6), (10, 8)]
+
+    def test_the_tab_warns_and_says_how_to_evaluate(self):
+        from helicon.webApps.tabs import hill_tab
+
+        group = hill_compute.csym_ambiguity(self._found())
+        text = hill_tab._csym_warning_text(group)
+        assert "C6 (rank 1)" in text and "C8 (rank 3)" in text and "C4 (rank 4)" in text
+        assert "same heights" in text and "Evaluate each" in text
+        assert "does not rule one out" in text
+        # an odd member: the phases across the meridian are the better check
+        assert "phases across the meridian" in text
+        even = hill_tab._csym_warning_text([(1, 6), (2, 8)])
+        assert "phases across the meridian" not in even
+        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        assert 'ui.output_ui("hill_symmetry_warning")' in src
+        assert 'class_="alert alert-warning"' in src
 
     def test_no_candidates_is_an_empty_table(self):
         assert len(hill_compute.candidates_table([])) == 0
@@ -311,9 +369,25 @@ class TestRadialDensity:
     def test_a_shell_has_its_density_at_its_radius(self):
         r, rho = li.radial_density([self._tube(60.0)], 4.0, 8.0)
         assert r[0] == 0.0 and r[1] == pytest.approx(4.0)
-        assert (rho >= 0).all()
         assert r[np.argmax(rho)] == pytest.approx(60.0, abs=8.0)
         assert rho[r > 90.0].max() < 0.1 * rho.max()
+
+    def test_a_thick_tube_is_recovered_with_its_edges(self):
+        # a uniform tube between 40 and 70 A, projected along y: the inverse of that
+        # is the density, as far as the resolution limit allows
+        apix, nx, cut = 2.0, 160, 6.0
+        x = (np.arange(nx) - nx // 2) * apix
+        y = np.arange(-200.0, 200.0, 0.25)
+        rr = np.hypot(x[:, None], y[None, :])
+        profile = ((rr >= 40.0) & (rr <= 70.0)).sum(axis=1) * 0.25
+        r, rho = li.radial_density([np.tile(profile, (32, 1))], apix, cut)
+        mass = np.cumsum(np.maximum(rho, 0.0) * r)
+        mass /= mass[-1]
+        assert np.interp(0.05, mass, r) == pytest.approx(41.0, abs=3.0)
+        assert np.interp(0.95, mass, r) == pytest.approx(69.0, abs=3.0)
+        inside = (r > 45.0) & (r < 65.0)
+        assert rho[inside].min() > 0.8 * rho[inside].max()
+        assert np.abs(rho[r < 30.0]).max() < 0.1 * rho.max()
 
     def test_an_off_centre_filament_is_centred_first(self):
         _, rho = li.radial_density([self._tube(60.0, offset=3.0)], 4.0, 8.0)

@@ -24,9 +24,9 @@ try:
 except Exception:
     hill = None
 
-# helicon.get_images_from_url does not exist; use the shared webApps lib.
+# the image loader is shared with the other tabs (and caches downloads)
 from .. import auto_method_ui, bookmark, deployment
-from ..lib import denovo3d_pipeline
+from ..lib import image_loader
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ _INIT_PNY = 1024
 _INIT_CUTOFF_X = 7.03
 _INIT_CUTOFF_Y = 4.69
 _INIT_HELICAL_RADIUS = 77.6
+# the largest diameter the slider offers before an image is loaded (then: its width)
+_DIAMETER_SLIDER_MAX = 1000.0
+# side borders (px) of the image figure and of the profile plot below it
+_ALIGNED_BORDER = 5
 
 
 def _set_helix_sliders(slider_twist, slider_pitch, slider_rise, twist, pitch, rise):
@@ -330,6 +334,41 @@ def hill_tab_ui():
                         ),
                         output_widget("hill_display_transformed", height="auto"),
                         output_widget("hill_plot_radial_profile", height="auto"),
+                        # under the profile plot, whose dashed lines show them: the
+                        # mask (green) and the filament's diameter (orange)
+                        ui.layout_columns(
+                            ui.tooltip(
+                                helicon.shiny.slider(
+                                    "hill_mask_radius",
+                                    "Mask radius (Å)",
+                                    min=0.0,
+                                    max=_DIAMETER_SLIDER_MAX / 2,
+                                    value=0.0,
+                                    step=1.0,
+                                ),
+                                "The radius beyond which the image is masked out, "
+                                "shown as the green dashed lines in the profile above. "
+                                "0: no mask.",
+                            ),
+                            ui.tooltip(
+                                helicon.shiny.slider(
+                                    "hill_diameter",
+                                    "Tube/filament diameter (Å)",
+                                    min=1.0,
+                                    max=_DIAMETER_SLIDER_MAX,
+                                    value=_INIT_HELICAL_RADIUS * 2,
+                                    step=0.5,
+                                ),
+                                "The outer diameter of the filament or tube, shown as the orange "
+                                "dashed lines in the profile above. It decides where each "
+                                "layer line starts away from the meridian, so it matters for "
+                                "the predicted lines and for 'Suggest csym, twist and rise'. "
+                                "It is estimated from each image; double-click the number to "
+                                "type one.",
+                            ),
+                            col_widths=6,
+                            style="align-items: flex-end;",
+                        ),
                         output_widget("hill_plot_acf", width="auto", height="auto"),
                         ui.output_ui("hill_get_avg_ps_ui"),
                         ui.div(
@@ -342,7 +381,7 @@ def hill_tab_ui():
                                     ),
                                     "Search the layer lines of the selected images for "
                                     "the helical symmetries that explain them, best "
-                                    "first. Uses the filament diameter and the "
+                                    "first. Uses the filament diameter (above) and the "
                                     "resolution limit X (Parameters tab); several class "
                                     "averages of one helix do better than one.",
                                 ),
@@ -351,6 +390,7 @@ def hill_tab_ui():
                             ),
                             ui.output_ui("hill_symmetry_message"),
                             ui.output_ui("hill_symmetry_progress"),
+                            ui.output_ui("hill_symmetry_warning"),
                             ui.output_data_frame("hill_symmetry_candidates"),
                             style="margin: 0.5em 0 1em 0;",
                         ),
@@ -369,15 +409,6 @@ def hill_tab_ui():
                                 "Helical symmetry",
                                 ui.layout_columns(
                                     ui.input_numeric(
-                                        "hill_diameter",
-                                        "Filament/tube diameter (Å)",
-                                        value=155.2,
-                                        min=1.0,
-                                        max=1000.0,
-                                        step=10.0,
-                                        update_on="blur",
-                                    ),
-                                    ui.input_numeric(
                                         "hill_out_of_plane_tilt",
                                         "Out-of-plane tilt (°)",
                                         value=0.0,
@@ -386,15 +417,15 @@ def hill_tab_ui():
                                         step=1.0,
                                         update_on="blur",
                                     ),
+                                    ui.input_radio_buttons(
+                                        "hill_use_twist_pitch",
+                                        "Keep twist/pitch when changing rise:",
+                                        choices=["Twist", "Pitch"],
+                                        selected="Twist",
+                                        inline=True,
+                                    ),
                                     col_widths=6,
                                     style="align-items: flex-end;",
-                                ),
-                                ui.input_radio_buttons(
-                                    "hill_use_twist_pitch",
-                                    "Keep twist/pitch when changing rise:",
-                                    choices=["Twist", "Pitch"],
-                                    selected="Twist",
-                                    inline=True,
                                 ),
                                 value="hill_params_symmetry",
                             ),
@@ -847,7 +878,6 @@ def hill_tab_server(input, output, session):
 
     straighten_tab_activated = reactive.value(False)
     markers_straighten = reactive.value(None)
-    mask_radius_auto = reactive.value(0.0)
     mask_len_percent_auto = reactive.value(0.0)
     data_2d_transformed = reactive.value(None)
     ny_curr_img = reactive.value(_INIT_NY)
@@ -883,6 +913,7 @@ def hill_tab_server(input, output, session):
     from bokeh.models import (
         ColumnDataSource,
         CustomJS,
+        Range1d,
         Span,
         Slider,
         Spinner,
@@ -1178,6 +1209,7 @@ def hill_tab_server(input, output, session):
         _INIT_APIX,
         title=f"Transformed Image ({_INIT_NX}x{_INIT_NY})",
         title_location="below",
+        title_font_size="14px",  # as the labels of the sliders under the plots
         show_axis=False,
         show_toolbar=False,
         crosshair_color="white",
@@ -1235,7 +1267,32 @@ def hill_tab_server(input, output, session):
     )
     fig_radial_profile.add_layout(_rp_rmin_span)
     fig_radial_profile.add_layout(_rp_rmax_span)
+    # the filament's diameter (the green ones are the mask)
+    _rp_diameter_spans = [
+        Span(
+            location=side * _INIT_HELICAL_RADIUS,
+            dimension="height",
+            line_color="darkorange",
+            line_dash="dashed",
+            line_width=2,
+        )
+        for side in (-1, 1)
+    ]
+    for _span in _rp_diameter_spans:
+        fig_radial_profile.add_layout(_span)
     fig_radial_profile.yaxis.visible = False
+    # aligned with the image above it, so that the dashed lines fall on the mask
+    # and the filament there: the same x range (the two are separate Bokeh
+    # documents, which cannot share one range: its ends are copied, here and when
+    # the image changes), the same side borders, and the toolbar above the plot (it
+    # would take width at the side), shown only while the mouse is over the plot
+    fig_radial_profile.x_range = Range1d(
+        fig_transformed_img.x_range.start, fig_transformed_img.x_range.end
+    )
+    for _fig in (fig_transformed_img, fig_radial_profile):
+        _fig.min_border_left = _fig.min_border_right = _ALIGNED_BORDER
+    fig_radial_profile.toolbar_location = "above"
+    fig_radial_profile.toolbar.autohide = True
     fig_radial_profile.legend.visible = False
     fig_radial_profile.legend.location = "top_right"
     fig_radial_profile.legend.click_policy = "hide"
@@ -1923,7 +1980,7 @@ def hill_tab_server(input, output, session):
             return
         # Loading an image must not overwrite restored or user-edited helix params.
         try:
-            data, apix = denovo3d_pipeline.get_images_from_url(url)
+            data, apix = image_loader.get_images_from_url(url)
             input_data.set(data)
             apix_from_file.set(apix)
             _update_with_apix_from_file(apix)
@@ -2611,17 +2668,6 @@ def hill_tab_server(input, output, session):
                         step=1.0,
                     ),
                     helicon.shiny.slider(
-                        "hill_mask_radius",
-                        "Mask radius (Å, 0: no mask)",
-                        min=0.0,
-                        max=max(1.0, nx_curr_img() / 2 * apix_from_file()),
-                        value=min(
-                            max(mask_radius_auto(), 0.0),
-                            max(1.0, nx_curr_img() / 2 * apix_from_file()),
-                        ),
-                        step=1.0,
-                    ),
-                    helicon.shiny.slider(
                         "hill_mask_len",
                         "Mask length (%, 0: no mask)",
                         min=0.0,
@@ -2792,7 +2838,7 @@ def hill_tab_server(input, output, session):
             apix,
             radius,
             cutoff_res,
-            top=8,
+            top=40,  # the table shows 8, and the alternatives of the best
             progress=progress,
         )
 
@@ -2863,13 +2909,12 @@ def hill_tab_server(input, output, session):
         status = _symmetry_search.status()
         if status == "success":
             found = _symmetry_search.result()
-            symmetry_candidates.set(list(found))
+            symmetry_candidates.set(list(zip(*hill.candidates_to_show(list(found)))))
             symmetry_message.set(
                 "Click a row to use it. The hand of the helix (the sign of the twist) "
                 "cannot be seen in a power spectrum: the twists have the sign of the "
-                "current one. Candidates that put their lines at the same heights "
-                "(the same rise and csym × twist) differ only in where each line "
-                "starts, which depends on the diameter."
+                "current one. Candidates in the same Group put their layer lines at "
+                "the same heights."
                 if found
                 else "No helical symmetry stood out in these images."
             )
@@ -2882,14 +2927,32 @@ def hill_tab_server(input, output, session):
         req(text)
         return ui.p(text, style="font-size: 0.85em; margin: 0.4em 0;")
 
+    @render.ui
+    def hill_symmetry_warning():
+        found = symmetry_candidates()
+        req(len(found))
+        ranks, shown = zip(*found)
+        group = hill.csym_ambiguity(shown, ranks)
+        req(group)
+        return ui.div(
+            ui.strong("Csym is uncertain. "),
+            _csym_warning_text(group),
+            class_="alert alert-warning",
+            role="alert",
+            style="font-size: 0.85em; padding: 0.5em 0.75em; margin: 0.4em 0;",
+        )
+
     @render.data_frame
     def hill_symmetry_candidates():
         found = symmetry_candidates()
         req(len(found))
         with reactive.isolate():
             sign = -1.0 if (input.hill_twist() or 0) < 0 else 1.0
+        ranks, shown = zip(*found)
         return render.DataGrid(
-            hill.candidates_table(found, sign), selection_mode="row", width="100%"
+            hill.candidates_table(shown, sign, ranks),
+            selection_mode="row",
+            width="100%",
         )
 
     @reactive.effect
@@ -2901,7 +2964,7 @@ def hill_tab_server(input, output, session):
             return
         found = symmetry_candidates()
         req(len(rows), len(found))
-        choice = found[int(rows[0])]
+        choice = found[int(rows[0])][1]
         sign = -1.0 if (input.hill_twist() or 0) < 0 else 1.0
         ui.update_numeric("hill_csym", value=int(choice.csym))
         ui.update_numeric("hill_rise", value=round(float(choice.rise), 3))
@@ -2919,9 +2982,25 @@ def hill_tab_server(input, output, session):
         radius_auto, _ = hill.estimate_radial_range(
             data_2d_transformed(), thresh_ratio=0.1
         )
-        ui.update_numeric(
-            "hill_diameter", value=round(radius_auto * input.hill_apix() * 2, 2)
+        width = data_2d_transformed().shape[1] * input.hill_apix()
+        ui.update_slider(
+            "hill_diameter",
+            value=round(min(radius_auto * input.hill_apix() * 2, width), 2),
+            max=round(width, 1),
         )
+
+    @reactive.effect
+    def _mask_slider_range():
+        """The mask radius goes up to half the width of the image."""
+        half = max(1.0, nx_curr_img() / 2 * apix_from_file())
+        ui.update_slider("hill_mask_radius", max=round(half, 1))
+
+    @reactive.effect
+    def _show_diameter():
+        """The orange dashed lines of the profile plot follow the diameter."""
+        half = float(input.hill_diameter() or 0.0) / 2.0
+        _rp_diameter_spans[0].location = -half
+        _rp_diameter_spans[1].location = half
 
     # ── Compute PS/PD data ──────────────────────────────────────
     @reactive.effect
@@ -3088,6 +3167,8 @@ def hill_tab_server(input, output, session):
         aspect_ratio = w * dx / (h * dy)
         fig_transformed_img.x_range.start = -w // 2 * dx
         fig_transformed_img.x_range.end = (w // 2 - 1) * dx
+        fig_radial_profile.x_range.start = fig_transformed_img.x_range.start
+        fig_radial_profile.x_range.end = fig_transformed_img.x_range.end
         fig_transformed_img.y_range.start = (h // 2 - 1) * dy
         fig_transformed_img.y_range.end = -h // 2 * dy
         fig_transformed_img.aspect_ratio = aspect_ratio
@@ -3642,6 +3723,45 @@ def hill_tab_server(input, output, session):
 
 
 # ── Helpers (module-level to avoid pickling issues) ──────────────
+
+
+def _csym_warning_text(group):
+    """What the user is told when candidates of different csym share the lines of the best.
+
+    Parameters
+    ----------
+    group : list of tuple
+        ``(rank, csym)`` of the candidates in the group of the best, the best first
+        (``hill_compute.csym_ambiguity``).
+
+    Returns
+    -------
+    str
+    """
+    first_rank, first = group[0]
+    others = ", ".join(f"C{c} (rank {r})" for r, c in group[1:])
+    parities = {c % 2 for _, c in group}
+    text = (
+        f"C{first} (rank {first_rank}) and {others}, the candidates in Group A, "
+        "put their layer lines at exactly the same heights. They differ only in the "
+        "Bessel order of each line, and so in where each line starts away from the "
+        "meridian, which depends on the radius of the helix as well: the layer "
+        "lines of 2D images tell them apart only weakly, and the ranking among them "
+        "can be wrong even when the twist and rise are right. Their scores depend "
+        "on the filament diameter (the slider below the profile plot) and are not reliable: a low score, "
+        "even 0%, does not rule one out. Evaluate each before "
+        "choosing: click its row and compare where its predicted lines start with "
+        "the lines of the power spectrum; search several class averages together; "
+        "and confirm the choice with a 3D reconstruction (HI3D, Denovo3D) or a known "
+        "structure."
+    )
+    if len(parities) > 1:
+        text += (
+            " Odd and even csym in this group also differ in the phases across the "
+            "meridian (0 or 180 degrees on a line, in the phase difference plot), "
+            "which tells them apart more reliably."
+        )
+    return text
 
 
 def _init_layer_lines(fig_ellipses, figs_image):

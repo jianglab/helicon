@@ -488,7 +488,97 @@ def images_for_indexing(images, records, apix, method="threshold"):
     return out
 
 
-def candidates_table(candidates, twist_sign=1.0):
+def same_line_groups(candidates, rise_tol=0.3, ct_tol=2.0):
+    """Which candidates put their layer lines at the same heights.
+
+    Helices with the same rise and the same ``csym * twist`` (modulo 360 degrees)
+    have identical layer-line heights, overlaps included, and differ only in the
+    Bessel order of each line (C4, C6 and C8 at 45, 30 and 22.5 degrees, say). The
+    layer lines of 2D images tell them apart only weakly: where a line starts away
+    from the meridian depends on its order and on the radius of the helix together.
+
+    Parameters
+    ----------
+    candidates : sequence of layerline_index.Candidate
+        The best first.
+    rise_tol : float, optional
+        A. Defaults to 0.3.
+    ct_tol : float, optional
+        Degrees of ``csym * twist``. Defaults to 2.
+
+    Returns
+    -------
+    list of str
+        One letter per candidate, ``"A"`` for the group of the first, then in the
+        order the groups first appear.
+    """
+    keys, labels = [], []
+    for c in candidates:
+        ct = (int(c.csym) * float(c.twist)) % 360.0
+        for k, (rise, other) in enumerate(keys):
+            d = abs(ct - other)
+            if abs(float(c.rise) - rise) <= rise_tol and min(d, 360.0 - d) <= ct_tol:
+                labels.append(chr(ord("A") + k % 26))
+                break
+        else:
+            keys.append((float(c.rise), ct))
+            labels.append(chr(ord("A") + (len(keys) - 1) % 26))
+    return labels
+
+
+def candidates_to_show(candidates, n=8):
+    """The candidates HILL lists: the first ``n``, and every other one that shares the lines of the first.
+
+    The alternatives with the same layer lines as the best (other csym at the same
+    ``csym * twist`` and rise) can score below candidates of other lattices, but
+    they are the ones the user has to weigh against the best, so they are always
+    shown.
+
+    Parameters
+    ----------
+    candidates : sequence of layerline_index.Candidate
+        The best first.
+    n : int, optional
+        Defaults to 8.
+
+    Returns
+    -------
+    ranks : list of int
+        Their ranks among all the candidates, from 1.
+    shown : list of layerline_index.Candidate
+    """
+    groups = same_line_groups(candidates)
+    keep = [i for i, g in enumerate(groups) if i < n or g == "A"]
+    return [i + 1 for i in keep], [candidates[i] for i in keep]
+
+
+def csym_ambiguity(candidates, ranks=None):
+    """The ranks and csyms of the candidates that share the lines of the first, or None.
+
+    Parameters
+    ----------
+    candidates : sequence of layerline_index.Candidate
+        The best first.
+    ranks : sequence of int, optional
+        Their ranks; by default 1, 2, ...
+
+    Returns
+    -------
+    list of tuple or None
+        ``(rank, csym)`` of every candidate in the group of the first, the first
+        included, when there are at least two; None otherwise.
+    """
+    labels = same_line_groups(candidates)
+    ranks = list(ranks) if ranks is not None else range(1, len(candidates) + 1)
+    group = [
+        (rank, int(c.csym))
+        for rank, c, label in zip(ranks, candidates, labels)
+        if label == "A"
+    ]
+    return group if len(group) > 1 else None
+
+
+def candidates_table(candidates, twist_sign=1.0, ranks=None):
     """The candidates of the layer-line search as the table HILL shows.
 
     Parameters
@@ -498,19 +588,24 @@ def candidates_table(candidates, twist_sign=1.0):
     twist_sign : float, optional
         The hand to show the twists in: a power spectrum cannot tell it, so the
         sign of the twist the user has is kept. Defaults to positive.
+    ranks : sequence of int, optional
+        The ranks to show (:func:`candidates_to_show`); by default 1, 2, ...
 
     Returns
     -------
     pandas.DataFrame
-        One row per candidate: its rank, csym, twist, rise and pitch, and its
-        score as a percentage of the best one's.
+        One row per candidate: its rank, csym, twist, rise and pitch, the group of
+        candidates with the same layer lines it is in (``Group``) (:func:`same_line_groups`),
+        and its score as a percentage of the best one's.
     """
     import pandas as pd
 
     sign = -1.0 if twist_sign < 0 else 1.0
     best = max((c.score for c in candidates), default=0.0)
     rows = []
-    for rank, c in enumerate(candidates, start=1):
+    groups = same_line_groups(candidates)
+    ranks = list(ranks) if ranks is not None else range(1, len(candidates) + 1)
+    for rank, c, group in zip(ranks, candidates, groups):
         rows.append(
             {
                 "Rank": rank,
@@ -518,6 +613,7 @@ def candidates_table(candidates, twist_sign=1.0):
                 "Twist (°)": round(sign * c.twist, 2),
                 "Rise (Å)": round(c.rise, 2),
                 "Pitch (Å)": round(360.0 * c.rise / c.twist, 1) if c.twist else None,
+                "Group": group,
                 "Score (%)": int(round(100.0 * c.score / best)) if best > 0 else 0,
             }
         )
@@ -939,6 +1035,7 @@ def create_image_figure(
     dy,
     title="",
     title_location="below",
+    title_font_size="18px",
     plot_width=None,
     plot_height=None,
     x_axis_label="x",
@@ -979,7 +1076,7 @@ def create_image_figure(
     if title:
         fig.title.text = title
         fig.title.align = "center"
-        fig.title.text_font_size = "18px"
+        fig.title.text_font_size = title_font_size
         fig.title.text_font_style = "normal"
     if not show_axis:
         fig.axis.visible = False
