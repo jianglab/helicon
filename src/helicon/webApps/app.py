@@ -157,6 +157,30 @@ def _lazy_panel(prefix: str, label: str):
     )
 
 
+# Every button is blue-filled, as a ``btn-primary`` is, whatever plain or outline style
+# its tab gave it (Shiny's default is white). The ones with a colour of their own,
+# for a warning or a danger, keep it. The values are those of ``btn-primary`` in this
+# app's theme (the same in the light and the dark one); a rule of two classes wins
+# over the single class of Bootstrap's own.
+_BUTTON_CSS = """
+.btn.btn-default, .btn.btn-outline-primary, .btn.btn-outline-secondary,
+.btn.btn-secondary, .btn.btn-light {
+    --bs-btn-color: #fff;
+    --bs-btn-bg: #007bc2;
+    --bs-btn-border-color: #007bc2;
+    --bs-btn-hover-color: #fff;
+    --bs-btn-hover-bg: #0069a5;
+    --bs-btn-hover-border-color: #00629b;
+    --bs-btn-active-color: #fff;
+    --bs-btn-active-bg: #00629b;
+    --bs-btn-active-border-color: #005c92;
+    --bs-btn-disabled-color: #fff;
+    --bs-btn-disabled-bg: #007bc2;
+    --bs-btn-disabled-border-color: #007bc2;
+    --bs-btn-focus-shadow-rgb: 38, 143, 203;
+}
+"""
+
 # hides the note of a lazily loaded tab once its page is in the placeholder
 _LAZY_PANEL_CSS = """
 .helicon-lazy-loading { padding: 2.5rem 1rem; text-align: center; opacity: 0.75; }
@@ -538,6 +562,7 @@ def _page(theme: str, initial_theme: str, active_tab: str):
             ),
         ),
         ui.tags.style(_LAZY_PANEL_CSS),
+        ui.tags.style(_BUTTON_CSS),
         ui.tags.style(
             f"""
             :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {{
