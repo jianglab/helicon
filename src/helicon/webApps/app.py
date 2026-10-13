@@ -40,6 +40,11 @@ from starlette.routing import Route
 from shiny import App, reactive, render, ui
 
 from helicon.lib.shiny import encode_query_params
+from helicon.webApps import shiny_speedups
+
+# Shiny names each reactive value by inspecting the whole call stack, about 160 ms
+# a value in a running server: the tabs start seconds faster with a cheaper way
+shiny_speedups.apply()
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +131,39 @@ _LAZY_TABS = {
 }
 
 
-def _lazy_panel(prefix: str):
-    """The place in the page where a lazily loaded tab's page appears."""
-    return ui.output_ui(f"lazy_tab_{prefix}", fill=True, fillable=True)
+def _lazy_panel(prefix: str, label: str):
+    """The place in the page where a lazily loaded tab's page appears.
+
+    Until it does (the first visit imports the tab's modules and builds its page,
+    which takes seconds) the place shows a note that it is loading. The note is
+    in the page from the start, so the browser shows it at once, and the style
+    rule below hides it when the page arrives.
+
+    Parameters
+    ----------
+    prefix : str
+        The tab's module prefix (the name of its placeholder is derived from it).
+    label : str
+        The tab's name as the note shows it.
+    """
+    return ui.div(
+        ui.div(
+            ui.span(class_="spinner-border spinner-border-sm", role="status"),
+            f" Loading {label} ... the first visit takes a few seconds.",
+            class_="helicon-lazy-loading",
+        ),
+        ui.output_ui(f"lazy_tab_{prefix}", fill=True, fillable=True),
+        class_="helicon-lazy-panel html-fill-item html-fill-container",
+    )
+
+
+# hides the note of a lazily loaded tab once its page is in the placeholder
+_LAZY_PANEL_CSS = """
+.helicon-lazy-loading { padding: 2.5rem 1rem; text-align: center; opacity: 0.75; }
+.helicon-lazy-panel:has(> .shiny-html-output:not(:empty)) > .helicon-lazy-loading {
+    display: none;
+}
+"""
 
 
 # ── Bookmark module map ─────────────────────────────────────────
@@ -502,6 +537,7 @@ def _page(theme: str, initial_theme: str, active_tab: str):
                 """
             ),
         ),
+        ui.tags.style(_LAZY_PANEL_CSS),
         ui.tags.style(
             f"""
             :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {{
@@ -591,15 +627,15 @@ def _page(theme: str, initial_theme: str, active_tab: str):
                 (
                     _local_only_note("WhereIsMyClass", "the micrographs")
                     if deployment.is_cloud()
-                    else _lazy_panel("where_is_my_class")
+                    else _lazy_panel("where_is_my_class", "WhereIsMyClass")
                 ),
             ),
             ui.nav_panel(
                 "HelicalProjection", helical_projection_tab_ui("helical_projection")
             ),
-            ui.nav_panel("HILL", _lazy_panel("hill")),
+            ui.nav_panel("HILL", _lazy_panel("hill", "HILL")),
             ui.nav_panel("HelicalPitch", helical_pitch_tab_ui("helical_pitch")),
-            ui.nav_panel("Denovo3D", _lazy_panel("denovo3d")),
+            ui.nav_panel("Denovo3D", _lazy_panel("denovo3d", "Denovo3D")),
             ui.nav_panel("AbInitio3D", abinitio3d_tab_ui("abinitio3d")),
             ui.nav_panel("HelicalLattice", helical_lattice_tab_ui("helical_lattice")),
             ui.nav_panel("HI3D", hi3d_tab_ui("hi3d")),
@@ -714,9 +750,22 @@ def server(input, output, session):
         browser answered "No model found for id").
         """
         spec = _LAZY_TABS[tab]
-        module = importlib.import_module(spec["module"])
-        make_page = getattr(module, spec["ui"])
-        start_server = getattr(module, spec["server"])
+        try:
+            module = importlib.import_module(spec["module"])
+            make_page = getattr(module, spec["ui"])
+            start_server = getattr(module, spec["server"])
+        except Exception as error:
+            logger.error("failed to load tab %s", tab, exc_info=True)
+
+            def failed():
+                return ui.div(
+                    f"{tab} could not be loaded: {error}",
+                    class_="alert alert-danger m-3",
+                )
+
+            failed.__name__ = f"lazy_tab_{spec['prefix']}"
+            render.ui(failed)
+            return
         ready = f"lazy_ready_{spec['prefix']}"
 
         def page():
