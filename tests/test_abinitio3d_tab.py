@@ -492,9 +492,11 @@ class TestTypesGrouping:
         sug = src.index("id=_SUGGESTIONS_BOX")
         card = src.index('ui.card_header("Types")')
         assert sug < card
-        assert (
-            'ui.input_task_button(\n                                "types_run"' in src
-        )
+        assert re.search(r'ui\.input_task_button\(\s*"types_run"', src)
+        # the button is to the right of the method selector, with a short label
+        card_src = src[card : src.index("types_group", card)]
+        assert card_src.index('"types_method"') < card_src.index('"types_run"')
+        assert 'label="Group filaments",' in card_src
 
     def test_the_grouping_runs_in_the_background(self):
         src = self._src()

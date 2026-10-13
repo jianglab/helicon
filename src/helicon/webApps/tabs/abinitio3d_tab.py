@@ -24,6 +24,7 @@ from shiny.module import resolve_id
 from .. import bookmark, class2d_files, deployment, map_viewers
 
 from ..lib import helical_pitch_compute as compute
+from ..lib import helical_pitch_context as context
 from ..lib import helical_pitch_lattice as lattice
 from ..lib import helical_pitch_map as maps
 from ..lib import helical_pitch_mixture as mixture
@@ -58,6 +59,7 @@ BOOKMARK_DEFAULTS = {
     "rise": ("rise", 4.75),
     "min_twist": ("min_twist", 0.3),
     "merge_counterparts": ("merge_counterparts", True),
+    "types_method": ("types_method", "markers"),
     # starts at the number of clear splits of the filaments, from the classes
     "types_n": ("types_n", 1, bookmark.DERIVED),
     "agree_cut": ("agree_threshold", 0.0),
@@ -345,6 +347,11 @@ _MAP_PLOT_WIDTH = 900
 
 # The reconstruction methods of the map. "joint" is kept as the key of elastic net,
 # so that older bookmarks still name it.
+_TYPES_METHODS = {
+    "markers": "Marker classes (class averages)",
+    "context": "Filament context (sequence of classes)",
+}
+
 _MAP_METHODS = {
     "joint": "Linear regression - elasticnet",
     "gauss": "Linear regression - gauss",
@@ -812,7 +819,7 @@ def abinitio3d_tab_ui():
                                 ui.input_action_button(
                                     "accepted_select_all",
                                     "Select all",
-                                    class_="btn-sm btn-outline-secondary",
+                                    class_="btn-sm btn-primary",
                                     onclick=_SELECT_ALL_JS
                                     % module.resolve_id("select_classes_inner_image_1"),
                                 ),
@@ -836,7 +843,7 @@ def abinitio3d_tab_ui():
                             ui.input_task_button(
                                 "suggest_run",
                                 label="Suggest classes",
-                                class_="btn-outline-secondary",
+                                class_="btn-primary",
                             ),
                             "More classes of this type: those that look like a "
                             "selected class turned 180\u00b0 (\u21bb, with the "
@@ -858,32 +865,81 @@ def abinitio3d_tab_ui():
                     ),
                     ui.card(
                         ui.card_header("Types"),
-                        _tip(
-                            ui.input_task_button(
-                                "types_run",
-                                label="Group filaments by type",
-                                class_="btn-outline-secondary",
+                        ui.div(
+                            _tip(
+                                ui.input_select(
+                                    "types_method",
+                                    "Method",
+                                    _TYPES_METHODS,
+                                    selected="markers",
+                                ),
+                                "How the filaments are grouped. Marker classes: by the "
+                                "classes the filaments of one group use and those of "
+                                "the other never do, from the class averages (fast). "
+                                "Filament context: by the sequence of classes along "
+                                "each filament, a hidden Markov chain over its "
+                                "segments whose type stays along the filament and "
+                                "whose class follows the type's own transitions "
+                                "(RELION's helix_filament_context). It does not "
+                                "register the class averages. It is slower (a model "
+                                "is fitted for each number of groups, minutes on a "
+                                "large data set) and needs the segments in order along "
+                                "their filaments. On the one set of several known "
+                                "types it was measured on, it told the types apart "
+                                "better with 4 or 5 groups, and as well with 6 or "
+                                "more. The number of groups it starts at is chosen, "
+                                "as in RELION, by how well each number predicts "
+                                "filaments held out of the fit (the fewest within "
+                                "0.01 nats per segment of the best, one type "
+                                "included). Short filaments show only part of the "
+                                "cycle of views, so types of one structure can "
+                                "differ by the phase they show; the group list "
+                                "says when the filaments are short, and how alike "
+                                "the class averages of the groups look. The "
+                                "slider changes it.",
                             ),
-                            "Groups the filaments by the classes they use. Every "
-                            "pair of class averages is registered, and classes "
-                            "whose averages look alike form candidate sets. The "
-                            "filaments are then split, one step at a time, by the "
-                            "set that the filaments of one side use and those of "
-                            "the other never do (views only one type shows). "
-                            "Classes that look like no other (junk, or a view of "
-                            "their own) are left out and listed as Not grouped. It "
-                            "does not use the repeat, which different types can "
-                            "share. Use one group at a time, then estimate its "
-                            "pitch.",
+                            _tip(
+                                ui.input_task_button(
+                                    "types_run",
+                                    label="Group filaments",
+                                    class_="btn-primary",
+                                    style="white-space: nowrap; margin-bottom: 1rem;",
+                                ),
+                                "Groups the filaments by type with the method above "
+                                "(shown in its tooltip). Marker classes: every pair "
+                                "of class averages is registered, classes whose "
+                                "averages look alike form candidate sets, and the "
+                                "filaments are split, one step at a time, by the set "
+                                "that one side uses and the other never does (views "
+                                "only one type shows). Filament context: a model of "
+                                "the sequence of classes along the filaments is "
+                                "fitted for each number of types from 2 to 8, and "
+                                "each filament gets the type that most of its "
+                                "segments are in; it takes minutes on a large data "
+                                "set. In both, classes that look like no other "
+                                "(junk, or a view of their own) are listed as Not "
+                                "grouped, and the repeat is not used (different "
+                                "types can share it). Use one group at a time, then "
+                                "estimate its pitch.",
+                            ),
+                            style=(
+                                "display: grid; grid-template-columns: minmax(0, 1fr) auto; "
+                                "gap: 8px; align-items: end;"
+                            ),
                         ),
                         helicon.shiny.slider(
                             "types_n",
                             ui.span(
                                 "Groups",
                                 _info(
-                                    "How many groups of filaments: the splits are "
-                                    "made best first. It starts after the last "
-                                    "clear split. Too many groups is the safer "
+                                    "How many groups of filaments. Marker classes: "
+                                    "the splits are made best first, and it starts "
+                                    "after the last clear split. Filament context: "
+                                    "it starts at the number of types that predicts "
+                                    "held-out filaments best (the fewest within 0.01 "
+                                    "nats per segment, one type included), and a "
+                                    "group is one type. Too "
+                                    "many groups is the safer "
                                     "error: two groups of one type give the same "
                                     "structure and can be merged later, while a "
                                     "group of two types gives none. A group that "
@@ -2124,12 +2180,12 @@ def abinitio3d_tab_server(input, output, session):
             ui.input_action_button(
                 "suggested_add_all",
                 "Add all",
-                class_="btn-sm btn-outline-primary",
+                class_="btn-sm btn-primary",
             ),
             ui.input_action_button(
                 "suggested_add_picked",
                 "Add picked",
-                class_="btn-sm btn-outline-primary",
+                class_="btn-sm btn-primary",
             ),
             col_widths=(6, 6),
             fill=False,
@@ -2199,14 +2255,20 @@ def abinitio3d_tab_server(input, output, session):
                 int(90 * k / max(n, 1)), message=f"registered {k:,} of {n:,} pairs"
             ),
         )
+        full_similarity = similarity
         # a class that looks like no other (junk, or a view of its own) is no
         # evidence of a type: it is left out of the split and shown apart
         grouped = np.flatnonzero(types.pixel_groups(similarity) >= 0)
         if len(grouped) < 3:
             grouped = np.arange(len(classes))
         loners = [classes[i] for i in range(len(classes)) if i not in set(grouped)]
+        modelled = list(classes)
         classes = [classes[i] for i in grouped]
         similarity = similarity[np.ix_(grouped, grouped)]
+        if job.get("method") == "context":
+            return _types_context_work(
+                job, modelled, classes, loners, floor, progress, full_similarity
+            )
         progress.set(90, message="splitting the filaments by the classes they use")
         usage, keys = types.usage_matrix(job["params"], classes)
         splits = types.marker_groups(usage, similarity)
@@ -2219,6 +2281,66 @@ def abinitio3d_tab_server(input, output, session):
             keys=[(str(m), int(t)) for m, t in keys],
             splits=splits,
             default_n=types.default_n_marker_groups(splits),
+        )
+
+    def _particle_diameter(p):
+        """The box of the segments in A (the mask diameter RELION takes by default), or None."""
+        try:
+            optics = p.attrs["optics"]
+            return float(
+                optics["rlnImageSize"].iloc[0] * optics["rlnImagePixelSize"].iloc[0]
+            )
+        except (KeyError, IndexError, TypeError, AttributeError, ValueError):
+            return None
+
+    def _types_context_work(
+        job, modelled, classes, loners, floor, progress, similarity=None
+    ):
+        """The filaments grouped by the sequence of classes along them, for 2 to 8
+        types, in the shape of the marker splits (see helical_pitch_context).
+
+        The model has every class with segments enough: a class that looks like no
+        other (junk, or a view of its own) is evidence of a junk type, and without
+        it the junk filaments fall into the others. What is listed is as in the
+        marker method: the classes that look like others, the rest as Not grouped."""
+        counts, keys = types.usage_matrix(job["params"], classes)
+        # Filaments are picked in either direction, and the views of a helix follow
+        # the molecule: a filament picked backwards uses the 180-degree counterparts
+        # of the classes of a forward one, and its class sequence runs the other
+        # way, which a sequence model reads as a type of its own (on the default
+        # data, half of the two "types" were the two directions). The counterparts
+        # are merged, and such a filament is read the other way round.
+        counterparts = None
+        if job.get("merge", True):
+            progress.set(0, message="pairing the classes that are 180° counterparts")
+            counterparts = _counterpart_pairs(modelled, job["ids"], job["images"])
+        progress.set(
+            0, message=f"fitting the filament context of {len(modelled)} classes"
+        )
+        splits, info = context.context_splits(
+            job["params"],
+            modelled,
+            keys,
+            counterparts=counterparts,
+            detail=True,
+            diameter=_particle_diameter(job["params"]),
+            similarity=similarity,
+            similarity_classes=modelled,
+            compare_classes=classes,
+            progress=lambda i, n, message: progress.set(
+                int(100 * i / max(n, 1)), message=f"{message} ({i} of {n})"
+            ),
+        )
+        return dict(
+            classes=classes,
+            loners=loners,
+            floor=floor,
+            counts=counts,
+            keys=[(str(m), int(t)) for m, t in keys],
+            splits=splits,
+            default_n=info.get("default_n", context.CONTEXT_DEFAULT_TYPES),
+            method="context",
+            context=info,
         )
 
     def _types_apply(job, result):
@@ -2259,6 +2381,8 @@ def abinitio3d_tab_server(input, output, session):
                 images=list(displayed_class_images()),
                 abundance=np.asarray(abundance()),
                 apix=float(data_all()[1]),
+                method=input.types_method(),
+                merge=bool(input.merge_counterparts()),
             )
         )
 
@@ -2301,6 +2425,32 @@ def abinitio3d_tab_server(input, output, session):
             labels = np.where(counts.sum(1) > 0, 0, -1)
         return _group_entries(state, labels, described)
 
+    def _context_facts(state, g):
+        """The period of the class sequence and the mean section of type ``g`` (the
+        filament context method), or None."""
+        if state.get("method") != "context":
+            return None
+        d = state["context"].get("detail", {}).get(_types_number())
+        if not d or g >= len(d["types"]):
+            return None
+        row = d["types"].iloc[g]
+        n = _types_number()
+        like = state["context"].get("likeness", {}).get(n)
+        # the other group whose class averages look most like this one's
+        alike = []
+        if like is not None and g < len(like) and len(like) > 1:
+            h = max((h for h in range(len(like)) if h != g), key=lambda h: like[g, h])
+            alike = [(h, float(like[g, h]))]
+        period = float(row["PeriodAngst"])
+        return dict(
+            # at the longest period tried, the fit found none
+            period=0.0 if period >= 0.99 * context.MAX_PERIOD_ANGST else period,
+            score=float(row["PeriodScore"]),
+            section=float(row["MeanSectionAngst"]),
+            sections=int(row["NrSections"]),
+            alike=alike,
+        )
+
     def _group_entries(state, labels, described, mixed=None, fits=None, numbers=None):
         """One dict per group of ``labels``, largest first, numbered from 1; the
         group ``mixed`` (the groups whose classes fit no ring, merged) last.
@@ -2340,6 +2490,7 @@ def abinitio3d_tab_server(input, output, session):
                     repeat=None,
                     fit=fits.get(g),
                     mixed=g == mixed,
+                    context=_context_facts(state, g),
                 )
             )
         found.sort(key=lambda x: (x["mixed"], -x["filaments"]))
@@ -2354,6 +2505,10 @@ def abinitio3d_tab_server(input, output, session):
             x["label"] = "Mixed" if x["mixed"] else f"Group {number[x['id']]}"
             # a group merged into the mixed one is no longer there to name
             x["lacks"] = sorted(number[g] for g in x["lacks"] if g in number)
+            if x.get("context"):
+                x["context"]["alike"] = sorted(
+                    (number[h], v) for h, v in x["context"]["alike"] if h in number
+                )
         return found
 
     @reactive.calc
@@ -2463,6 +2618,15 @@ def abinitio3d_tab_server(input, output, session):
             text += f", repeat ≈ {g['repeat']:.0f} Å"
         if g.get("fit") is not None and np.isfinite(g["fit"]):
             text += f", ring fit {g['fit']:.2f}"
+        c = g.get("context")
+        if c:
+            if c["period"] > 0:
+                text += f", class period {c['period']:.0f} Å"
+            if c["section"] > 0:
+                text += f", sections of {c['section']:.0f} Å on average"
+            if c.get("alike"):
+                k, v = c["alike"][0]
+                text += f", class averages {v:.2f} like Group {k}'s"
         if g["markers"]:
             text += f", {len(g['markers'])} marker classes"
         if g["lacks"]:
@@ -2481,6 +2645,36 @@ def abinitio3d_tab_server(input, output, session):
             selected="0",
         )
 
+    def _cycle_note(state):
+        """Whether the filaments are long enough to tell types from phases of one
+        structure's cycle of views."""
+        if state.get("method") != "context":
+            return ""
+        info = state["context"]
+        text = ""
+        cov = info.get("coverage") or {}
+        if cov.get("n_classes") and cov["median_classes"] < 0.5 * cov["n_classes"]:
+            text += (
+                f". Filaments here are short (a median unbroken stretch of "
+                f"{cov['median_span']:.0f} Å, showing {cov['median_classes']:.0f} of "
+                f"{cov['n_classes']} classes), so types of one structure can differ "
+                "only by which part of its cycle of views they show"
+            )
+        return text
+
+    def _prediction_note(state):
+        """How well the filament alone predicts the class of a segment (filament context,
+        at the number of types it starts at; the number does not move it much)."""
+        if state.get("method") != "context":
+            return ""
+        d = state["context"].get("detail", {}).get(state["default_n"])
+        if not d or "context_hit" not in d:
+            return ""
+        return (
+            f". The filament alone predicts the class of {100 * d['context_hit']:.0f}% "
+            f"of the segments, from those at least {d['context_angst']:.0f} Å away"
+        )
+
     @render.ui
     def types_controls():
         # drawn once for each grouping, not at each move of the number; the
@@ -2492,12 +2686,26 @@ def abinitio3d_tab_server(input, output, session):
             groups = _type_groups()
         n_fil = len(state["keys"])
         loners = len(state.get("loners", []))
-        apart = f"; {loners} that look like no other are left out" if loners else ""
+        if state.get("method") == "context":
+            apart = (
+                f"; {loners} that look like no other are modelled, and listed apart"
+                if loners
+                else ""
+            )
+        else:
+            apart = f"; {loners} that look like no other are left out" if loners else ""
+        by = (
+            "by the sequence of their segments' classes along them, over the"
+            if state.get("method") == "context"
+            else "by their segments in the"
+        )
+        likeness = "" if state.get("method") == "context" else " that look like others"
+        apart += _prediction_note(state) + _cycle_note(state)
         return ui.TagList(
             ui.p(
-                f"{n_fil:,} filaments, by their segments in the "
+                f"{n_fil:,} filaments, {by} "
                 f"{len(state['classes'])} classes with {state['floor']:,} segments "
-                f"or more that look like others{apart}",
+                f"or more{likeness}{apart}",
                 class_="small text-muted",
                 style="margin-bottom: 4px;",
             ),
@@ -2545,16 +2753,68 @@ def abinitio3d_tab_server(input, output, session):
             selection=True,
         )
 
+    def _typed_star():
+        """The segments with the labels of the filament context at the number of types
+        shown: ``rlnHelicalType``, ``rlnHelicalTypeProbability``,
+        ``rlnHelicalSectionID`` and ``rlnHelicalContextProbability``; None if there
+        are none."""
+        state = types_state()
+        if state is None or state.get("method") != "context":
+            return None
+        d = state["context"].get("detail", {}).get(_types_number())
+        p = state.get("params")
+        if not d or p is None or len(p) != len(d["labels"]):
+            return None
+        out = p.reset_index(drop=True).copy()
+        out.attrs = dict(p.attrs)
+        for c in d["labels"].columns:
+            out[c] = d["labels"][c].to_numpy()
+        return out
+
     @render.ui
     def types_buttons():
         if _chosen_group() is None:
             return None
+        with reactive.isolate():
+            typed = _typed_star() is not None
+        export = None
+        if typed:
+            n = _types_number()
+            btn = render.download(
+                label=f"Download the {n} types of every segment (.star)",
+                filename=f"filament_context_{n}_types_data.star",
+            )
+
+            @btn
+            def download_types():
+                out = _typed_star()
+                req(out is not None)
+                yield from _write_star(out)
+
+            export = ui.tooltip(
+                map_viewers.download_link(
+                    session,
+                    "download_types",
+                    f"Download the {n} types of every segment (.star)",
+                ),
+                "The segments with the type of each (rlnHelicalType and its "
+                "probability), the section along its filament it is in "
+                "(rlnHelicalSectionID) and the probability of its class from the "
+                "segments far along the filament (rlnHelicalContextProbability), "
+                "as RELION's helix_filament_context writes them",
+            )
+        return ui.TagList(
+            _types_button_row(),
+            export,
+        )
+
+    def _types_button_row():
         return ui.layout_columns(
             _tip(
                 ui.input_action_button(
                     "types_use",
                     "Use group",
-                    class_="btn-sm btn-outline-primary",
+                    class_="btn-sm btn-primary",
                 ),
                 "Select the classes of this group (picked ones if some are "
                 "picked) and no others, and restrict the analysis to the "
@@ -2564,7 +2824,7 @@ def abinitio3d_tab_server(input, output, session):
                 ui.input_action_button(
                     "types_add",
                     "Add group",
-                    class_="btn-sm btn-outline-primary",
+                    class_="btn-sm btn-primary",
                 ),
                 "Add all the classes of this group to those selected; when the "
                 "analysis is restricted to a group, add this group's filaments "
@@ -2574,7 +2834,7 @@ def abinitio3d_tab_server(input, output, session):
                 ui.input_action_button(
                     "types_add_picked",
                     "Add selected",
-                    class_="btn-sm btn-outline-primary",
+                    class_="btn-sm btn-primary",
                 ),
                 "Add the classes picked in this group's gallery to those "
                 "selected; when the analysis is restricted to a group, add this "
@@ -2879,7 +3139,7 @@ def abinitio3d_tab_server(input, output, session):
                 ui.input_task_button(
                     "types_pitch_run",
                     label="Evaluate one vs two ring fits for each group",
-                    class_="btn-sm btn-outline-secondary",
+                    class_="btn-sm btn-primary",
                 ),
                 "For each group, fits one ring of its classes and two. A group "
                 "whose classes fit no single ring (ring fit below 0.3) holds "

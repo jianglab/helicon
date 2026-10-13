@@ -19,6 +19,7 @@ Intermediate results (similarity matrices, the reference table) are written to
 | `two_stage.py` | Filaments grouped by the alignment, then split by pitch inside each group with the ring fit |
 | `compare_stage1.py` | The Types card's first stage (class groups, then a vote by each filament's segments) against the alignment, on the same filaments |
 | `segment_hmm.py` | A type along each filament (hidden state, switch rate, class probabilities by EM), anchored on the classes the pixels make clear |
+| `filament_context.py` | The type of each segment from the classes along its filament: a hidden Markov chain over the positions of a filament, with a type that stays and a class that follows the type's own transitions (`helical_pitch_context`, a port of RELION's `helix_filament_context`), against the Types card's marker splits and its first stage |
 
 ## What the reference is
 
@@ -84,3 +85,60 @@ the other type. Scoring by class majority is misleading; score per filament
    accuracy for each pair of types differs by 0.01 to 0.14 in either direction. The
    alignment needs every pair of filaments (hundreds of millions for a data set of
    thousands), the vote one pass over the segments, so the card's first stage stays.
+10. **Filament context, a hidden Markov chain with a sticky type above the class, reaches the
+    purity of the marker splits with fewer groups, once the picking directions are dealt
+    with.** On every filament of the reference sets (about 17,000, of five sets; 1.65 million
+    segments, 199 classes), with the probability of each segment's class from the
+    classification: purity (share of filaments in the majority set of their group) and mean
+    balanced accuracy of telling two sets apart (worst pair in brackets). Marker splits: 0.689
+    and 0.818 (0.521) at 3 to 5 groups, 0.757 and 0.851 (0.723) at 6, 0.770 and 0.872 (0.731)
+    at 8. Context, with the classes that are 180-degree counterparts merged and filaments
+    picked backwards read the other way (the views follow the molecule, not the picking
+    direction): 0.781 and 0.871 (0.720) at 4 types, 0.763 and 0.862 (0.716) at 5, 0.755 and
+    0.869 (0.713) at 6, 0.781 and 0.861 (0.715) at 8; adjusted Rand index 0.535 at 4 types
+    against 0.43 to 0.48 for the markers at 3 to 8 groups. **Without that handling the
+    context model was worse** (0.719 and 0.864 (0.684) at 5 types, 0.741 at 8): a filament
+    picked backwards runs its class sequence the other way and uses the counterpart classes,
+    and a sequence model reads that as a second type. On the default data of the app (a
+    nearly pure set) two of the "types" were largely the two directions (47% of the filaments
+    of one had most of their segments in backward classes, 6% of the other). The first stage
+    (class groups, then a vote) was lower than both (0.68 purity at any number of groups).
+    Tempering the log-likelihoods (the segments overlap) did not help, and the held-out
+    log-likelihood is nearly flat across the number of types, so it chooses the fewest (the
+    tolerance of RELION, 0.01 nats per segment) and the number is best set by the slider. A
+    fit of the model on all segments took 2 to 3 minutes on 8 CPUs; learning it from 400,000
+    segments in whole filaments and decoding all of them took 25 seconds, with the same
+    purity. AbInitio3D offers it as the "Filament context" method of the Types card (2 to 8
+    types, starting at the number chosen by the held-out likelihood), the marker splits
+    staying the default: it is seconds against minutes, and was measured on one set of
+    several types.
+
+    The port was checked against the C++ program it follows (RELION's `helix_filament_context`,
+    built from source) on simulated filaments, with 20% of the segments missing, the input
+    shuffled and the tempering and the largest gap changed: the log-likelihood agrees to
+    0.5 nats of 15,000 (the two programs start from different random numbers; with no
+    missing segments, to the printed digits), as do the types of the segments (all but the 0.3% on a
+    position already taken, which RELION leaves without a type), the context probabilities
+    (mean difference 1e-5 with no such segments), the transition table (1e-5), the sections
+    (numbered alike when the input is in order along the filaments), the periods and their
+    scores, and the held-out log-likelihoods by number of
+    types. The check found one error, since corrected: of several segments on one grid
+    position, the one that counts is the first along the filament, not the first in the
+    input.
+11. **A type of the filament context is not a structure: it can be a part of the cycle of
+    views, and no rule from the class averages told them apart.** On the nearly pure
+    default data of the app (98,000 segments, 3,700 filaments) the held-out log-likelihood
+    rises with the number of types (+0.007 nats per segment at 2 types, +0.025 at 3,
+    +0.039 at 7 over one type, every fold and shuffle the same sign), so the gain is
+    reproducible, and the types learnt from two halves of the filaments agree on 91% of
+    the segments. But the median filament spans 271 A and 90% span less than 700 A, the
+    period of the class sequence, so a filament shows only part of the cycle of views, and
+    the classes it uses depend on where in the cycle it lies. The types also differ in the
+    mean class probability of their filaments (0.35, 0.49, 0.52) and not in the
+    micrographs they are on (0.516 against 0.497 by chance). The app therefore says when
+    the median filament shows less than half of the classes. A rule that merged types whose
+    class averages look alike (the average linkage of `pixel_groups`, between the types)
+    gave one group on that data, as it should if it is one structure, **but also one group
+    on the multi-type data above**: the types of different sets had a mean correlation of
+    0.83 to 0.91 between their classes, those of one set 0.88 to 0.92. It is not used; the
+    number is shown for each group, and the held-out choice may now be one type.
