@@ -19,6 +19,7 @@ import helicon
 METHODS = {
     "threshold": "Threshold and moments",
     "spectral": "Projection sharpness and phases across the meridian",
+    "pd": "Phases across the meridian: rotation and centre together",
 }
 DEFAULT_METHOD = "threshold"
 
@@ -240,6 +241,160 @@ def spectral_rotation_center_diameter(
     return float(rotation), float(shift), _profile_width(centred)
 
 
+def _pd_terms(image, f_max=0.3):
+    """What the phase difference across the meridian (PD) of an image is made of.
+
+    The image is laid out as for :func:`meridian_offset` (the filament horizontal).
+    Returns the phase of the product of every pixel of the transform with its
+    mirror across the meridian, its weight, and its frequency along the filament.
+
+    The weight of a pixel is the geometric mean of the power of the pixel and of
+    its mirror, each divided by the noise power of its ring (the median of the ring
+    over ``ln 2``, :func:`ring_noise`) and with the noise taken out: the shell-median
+    normalised intensity above the noise. Pixels the lines of the helix do not
+    reach weigh nothing, and random phases add nothing.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        The filament horizontal.
+    f_max : float, optional
+        Largest spatial frequency used, cycles per pixel. Defaults to 0.3.
+
+    Returns
+    -------
+    phase : numpy.ndarray
+        The phase of the product, radians; ``(rows, columns)`` of the pixels on one
+        side of the meridian, the equator and the meridian left out.
+    weight : numpy.ndarray
+        The same shape.
+    freq : numpy.ndarray
+        The frequency along the filament of each column, cycles per pixel.
+    """
+    img = np.asarray(image, dtype=float).T
+    ny, n = img.shape
+    img = np.roll(img - img.mean(), -(n // 2), axis=1)
+    F = np.fft.rfft2(img)
+    power = np.abs(F) ** 2
+    excess = np.maximum(power / ring_noise(power) - 1.0, 0.0)
+    rows = np.arange(4, ny // 2)
+    mirror = (-rows) % ny
+    cols = np.arange(1, F.shape[1])
+    cols = cols[cols / n <= f_max]
+    product = F[np.ix_(rows, cols)] * F[np.ix_(mirror, cols)]
+    weight = np.sqrt(excess[np.ix_(rows, cols)] * excess[np.ix_(mirror, cols)])
+    height = rows / ny
+    inside = (cols[None, :] / n) ** 2 + height[:, None] ** 2 <= f_max**2
+    return np.angle(product), weight * inside, cols / n
+
+
+def _pd_best_offset(phase, weight, freq, centre, half=0.6, step=0.02):
+    """The offset of the axis that makes the phase difference cleanest, and its score.
+
+    A shift ``o`` of the axis along the filament adds ``4 pi f o`` to the phase of
+    the product, so ``cos(2 PD)`` of a pixel becomes ``cos(2 phase + 8 pi f o)``,
+    which is 1 at 0 and at 180 degrees alike, as the phase of a line of even and
+    of odd order is. The score is the weighted sum of it.
+
+    Returns
+    -------
+    offset : float
+        Pixels, as :func:`meridian_offset` gives it.
+    score : float
+        ``sum(weight * cos(2 PD))`` over the weight, from -1 to 1.
+    """
+    grid = np.arange(centre - half, centre + half + step / 2, step)
+    two = 2.0 * phase[..., None] + 8.0 * np.pi * freq[None, :, None] * grid
+    total = (weight[..., None] * np.cos(two)).sum(axis=(0, 1))
+    k = int(np.argmax(total))
+    offset = float(grid[k])
+    if 0 < k < len(grid) - 1:  # to a fraction of a step
+        a, b, c = total[k - 1], total[k], total[k + 1]
+        if a - 2.0 * b + c < 0:
+            offset += 0.5 * (a - c) / (a - 2.0 * b + c) * step
+    return offset, float(total[k] / max(weight.sum(), 1e-30))
+
+
+def pd_rotation_center_diameter(
+    data, estimate_rotation=True, estimate_center=True, search=1.5, step=0.1
+):
+    """Rotation, vertical shift and diameter of a filament from the phases across its meridian.
+
+    The rotation and the centre are found together by maximising the weighted sum
+    of ``cos(2 PD)``, the phase difference across the meridian: for a centred helix
+    whose axis is along the rows, the phase of every layer line is 0 (even Bessel
+    order) or 180 degrees (odd), and ``cos(2 PD)`` is 1 for both. A tilt of the axis
+    shears the lines and a shift of the axis tilts the phases along them, so the
+    two are told apart by what they do (the shift is solved for exactly for every
+    tilt, :func:`_pd_best_offset`). The weight of each pixel is its shell-median
+    normalised intensity above the noise (:func:`_pd_terms`).
+
+    The search starts from the estimate of ``"threshold"``, over ``search`` degrees
+    either way, then narrows around the best tilt.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        The 2D image.
+    estimate_rotation, estimate_center : bool, optional
+        Whether to estimate them; what is not estimated is 0 (the rotation of the
+        threshold estimate, when only the centre is wanted).
+    search : float, optional
+        Degrees either way of the starting rotation. Defaults to 1.5.
+    step : float, optional
+        First step of the rotation, degrees. Defaults to 0.1.
+
+    Returns
+    -------
+    rotation : float
+        Degrees to rotate with ``helicon.transform_image`` to make it horizontal.
+    shift_y : float
+        Pixels to move it down (``post_translation=(shift_y, 0)``) to centre it.
+    diameter : int
+        Width of the filament across its axis, pixels.
+    """
+    import helicon
+
+    data = np.asarray(data, dtype=float)
+    start, _, _ = estimate_rotation_center_diameter(
+        data, method="threshold", estimate_center=False
+    )
+
+    def turned(angle):
+        return helicon.transform_image(image=data, rotation=angle) if angle else data
+
+    def evaluate(angle):
+        straight = turned(angle)
+        phase, weight, freq = _pd_terms(straight)
+        coarse = meridian_offset(straight)
+        offset, score = _pd_best_offset(phase, weight, freq, coarse)
+        return score, offset
+
+    rotation = start
+    if estimate_rotation:
+        half = search
+        while half >= 0.01:
+            grid = np.arange(rotation - half, rotation + half + step / 2, step)
+            scores = np.array([evaluate(a)[0] for a in grid])
+            k = int(np.argmax(scores))
+            best = float(grid[k])
+            if 0 < k < len(grid) - 1:  # to a fraction of a step
+                a, b, c = scores[k - 1], scores[k], scores[k + 1]
+                if a - 2.0 * b + c < 0:
+                    best += 0.5 * (a - c) / (a - 2.0 * b + c) * step
+            rotation = best
+            half = 2.0 * step
+            step /= 5.0
+    straight = turned(rotation)
+    shift = -evaluate(rotation)[1] if estimate_center else 0.0
+    centred = (
+        helicon.transform_image(image=straight, post_translation=(shift, 0))
+        if shift
+        else straight
+    )
+    return float(rotation), float(shift), _profile_width(centred)
+
+
 def estimate_rotation_center_diameter(
     data,
     method=DEFAULT_METHOD,
@@ -282,6 +437,10 @@ def estimate_rotation_center_diameter(
     """
     if method == "spectral":
         return spectral_rotation_center_diameter(
+            data, estimate_rotation=estimate_rotation, estimate_center=estimate_center
+        )
+    if method == "pd":
+        return pd_rotation_center_diameter(
             data, estimate_rotation=estimate_rotation, estimate_center=estimate_center
         )
     if method != "threshold":

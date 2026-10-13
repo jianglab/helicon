@@ -98,7 +98,7 @@ class TestSpectralEstimate:
 class TestMethods:
     def test_the_default_is_the_threshold_one(self):
         assert ht.DEFAULT_METHOD == "threshold"
-        assert set(ht.METHODS) == {"threshold", "spectral"}
+        assert set(ht.METHODS) == {"threshold", "spectral", "pd"}
 
     def test_the_threshold_method_is_what_it_was(self):
         img = _placed(_helix(), 12.0, 4.0)
@@ -230,3 +230,54 @@ class TestTheControlSaysWhatItCovers:
 
         assert "straightens and centres filaments automatically" in auto_method_ui.HELP
         assert "tube diameter" in auto_method_ui.HELP  # a separate estimate
+
+
+class TestPhaseDifferenceMethod:
+    """Rotation and centre together, by the weighted sum of cos(2 PD)."""
+
+    def _placed_helix(self, tilt, down, noise=0.5, seed=0):
+        img = hill_compute.simulate_helix(
+            29.4, 21.92, 6, 77.6, 8.0, 128, 128, 4.6876, az0=17.0
+        ).T
+        img = helicon.transform_image(
+            image=img - img.mean(), rotation=tilt, post_translation=(down, 0)
+        )
+        return img + np.random.default_rng(seed).normal(0, noise * img.std(), img.shape)
+
+    @pytest.mark.parametrize("tilt,down", [(0.4, 2.0), (-0.7, -3.0), (0.6, -1.0)])
+    def test_it_undoes_a_known_tilt_and_shift(self, tilt, down):
+        rotation, shift, _ = ht.estimate_rotation_center_diameter(
+            self._placed_helix(tilt, down), method="pd"
+        )
+        assert rotation == pytest.approx(-tilt, abs=0.2)
+        assert shift == pytest.approx(-down, abs=0.2)
+
+    def test_the_phase_of_a_clean_helix_is_zero_or_a_half_turn(self):
+        img = hill_compute.simulate_helix(
+            29.4, 21.92, 6, 77.6, 8.0, 128, 128, 4.6876, az0=17.0
+        ).T
+        phase, weight, freq = ht._pd_terms(img - img.mean())
+        offset, score = ht._pd_best_offset(phase, weight, freq, 0.0)
+        assert abs(offset) < 0.1
+        assert 0.8 < score <= 1.0 + 1e-9
+        # a noise-only image has random phases: nothing to agree on
+        noise = np.random.default_rng(1).normal(size=(128, 128))
+        phase, weight, freq = ht._pd_terms(noise)
+        assert abs(ht._pd_best_offset(phase, weight, freq, 0.0)[1]) < 0.3
+
+    def test_a_shift_does_not_change_the_score_once_it_is_solved_for(self):
+        img = hill_compute.simulate_helix(
+            29.4, 21.92, 6, 77.6, 8.0, 128, 128, 4.6876, az0=17.0
+        ).T
+        img = img - img.mean()
+        scores = []
+        for down in (0.0, 2.5):
+            moved = helicon.transform_image(image=img, post_translation=(down, 0))
+            phase, weight, freq = ht._pd_terms(moved)
+            scores.append(
+                ht._pd_best_offset(phase, weight, freq, ht.meridian_offset(moved))[1]
+            )
+        assert scores[0] == pytest.approx(scores[1], abs=0.05)
+
+    def test_the_default_does_not_change(self):
+        assert ht.DEFAULT_METHOD == "threshold"
