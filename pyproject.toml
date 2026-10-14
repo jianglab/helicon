@@ -46,7 +46,7 @@ shiny = ['ipywidgets', 'jupyter_bokeh', 'plotly', 'requests', 'shiny', 'shinywid
 
 streamlit = ['atomium', 'bokeh', 'kneebow', 'numpy', 'psutil', 'qrcode', 'shapely', 'st-clickable-images', 'streamlit', 'streamlit-bokeh', 'streamlit-drawable-canvas', 'trackpy']
 
-gui = ['napari', 'PySide6', 'pyqtgraph']
+gui = ['napari', 'PySide6', 'pyqtgraph', 'qtawesome']
 
 ptycho = ['py4dstem']
 

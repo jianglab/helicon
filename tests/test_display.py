@@ -129,7 +129,8 @@ class TestDisplayArgs(object):
         settings.setValue("theme", "Light")
         try:
             display._refresh_napari_theme()
-            assert viewer.theme == "light"
+            # Helicon's own napari theme (napari's "light" where it cannot be made)
+            assert viewer.theme in ("helicon-light", "light")
             assert viewer.background_color == "#ffffff"
         finally:
             settings.remove("theme")
@@ -2968,7 +2969,8 @@ class TestFolderBrowser(object):
         (tmp_path / "recent.txt").write_text("new")
         model = FileBrowserModel(str(tmp_path))
         dates = [model.item(r, COL_MODIFIED).text() for r in range(model.rowCount())]
-        assert any("202" in d for d in dates)
+        # a file of today is shown as "Today HH:MM", older ones with the date
+        assert any(d.startswith("Today") or "202" in d for d in dates)
 
     def test_file_browser_model_shows_folder_date(self, tmp_path):
         from datetime import datetime
@@ -2988,9 +2990,9 @@ class TestFolderBrowser(object):
             for r in range(model.rowCount())
         }
         assert dates_by_type["Folder"]
-        expected = datetime.fromtimestamp(folder.stat().st_mtime).strftime(
-            "%Y-%m-%d %H:%M"
-        )
+        from helicon.lib.gui.file_browser import _format_modified
+
+        expected = _format_modified(datetime.fromtimestamp(folder.stat().st_mtime))
         assert dates_by_type["Folder"] == expected
 
     def test_file_browser_model_sort_by_size(self, tmp_path):

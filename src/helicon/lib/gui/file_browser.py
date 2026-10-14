@@ -12,6 +12,13 @@ from pathlib import Path
 
 from helicon.lib.cache import cache, setup_cache_dir
 from helicon.lib.terminal import _open_terminal, _spawn_detached
+from helicon.lib.gui.browser_parts import (
+    FlowLayout,
+    cryosparc_job_info,
+    PathBar,
+    PlacesSidebar,
+    PreviewPane,
+)
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -36,8 +43,12 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QAbstractItemView,
+    QSplitter,
 )
 from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QIcon,
     QPalette,
     QStandardItemModel,
     QStandardItem,
@@ -55,6 +66,7 @@ from PySide6.QtCore import (
     QThread,
     QObject,
     QSettings,
+    QSize,
     QTimer,
 )
 
@@ -99,12 +111,17 @@ _THEME_COLORS = {
         "border": "#555555",
         "header_border": "#2d2d2d",
         "hover": "#3a3a3a",
-        "accent": "#4a6fa5",
-        "pressed": "#5a82c4",
-        "accent_border": "#6f9bd6",
+        "accent": "#007bc2",
+        "pressed": "#0069a5",
+        "accent_border": "#268fcb",
         "disabled": "#7a7a7a",
         "disabled_bg": "#2b2b2b",
         "error": "#ff6b6b",
+        "muted": "#8f8f8f",
+        "app_text": "#4db3ec",
+        "alt": "#303030",
+        "folder": "#e0a93b",
+        "file_icon": "#8fb0dc",
     },
     "Light": {
         "window": "#f4f4f4",
@@ -114,12 +131,17 @@ _THEME_COLORS = {
         "border": "#b8b8b8",
         "header_border": "#d2d2d2",
         "hover": "#e8eef7",
-        "accent": "#4a78b8",
-        "pressed": "#36649f",
-        "accent_border": "#2e5d9c",
+        "accent": "#007bc2",
+        "pressed": "#0069a5",
+        "accent_border": "#00629b",
         "disabled": "#888888",
         "disabled_bg": "#e5e5e5",
         "error": "#b3261e",
+        "muted": "#6e6e6e",
+        "app_text": "#007bc2",
+        "alt": "#eeeeee",
+        "folder": "#c48a12",
+        "file_icon": "#007bc2",
     },
 }
 
@@ -144,31 +166,202 @@ def _resolved_theme(theme: str) -> str:
     return "Dark" if window.lightness() < 128 else "Light"
 
 
+def _widgets_qss(colors: dict[str, str]) -> str:
+    """The look of the common widgets (sliders, scroll bars, boxes, buttons, tips) in a theme.
+
+    Shared by the file browser and by the windows it opens, so a slider or a button
+    looks the same everywhere. It sets no background for the window itself.
+    """
+    return f"""
+        QLabel {{ background: transparent; }}
+        QSlider::groove:horizontal {{
+            height: 4px;
+            background: {colors["border"]};
+            border-radius: 2px;
+        }}
+        QSlider::sub-page:horizontal {{
+            background: {colors["accent"]};
+            border-radius: 2px;
+        }}
+        QSlider::handle:horizontal {{
+            width: 12px;
+            height: 12px;
+            margin: -5px 0;
+            border-radius: 7px;
+            background: {colors["strong_text"]};
+            border: 2px solid {colors["accent"]};
+        }}
+        QSlider::handle:horizontal:hover {{ background: {colors["accent"]}; }}
+        QSlider::groove:vertical {{
+            width: 4px;
+            background: {colors["border"]};
+            border-radius: 2px;
+        }}
+        QSlider::add-page:vertical {{
+            background: {colors["accent"]};
+            border-radius: 2px;
+        }}
+        QSlider::handle:vertical {{
+            width: 12px;
+            height: 12px;
+            margin: 0 -5px;
+            border-radius: 7px;
+            background: {colors["strong_text"]};
+            border: 2px solid {colors["accent"]};
+        }}
+        QScrollBar:vertical {{ width: 10px; background: transparent; margin: 0; }}
+        QScrollBar:horizontal {{ height: 10px; background: transparent; margin: 0; }}
+        QScrollBar::handle:vertical {{
+            background: {colors["border"]};
+            border-radius: 5px;
+            min-height: 28px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {colors["border"]};
+            border-radius: 5px;
+            min-width: 28px;
+        }}
+        QScrollBar::handle:hover {{ background: {colors["muted"]}; }}
+        QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+        QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+        QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 4px;
+            padding: 3px 6px;
+        }}
+        QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus {{
+            border: 1px solid {colors["accent"]};
+        }}
+        QComboBox::drop-down {{ border: none; width: 18px; }}
+        QPushButton {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 5px;
+            padding: 4px 12px;
+        }}
+        QPushButton:hover {{ background-color: {colors["accent"]}; color: #ffffff; }}
+        QPushButton:pressed {{ background-color: {colors["pressed"]}; }}
+        QPushButton:checked {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+            border: 1px solid {colors["accent_border"]};
+        }}
+        QPushButton:disabled {{
+            color: {colors["disabled"]};
+            background-color: {colors["disabled_bg"]};
+        }}
+        QRadioButton {{ spacing: 6px; }}
+        QRadioButton::indicator {{
+            width: 14px;
+            height: 14px;
+            border: 1px solid {colors["border"]};
+            border-radius: 8px;
+            background-color: {colors["input"]};
+        }}
+        QRadioButton::indicator:checked {{
+            border: 1px solid {colors["accent"]};
+            background-color: qradialgradient(
+                cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+                stop: 0 {colors["accent"]}, stop: 0.45 {colors["accent"]},
+                stop: 0.55 {colors["input"]}, stop: 1 {colors["input"]});
+        }}
+        QCheckBox {{ spacing: 6px; }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+            background-color: {colors["input"]};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {colors["accent"]};
+            border: 1px solid {colors["accent_border"]};
+        }}
+        QGroupBox {{
+            border: 1px solid {colors["header_border"]};
+            border-radius: 5px;
+            margin-top: 10px;
+            padding-top: 6px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            color: {colors["muted"]};
+        }}
+        QProgressBar {{
+            border: none;
+            border-radius: 3px;
+            background-color: {colors["border"]};
+            text-align: center;
+            color: {colors["text"]};
+        }}
+        QProgressBar::chunk {{ background-color: {colors["accent"]}; border-radius: 3px; }}
+        QToolTip {{
+            background-color: {colors["input"]};
+            color: {colors["text"]};
+            border: 1px solid {colors["border"]};
+            padding: 4px 6px;
+        }}
+    """
+
+
 def _browser_stylesheet(colors: dict[str, str]) -> str:
     """Build the shared stylesheet for the browser and launch buttons."""
-    return f"""
+    base = f"""
         QWidget {{
             background-color: {colors["window"]};
             color: {colors["text"]};
         }}
         QTreeView {{
-            font-size: 12px;
+            font-size: 13px;
             background-color: {colors["window"]};
+            alternate-background-color: {colors["alt"]};
             color: {colors["text"]};
             border: none;
+            outline: 0;
         }}
+        QTreeView::item {{ padding: 4px 2px; border: none; }}
+        QTreeView::item:hover {{ background-color: {colors["hover"]}; }}
         QTreeView::item:selected {{
             background-color: {colors["accent"]};
             color: #ffffff;
         }}
-        QTreeView::item:hover {{ background-color: {colors["hover"]}; }}
         QHeaderView::section {{
-            padding: 4px;
-            font-weight: bold;
-            background-color: {colors["input"]};
-            color: {colors["text"]};
-            border: 1px solid {colors["header_border"]};
+            padding: 6px 8px;
+            font-weight: normal;
+            background-color: {colors["window"]};
+            color: {colors["muted"]};
+            border: none;
+            border-bottom: 1px solid {colors["header_border"]};
         }}
+        QHeaderView::section:hover {{ color: {colors["text"]}; }}
+        QSplitter::handle {{ background-color: {colors["header_border"]}; }}
+        QSplitter::handle:horizontal {{ width: 1px; }}
+        QTreeWidget {{
+            font-size: 13px;
+            background-color: {colors["window"]};
+            color: {colors["text"]};
+            border: none;
+            outline: 0;
+        }}
+        QTreeWidget::item {{ padding: 3px 2px; }}
+        QTreeWidget::item:hover {{ background-color: {colors["hover"]}; }}
+        QTreeWidget::item:selected {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+        }}
+        #pathCrumbs {{
+            background-color: {colors["input"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 3px;
+        }}
+        #pathSeparator {{ color: {colors["muted"]}; background: transparent; }}
+        #pathCrumbs QToolButton {{ padding: 2px 5px; }}
+        #previewFacts, #previewTitle, #previewNote {{ background: transparent; }}
         QLineEdit, QComboBox {{
             background-color: {colors["input"]};
             color: {colors["text"]};
@@ -181,13 +374,33 @@ def _browser_stylesheet(colors: dict[str, str]) -> str:
             color: {colors["text"]};
             selection-background-color: {colors["accent"]};
         }}
-        QToolButton, QPushButton {{
+        QPushButton {{
             background-color: {colors["input"]};
             color: {colors["text"]};
             border: 1px solid {colors["border"]};
-            border-radius: 3px;
-            padding: 3px 8px;
+            border-radius: 5px;
+            padding: 4px 12px;
         }}
+        QPushButton[category="app"] {{
+            color: {colors["app_text"]};
+            border: 1px solid {colors["accent"]};
+        }}
+        QPushButton[category="app"]:hover {{
+            background-color: {colors["accent"]};
+            color: #ffffff;
+        }}
+        #actionBar {{
+            background-color: {colors["window"]};
+            border-top: 1px solid {colors["header_border"]};
+        }}
+        QToolButton {{
+            background-color: transparent;
+            color: {colors["text"]};
+            border: 1px solid transparent;
+            border-radius: 4px;
+            padding: 4px 6px;
+        }}
+        QToolButton:hover {{ background-color: {colors["hover"]}; }}
         QMenuBar {{
             background-color: {colors["window"]};
             color: {colors["text"]};
@@ -209,7 +422,7 @@ def _browser_stylesheet(colors: dict[str, str]) -> str:
         QMenu::item {{
             padding: 4px 24px 4px 8px;
         }}
-        QToolButton:hover, QPushButton:hover {{
+        QPushButton:hover {{
             background-color: {colors["accent"]};
             color: #ffffff;
         }}
@@ -231,6 +444,7 @@ def _browser_stylesheet(colors: dict[str, str]) -> str:
             image: none;
         }}
     """
+    return base + _widgets_qss(colors)
 
 
 def _disabled_button_stylesheet(colors: dict[str, str]) -> str:
@@ -789,7 +1003,14 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
                 apix = float(mrc.voxel_size.x)
                 if apix > 0:
                     pixel_size = f"{apix:.3f} Å"
-                if ext == ".mrcs":
+                stack = ext == ".mrcs"
+                if not stack and nz > 1:
+                    # everything is .mrc in a CryoSPARC job: its type says whether
+                    # this is a stack of class averages or particles
+                    from helicon.lib import cryosparc_project
+
+                    stack = cryosparc_project.mrc_content(filepath) == "stack"
+                if stack:
                     n_images = str(nz) if nz > 1 else "1"
                     info = f"{nx}×{ny}"
                 else:
@@ -995,6 +1216,93 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
     return info, n_images, pixel_size
 
 
+ROLE_KIND = Qt.ItemDataRole.UserRole + 2
+
+# the kind of a row, for its icon: folder, image, stack, table, text, pdf, web, plot, file
+_IMAGE_SUFFIXES = {
+    ".mrc", ".map", ".ccp4", ".rec", ".ctf", ".tif", ".tiff", ".png", ".jpg", ".jpeg",
+}  # fmt: skip
+_STACK_SUFFIXES = {".mrcs", ".st", ".ali", ".hdf", ".img"}
+_KIND_FOR_LABEL = {
+    "Metadata": "table",
+    "STAR": "table",
+    "CryoSPARC": "table",
+    "Text": "text",
+    "PDF": "pdf",
+    "EPS": "pdf",
+    "Browser": "web",
+    "3D Plot": "plot",
+    "MRC": "image",
+}
+# the Font Awesome icon of each kind (qtawesome); the colour comes from the theme
+_KIND_ICONS = {
+    "folder": "fa5s.folder",
+    "image": "fa5s.image",
+    "stack": "fa5s.images",
+    "table": "fa5s.table",
+    "text": "fa5s.file-alt",
+    "pdf": "fa5s.file-pdf",
+    "web": "fa5s.globe",
+    "plot": "fa5s.chart-area",
+    "file": "fa5s.file",
+}
+_icon_cache: dict[tuple[str, str], QIcon] = {}
+
+
+def _icon_kind(type_label: str, suffix: str, is_dir: bool) -> str:
+    """The icon kind of a file or folder from its type label and suffix."""
+    if is_dir:
+        return "folder"
+    suffix = suffix.lower()
+    if suffix in _STACK_SUFFIXES:
+        return "stack"
+    if suffix in _IMAGE_SUFFIXES:
+        return "image"
+    return _KIND_FOR_LABEL.get(type_label, "file")
+
+
+def _themed_icon(kind: str, colors: dict[str, str]) -> QIcon:
+    """The icon of a kind in the colour of the theme, cached.
+
+    Drawn by qtawesome when it is installed (loaded here, not at import, to keep
+    start-up short); otherwise the style's own folder and file icons.
+    """
+    color = colors["folder"] if kind == "folder" else colors["file_icon"]
+    key = (kind, color)
+    icon = _icon_cache.get(key)
+    if icon is None:
+        try:
+            import qtawesome
+
+            icon = qtawesome.icon(
+                _KIND_ICONS.get(kind, "fa5s.file"),
+                color=color,
+                color_selected="#ffffff",  # on the accent of a selected row
+            )
+        except Exception:
+            from PySide6.QtWidgets import QStyle
+
+            style = QApplication.style()
+            icon = style.standardIcon(
+                QStyle.StandardPixmap.SP_DirIcon
+                if kind == "folder"
+                else QStyle.StandardPixmap.SP_FileIcon
+            )
+        _icon_cache[key] = icon
+    return icon
+
+
+def _format_modified(mtime: datetime, now: datetime | None = None) -> str:
+    """The modification time for the list: "Today 21:07", "Yesterday 09:30", or the date."""
+    now = now or datetime.now()
+    days = (now.date() - mtime.date()).days
+    if days == 0:
+        return "Today " + mtime.strftime("%H:%M")
+    if days == 1:
+        return "Yesterday " + mtime.strftime("%H:%M")
+    return mtime.strftime("%Y-%m-%d %H:%M")
+
+
 COL_NAME = 0
 COL_SIZE = 1
 COL_TYPE = 2
@@ -1004,6 +1312,8 @@ COL_PIXELSIZE = 5
 COL_MODIFIED = 6
 NUM_COLUMNS = 7
 ROLE_SORT = Qt.ItemDataRole.UserRole + 1
+# the columns of numbers are right-aligned
+_RIGHT_COLUMNS = (COL_SIZE, COL_IMAGES, COL_PIXELSIZE)
 
 # Star files that describe pipelines/optimisation rather than image data.
 # Must stay in sync with _METADATA_STAR_SUFFIXES in commands/display.py.
@@ -1026,6 +1336,7 @@ class FileBrowserModel(QStandardItemModel):
             ["Name", "Size", "Type", "Images", "Dimension", "Pixel Size", "Modified"]
         )
         self._root_path = root_path
+        self._colors = _THEME_COLORS[_resolved_theme(_saved_theme())]
         self._file_infos: dict[str, tuple[str, str, str]] = {}
         self._folder_counts: dict[str, int] = {}
         self._sorting = False
@@ -1048,6 +1359,29 @@ class FileBrowserModel(QStandardItemModel):
         ):
             signal.connect(self._invalidate_row_index)
         self._load_directory(root_path)
+
+    def set_theme_colors(self, colors: dict[str, str]) -> None:
+        """Use the colours of a theme for the icons and the muted columns."""
+        self._colors = colors
+        if self.rowCount():
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, NUM_COLUMNS - 1),
+                [
+                    Qt.ItemDataRole.DecorationRole,
+                    Qt.ItemDataRole.ForegroundRole,
+                ],
+            )
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        column = index.column()
+        if role == Qt.ItemDataRole.DecorationRole and column == COL_NAME:
+            return _themed_icon(super().data(index, ROLE_KIND) or "file", self._colors)
+        if role == Qt.ItemDataRole.ForegroundRole and column != COL_NAME:
+            return QBrush(QColor(self._colors["muted"]))
+        if role == Qt.ItemDataRole.TextAlignmentRole and column in _RIGHT_COLUMNS:
+            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return super().data(index, role)
 
     def _invalidate_row_index(self, *_args) -> None:
         """Mark the filepath -> row index stale after the rows changed."""
@@ -1105,6 +1439,12 @@ class FileBrowserModel(QStandardItemModel):
                 size_item.setData(cached_count, ROLE_SORT)
             type_item = QStandardItem("Folder")
             type_item.setData("folder", ROLE_SORT)
+            # a job folder of a CryoSPARC project says what job it is
+            job = cryosparc_job_info(path)
+            if job is not None:
+                type_item.setText(job["type_name"])
+                tip = f"{job['uid']}  {job['title']}".rstrip()
+                name_item.setToolTip(f"{tip}\n{job['raw_status'] or 'unknown'}")
             info_item = QStandardItem("")
             info_item.setData("", ROLE_SORT)
             images_item = QStandardItem("")
@@ -1115,7 +1455,7 @@ class FileBrowserModel(QStandardItemModel):
                 mtime = datetime.fromtimestamp(path.stat().st_mtime)
             except (OSError, ValueError):
                 mtime = datetime.now()
-            mod_item = QStandardItem(mtime.strftime("%Y-%m-%d %H:%M"))
+            mod_item = QStandardItem(_format_modified(mtime))
             mod_item.setData(mtime.isoformat(), ROLE_SORT)
         else:
             try:
@@ -1142,9 +1482,10 @@ class FileBrowserModel(QStandardItemModel):
 
             apix_item = QStandardItem("")
             apix_item.setData(0, ROLE_SORT)
-            mod_item = QStandardItem(mtime.strftime("%Y-%m-%d %H:%M"))
+            mod_item = QStandardItem(_format_modified(mtime))
             mod_item.setData(mtime.isoformat(), ROLE_SORT)
 
+        name_item.setData(_icon_kind(type_item.text(), path.suffix, is_dir), ROLE_KIND)
         name_item.setDragEnabled(False)
         name_item.setDropEnabled(False)
 
@@ -1338,7 +1679,16 @@ class FileBrowserModel(QStandardItemModel):
             is_dir = pair[type_col].data(ROLE_SORT) == "folder"
             return (0 if is_dir else 1, data)
 
-        rows.sort(key=sort_key, reverse=(order == Qt.SortOrder.DescendingOrder))
+        descending = order == Qt.SortOrder.DescendingOrder
+        if column == COL_NAME:
+            # by name the folders stay first, in either order
+            folders = [r for r in rows if r[type_col].data(ROLE_SORT) == "folder"]
+            files = [r for r in rows if r[type_col].data(ROLE_SORT) != "folder"]
+            folders.sort(key=sort_key, reverse=descending)
+            files.sort(key=sort_key, reverse=descending)
+            rows = folders + files
+        else:
+            rows.sort(key=sort_key, reverse=descending)
 
         for row_items in rows:
             self.appendRow(row_items)
@@ -1402,6 +1752,35 @@ class DirCountWorker(QThread):
             )
             if n_items is not None:
                 self.count_ready.emit(filepath, n_items, self._epoch)
+
+
+# the icon (Font Awesome, drawn by qtawesome) and the category of each action button.
+# "viewer" shows the file in a window of the browser; "app" opens a web app or a panel
+# of tools, and is outlined in the accent colour.
+_ACTION_STYLE = {
+    "slice": ("fa5s.image", "viewer"),
+    "volume": ("fa5s.cube", "viewer"),
+    "3dplot": ("fa5s.project-diagram", "viewer"),
+    "chimerax": ("fa5s.atom", "viewer"),
+    "stats": ("fa5s.chart-bar", "viewer"),
+    "text": ("fa5s.file-alt", "viewer"),
+    "gallery": ("fa5s.th", "viewer"),
+    "optimiser": ("fa5s.layer-group", "viewer"),
+    "2dclasses": ("fa5s.th-large", "viewer"),
+    "orthogonal": ("fa5s.cubes", "viewer"),
+    "fsc": ("fa5s.chart-line", "viewer"),
+    "html": ("fa5s.globe", "viewer"),
+    "denovo3D": ("fa5s.dna", "app"),
+    "abInitio3D": ("fa5s.shapes", "app"),
+    "whereIsMyClass": ("fa5s.map-marker-alt", "app"),
+    "helicalProjection": ("fa5s.film", "app"),
+    "helicalPitch": ("fa5s.ruler-horizontal", "app"),
+    "hill": ("fa5s.wave-square", "app"),
+    "hi3d": ("fa5s.circle-notch", "app"),
+    "proc3d": ("fa5s.sliders-h", "app"),
+    "trueFSC": ("fa5s.chart-line", "app"),
+    "images2star": ("fa5s.exchange-alt", "app"),
+}
 
 
 class FolderBrowserWidget(QMainWindow):
@@ -1540,6 +1919,22 @@ class FolderBrowserWidget(QMainWindow):
             self._theme_menu.addAction(action)
             self._theme_actions[theme] = action
 
+        self._view_menu.addSeparator()
+        self._sidebar_action = QAction("Sidebar", self)
+        self._sidebar_action.setCheckable(True)
+        self._sidebar_action.setShortcut(QKeySequence("F9"))
+        self._sidebar_action.toggled.connect(self._on_sidebar_toggled)
+        self._view_menu.addAction(self._sidebar_action)
+        self._preview_action = QAction("Preview Pane", self)
+        self._preview_action.setCheckable(True)
+        self._preview_action.setShortcut(QKeySequence("F3"))
+        self._preview_action.toggled.connect(self._on_preview_toggled)
+        self._view_menu.addAction(self._preview_action)
+        self._location_action = QAction("Edit Location", self)
+        self._location_action.setShortcut(QKeySequence("Ctrl+L"))
+        self._location_action.triggered.connect(lambda: self._path_edit.edit())
+        self._view_menu.addAction(self._location_action)
+
         self._help_menu = self._menu_bar.addMenu("Help")
         self._home_page_action = QAction("Home Page", self)
         self._home_page_action.triggered.connect(self._open_home_page)
@@ -1569,8 +1964,9 @@ class FolderBrowserWidget(QMainWindow):
         self._refresh_btn.clicked.connect(self._refresh)
         nav_layout.addWidget(self._refresh_btn)
 
-        self._path_edit = QLineEdit(start_dir)
+        self._path_edit = PathBar(start_dir)
         self._path_edit.returnPressed.connect(self._go_to_path)
+        self._path_edit.pathClicked.connect(self._navigate_to)
         # Stretch factor 1 makes the path box expand to fill all space up to
         # the filter controls at the right end of the row.
         nav_layout.addWidget(self._path_edit, 1)
@@ -1651,17 +2047,17 @@ class FolderBrowserWidget(QMainWindow):
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
 
         header = self._tree.header()
-        header.setStretchLastSection(False)
+        header.setStretchLastSection(True)
         header.setSectionsMovable(False)
         for col in range(NUM_COLUMNS):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(COL_NAME, 200)
-        header.resizeSection(COL_SIZE, 70)
-        header.resizeSection(COL_TYPE, 50)
-        header.resizeSection(COL_IMAGES, 50)
-        header.resizeSection(COL_INFO, 80)
-        header.resizeSection(COL_PIXELSIZE, 70)
-        header.resizeSection(COL_MODIFIED, 120)
+        header.resizeSection(COL_NAME, 280)
+        header.resizeSection(COL_SIZE, 80)
+        header.resizeSection(COL_TYPE, 130)
+        header.resizeSection(COL_IMAGES, 70)
+        header.resizeSection(COL_INFO, 100)
+        header.resizeSection(COL_PIXELSIZE, 90)
+        header.resizeSection(COL_MODIFIED, 140)
 
         # Restore previously saved column widths (persisted between launches).
         # Done before connecting sectionResized so the initial programmatic
@@ -1676,6 +2072,8 @@ class FolderBrowserWidget(QMainWindow):
         header.sortIndicatorChanged.connect(self._save_sort_state)
 
         self._tree.setAnimated(True)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setIconSize(QSize(18, 18))
         self._tree.setIndentation(20)
         self._tree.setExpandsOnDoubleClick(False)
 
@@ -1766,15 +2164,28 @@ class FolderBrowserWidget(QMainWindow):
             """
         )
 
-        layout.addWidget(self._tree)
+        self._sidebar = PlacesSidebar()
+        self._sidebar.navigate.connect(self._navigate_to)
+        self._sidebar.bookmark_removed.connect(self._on_bookmark_removed)
+        self._preview = PreviewPane()
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self._sidebar)
+        self._splitter.addWidget(self._tree)
+        self._splitter.addWidget(self._preview)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 0)
+        self._splitter.setSizes([180, 760, 300])
+        layout.addWidget(self._splitter, 1)
+        self._restore_panes()
 
         # Bottom bar: contextual display-mode buttons + "new window" toggle.
         # Hidden unless exactly one file (not a directory) is selected.
         self._action_bar = QWidget()
-        self._action_bar.setContentsMargins(4, 4, 4, 4)
-        action_layout = QHBoxLayout(self._action_bar)
-        action_layout.setContentsMargins(4, 4, 4, 4)
-        action_layout.setSpacing(4)
+        self._action_bar.setObjectName("actionBar")
+        # the buttons wrap to a second row when the window is narrow
+        action_layout = FlowLayout(self._action_bar, margin=8, h_spacing=6, v_spacing=6)
 
         self._btn_slice = QPushButton("Image Slice")
         self._btn_volume = QPushButton("3D Volume")
@@ -1845,15 +2256,18 @@ class FolderBrowserWidget(QMainWindow):
             "Open the Images2Star tools panel to preview and transform "
             "this dataset, then save a new RELION STAR/CryoSPARC file"
         )
-        self._new_window_cb = QCheckBox("New")
+        self._new_window_cb = QCheckBox("New window")
         self._new_window_cb.setToolTip(
             "<div style='white-space: normal; width: 200px;'>Create a new display window instead of reusing the current one. Most recently clicked/focused display window will be used as the display target if there are two or more display windows</div>"
         )
-        for attr, _mode in self._DISPLAY_BUTTONS:
+        for attr, mode in self._DISPLAY_BUTTONS:
             btn = getattr(self, attr)
-            btn.setFixedHeight(26)
+            btn.setFixedHeight(30)
+            btn.setIconSize(QSize(16, 16))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # the web apps and the panels that open apart are marked from the viewers
+            btn.setProperty("category", _ACTION_STYLE.get(mode, ("", "viewer"))[1])
             action_layout.addWidget(btn)
-        action_layout.addStretch(1)
         action_layout.addWidget(self._new_window_cb)
         self._action_bar.hide()
 
@@ -1876,10 +2290,98 @@ class FolderBrowserWidget(QMainWindow):
         # manually when the cursor is over the (disabled) button.
         self.installEventFilter(self)
 
+        self._refresh_sidebar()
+        self._update_preview()
+
         # Fill Dimension / Images / Pixel Size for the initial directory in
         # the background so the browser opens instantly (these columns start
         # empty and are populated by worker threads).
         self._populate_file_info_async()
+
+    def _restore_panes(self) -> None:
+        """Restore which side panes are shown, and how wide, from the last launch."""
+        settings = QSettings("helicon", "display")
+        for action, key in (
+            (self._sidebar_action, "browser_show_sidebar"),
+            (self._preview_action, "browser_show_preview"),
+        ):
+            action.setChecked(settings.value(key, True, type=bool))
+        sizes = settings.value("browser_pane_sizes", [], type=list)
+        try:
+            sizes = [int(x) for x in sizes]
+        except (TypeError, ValueError):
+            sizes = []
+        if len(sizes) == 3 and sizes[1] > 0:
+            self._splitter.setSizes(sizes)
+
+    def _save_panes(self) -> None:
+        settings = QSettings("helicon", "display")
+        settings.setValue("browser_show_sidebar", self._sidebar_action.isChecked())
+        settings.setValue("browser_show_preview", self._preview_action.isChecked())
+        sizes = self._splitter.sizes()
+        # a hidden pane has no width; keep the last one it had
+        if all(sizes[i] > 0 for i in (0, 2)):
+            settings.setValue("browser_pane_sizes", sizes)
+
+    def _on_sidebar_toggled(self, shown: bool) -> None:
+        self._sidebar.setVisible(shown)
+
+    def _on_preview_toggled(self, shown: bool) -> None:
+        self._preview.setVisible(shown)
+        if shown:
+            self._update_preview()
+
+    def _refresh_sidebar(self) -> None:
+        self._sidebar.refresh(
+            self._model._root_path,
+            bookmarks=_get_bookmarks(),
+            recent=_get_recent_folders(),
+        )
+
+    def _update_preview(self) -> None:
+        """Preview the selected file or folder, or else the folder shown."""
+        if not self._preview_action.isChecked():
+            return
+        indexes = self._tree.selectionModel().selectedIndexes()
+        rows = sorted({idx.row() for idx in indexes})
+        path = None
+        if len(rows) == 1:
+            path = self._model.file_path(self._model.index(rows[0], 0))
+        self._preview.show_path(str(path) if path else self._model._root_path)
+
+    def _set_action_icons(self, colors: dict[str, str]) -> None:
+        """Icons on the action buttons, in the colour of the text (white when hovered)
+        and of the accent for the apps. None where qtawesome is not installed."""
+        try:
+            import qtawesome
+        except ImportError:
+            return
+        for attr, mode in self._DISPLAY_BUTTONS:
+            name, category = _ACTION_STYLE.get(mode, ("fa5s.file", "viewer"))
+            color = colors["app_text"] if category == "app" else colors["text"]
+            getattr(self, attr).setIcon(
+                qtawesome.icon(
+                    name,
+                    color=color,
+                    color_active="#ffffff",
+                    color_disabled=colors["disabled"],
+                )
+            )
+
+    def _set_nav_icons(self, colors: dict[str, str]) -> None:
+        """Icons for back, up and refresh in the colour of the theme (the arrows of the
+        text stay where qtawesome is not installed)."""
+        try:
+            import qtawesome
+        except ImportError:
+            return
+        for button, name in (
+            (self._back_btn, "fa5s.arrow-left"),
+            (self._up_btn, "fa5s.arrow-up"),
+            (self._refresh_btn, "fa5s.sync-alt"),
+        ):
+            button.setIcon(qtawesome.icon(name, color=colors["text"]))
+            button.setText("")
 
     def _on_theme_changed(self, theme: str) -> None:
         """Persist and immediately apply a newly selected browser theme."""
@@ -1909,6 +2411,11 @@ class FolderBrowserWidget(QMainWindow):
         self._tree.setStyleSheet(stylesheet)
         self._recent_combo.setStyleSheet(stylesheet)
         self._theme_combo.setStyleSheet(stylesheet)
+        self._model.set_theme_colors(colors)
+        self._sidebar.set_theme(colors)
+        self._preview.set_theme(colors)
+        self._set_nav_icons(colors)
+        self._set_action_icons(colors)
         for name, action in self._theme_actions.items():
             action.setChecked(name == theme)
         for attr, _mode in self._DISPLAY_BUTTONS:
@@ -2140,6 +2647,7 @@ class FolderBrowserWidget(QMainWindow):
         )
 
     def _on_selection_changed(self, selected, deselected) -> None:
+        self._update_preview()
         indexes = self._tree.selectionModel().selectedIndexes()
         # selectedIndexes() returns one index per column; collapse to rows.
         rows = sorted({idx.row() for idx in indexes})
@@ -2239,10 +2747,12 @@ class FolderBrowserWidget(QMainWindow):
 
     def _navigate_to(self, path: str) -> None:
         path = str(Path(path).resolve())
-        if self._history_index < len(self._history) - 1:
-            self._history = self._history[: self._history_index + 1]
-        self._history.append(path)
-        self._history_index = len(self._history) - 1
+        if path != self._history[self._history_index]:
+            # (going to the folder one is in again is a refresh, not a new step back)
+            if self._history_index < len(self._history) - 1:
+                self._history = self._history[: self._history_index + 1]
+            self._history.append(path)
+            self._history_index = len(self._history) - 1
         self._model.set_root_path(path)
         sort_col = self._tree.header().sortIndicatorSection()
         sort_order = self._tree.header().sortIndicatorOrder()
@@ -2250,6 +2760,8 @@ class FolderBrowserWidget(QMainWindow):
         self._path_edit.setText(path)
         self._refresh_recent_combo()
         self._refresh_recent_menu()
+        self._refresh_sidebar()
+        self._update_preview()
         self._populate_file_info_async()
 
     def _toggle_bookmark(self) -> None:
@@ -2265,6 +2777,8 @@ class FolderBrowserWidget(QMainWindow):
         """Fill the Bookmarks menu: the toggle, then one entry per bookmark."""
         menu = self._bookmarks_menu
         menu.clear()
+        if hasattr(self, "_sidebar"):
+            self._refresh_sidebar()
         here = self._model._root_path
         self._bookmark_toggle_action.setText(
             "Remove Bookmark of This Folder"
@@ -2625,6 +3139,8 @@ class FolderBrowserWidget(QMainWindow):
             sort_order = self._tree.header().sortIndicatorOrder()
             self._model.sort(sort_col, sort_order)
             self._path_edit.setText(path)
+            self._refresh_sidebar()
+            self._update_preview()
             self._populate_file_info_async()
 
     def _go_to_path(self) -> None:
@@ -2633,6 +3149,8 @@ class FolderBrowserWidget(QMainWindow):
             self._navigate_to(path)
 
     def _refresh(self) -> None:
+        self._sidebar.invalidate()
+        self._refresh_sidebar()
         self._model.refresh()
         self._populate_file_info_async()
 
@@ -2836,6 +3354,8 @@ class FolderBrowserWidget(QMainWindow):
         try:
             self._save_col_widths()
             self._save_sort_state()
+            self._save_panes()
+            self._preview.wait()
         except Exception:
             pass
         super().closeEvent(event)
