@@ -488,3 +488,55 @@ def test_without_the_flag_a_launch_is_in_turn(monkeypatch):
     )
     webapps._launch_or_reuse_web_app("HILL", {"x": 1})
     assert seen == [threading.main_thread()]
+
+
+def test_the_launch_thread_outlives_a_job_so_a_server_it_started_is_not_killed(
+    monkeypatch,
+):
+    """On Linux a server is started with PR_SET_PDEATHSIG, which the kernel ties to the
+    *thread* that started it: a thread of its own for each launch ended at once and took the
+    server with it (the web app buttons of the file browser opened nothing)."""
+    import subprocess
+    import sys
+    import threading
+    import time
+
+    import pytest
+    from PySide6.QtWidgets import QApplication
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("PR_SET_PDEATHSIG is Linux's")
+    from helicon.lib.gui import webapps
+    from helicon.lib.shiny import _make_pdeathsig_preexec
+
+    QApplication.instance() or QApplication([])
+    started = {}
+
+    def work():
+        started["proc"] = subprocess.Popen(
+            ["sleep", "30"], preexec_fn=_make_pdeathsig_preexec()
+        )
+        started["thread"] = threading.current_thread()
+
+    try:
+        webapps._in_background(work, "t", "m")
+        deadline = time.monotonic() + 10
+        while "proc" not in started and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(1.0)  # (a killed child is gone well within that)
+        assert started["proc"].poll() is None, "the server was killed with the thread"
+        assert started["thread"].is_alive()
+        # and the next launch is run by the same thread
+        second = {}
+        webapps._in_background(
+            lambda: second.update(t=threading.current_thread()), "t", "m"
+        )
+        deadline = time.monotonic() + 10
+        while "t" not in second and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert second["t"] is started["thread"]
+    finally:
+        proc = started.get("proc")
+        if proc is not None:
+            proc.kill()
+            proc.wait()

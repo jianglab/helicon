@@ -8,6 +8,9 @@ while ``New``-checked clicks spawn coexisting servers.
 
 from __future__ import annotations
 
+import queue
+import threading
+
 import time
 
 from .theme import _get_display_theme
@@ -153,9 +156,27 @@ BACKGROUND_LAUNCH = False
 _reporters: list = []
 
 
+# The launches run one after another in a single thread that lasts as long as the process.
+# That matters on Linux: a server is started with PR_SET_PDEATHSIG (so it dies with the browser),
+# and the kernel ties that to the *thread* that started it. A thread of its own for each
+# launch ended as soon as the server was started, and the server was killed with it.
+_launch_queue: "queue.Queue" = queue.Queue()
+_launch_thread: "threading.Thread | None" = None
+_launch_lock = threading.Lock()
+
+
+def _launch_loop() -> None:
+    while True:
+        job = _launch_queue.get()
+        try:
+            job()
+        except Exception:  # (each job reports its own failure)
+            pass
+
+
 def _in_background(work, title: str, message: str) -> None:
-    """Run ``work()`` in a thread; if it fails, say so in a box on the main thread."""
-    import threading
+    """Run ``work()`` in the launch thread; if it fails, say so in a box on the main thread."""
+    global _launch_thread
 
     from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -185,7 +206,13 @@ def _in_background(work, title: str, message: str) -> None:
             if reporter in _reporters:
                 _reporters.remove(reporter)
 
-    threading.Thread(target=run, name="helicon-launch", daemon=True).start()
+    with _launch_lock:
+        if _launch_thread is None or not _launch_thread.is_alive():
+            _launch_thread = threading.Thread(
+                target=_launch_loop, name="helicon-launch", daemon=True
+            )
+            _launch_thread.start()
+    _launch_queue.put(run)
 
 
 def _launch_or_reuse_web_app(
