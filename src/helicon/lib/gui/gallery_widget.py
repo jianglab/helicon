@@ -75,7 +75,7 @@ def _tile_contrast(frame: np.ndarray) -> tuple[float, float]:
 
 
 def _gallery_theme_colors() -> dict[str, str]:
-    """Return colors for custom-painted gallery widgets."""
+    """Return colors for custom-painted gallery widgets, from the shared theme."""
     from helicon.lib.gui.file_browser import (
         _THEME_COLORS,
         _resolved_theme,
@@ -84,15 +84,18 @@ def _gallery_theme_colors() -> dict[str, str]:
 
     resolved = _resolved_theme(_saved_theme())
     colors = _THEME_COLORS[resolved]
+    base = {
+        "background": "#ffffff" if resolved == "Light" else colors["window"],
+        "panel": colors["window"],
+        "text": colors["text"],
+        "input": colors["input"],
+        "border": colors["border"],
+        "accent": colors["accent"],
+        "muted": colors["muted"],
+    }
     if resolved == "Light":
         return {
-            "background": "#ffffff",
-            "panel": colors["window"],
-            "text": colors["text"],
-            "input": colors["input"],
-            "border": colors["border"],
-            "accent": colors["accent"],
-            "muted": "#707070",
+            **base,
             # QColor does not parse CSS rgba() strings reliably in Qt6;
             # use 8-digit ARGB hex so the painter preserves the alpha.
             "label_background": "#d2ffffff",
@@ -100,13 +103,7 @@ def _gallery_theme_colors() -> dict[str, str]:
             "scrollbar_thumb": "#a0a0a0",
         }
     return {
-        "background": "#2d2d2d",
-        "panel": "#3a3a3a",
-        "text": "#e8e8e8",
-        "input": "#555555",
-        "border": "#777777",
-        "accent": "#5a82c4",
-        "muted": "#aaaaaa",
+        **base,
         "label_background": "#8c000000",
         "scrollbar": "#1f1f1f",
         "scrollbar_thumb": "#5a5a5a",
@@ -114,40 +111,42 @@ def _gallery_theme_colors() -> dict[str, str]:
 
 
 def _gallery_qss(colors: dict[str, str]) -> str:
-    """Return a theme-aware stylesheet for gallery controls."""
+    """Return a theme-aware stylesheet for gallery controls (the shared widget look)."""
+    from helicon.lib.gui.file_browser import (
+        _THEME_COLORS,
+        _resolved_theme,
+        _saved_theme,
+        _widgets_qss,
+    )
+
+    theme = _THEME_COLORS[_resolved_theme(_saved_theme())]
     return f"""
         QWidget {{
             background-color: {colors["panel"]};
             color: {colors["text"]};
         }}
-        QLabel, QCheckBox, QRadioButton {{
-            color: {colors["text"]};
-        }}
-        QSlider::groove:horizontal {{
-            background: {colors["border"]};
-            height: 4px;
-        }}
-        QSlider::handle:horizontal {{
-            background: {colors["text"]};
-            width: 12px;
-            margin: -4px 0;
-            border-radius: 6px;
-        }}
-        QPushButton, QComboBox, QSpinBox, QDoubleSpinBox {{
-            color: {colors["text"]};
-            background: {colors["input"]};
-            border: 1px solid {colors["border"]};
-            border-radius: 3px;
-            padding: 3px;
-        }}
-        QPushButton:hover {{
-            background: {colors["accent"]};
-        }}
-        QComboBox QAbstractItemView {{
-            color: {colors["text"]};
-            background: {colors["input"]};
-        }}
-    """
+        QLabel, QCheckBox, QRadioButton {{ font-size: 11px; }}
+        QPushButton, QComboBox, QSpinBox, QDoubleSpinBox {{ font-size: 11px; }}
+        """ + _widgets_qss(
+        theme
+    )
+
+
+def _button_icon(name: str, colors: dict[str, str] | None = None):
+    """A qtawesome icon in the text colour of the theme (white when hovered), or None."""
+    try:
+        import qtawesome
+
+        colors = colors or _gallery_theme_colors()
+        return qtawesome.icon(
+            name,
+            color=colors["text"],
+            color_active="#ffffff",
+            color_on="#ffffff",
+            color_selected="#ffffff",
+        )
+    except Exception:
+        return None
 
 
 def _apply_gallery_theme(widget: QWidget) -> None:
@@ -339,20 +338,9 @@ class _ControlPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        lbl_style = f"color: {colors['text']}; font-size: 11px;"
-        slider_style = (
-            f"QSlider::groove:horizontal {{ background: {colors['border']}; height: 4px; }}"
-            f"QSlider::handle:horizontal {{ background: {colors['text']}; width: 12px; "
-            "margin: -4px 0; border-radius: 6px; }"
-        )
-        btn_style = (
-            f"QPushButton {{ color: {colors['text']}; background: {colors['input']}; "
-            f"border: 1px solid {colors['border']}; "
-            "border-radius: 3px; padding: 4px; }"
-            f"QPushButton:hover {{ background: {colors['border']}; }}"
-        )
-        radio_style = f"QRadioButton {{ color: {colors['text']}; font-size: 11px; }}"
-        chk_style = f"QCheckBox {{ color: {colors['text']}; font-size: 11px; }}"
+        # the look of the labels, sliders, buttons and boxes is the stylesheet of the
+        # panel (_gallery_qss), so a change of theme reaches all of them
+        lbl_style = slider_style = btn_style = radio_style = chk_style = ""
 
         # --- Brightness ---
         root.addWidget(self._label("Brightness", lbl_style))
@@ -390,6 +378,9 @@ class _ControlPanel(QWidget):
         # --- Autocontrast ---
         self._auto_btn = QPushButton("Autocontrast")
         self._auto_btn.setStyleSheet(btn_style)
+        icon = _button_icon("fa5s.magic", colors)
+        if icon is not None:
+            self._auto_btn.setIcon(icon)
         root.addWidget(self._auto_btn)
 
         # --- Histogram ---
@@ -442,11 +433,6 @@ class _ControlPanel(QWidget):
         self._z_thickness_spin.setDecimals(1)
         self._z_thickness_spin.setSingleStep(1.0)
         self._z_thickness_spin.setValue(0.0)
-        self._z_thickness_spin.setStyleSheet(
-            f"QDoubleSpinBox {{ color: {colors['text']}; background: {colors['input']}; "
-            f"border: 1px solid {colors['border']}; "
-            "border-radius: 3px; padding: 3px; }"
-        )
         self._z_thickness_spin.setSuffix(" Å")
         self._z_thickness_label.setVisible(False)
         self._z_thickness_spin.setVisible(False)
@@ -461,14 +447,7 @@ class _ControlPanel(QWidget):
         self._sort_sep.setVisible(False)
         root.addWidget(self._sort_sep)
 
-        combo_style = (
-            f"QComboBox {{ color: {colors['text']}; background: {colors['input']}; "
-            f"border: 1px solid {colors['border']}; "
-            "border-radius: 3px; padding: 3px; font-size: 11px; }"
-            "QComboBox::drop-down { border: none; }"
-            f"QComboBox QAbstractItemView {{ color: {colors['text']}; "
-            f"background: {colors['panel']}; }}"
-        )
+        combo_style = ""
         self._sort_column_combo = QComboBox()
         self._sort_column_combo.setStyleSheet(combo_style)
         self._sort_column_combo.setVisible(False)
@@ -496,6 +475,9 @@ class _ControlPanel(QWidget):
         self.setStyleSheet(_gallery_qss(colors))
         for child in self.findChildren(QWidget):
             child.setStyleSheet("")
+        icon = _button_icon("fa5s.magic", colors)
+        if icon is not None:
+            self._auto_btn.setIcon(icon)
         self.update()
 
     def show_z_thickness(self, visible: bool = True, maximum: float = 99999.0) -> None:
@@ -1840,19 +1822,8 @@ class _ControlBar(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        lbl = f"QLabel {{ color: {colors['text']}; font-size: 11px; }}"
-        sld = (
-            f"QSlider::groove:horizontal {{ background: {colors['border']}; height: 4px; }}"
-            f"QSlider::handle:horizontal {{ background: {colors['text']}; width: 12px; "
-            "margin: -4px 0; border-radius: 3px; }"
-        )
-        val_lbl = f"QLabel {{ color: {colors['text']}; font-size: 10px; }}"
-        btn = (
-            f"QPushButton {{ color: {colors['text']}; background: {colors['input']}; "
-            f"border: 1px solid {colors['border']}; "
-            "border-radius: 3px; padding: 4px; font-size: 11px; }"
-            f"QPushButton:hover {{ background: {colors['accent']}; }}"
-        )
+        # styled by the stylesheet of the bar (_gallery_qss), not widget by widget
+        lbl = sld = val_lbl = btn = ""
 
         def _label(text):
             l = QLabel(text)
@@ -1922,6 +1893,7 @@ class _ControlBar(QWidget):
         # movie button (QPushButton auto-defaults inside a QDialog parent).
         self._movie_btn.setAutoDefault(False)
         self._movie_btn.clicked.connect(self.movie_toggled)
+        self._movie_btn.toggled.connect(lambda _on: self._set_icons())
         row_btns.addWidget(self._movie_btn)
 
         self._reset_btn = QPushButton("Reset")
@@ -1930,6 +1902,7 @@ class _ControlBar(QWidget):
         self._reset_btn.clicked.connect(self.reset_view_requested)
         row_btns.addWidget(self._reset_btn)
         root.addLayout(row_btns)
+        self._set_icons()
 
         root.addStretch(1)
 
@@ -1950,6 +1923,19 @@ class _ControlBar(QWidget):
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
         self._zoom_spin.valueChanged.connect(self._on_zoom_spin)
 
+    def _set_icons(self) -> None:
+        """Icons on the movie and reset buttons (a pause while the movie plays)."""
+        for button, name in (
+            (
+                self._movie_btn,
+                "fa5s.pause" if self._movie_btn.isChecked() else "fa5s.play",
+            ),
+            (self._reset_btn, "fa5s.undo"),
+        ):
+            icon = _button_icon(name)
+            if icon is not None:
+                button.setIcon(icon)
+
     def _apply_display_theme(self) -> None:
         """Apply the current theme to the orthogonal-view controls."""
         colors = _gallery_theme_colors()
@@ -1959,6 +1945,7 @@ class _ControlBar(QWidget):
         self.setStyleSheet(_gallery_qss(colors))
         for child in self.findChildren(QWidget):
             child.setStyleSheet("")
+        self._set_icons()
         self.update()
 
     @staticmethod
@@ -2100,13 +2087,7 @@ class _BCGPanel(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        lbl = f"QLabel {{ color: {colors['text']}; font-size: 11px; }}"
-        sld = (
-            f"QSlider::groove:horizontal {{ background: {colors['border']}; height: 4px; }}"
-            f"QSlider::handle:horizontal {{ background: {colors['text']}; width: 12px; "
-            "margin: -4px 0; border-radius: 3px; }"
-        )
-        val_lbl = f"QLabel {{ color: {colors['text']}; font-size: 10px; }}"
+        lbl = sld = val_lbl = ""
 
         def _label(text):
             return QLabel(text)

@@ -24,14 +24,16 @@ def _display_theme_stylesheet() -> str:
         _THEME_COLORS,
         _resolved_theme,
         _saved_theme,
+        _widgets_qss,
     )
 
     colors = _THEME_COLORS[_resolved_theme(_saved_theme())]
-    return f"""
+    base = f"""
         QWidget {{
             background-color: {colors["window"]};
             color: {colors["text"]};
         }}
+        QLabel {{ background: transparent; }}
         QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
             background-color: {colors["input"]};
             color: {colors["text"]};
@@ -87,6 +89,8 @@ def _display_theme_stylesheet() -> str:
             spacing: 6px;
         }}
     """
+    # the common widgets last, so that they win over the general rules above
+    return base + _widgets_qss(colors)
 
 
 def _display_theme_palette():
@@ -175,6 +179,41 @@ def _napari_display_theme() -> str:
     return {"Dark": "dark", "Light": "light", "System": "system"}[theme]
 
 
+def _napari_viewer_theme() -> str:
+    """The napari theme for a viewer: Helicon's own, in the colours of the browser.
+
+    Registers ``helicon-dark`` and ``helicon-light`` with napari (once) from the shared
+    theme colours, so the napari windows (slice, volume, class averages) look like the
+    rest. Falls back to napari's own ``dark``/``light``/``system`` where napari cannot
+    take them.
+    """
+    try:
+        from helicon.lib.gui.file_browser import _THEME_COLORS, _resolved_theme
+        from napari.utils.theme import available_themes, get_theme, register_theme
+
+        resolved = _resolved_theme(_get_display_theme())
+        theme_id = f"helicon-{resolved.lower()}"
+        if theme_id not in available_themes():
+            c = _THEME_COLORS[resolved]
+            base = get_theme(resolved.lower()).model_dump()
+            base.update(
+                id=theme_id,
+                label=f"Helicon {resolved.lower()}",
+                background=c["window"],
+                foreground=c["input"],
+                primary=c["border"],
+                secondary=c["header_border"] if resolved == "Light" else "#666666",
+                highlight=c["accent"],
+                text=c["text"],
+                icon=c["text"],
+                current=c["accent"],
+            )
+            register_theme(theme_id, base, "helicon")
+        return theme_id
+    except Exception:
+        return _napari_display_theme()
+
+
 def _napari_canvas_background() -> str:
     """Return the napari canvas background for the saved display theme."""
     from helicon.lib.gui.file_browser import _resolved_theme
@@ -187,7 +226,7 @@ def _napari_canvas_background() -> str:
 def _refresh_napari_theme() -> None:
     """Apply the saved theme to all currently open napari viewers."""
     try:
-        theme = _napari_display_theme()
+        theme = _napari_viewer_theme()
         background = _napari_canvas_background()
         for viewer in _napari.alive():
             viewer.theme = theme

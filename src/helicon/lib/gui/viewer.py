@@ -17,6 +17,7 @@ from .theme import (
     _display_theme_stylesheet,
     _napari_canvas_background,
     _napari_display_theme,
+    _napari_viewer_theme,
 )
 from .trackers import _napari
 
@@ -1039,7 +1040,7 @@ def _create_napari_viewer(title="Helicon display"):
             "updating your GPU drivers."
         ) from exc
     try:
-        new_viewer.theme = _napari_display_theme()
+        new_viewer.theme = _napari_viewer_theme()
         new_viewer.background_color = _napari_canvas_background()
     except Exception:
         pass
