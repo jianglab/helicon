@@ -307,6 +307,32 @@ class TestFileBrowserUsesTheProject:
         for app in ("helicalProjection", "hill", "denovo3D"):
             assert app in modes, modes
 
+    def test_the_particles_of_a_helical_classification_offer_helicalpitch_and_abinitio3d(
+        self, widget, project
+    ):
+        modes = widget._display_modes_for(str(project / "J7" / "J7_020_particles.cs"))
+        for app in ("helicalPitch", "abInitio3D"):
+            assert app in modes, modes
+
+    def test_only_the_particles_with_the_classes_and_their_averages_do(
+        self, widget, project, tmp_path
+    ):
+        from helicon.lib import cryosparc_project
+
+        particles = project / "J7" / "J7_020_particles.cs"
+        assert cryosparc_project.is_class2d_particles(particles)
+        # the passthrough and rejected sets carry no class
+        assert not cryosparc_project.is_class2d_particles(
+            project / "J7" / "J7_passthrough_particles.cs"
+        )
+        assert not cryosparc_project.is_class2d_particles(
+            project / "J5" / "picked_particles.cs"
+        )
+        # without the class averages beside them there is nothing for the apps to load
+        (project / "J7" / "J7_020_class_averages.mrc").rename(tmp_path / "moved.mrc")
+        modes = widget._display_modes_for(str(particles))
+        assert "helicalPitch" not in modes and "abInitio3D" not in modes
+
     def test_single_particle_class_averages_do_not(self, widget, project):
         # offering them would be noise on a project that is not helical, and
         # whether it is can be told from the filament columns or the ancestry

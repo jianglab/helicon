@@ -1988,6 +1988,13 @@ class DirCountWorker(QThread):
             self.count_ready.emit(batch, self._epoch)
 
 
+def _has_class_averages(params_path: str) -> bool:
+    """Whether the class averages that go with a Class2D parameter file are beside it."""
+    from helicon.webApps import class2d_files
+
+    return class2d_files.companion(params_path) is not None
+
+
 class _ModesWorker(QThread):
     """Works out, off the main thread, what can be done with a file: the display modes
     (which read headers and datasets), the label of the slice button, and whether
@@ -2777,6 +2784,13 @@ class FolderBrowserWidget(QMainWindow):
                 modes = ["slice", "gallery"] + modes
                 if cryosparc_project.is_helical(path):
                     modes.append("denovo3D")
+            # the particles of a helical 2D classification, with the class averages
+            # beside them, are what HelicalPitch and AbInitio3D read (as a RELION
+            # Class2D data.star is)
+            if cryosparc_project.is_class2d_particles(path) and (
+                cryosparc_project.is_helical(path) and _has_class_averages(path)
+            ):
+                modes.extend(["helicalPitch", "abInitio3D"])
             return modes
         if ext == ".mrcs":
             modes = ["slice", "gallery"]

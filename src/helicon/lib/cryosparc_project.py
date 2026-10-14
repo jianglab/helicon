@@ -307,6 +307,29 @@ def is_class_averages(path: str | Path) -> bool:
     )
 
 
+def is_class2d_particles(path: str | Path) -> bool:
+    """Whether *path* is the particles dataset of a 2D classification: the one with each
+    particle's class (``<job>_<iteration>_particles.cs`` of a ``class_2D`` job), not the
+    passthrough or rejected sets, which carry no class assignment.
+
+    Parameters
+    ----------
+    path : str or Path
+
+    Returns
+    -------
+    bool
+    """
+    name = Path(path).name.lower()
+    if (
+        not name.endswith("_particles.cs")
+        or "passthrough" in name
+        or "rejected" in name
+    ):
+        return False
+    return job_type(path) in {"class_2D", "class_2D_new"}
+
+
 def is_metadata_file(path: str | Path) -> bool:
     """Whether *path* is one of a project's bookkeeping files."""
     return Path(path).name in METADATA_FILES
