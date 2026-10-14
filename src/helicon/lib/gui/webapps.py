@@ -145,6 +145,49 @@ def _spawn_web_app(query_params: dict) -> _WebAppState:
     return new_state
 
 
+# Set by the file browser (``helicon display``): a launch then runs in a thread. Reaching
+# a running app is an HTTP request that waits up to 10 s if the app is busy, and starting
+# one reads files and starts a process: none of that may hold up the window.
+BACKGROUND_LAUNCH = False
+
+_reporters: list = []
+
+
+def _in_background(work, title: str, message: str) -> None:
+    """Run ``work()`` in a thread; if it fails, say so in a box on the main thread."""
+    import threading
+
+    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    class Reporter(QObject):
+        failed = Signal(str)
+
+    reporter = Reporter()
+    app = QApplication.instance()
+    if app is not None:
+        reporter.moveToThread(app.thread())
+
+    def show(detail: str) -> None:
+        QMessageBox.critical(None, title, f"{message}:\n{detail}")
+        if reporter in _reporters:
+            _reporters.remove(reporter)
+
+    reporter.failed.connect(show, Qt.ConnectionType.QueuedConnection)
+    _reporters.append(reporter)  # (kept alive until it has spoken, or the work ends)
+
+    def run() -> None:
+        try:
+            work()
+        except Exception as exc:  # reported on the main thread
+            reporter.failed.emit(str(exc))
+        else:
+            if reporter in _reporters:
+                _reporters.remove(reporter)
+
+    threading.Thread(target=run, name="helicon-launch", daemon=True).start()
+
+
 def _launch_or_reuse_web_app(
     key: str, query_params: dict, *, new_window: bool = False
 ) -> None:
@@ -172,12 +215,17 @@ def _launch_or_reuse_web_app(
     query_params = dict(query_params)
     query_params["helicon_theme"] = _get_display_theme()
 
-    if not new_window:
-        for state in _web_app_alive():
-            if _navigate_web_app(state, query_params):
-                return
+    def work() -> None:
+        if not new_window:
+            for state in _web_app_alive():
+                if _navigate_web_app(state, query_params):
+                    return
+        _spawn_web_app(query_params)
 
-    _spawn_web_app(query_params)
+    if not BACKGROUND_LAUNCH:
+        work()
+        return
+    _in_background(work, f"{key} Launch Error", f"Failed to launch {key}")
 
 
 def _make_bookmark_query(tab_name: str, params: dict) -> dict:

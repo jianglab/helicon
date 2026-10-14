@@ -96,3 +96,20 @@ def pytest_collection_modifyitems(config, items):
     browser = [item for item in items if _uses_playwright(item)]
     if browser:
         items[:] = [item for item in items if not _uses_playwright(item)] + browser
+
+
+@pytest.fixture(autouse=True)
+def _foreground_launches():
+    """``helicon display`` makes the launches of web apps run in a thread (and sets this
+    for the life of its process); a test that runs its ``main`` must not leave it set.
+    """
+    import sys
+
+    def reset():
+        module = sys.modules.get("helicon.lib.gui.webapps")
+        if module is not None:
+            module.BACKGROUND_LAUNCH = False
+
+    reset()
+    yield
+    reset()

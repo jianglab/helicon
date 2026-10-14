@@ -278,12 +278,8 @@ class TestFileBrowserUsesTheProject:
         app = QApplication.instance() or QApplication([])
         with (
             patch(
-                "helicon.lib.gui.file_browser.FileBrowserModel.file_rows",
-                return_value=[],
-            ),
-            patch(
-                "helicon.lib.gui.file_browser.FileBrowserModel.dir_rows",
-                return_value=[],
+                "helicon.lib.gui.file_browser.FileBrowserModel.listed_paths",
+                return_value=([], []),
             ),
         ):
             w = FolderBrowserWidget(start_dir=str(project))
@@ -553,12 +549,8 @@ class TestBrowserOffersStackActionsForCs:
         QApplication.instance() or QApplication([])
         with (
             patch(
-                "helicon.lib.gui.file_browser.FileBrowserModel.file_rows",
-                return_value=[],
-            ),
-            patch(
-                "helicon.lib.gui.file_browser.FileBrowserModel.dir_rows",
-                return_value=[],
+                "helicon.lib.gui.file_browser.FileBrowserModel.listed_paths",
+                return_value=([], []),
             ),
         ):
             w = FolderBrowserWidget(start_dir=str(project))

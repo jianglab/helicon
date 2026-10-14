@@ -1829,7 +1829,57 @@ def _open_image_ref_stack(
     _reset_view(viewer)
 
 
-def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -> None:
+_BACKGROUND_JOBS: list = []
+
+
+def _run_in_thread(work, then) -> None:
+    """Run ``work()`` in a thread, then ``then(result)`` on the main thread.
+
+    The cursor is busy meanwhile. If ``work`` raises, the error is printed and nothing
+    follows (as a failed read of a file did before).
+    """
+    from PySide6.QtCore import QThread, Qt, Signal
+    from PySide6.QtWidgets import QApplication
+
+    class Worker(QThread):
+        done = Signal(object, object)
+
+        def run(self) -> None:
+            try:
+                self.done.emit(work(), None)
+            except Exception as exc:
+                self.done.emit(None, exc)
+
+    worker = Worker()
+    _BACKGROUND_JOBS.append(worker)
+    QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+
+    def finished(result, error) -> None:
+        QApplication.restoreOverrideCursor()
+        if worker in _BACKGROUND_JOBS:
+            _BACKGROUND_JOBS.remove(worker)
+        if error is not None:
+            print(f"[helicon] failed to read the file: {error}")
+            return
+        then(result)
+
+    worker.done.connect(finished)
+    worker.start()
+
+
+def _open_file(
+    viewer,
+    path: str,
+    mode: str | None = None,
+    reuse_gallery=None,
+    background: bool = False,
+) -> None:
+    """Show a file in the napari viewer or a gallery.
+
+    With ``background``, the reading of the list of images of a star or CryoSPARC file
+    (seconds for a hundred thousand particles) is done in a thread, and the window is
+    shown when it is read: the file browser does not freeze meanwhile.
+    """
     from pathlib import Path
 
     if viewer is not None:
@@ -1898,29 +1948,34 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         # A CryoSPARC dataset names its images the way a data.star does.
         from helicon.lib import cryosparc_project
 
-        refs = cryosparc_project.image_refs(path)
-        if refs is None:
-            return
-        entries, first_shape, first_apix, n_skipped = refs
-        if n_skipped:
-            from PySide6.QtWidgets import QMessageBox
+        def _show_refs(refs):
+            if refs is None:
+                return
+            entries, first_shape, first_apix, n_skipped = refs
+            if n_skipped:
+                from PySide6.QtWidgets import QMessageBox
 
-            QMessageBox.warning(
-                None,
-                "Missing images",
-                f"{n_skipped} image(s) referenced in {Path(path).name} "
-                "could not be found on disk and were skipped.",
+                QMessageBox.warning(
+                    None,
+                    "Missing images",
+                    f"{n_skipped} image(s) referenced in {Path(path).name} "
+                    "could not be found on disk and were skipped.",
+                )
+            _open_image_ref_stack(
+                viewer,
+                entries,
+                first_shape,
+                first_apix,
+                Path(path).name,
+                mode,
+                reuse_gallery=reuse_gallery,
+                tracker=_gallery,
             )
-        _open_image_ref_stack(
-            viewer,
-            entries,
-            first_shape,
-            first_apix,
-            Path(path).name,
-            mode,
-            reuse_gallery=reuse_gallery,
-            tracker=_gallery,
-        )
+
+        if background:
+            _run_in_thread(lambda: cryosparc_project.image_refs(path), _show_refs)
+        else:
+            _show_refs(cryosparc_project.image_refs(path))
         return
 
     # "text" mode: always open any star file as text, regardless of type.
@@ -1935,30 +1990,35 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
     if ext == ".star":
         import mrcfile
 
-        result = _parse_star_image_refs(path)
-        if result is None:
-            return
-        entries, first_shape, first_apix, n_skipped = result
+        def _show_result(result):
+            if result is None:
+                return
+            entries, first_shape, first_apix, n_skipped = result
 
-        if n_skipped:
-            from PySide6.QtWidgets import QMessageBox
+            if n_skipped:
+                from PySide6.QtWidgets import QMessageBox
 
-            QMessageBox.warning(
-                None,
-                "Missing images",
-                f"{n_skipped} image(s) referenced in {Path(path).name} "
-                "could not be found on disk and were skipped.",
+                QMessageBox.warning(
+                    None,
+                    "Missing images",
+                    f"{n_skipped} image(s) referenced in {Path(path).name} "
+                    "could not be found on disk and were skipped.",
+                )
+            _open_image_ref_stack(
+                viewer,
+                entries,
+                first_shape,
+                first_apix,
+                Path(path).name,
+                mode,
+                reuse_gallery=reuse_gallery,
+                tracker=_gallery,
             )
-        _open_image_ref_stack(
-            viewer,
-            entries,
-            first_shape,
-            first_apix,
-            Path(path).name,
-            mode,
-            reuse_gallery=reuse_gallery,
-            tracker=_gallery,
-        )
+
+        if background:
+            _run_in_thread(lambda: _parse_star_image_refs(path), _show_result)
+        else:
+            _show_result(_parse_star_image_refs(path))
         return
 
     if ext == ".bild":
@@ -1984,8 +2044,6 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
     if ext in _MRC_EXTENSIONS:
         import struct
         import numpy as np
-        import dask.array as da
-        from dask import delayed
 
         # Parse the MRC header directly from raw bytes so we never open
         # the file through mrcfile (which mmap's the *data* section and
@@ -2042,14 +2100,11 @@ def _open_file(viewer, path: str, mode: str | None = None, reuse_gallery=None) -
         # Build a lazily-read 3D array (axis 0 = Z / frame). Planes are read
         # from disk individually, so a 2D view never loads the whole file.
         if _nz >= 1 and _nx > 0 and _ny > 0:
-            _vol = da.stack(
-                [
-                    da.from_delayed(
-                        delayed(_read_raw)(i), shape=(_ny, _nx), dtype=_dtype
-                    )
-                    for i in range(_nz)
-                ]
-            )
+            # (no dask graph of one task per plane: that took 21 s on the main thread
+            # for 120,000 planes)
+            from helicon.lib.gui.viewer import _LazyMrcStack
+
+            _vol = _LazyMrcStack(_data_mmap)
         else:
             _vol = None
 
@@ -2182,6 +2237,27 @@ def _run_standalone() -> None:
     except Exception as exc:  # pragma: no cover - environment dependent
         print(f"[helicon] failed to display {path}: {exc}")
     napari.run()
+
+
+def _warm_up_napari() -> "threading.Thread":
+    """Import napari (the part that takes seconds) in a thread, ahead of the first display.
+
+    Only importing: no Qt object is made in the thread. If it fails, the first display
+    imports napari itself, as before.
+    """
+    import threading
+
+    def work() -> None:
+        try:
+            import napari  # noqa: F401
+            import napari.layers  # noqa: F401
+            import napari.utils.theme  # noqa: F401
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=work, name="helicon-napari-warmup", daemon=True)
+    thread.start()
+    return thread
 
 
 def main(args: argparse.Namespace) -> None:
@@ -2410,7 +2486,7 @@ def main(args: argparse.Namespace) -> None:
             else:
                 _show_napari_viewer()
                 try:
-                    _open_file(_napari.active(), path, mode=mode)
+                    _open_file(_napari.active(), path, mode=mode, background=True)
                 except Exception as exc:
                     import logging
 
@@ -2420,7 +2496,7 @@ def main(args: argparse.Namespace) -> None:
         else:
             reuse = None if new_window else tracker.active()
             if tracker is _gallery:
-                _open_file(None, path, mode=mode, reuse_gallery=reuse)
+                _open_file(None, path, mode=mode, reuse_gallery=reuse, background=True)
             elif tracker is _text:
                 _open_text_window(path, reuse_window=reuse)
             elif tracker is _plot:
@@ -2447,6 +2523,13 @@ def main(args: argparse.Namespace) -> None:
     widget.setWindowFlags(Qt.WindowType.Window)
     widget.setWindowTitle("Helicon - Files")
     widget.show()
+    # keep the window answering: launching a web app (an HTTP request, a new process) runs
+    # in a thread, and napari, which takes seconds to import, is imported in the background
+    # while the browser is looked at, so that the first display is not the one that waits
+    from helicon.lib.gui import webapps as _webapps_module
+
+    _webapps_module.BACKGROUND_LAUNCH = True
+    _warm_up_napari()
 
     # On macOS the application-name menu item is only realized once the
     # QMainWindow's native menu bar is installed by the event loop. Re-apply

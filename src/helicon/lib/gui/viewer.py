@@ -164,6 +164,46 @@ def _save_geometry(dock, viewer):
         save_cols()
 
 
+class _LazyMrcStack:
+    """The planes of an MRC file, read from disk as they are indexed.
+
+    A stand-in for a dask array of one delayed read per plane, which took 21 s to build
+    for a stack of 120,000 planes (and the same on the main thread of the browser, so the
+    window froze when such a stack was opened). This needs no work per plane: it holds
+    the memory map and hands out what is asked for, so napari and the gallery read the
+    planes they show and no more. It has what napari asks of an array: ``shape``,
+    ``ndim``, ``dtype`` and ``__getitem__``.
+
+    Parameters
+    ----------
+    data : numpy.memmap
+        ``(nz, ny, nx)``.
+    """
+
+    def __init__(self, data):
+        self._data = data
+        self.shape = tuple(int(n) for n in data.shape)
+        self.ndim = len(self.shape)
+        self.dtype = data.dtype
+
+    def __getitem__(self, key):
+        import numpy as np
+
+        return np.asarray(self._data[key])
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __array__(self, dtype=None, copy=None):
+        import numpy as np
+
+        return np.asarray(self._data, dtype=dtype)
+
+    @property
+    def nbytes(self) -> int:
+        return int(self._data.nbytes)
+
+
 class _LazyStarStack:
     """Lazy array that reads individual images from star file references on demand.
 

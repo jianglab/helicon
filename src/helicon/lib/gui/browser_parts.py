@@ -10,6 +10,7 @@ imported where they are used, so opening the browser stays quick.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -492,6 +493,7 @@ _MRC_SUFFIXES = {".mrc", ".mrcs", ".map", ".ccp4", ".rec", ".st", ".ali", ".ctf"
 _PIL_SUFFIXES = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 _MAX_PIL_PIXELS = 150_000_000
 _STACK_PREVIEW_FRAMES = 12
+_STACK_PREVIEW_BYTES = 96 * 2**20
 
 
 def _folder_preview(path: Path, now: datetime | None = None) -> dict:
@@ -499,12 +501,16 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         kind="folder", title=path.name or str(path), facts=[], text="", image=None
     )
     try:
-        entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        # os.scandir: a DirEntry knows if it is a folder without a stat, and no Path is
+        # made for each entry. Listing 20,000 files with Path.iterdir and is_dir took 18 s of
+        # a thread that held the main thread's GIL, so the window froze.
+        with os.scandir(path) as listing:
+            entries = [(e.name, e.is_dir()) for e in listing if e.name[:1] != "."]
     except OSError as e:
         out["note"] = f"Cannot read this folder: {e.strerror or e}"
         return out
-    entries = [e for e in entries if not e.name.startswith(".")]
-    n_dirs = sum(1 for e in entries if e.is_dir())
+    entries.sort(key=lambda e: (not e[1], e[0].lower()))
+    n_dirs = sum(1 for _, is_dir in entries if is_dir)
     out["facts"].append(
         ("Contains", f"{len(entries) - n_dirs} files, {n_dirs} folders")
     )
@@ -526,8 +532,8 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         title = _read_json(path / "project.json").get("title") or ""
         n_jobs = sum(
             1
-            for e in entries
-            if _CRYOSPARC_JOB.match(e.name) and (e / "job.json").is_file()
+            for name, _ in entries
+            if _CRYOSPARC_JOB.match(name) and (path / name / "job.json").is_file()
         )
         out["facts"].append(
             ("CryoSPARC project", f"{title}, {n_jobs} jobs".lstrip(", "))
@@ -549,7 +555,7 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         )
     except OSError:
         pass
-    shown = [e.name + ("/" if e.is_dir() else "") for e in entries[:14]]
+    shown = [name + ("/" if is_dir else "") for name, is_dir in entries[:14]]
     if len(entries) > 14:
         shown.append(f"… {len(entries) - 14} more")
     out["text"] = "\n".join(shown)
@@ -674,7 +680,12 @@ def _preview_mrc(path: Path, suffix: str, out: dict) -> None:
         elif stack:
             out["kind"] = "stack"
             out["facts"].insert(0, ("Images", f"{nz} of {nx} × {ny}"))
-            n = min(nz, _STACK_PREVIEW_FRAMES)
+            # read no more than _STACK_PREVIEW_BYTES: the first frames of a stack of
+            # large movie frames would otherwise be gigabytes to read for a thumbnail
+            frame_bytes = max(int(nx) * int(ny) * data.dtype.itemsize, 1)
+            n = max(
+                1, min(nz, _STACK_PREVIEW_FRAMES, _STACK_PREVIEW_BYTES // frame_bytes)
+            )
             frames = [np.asarray(data[i]) for i in range(n)]
             image = _montage(frames, columns=4 if n > 6 else min(n, 3) or 1)
             sample = frames[0]

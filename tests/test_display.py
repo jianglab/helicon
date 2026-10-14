@@ -1980,8 +1980,9 @@ class TestOpenFile(object):
 
         mock_viewer.add_image.assert_called_once()
         call_args, call_kwargs = mock_viewer.add_image.call_args
-        assert hasattr(call_args[0], "compute")
-        np.testing.assert_array_equal(call_args[0].compute(), test_data)
+        # a lazy stack (no dask graph of one task per plane), read as it is indexed
+        np.testing.assert_array_equal(np.asarray(call_args[0]), test_data)
+        np.testing.assert_array_equal(call_args[0][1], test_data[1])
         assert call_args[0].shape == (3, 4, 5)
         assert call_kwargs["name"] == "test.mrc"
         assert call_kwargs["scale"] == (2.0, 2.0, 2.0)
@@ -2297,12 +2298,8 @@ class TestFolderBrowser(object):
         # Keep this navigation test independent of background metadata workers.
         with (
             patch(
-                "helicon.lib.gui.file_browser.FileBrowserModel.file_rows",
-                return_value=[],
-            ),
-            patch(
-                "helicon.lib.gui.file_browser.FileBrowserModel.dir_rows",
-                return_value=[],
+                "helicon.lib.gui.file_browser.FileBrowserModel.listed_paths",
+                return_value=([], []),
             ),
         ):
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -3271,6 +3268,7 @@ class TestFolderBrowser(object):
             widget._tree.selectionModel().select(
                 idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
             )
+            widget.wait_for_selection()
 
         select("particles.mrcs")
         assert widget._btn_slice.text() == "2D Image"
@@ -3293,6 +3291,7 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             index, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
+        widget.wait_for_selection()
 
         assert widget._btn_slice.text() == "PDF"
 
@@ -3323,6 +3322,7 @@ class TestFolderBrowser(object):
             widget._tree.selectionModel().select(
                 idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
             )
+            widget.wait_for_selection()
 
         select("volume.mrc")
         assert not widget._btn_chimerax.isHidden()
@@ -3346,6 +3346,7 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
+        widget.wait_for_selection()
         # bild files get a ChimeraX button (renders cylinders/spheres natively).
         assert not widget._btn_chimerax.isHidden()
         assert widget._btn_chimerax.text() == "ChimeraX"
@@ -3389,6 +3390,7 @@ class TestFolderBrowser(object):
             widget._tree.selectionModel().select(
                 idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
             )
+            widget.wait_for_selection()
             assert not widget._btn_chimerax.isHidden()
             assert not widget._btn_chimerax.isEnabled()
             assert "not found" in widget._btn_chimerax.toolTip().lower()
@@ -3410,6 +3412,7 @@ class TestFolderBrowser(object):
             widget._tree.selectionModel().select(
                 idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
             )
+            widget.wait_for_selection()
             assert widget._btn_chimerax.isEnabled()
             assert "Open this file" in widget._btn_chimerax.toolTip()
 
@@ -3448,6 +3451,7 @@ class TestFolderBrowser(object):
             widget._tree.selectionModel().select(
                 idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
             )
+            widget.wait_for_selection()
 
         for star_path in (class3d_star, refine3d_star):
             select(star_path)
@@ -3480,6 +3484,7 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
+        widget.wait_for_selection()
         # EPS rasterizes to a 2D image, so it reuses the slice mode (button
         # labelled "EPS", mirroring the "PDF" label for .pdf files).
         assert widget._display_modes_for(str(tmp_path / "fig.eps")) == ["slice"]
@@ -3636,6 +3641,7 @@ class TestFolderBrowser(object):
         widget._tree.selectionModel().select(
             idx, QItemSelectionModel.Select | QItemSelectionModel.Clear
         )
+        widget.wait_for_selection()
         assert not widget._btn_html.isHidden()
         assert widget._btn_html.isEnabled()
         assert widget._btn_html.text() == "Browser"

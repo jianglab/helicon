@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -937,8 +939,8 @@ def _get_file_type_label(filepath: str) -> str:
     2. Known text extensions -> "Text"
     3. Anything else -> uppercased extension (or "File" if no extension)
     """
-    name = Path(filepath).name.lower()
-    ext = Path(filepath).suffix.lower()
+    name = os.path.basename(filepath).lower()
+    ext = os.path.splitext(name)[1]
 
     if ext == ".star":
         if any(name.endswith(s) for s in _METADATA_STAR_SUFFIXES):
@@ -1312,6 +1314,12 @@ COL_PIXELSIZE = 5
 COL_MODIFIED = 6
 NUM_COLUMNS = 7
 ROLE_SORT = Qt.ItemDataRole.UserRole + 1
+# A folder of up to this many entries is listed at once, with their sizes and dates. A
+# longer one is listed in slices of the main thread (INSERT_SLICE_S seconds each, so the
+# window keeps answering), and the sizes and dates are read in threads: a stat on a network
+# disk takes about a millisecond, so 20,000 files froze the browser for 40 s.
+SYNC_ROWS = 200
+INSERT_SLICE_S = 0.03
 # the columns of numbers are right-aligned
 _RIGHT_COLUMNS = (COL_SIZE, COL_IMAGES, COL_PIXELSIZE)
 
@@ -1329,7 +1337,45 @@ _METADATA_STAR_SUFFIXES = (
 )
 
 
+class _StatWorker(QThread):
+    """Reads the size and modification time of files off the main thread, in batches.
+
+    ``stats_ready(epoch, batch)`` with ``batch`` a list of ``(path, size, mtime)``.
+    """
+
+    stats_ready = Signal(int, list)
+    BATCH = 250
+
+    def __init__(self, paths: list[str], epoch: int, parent=None) -> None:
+        super().__init__(parent)
+        self._paths = paths
+        self._epoch = epoch
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        batch = []
+        for path in self._paths:
+            if self._stop:
+                return
+            try:
+                st = os.stat(path)
+                batch.append((path, st.st_size, st.st_mtime))
+            except OSError:
+                batch.append((path, 0, 0.0))
+            if len(batch) >= self.BATCH:
+                self.stats_ready.emit(self._epoch, batch)
+                batch = []
+        if batch and not self._stop:
+            self.stats_ready.emit(self._epoch, batch)
+
+
 class FileBrowserModel(QStandardItemModel):
+    # emitted when every row of a folder is there (at once for a small folder)
+    load_finished = Signal()
+
     def __init__(self, root_path: str, parent=None):
         super().__init__(0, NUM_COLUMNS, parent)
         self.setHorizontalHeaderLabels(
@@ -1346,18 +1392,23 @@ class FileBrowserModel(QStandardItemModel):
         # a previous load are discarded via this epoch so stale results never
         # land in the new model.
         self._epoch = 0
-        # filepath -> row index for _row_for_filepath; rebuilt lazily after
-        # any change to the rows (insert, remove, sort, reset).
-        self._row_index: dict[str, int] = {}
-        self._row_index_dirty = True
-        for signal in (
-            self.rowsInserted,
-            self.rowsRemoved,
-            self.rowsMoved,
-            self.layoutChanged,
-            self.modelReset,
-        ):
-            signal.connect(self._invalidate_row_index)
+        # filepath -> the Name item of its row, for _row_for_filepath: an item knows its
+        # own row, so nothing has to be rebuilt when rows are added or sorted
+        self._name_items: dict[str, QStandardItem] = {}
+        # a long folder is listed in slices; its sizes and dates come from threads
+        self._loading = False
+        self._pending: list[tuple[str, bool]] = []
+        self._pending_base = Path(root_path)
+        self._pending_pos = 0
+        self._stat_items: dict[str, tuple] = {}
+        self._stat_workers: list[_StatWorker] = []
+        self._stats_running = 0
+        self._cs_parents: dict[str, bool] = {}
+        # the files and the folders of the folder shown, as the rows are made
+        self._listed_files: list[str] = []
+        self._listed_dirs: list[str] = []
+        self._sort_state = (COL_NAME, Qt.SortOrder.AscendingOrder)
+        self._listing_sort = self._sort_state
         self._load_directory(root_path)
 
     def set_theme_colors(self, colors: dict[str, str]) -> None:
@@ -1383,50 +1434,173 @@ class FileBrowserModel(QStandardItemModel):
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return super().data(index, role)
 
-    def _invalidate_row_index(self, *_args) -> None:
-        """Mark the filepath -> row index stale after the rows changed."""
-        self._row_index_dirty = True
-
-    def _rebuild_row_index(self) -> None:
-        """Rebuild the filepath -> row index from the Name column."""
-        index: dict[str, int] = {}
-        for row in range(self.rowCount()):
-            path = self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
-            if path is not None:
-                index.setdefault(path, row)
-        self._row_index = index
-        self._row_index_dirty = False
-
     def _matches_filter(self, name: str) -> bool:
+        if self._filter_pattern == "*" and not self._use_regex:
+            return True  # (by far the most common; and 20,000 fnmatch calls take 0.2 s)
         return _name_matches_filter(name, self._filter_pattern, self._use_regex)
 
     def _load_directory(self, path: str) -> None:
         self._epoch += 1
+        epoch = self._epoch
+        self._cancel_loading()
+        self._listing_sort = self._sort_state
+        self._cs_parents = {}
+        self._listed_files = []
+        self._listed_dirs = []
+        self._name_items = {}
         self.removeRows(0, self.rowCount())
         try:
-            entries = sorted(
-                Path(path).iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
-            )
-        except PermissionError:
+            # a listing needs no stat of the entries (a DirEntry knows if it is a folder)
+            with os.scandir(path) as listing:
+                found = [(e.name, e.is_dir()) for e in listing]
+        except OSError:
+            self.load_finished.emit()
             return
+        entries = [
+            (name, is_dir)
+            for name, is_dir in found
+            if not name.startswith(".") and (is_dir or self._matches_filter(name))
+        ]
+        # in the order the list is sorted in, so a long folder needs no sort afterwards
+        column, order = self._sort_state
+        descending = order == Qt.SortOrder.DescendingOrder
+        if column == COL_NAME:
+            folders = sorted(
+                (e for e in entries if e[1]),
+                key=lambda e: _natural_sort_key(e[0] + "/"),
+                reverse=descending,
+            )
+            files = sorted(
+                (e for e in entries if not e[1]),
+                key=lambda e: _natural_sort_key(e[0]),
+                reverse=descending,
+            )
+            entries = folders + files
+        else:
+            entries.sort(key=lambda e: (not e[1], e[0].lower()))
+        base = Path(path)
+        if len(entries) <= SYNC_ROWS:
+            for name, is_dir in entries:
+                self.appendRow(self._make_row(base / name, is_dir=is_dir))
+            self._finish_loading(epoch)
+            return
+        self._loading = True
+        self._pending_base = base
+        self._pending = entries  # (name, is_dir): a Path is made when the row is
+        self._pending_pos = 0
+        self._insert_more(epoch)
 
-        for entry in entries:
-            if entry.name.startswith("."):
-                continue
-            if not entry.is_dir() and not self._matches_filter(entry.name):
-                continue
-            row = self._make_row(entry)
-            self.appendRow(row)
+    def _insert_more(self, epoch: int) -> None:
+        """Add the next rows of a long folder, for a slice of the main thread."""
+        if epoch != self._epoch or not self._loading:
+            return
+        start = time.perf_counter()
+        pending, pos, base = self._pending, self._pending_pos, self._pending_base
+        while pos < len(pending):
+            name, is_dir = pending[pos]
+            pos += 1
+            self.appendRow(self._make_row(base / name, is_dir=is_dir, light=True))
+            if pos % 20 == 0 and time.perf_counter() - start > INSERT_SLICE_S:
+                break
+        self._pending_pos = pos
+        if pos < len(pending):
+            QTimer.singleShot(0, lambda e=epoch: self._insert_more(e))
+        else:
+            self._pending = []
+            self._finish_loading(epoch)
+
+    def _finish_loading(self, epoch: int) -> None:
+        """All the rows are there: read the sizes and dates, and sort if the order asked for
+        is not the one they were listed in."""
+        self._loading = False
+        column, order = self._sort_state
+        if self._stat_items:
+            self._start_stats(epoch)
+        # by name the listing is already in order, unless another order was asked for while
+        # it was being made; the order by size or date waits for the stats (_stats_finished)
+        if column == COL_TYPE or (
+            column == COL_NAME and self._sort_state != self._listing_sort
+        ):
+            self._do_sort(column, order)
+        elif column in (COL_SIZE, COL_MODIFIED) and not self._stat_items:
+            self._do_sort(column, order)
+        self.load_finished.emit()
+
+    def _cancel_loading(self) -> None:
+        self._loading = False
+        self._pending = []
+        self._pending_pos = 0
+        self._stat_items = {}
+        for worker in self._stat_workers:
+            worker.stop()
+        self._stat_workers = [w for w in self._stat_workers if w.isRunning()]
+        self._stats_running = 0
+
+    def _start_stats(self, epoch: int) -> None:
+        paths = list(self._stat_items)
+        n = min(4, len(paths))
+        self._stats_running = n
+        for k in range(n):
+            worker = _StatWorker(paths[k::n], epoch, self)
+            worker.stats_ready.connect(self._apply_stats)
+            worker.finished.connect(lambda e=epoch: self._stats_finished(e))
+            self._stat_workers.append(worker)
+            worker.start()
+
+    def _apply_stats(self, epoch: int, batch: list) -> None:
+        if epoch != self._epoch:
+            return  # another folder was loaded since
+        with self._batched_changes():
+            for path, size, mtime in batch:
+                items = self._stat_items.get(path)
+                if items is None:
+                    continue
+                size_item, mod_item, is_dir = items
+                if not is_dir:
+                    size_item.setText(_format_size(size))
+                    size_item.setData(size, ROLE_SORT)
+                stamp = datetime.fromtimestamp(mtime) if mtime else None
+                mod_item.setText(_format_modified(stamp) if stamp else "")
+                mod_item.setData(stamp.isoformat() if stamp else "", ROLE_SORT)
+
+    def _stats_finished(self, epoch: int) -> None:
+        if epoch != self._epoch:
+            return
+        self._stats_running -= 1
+        if self._stats_running <= 0:
+            column, order = self._sort_state
+            # the sizes and dates are there now: sort by them if that is the order
+            if column in (COL_SIZE, COL_MODIFIED, COL_TYPE):
+                self._do_sort(column, order)
 
     def set_filter(self, pattern: str, use_regex: bool = False) -> None:
         self._filter_pattern = pattern
         self._use_regex = use_regex
         self._load_directory(self._root_path)
 
-    def _make_row(self, path: Path) -> list[QStandardItem]:
-        is_dir = path.is_dir()
+    def _in_cryosparc_project(self, path: Path) -> bool:
+        """Whether the folder holding ``path`` is a CryoSPARC project (read once per folder)."""
+        parent = str(path.parent)
+        known = self._cs_parents.get(parent)
+        if known is None:
+            try:
+                known = (path.parent / "project.json").is_file()
+            except OSError:
+                known = False
+            self._cs_parents[parent] = known
+        return known
+
+    def _make_row(
+        self, path: Path, is_dir: bool | None = None, light: bool = False
+    ) -> list[QStandardItem]:
+        """The items of a row. ``light``: no stat of the file here (its size and date are
+        filled in from a thread later, see :meth:`_start_stats`)."""
+        if is_dir is None:
+            is_dir = path.is_dir()
         name_item = QStandardItem(path.name + "/" if is_dir else path.name)
         name_item.setData(str(path), Qt.ItemDataRole.UserRole)
+        (self._listed_dirs if is_dir else self._listed_files).append(str(path))
+        self._name_items[str(path)] = name_item
         name_item.setEditable(False)
 
         if is_dir:
@@ -1440,7 +1614,7 @@ class FileBrowserModel(QStandardItemModel):
             type_item = QStandardItem("Folder")
             type_item.setData("folder", ROLE_SORT)
             # a job folder of a CryoSPARC project says what job it is
-            job = cryosparc_job_info(path)
+            job = cryosparc_job_info(path) if self._in_cryosparc_project(path) else None
             if job is not None:
                 type_item.setText(job["type_name"])
                 tip = f"{job['uid']}  {job['title']}".rstrip()
@@ -1451,21 +1625,31 @@ class FileBrowserModel(QStandardItemModel):
             images_item.setData(0, ROLE_SORT)
             apix_item = QStandardItem("")
             apix_item.setData("", ROLE_SORT)
-            try:
-                mtime = datetime.fromtimestamp(path.stat().st_mtime)
-            except (OSError, ValueError):
-                mtime = datetime.now()
-            mod_item = QStandardItem(_format_modified(mtime))
-            mod_item.setData(mtime.isoformat(), ROLE_SORT)
+            if light:
+                mod_item = QStandardItem("")
+                mod_item.setData("", ROLE_SORT)
+                self._stat_items[str(path)] = (size_item, mod_item, True)
+            else:
+                try:
+                    mtime = datetime.fromtimestamp(path.stat().st_mtime)
+                except (OSError, ValueError):
+                    mtime = datetime.now()
+                mod_item = QStandardItem(_format_modified(mtime))
+                mod_item.setData(mtime.isoformat(), ROLE_SORT)
         else:
-            try:
-                size_bytes = path.stat().st_size
-                mtime = datetime.fromtimestamp(path.stat().st_mtime)
-            except (OSError, ValueError):
-                size_bytes = 0
-                mtime = datetime.now()
-            size_item = QStandardItem(_format_size(size_bytes))
-            size_item.setData(size_bytes, ROLE_SORT)
+            if light:
+                size_item = QStandardItem("")
+                size_item.setData(0, ROLE_SORT)
+            else:
+                try:
+                    stat = path.stat()
+                    size_bytes = stat.st_size
+                    mtime = datetime.fromtimestamp(stat.st_mtime)
+                except (OSError, ValueError):
+                    size_bytes = 0
+                    mtime = datetime.now()
+                size_item = QStandardItem(_format_size(size_bytes))
+                size_item.setData(size_bytes, ROLE_SORT)
 
             type_label = _get_file_type_label(str(path))
             type_item = QStandardItem(type_label)
@@ -1482,8 +1666,13 @@ class FileBrowserModel(QStandardItemModel):
 
             apix_item = QStandardItem("")
             apix_item.setData(0, ROLE_SORT)
-            mod_item = QStandardItem(_format_modified(mtime))
-            mod_item.setData(mtime.isoformat(), ROLE_SORT)
+            if light:
+                mod_item = QStandardItem("")
+                mod_item.setData("", ROLE_SORT)
+                self._stat_items[str(path)] = (size_item, mod_item, False)
+            else:
+                mod_item = QStandardItem(_format_modified(mtime))
+                mod_item.setData(mtime.isoformat(), ROLE_SORT)
 
         name_item.setData(_icon_kind(type_item.text(), path.suffix, is_dir), ROLE_KIND)
         name_item.setDragEnabled(False)
@@ -1512,6 +1701,11 @@ class FileBrowserModel(QStandardItemModel):
         """
         return self._epoch
 
+    def listed_paths(self) -> tuple[list[str], list[str]]:
+        """``(files, folders)`` of the folder shown, so far. No row is looked at: with
+        20,000 rows, asking each for its path took 0.2 s of the main thread."""
+        return list(self._listed_files), list(self._listed_dirs)
+
     def file_rows(self) -> list[tuple[int, str]]:
         """Return ``(row, filepath)`` pairs for every non-directory row.
 
@@ -1539,6 +1733,35 @@ class FileBrowserModel(QStandardItemModel):
             if filepath and self.is_dir(self.index(row, COL_NAME)):
                 rows.append((row, filepath))
         return rows
+
+    @contextmanager
+    def _batched_changes(self):
+        """Change many items without a ``dataChanged`` for each: one for all at the end.
+
+        Every ``setText`` of an item of a model tells the views; for thousands of items
+        that is what froze the window. Anything connected to the signals of the model hears
+        only the one at the end."""
+        was_blocked = self.blockSignals(True)
+        try:
+            yield
+        finally:
+            self.blockSignals(was_blocked)
+            if self.rowCount():
+                self.dataChanged.emit(
+                    self.index(0, 0), self.index(self.rowCount() - 1, NUM_COLUMNS - 1)
+                )
+
+    def apply_file_infos(self, batch: list) -> None:
+        """:meth:`apply_file_info` for a list of ``(filepath, info, n_images, apix)``."""
+        with self._batched_changes():
+            for filepath, info, n_images, pixel_size in batch:
+                self.apply_file_info(filepath, info, n_images, pixel_size)
+
+    def apply_dir_counts(self, batch: list) -> None:
+        """:meth:`apply_dir_count` for a list of ``(filepath, n_items)``."""
+        with self._batched_changes():
+            for filepath, n_items in batch:
+                self.apply_dir_count(filepath, n_items)
 
     def apply_dir_count(self, filepath: str, n_items: int) -> None:
         """Fill the Size column for ``filepath`` with its entry count.
@@ -1610,25 +1833,14 @@ class FileBrowserModel(QStandardItemModel):
                 apix_item.setData(0, ROLE_SORT)
 
     def _row_for_filepath(self, filepath: str) -> int:
-        """Return the model row containing *filepath*, or -1 if not found.
-
-        Uses a cached filepath -> row index (rebuilt after the rows change),
-        so applying many worker results stays linear in the number of rows.
-        """
-        if self._row_index_dirty:
-            self._rebuild_row_index()
-        row = self._row_index.get(filepath, -1)
-        if row < 0:
+        """Return the model row containing *filepath*, or -1 if not found."""
+        item = self._name_items.get(filepath)
+        if item is None:
             return -1
-        if (
-            row >= self.rowCount()
-            or self.data(self.index(row, COL_NAME), Qt.ItemDataRole.UserRole)
-            != filepath
-        ):
-            # Rows changed without a signal we track: rebuild once.
-            self._rebuild_row_index()
-            row = self._row_index.get(filepath, -1)
-        return row
+        try:
+            return item.row()
+        except RuntimeError:  # the item is gone with its row
+            return -1
 
     def refresh(self) -> None:
         self._file_infos.clear()
@@ -1649,8 +1861,9 @@ class FileBrowserModel(QStandardItemModel):
     def sort(
         self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
     ) -> None:
-        if self._sorting:
-            return
+        self._sort_state = (column, order)
+        if self._sorting or self._loading:
+            return  # a long folder is sorted when it is all there (_finish_loading)
         self._sorting = True
         try:
             self._do_sort(column, order)
@@ -1698,15 +1911,17 @@ class InfoWorker(QThread):
     """Compute file metadata off the GUI thread.
 
     Each worker runs its own thread and is handed a slice of
-    ``(row, filepath)`` pairs; it emits ``info_ready`` per file as it resolves
-    the metadata. The blocking file reads (mrcfile / PIL / starfile / PDF)
-    therefore never stall the UI. ``finished`` is emitted once the slice is
-    exhausted so the owner can clean up and re-sort if needed.
+    ``(row, filepath)`` pairs; it emits ``info_ready`` with the metadata it has resolved,
+    a batch at a time (a signal for each of 20,000 files would flood the main thread's
+    event queue). The blocking file reads (mrcfile / PIL / starfile / PDF) therefore never
+    stall the UI. ``finished`` is emitted once the slice is exhausted so the owner can
+    clean up and re-sort if needed.
     """
 
-    info_ready = Signal(
-        str, str, str, str, int
-    )  # filepath, info, n_images, apix, epoch
+    # a list of (filepath, info, n_images, apix), and the epoch
+    info_ready = Signal(list, int)
+    BATCH = 50
+    INTERVAL_S = 0.1
 
     def __init__(self, tasks: list[tuple[int, str]], epoch: int) -> None:
         super().__init__()
@@ -1714,23 +1929,34 @@ class InfoWorker(QThread):
         self._epoch = epoch
 
     def run(self) -> None:
+        batch, sent = [], time.monotonic()
         for _row, filepath in self._tasks:
             info, n_images, pixel_size = _get_file_info(filepath)
-            self.info_ready.emit(filepath, info, n_images, pixel_size, self._epoch)
+            if info or n_images or pixel_size:  # nothing to show for the rest
+                batch.append((filepath, info, n_images, pixel_size))
+            if batch and (
+                len(batch) >= self.BATCH or time.monotonic() - sent > self.INTERVAL_S
+            ):
+                self.info_ready.emit(batch, self._epoch)
+                batch, sent = [], time.monotonic()
+        if batch:
+            self.info_ready.emit(batch, self._epoch)
 
 
 class DirCountWorker(QThread):
     """Count directory entries off the GUI thread.
 
     Each worker runs its own thread and is handed a slice of
-    ``(row, filepath)`` pairs; it emits ``count_ready`` per directory as it
-    resolves the count. Counting is a plain ``readdir`` per directory, so it
+    ``(row, filepath)`` pairs; it emits ``count_ready`` with the counts it has resolved,
+    a batch at a time. Counting is a plain ``readdir`` per directory, so it
     never stalls the UI even for folders holding many subdirectories.
     ``finished`` is emitted once the slice is exhausted so the owner can clean
     up and re-sort if needed.
     """
 
-    count_ready = Signal(str, int, int)  # filepath, n_items, epoch
+    count_ready = Signal(list, int)  # a list of (filepath, n_items), and the epoch
+    BATCH = 50
+    INTERVAL_S = 0.1
 
     def __init__(
         self,
@@ -1746,12 +1972,56 @@ class DirCountWorker(QThread):
         self._use_regex = use_regex
 
     def run(self) -> None:
+        batch, sent = [], time.monotonic()
         for _row, filepath in self._tasks:
             n_items = _count_dir_items(
                 Path(filepath), self._filter_pattern, self._use_regex
             )
             if n_items is not None:
-                self.count_ready.emit(filepath, n_items, self._epoch)
+                batch.append((filepath, n_items))
+            if batch and (
+                len(batch) >= self.BATCH or time.monotonic() - sent > self.INTERVAL_S
+            ):
+                self.count_ready.emit(batch, self._epoch)
+                batch, sent = [], time.monotonic()
+        if batch:
+            self.count_ready.emit(batch, self._epoch)
+
+
+class _ModesWorker(QThread):
+    """Works out, off the main thread, what can be done with a file: the display modes
+    (which read headers and datasets), the label of the slice button, and whether
+    ChimeraX is there. ``ready(serial, info)`` at the end."""
+
+    ready = Signal(int, dict)
+
+    def __init__(self, serial: int, path: str, browser, parent=None):
+        super().__init__(parent)
+        self._serial = serial
+        self._path = path
+        self._browser = browser
+
+    def run(self) -> None:
+        path = self._path
+        info = dict(path=path, modes=[], slice_text="Image Slice", chimerax=True)
+        try:
+            modes = self._browser._display_modes_for(path)
+            info["modes"] = modes
+            if modes:
+                suffix = Path(path).suffix.lower()
+                if suffix == ".pdf":
+                    info["slice_text"] = "PDF"
+                elif suffix == ".eps":
+                    info["slice_text"] = "EPS"
+                elif "volume" in modes:
+                    info["slice_text"] = "2D Slice"
+                elif self._browser._is_image_stack(path):
+                    info["slice_text"] = "2D Image"
+                if "chimerax" in modes:
+                    info["chimerax"] = _find_chimerax() is not None
+        except Exception:
+            info["modes"] = []  # a file that cannot be read gets no buttons
+        self.ready.emit(self._serial, info)
 
 
 # the icon (Font Awesome, drawn by qtawesome) and the category of each action button.
@@ -2027,8 +2297,12 @@ class FolderBrowserWidget(QMainWindow):
         self._history = [start_dir]
         self._history_index = 0
 
+        self._model.load_finished.connect(self._populate_file_info_async)
         self._tree = QTreeView()
         self._tree.setModel(self._model)
+        # all rows are as tall as the first: the view need not measure a row to place it,
+        # which is what made a folder of tens of thousands of files slow to scroll
+        self._tree.setUniformRowHeights(True)
         self._tree.setRootIndex(QModelIndex())
 
         self._tree.setSortingEnabled(True)
@@ -2279,6 +2553,11 @@ class FolderBrowserWidget(QMainWindow):
 
         layout.addWidget(self._action_bar)
 
+        # the buttons of the selected file are worked out in a thread (_ModesWorker)
+        self._modes_worker: _ModesWorker | None = None
+        self._modes_pending: str | None = None
+        self._modes_serial = 0
+        self._modes_applied = 0
         sel_model = self._tree.selectionModel()
         sel_model.selectionChanged.connect(self._on_selection_changed)
 
@@ -2651,22 +2930,72 @@ class FolderBrowserWidget(QMainWindow):
         indexes = self._tree.selectionModel().selectedIndexes()
         # selectedIndexes() returns one index per column; collapse to rows.
         rows = sorted({idx.row() for idx in indexes})
+        self._current_path = None
+        # what is being worked out for an earlier file is dropped
+        self._modes_serial += 1
         if len(rows) != 1:
             self._action_bar.hide()
+            self._modes_applied = self._modes_serial
             return
         index = self._model.index(rows[0], 0)
         path = self._model.file_path(index)
         if not path or self._model.is_dir(index):
             self._action_bar.hide()
+            self._modes_applied = self._modes_serial
             return
-        modes = self._display_modes_for(str(path))
+        # the buttons depend on what is in the file (and its folder), which can mean
+        # reading headers and datasets, on a network disk too: not on the main thread
+        self._action_bar.hide()
+        self._modes_pending = str(path)
+        if self._modes_worker is None or not self._modes_worker.isRunning():
+            self._start_modes()
+
+    def _start_modes(self) -> None:
+        path, self._modes_pending = self._modes_pending, None
+        if path is None:
+            return
+        worker = _ModesWorker(self._modes_serial, path, self)
+        worker.ready.connect(self._on_modes_ready)
+        worker.finished.connect(self._on_modes_finished)
+        self._modes_worker = worker
+        worker.start()
+
+    def _on_modes_finished(self) -> None:
+        if self._modes_pending is not None:
+            self._start_modes()
+
+    def _on_modes_ready(self, serial: int, info: dict) -> None:
+        if serial != self._modes_serial:
+            return  # another file was selected meanwhile
+        self._apply_modes(info)
+
+    def wait_for_selection(self, timeout_ms: int = 10000) -> None:
+        """Wait until the buttons of the selected file are shown (for tests and scripts)."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            worker = self._modes_worker
+            if worker is not None and worker.isRunning():
+                worker.wait(50)
+            QApplication.processEvents()
+            if (
+                self._modes_pending is None
+                and (worker is None or not worker.isRunning())
+                and self._modes_serial == self._modes_applied
+            ):
+                return
+
+    def _apply_modes(self, info: dict) -> None:
+        """Show the buttons for what the worker found: ``path``, ``modes``, ``slice_text``
+        and whether ChimeraX is installed."""
+        path, modes = info["path"], info["modes"]
+        self._modes_applied = self._modes_serial
         if not modes:
             self._action_bar.hide()
             return
         for attr, mode in self._DISPLAY_BUTTONS:
             getattr(self, attr).setVisible(mode in modes)
         if "chimerax" in modes:
-            if _find_chimerax() is None:
+            if not info["chimerax"]:
                 self._btn_chimerax.setEnabled(False)
                 # Explicit disabled styling so the button is unambiguously
                 # greyed-out regardless of the active Qt theme.
@@ -2686,17 +3015,7 @@ class FolderBrowserWidget(QMainWindow):
             self._btn_stats.setToolTip(
                 "Estimate and display per-filament tilt, psi, and rot-angle variance"
             )
-        # Label the slice button by the file/display type.
-        if Path(path).suffix.lower() == ".pdf":
-            self._btn_slice.setText("PDF")
-        elif Path(path).suffix.lower() == ".eps":
-            self._btn_slice.setText("EPS")
-        elif "volume" in modes:
-            self._btn_slice.setText("2D Slice")
-        elif self._is_image_stack(str(path)):
-            self._btn_slice.setText("2D Image")
-        else:
-            self._btn_slice.setText("Image Slice")
+        self._btn_slice.setText(info["slice_text"])
         self._current_path = str(path)
         self._reorder_buttons_alphabetically(modes)
         self._action_bar.show()
@@ -2762,7 +3081,8 @@ class FolderBrowserWidget(QMainWindow):
         self._refresh_recent_menu()
         self._refresh_sidebar()
         self._update_preview()
-        self._populate_file_info_async()
+        # (the columns that need reading a file are filled when the model says that
+        # the folder is all there: load_finished)
 
     def _toggle_bookmark(self) -> None:
         """Bookmark the folder shown, or remove its bookmark if it has one."""
@@ -3141,7 +3461,6 @@ class FolderBrowserWidget(QMainWindow):
             self._path_edit.setText(path)
             self._refresh_sidebar()
             self._update_preview()
-            self._populate_file_info_async()
 
     def _go_to_path(self) -> None:
         path = self._path_edit.text().strip()
@@ -3152,7 +3471,6 @@ class FolderBrowserWidget(QMainWindow):
         self._sidebar.invalidate()
         self._refresh_sidebar()
         self._model.refresh()
-        self._populate_file_info_async()
 
     def _populate_file_info_async(self) -> None:
         """Fill Dimension / Images / Pixel Size and folder counts in the background.
@@ -3171,8 +3489,9 @@ class FolderBrowserWidget(QMainWindow):
         # Stop tracking any in-flight workers from a previous load.
         self._info_threads.clear()
 
-        file_tasks = self._model.file_rows()
-        dir_tasks = self._model.dir_rows()
+        files, dirs = self._model.listed_paths()
+        file_tasks = [(-1, path) for path in files]  # (the workers need no row)
+        dir_tasks = [(-1, path) for path in dirs]
         if not file_tasks and not dir_tasks:
             return
 
@@ -3181,15 +3500,15 @@ class FolderBrowserWidget(QMainWindow):
         re_sort_needed = sort_col in (COL_SIZE, COL_IMAGES, COL_INFO, COL_PIXELSIZE)
         pending = 0
 
-        def on_info_ready(filepath, info, n_images, pixel_size, result_epoch):
+        def on_info_ready(batch, result_epoch):
             if result_epoch != self._model.current_epoch():
                 return  # directory was reloaded; ignore stale result
-            self._model.apply_file_info(filepath, info, n_images, pixel_size)
+            self._model.apply_file_infos(batch)
 
-        def on_count_ready(filepath, n_items, result_epoch):
+        def on_count_ready(batch, result_epoch):
             if result_epoch != self._model.current_epoch():
                 return  # directory was reloaded; ignore stale result
-            self._model.apply_dir_count(filepath, n_items)
+            self._model.apply_dir_counts(batch)
 
         def on_worker_finished():
             nonlocal pending
@@ -3235,7 +3554,6 @@ class FolderBrowserWidget(QMainWindow):
             pattern = "*"
         use_regex = self._regex_cb.isChecked()
         self._model.set_filter(pattern, use_regex)
-        self._populate_file_info_async()
 
     def _copy_selection(self) -> None:
         indexes = self._tree.selectionModel().selectedIndexes()

@@ -435,3 +435,56 @@ def test_launch_shiny_app_passes_preexec(monkeypatch):
     )
 
     assert captured.get("preexec_fn") is sentinel
+
+
+def test_a_launch_in_the_browser_runs_in_a_thread_and_reports_a_failure(monkeypatch):
+    """The file browser must not wait for a web app: the launch is a thread, and a failure
+    is shown on the main thread."""
+    import threading
+    import time
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from helicon.lib.gui import webapps
+
+    QApplication.instance() or QApplication([])
+    seen = {}
+
+    def spawn(params):
+        seen["thread"] = threading.current_thread()
+        raise RuntimeError("no server")
+
+    boxes = []
+    monkeypatch.setattr(webapps, "_web_app_alive", lambda: [])
+    monkeypatch.setattr(webapps, "_spawn_web_app", spawn)
+    monkeypatch.setattr(webapps, "BACKGROUND_LAUNCH", True)
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda *a, **k: boxes.append((a, threading.current_thread())),
+    )
+    start = time.monotonic()
+    webapps._launch_or_reuse_web_app("HILL", {"helicon_tab": '"X"'})
+    assert time.monotonic() - start < 1.0  # it returned at once
+    deadline = time.monotonic() + 10
+    while not boxes and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert seen["thread"] is not threading.main_thread()
+    assert boxes and "no server" in boxes[0][0][2]
+    assert boxes[0][1] is threading.main_thread()
+    assert "HILL" in boxes[0][0][1]
+
+
+def test_without_the_flag_a_launch_is_in_turn(monkeypatch):
+    import threading
+
+    from helicon.lib.gui import webapps
+
+    seen = []
+    monkeypatch.setattr(webapps, "_web_app_alive", lambda: [])
+    monkeypatch.setattr(
+        webapps, "_spawn_web_app", lambda p: seen.append(threading.current_thread())
+    )
+    webapps._launch_or_reuse_web_app("HILL", {"x": 1})
+    assert seen == [threading.main_thread()]
