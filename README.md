@@ -133,9 +133,17 @@ If Helicon is useful in your work, please cite:
 ```sh
 git clone https://github.com/jianglab/helicon.git
 cd helicon
-pip install -e ".[all,test]"
-pytest
+pip install -e ".[all,test]" pytest-xdist
+pytest -n auto -m "not slow and not browser"   # the everyday run, a few minutes
+pytest -n auto                                 # everything (browser tests need `playwright install chromium`)
+pre-commit install                             # Black on every commit
 ```
+
+The tests that take 8 s or more are marked `slow` (the list is `tests/slow_tests.txt`,
+made by `tests/update_slow_tests.py`), and those that drive a web page are marked
+`browser`. A test run has its own settings folder and never opens a window on your
+screen. On GitHub, every push runs Black, the fast tests and an install with no extras,
+and the whole suite runs every night.
 
 The version comes from the release tags (`v2026.10`), so `helicon --version` in a
 checkout shows the commits since the last tag and the commit hash. See

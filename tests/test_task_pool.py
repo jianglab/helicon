@@ -35,6 +35,11 @@ class TestTaskPool:
         took = time.time() - t0
         assert not any(w.is_alive() for w in workers)
         assert took < 3.0  # not the minute the tasks would have taken
+        # the pool settles the tasks that were waiting a moment later, in a thread of its
+        # own (so how soon depends on how busy the machine is): wait for it
+        deadline = time.time() + 30
+        while time.time() < deadline and not all(f.done() for f in futures[2:]):
+            time.sleep(0.05)
         assert all(f.cancelled() or f.done() for f in futures[2:])
 
     def test_the_workers_are_limited_to_their_share_of_the_threads(self):

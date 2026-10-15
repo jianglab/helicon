@@ -1,3 +1,24 @@
+"""Shared fixtures, and the isolation of the test run from the user's own settings.
+
+Set before anything imports Qt:
+
+* ``XDG_CONFIG_HOME`` points at a folder of the run's own, so ``QSettings`` (the saved
+  theme, bookmarks, window sizes of the file browser) is never the user's: a test that
+  saves a setting, or one that fails half way, cannot change the next launch of the app.
+* ``QT_QPA_PLATFORM`` is ``offscreen`` unless it is set, so that tests never open
+  windows on the screen they are run from (a forwarded display included).
+"""
+
+import atexit
+import os
+import shutil
+import tempfile
+
+_CONFIG_HOME = tempfile.mkdtemp(prefix="helicon-test-config-")
+os.environ["XDG_CONFIG_HOME"] = _CONFIG_HOME
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+atexit.register(shutil.rmtree, _CONFIG_HOME, ignore_errors=True)
+
 import pytest
 import pandas as pd
 import numpy as np
@@ -92,10 +113,36 @@ def _uses_playwright(item) -> bool:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Move the tests that drive a browser to the end, keeping relative order."""
+    """Move the tests that drive a browser to the end, keeping relative order, and mark
+    the browser tests ``browser`` and the listed ones ``slow`` (see below)."""
+    slow = _slow_ids()
+    for item in items:
+        add_marker = getattr(item, "add_marker", None)
+        if add_marker is None:
+            continue
+        if item.nodeid.split("[")[0] in slow:
+            add_marker(pytest.mark.slow)
+        if _uses_playwright(item):
+            add_marker(pytest.mark.browser)
     browser = [item for item in items if _uses_playwright(item)]
     if browser:
         items[:] = [item for item in items if not _uses_playwright(item)] + browser
+
+
+# ── markers ───────────────────────────────────────────────────────────────────
+# ``slow``: the tests listed in slow_tests.txt (see update_slow_tests.py). ``browser``:
+# the tests that drive a web page with Playwright (they need its browsers installed).
+# Everyday and CI runs are ``pytest -m "not slow and not browser"``.
+
+_SLOW_LIST = Path(__file__).with_name("slow_tests.txt")
+
+
+def _slow_ids() -> set[str]:
+    try:
+        lines = _SLOW_LIST.read_text().splitlines()
+    except OSError:
+        return set()
+    return {line.strip() for line in lines if line.strip() and not line.startswith("#")}
 
 
 @pytest.fixture(autouse=True)

@@ -22,8 +22,11 @@ def _n_entries(path) -> int:
     return len(list(Path(path).rglob("output.pkl")))
 
 
-def _wait_for(predicate, timeout=10.0, interval=0.1) -> bool:
-    """Poll until *predicate* holds; pruning runs on a background thread."""
+def _wait_for(predicate, timeout=30.0, interval=0.1) -> bool:
+    """Poll until *predicate* holds; pruning runs on a background thread.
+
+    The wait ends the moment it holds, so a long timeout costs nothing; a short one made
+    these tests fail when the machine was busy (the suite runs in parallel)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():

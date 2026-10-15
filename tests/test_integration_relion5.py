@@ -9,6 +9,7 @@ Verifies:
 Skipped if RELION 5.0 or cryosparc-tools are unavailable.
 """
 
+import functools
 import subprocess
 import shutil
 from pathlib import Path
@@ -54,14 +55,33 @@ def _cryosparc_tools_available():
         return False
 
 
-requires_relion = pytest.mark.skipif(
-    not _relion_available(),
-    reason=f"conda env '{RELION_ENV}' with relion_preprocess not available",
-)
-requires_cryosparc = pytest.mark.skipif(
-    not _cryosparc_tools_available(),
-    reason="cryosparc-tools (cryosparc.dataset) not installed",
-)
+# The checks run when a test is set up, not when this file is imported: finding out whether the
+# RELION environment is there (`conda run`) took 12 s of every collection, and an xdist worker
+# collects everything.
+@functools.cache
+def _relion_ok() -> bool:
+    return _relion_available()
+
+
+@functools.cache
+def _cryosparc_ok() -> bool:
+    return _cryosparc_tools_available()
+
+
+@pytest.fixture
+def _require_relion():
+    if not _relion_ok():
+        pytest.skip(f"conda env '{RELION_ENV}' with relion_preprocess not available")
+
+
+@pytest.fixture
+def _require_cryosparc():
+    if not _cryosparc_ok():
+        pytest.skip("cryosparc-tools (cryosparc.dataset) not installed")
+
+
+requires_relion = pytest.mark.usefixtures("_require_relion")
+requires_cryosparc = pytest.mark.usefixtures("_require_cryosparc")
 
 
 def _place_gaussians(img, centers, sigma=3.0, amp=200.0):

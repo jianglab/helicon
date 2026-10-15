@@ -98,6 +98,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 python_files = ["test_*.py"]
 norecursedirs = ["*.egg-info", "__pycache__", ".hypothesis"]
+markers = [
+    "slow: a test of 8 s or more (listed in tests/slow_tests.txt); left out of everyday and CI runs",
+    "browser: drives a web page with Playwright (needs its browsers installed)",
+]
 filterwarnings = [
     # Third-party (napari) uses the deprecated pydantic `json_encoders` config;
     # not fixable in our code. Tracked upstream.
@@ -112,6 +116,15 @@ filterwarnings = [
     "ignore:Unrecognised machine stamp:RuntimeWarning",
     "ignore:Map ID string not found:RuntimeWarning",
 ]
+
+# Static checks, started small: the rules that find real mistakes (a name that does not exist,
+# a name used before it is assigned, a function defined twice). A rule is added when the code is
+# clean for it. Run: ruff check src tests
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["F821", "F823"]
 
 [tool.setuptools_scm]
 # release tags look like v2026.10

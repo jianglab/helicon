@@ -520,8 +520,7 @@ _DISPLAY_NAME = "File explorer/display"
 _DISPLAY_LABEL = "Open file explorer/display"
 _DISPLAY_COLOR = "#475569"
 _DISPLAY_DESC = (
-    "Browse a folder and view its images, maps, STAR files and more in a "
-    "new window."
+    "Browse a folder and view its images, maps, STAR files and more in a " "new window."
 )
 
 # Delegated on document so it does not depend on when the tab is rendered.

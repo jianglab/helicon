@@ -1,10 +1,19 @@
 import numpy as np
 import pytest
 
+
 # torch is an optional dependency (no Intel-mac wheels for the supported Python
 # versions), so skip rather than fail collection where it is absent -- an error
 # here would show up in every test run on a machine that never wanted it.
-torch = pytest.importorskip("torch")
+#
+# Imported when a test first uses it, not when this file is collected (importing torch took 15 s
+# of every collection, and an xdist worker collects everything).
+class _LazyTorch:
+    def __getattr__(self, name):
+        return getattr(pytest.importorskip("torch"), name)
+
+
+torch = _LazyTorch()
 
 import helicon
 
@@ -113,7 +122,6 @@ def test_IsotropicGuassians():
         projs += [gaussians.projection_z(nx, ny, apix)]
         projs += [gaussians.sample_volume(nx, ny, nz, apix, batch_size=100).sum(axis=0)]
 
-    projs_pairs = []
     for i in range(len(projs)):
         for j in range(i + 1, len(projs)):
             proj1, proj2 = projs[i], projs[j]
@@ -121,10 +129,6 @@ def test_IsotropicGuassians():
             err_power_ratio = torch.linalg.norm(err) / (
                 (torch.linalg.norm(proj2) + torch.linalg.norm(proj2)) / 2
             )
-            proj_ratio = proj1.max() / proj2.max() if proj2.max() != 0 else float("inf")
-            max_proj1 = proj1.max()
-            max_proj2 = proj2.max()
-            max_ratio = max_proj1 / max_proj2 if max_proj2 != 0 else float("inf")
             assert err_power_ratio < 1e-3
 
 
