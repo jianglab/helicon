@@ -1484,6 +1484,39 @@ def _cs2dataframe_from_star_import(
         )
     if "alignments2D/pose" in names:
         data["rlnAnglePsi"] = -np.rad2deg(cs["alignments2D/pose"][k].astype(float))
+
+    # the 3D alignment of a refinement or a 3D classification, in the conventions of
+    # dataframe_cryosparc_to_relion (which sets them after the 2D ones, and so do we)
+    if "alignments3D/class" in names:
+        data["rlnClassNumber"] = cs["alignments3D/class"][k].astype(int) + 1
+    if "alignments3D/split" in names:
+        data["rlnRandomSubset"] = cs["alignments3D/split"][k].astype(int) + 1
+    if "alignments3D/cross_cor" in names:
+        data["rlnLogLikeliContribution"] = cs["alignments3D/cross_cor"][k]
+    if "alignments3D/pose" in names:
+        from scipy.spatial.transform import Rotation
+
+        # cryoSPARC's rotation is a rotation vector
+        rotvecs = np.stack(
+            [np.asarray(v, dtype=float) for v in cs["alignments3D/pose"][k]]
+        )
+        euler = Rotation.from_rotvec(rotvecs).as_euler("ZYZ", degrees=True)
+        data["rlnAngleRot"] = euler[:, 0]
+        data["rlnAngleTilt"] = euler[:, 1]
+        data["rlnAnglePsi"] = euler[:, 2]
+    if "alignments3D/shift" in names:
+        shift = np.round(
+            np.asarray(cs["alignments3D/shift"][k], dtype=float).reshape(len(k), -1), 2
+        )
+        apix = (
+            cs["blob/psize_A"][k].astype(float)
+            if "blob/psize_A" in names
+            else np.ones(len(k))
+        )
+        data["rlnOriginXAngst"] = np.round(shift[:, 0] * apix, 6)
+        data["rlnOriginYAngst"] = np.round(
+            shift[:, 1] * apix if shift.shape[1] > 1 else np.zeros(len(k)), 6
+        )
     ctf_overlays = [
         ("ctf/df1_A", "rlnDefocusU", 1.0),
         ("ctf/df2_A", "rlnDefocusV", 1.0),
