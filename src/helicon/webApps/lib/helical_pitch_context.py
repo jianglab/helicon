@@ -1116,7 +1116,6 @@ def select_n_types(
     scores : dict
         Held-out log-likelihood per segment by number of types.
     """
-    F = chains.n_filaments
     sub = chains
     if max_segments is not None and chains.n_segments > max_segments:
         sub = subsample(chains, max_segments)
@@ -1222,7 +1221,6 @@ def segment_types(chains, tpost):
     ch = chains.chain[order]
     ty = t[order].copy()
     new_run = np.r_[True, (ch[1:] != ch[:-1]) | (ty[1:] != ty[:-1])]
-    run_id = np.cumsum(new_run) - 1
     starts = np.flatnonzero(new_run)
     run_len = np.diff(np.r_[starts, len(ty)])
     run_type = ty[starts]

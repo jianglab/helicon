@@ -196,7 +196,6 @@ def _open_text_window(path, reuse_window=None):
             """Return True if it is safe to replace the buffer with *new_name*."""
             if not self._text_edit.document().isModified():
                 return True
-            from PySide6.QtWidgets import QMessageBox
 
             return self._confirm_unsaved(
                 f"Save changes to {Path(self._source_path).name} "

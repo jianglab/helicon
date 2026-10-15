@@ -10,7 +10,7 @@ from helicon.webApps.lib import map_gauss_fit as mgf
 
 def _tube(nz=48, ny=48, nx=48, apix=2.0, radius=10.0, sigma=3.0, seed=0):
     """A helical map: blobs on a screw path, which is what the fit assumes."""
-    rng = np.random.default_rng(seed)
+    np.random.default_rng(seed)
     z, y, x = np.mgrid[0:nz, 0:ny, 0:nx].astype(np.float32)
     z = (z - nz // 2) * apix
     y = (y - ny // 2) * apix

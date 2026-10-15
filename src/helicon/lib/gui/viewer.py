@@ -16,7 +16,6 @@ from helicon.lib.exceptions import HeliconDependencyError
 from .theme import (
     _display_theme_stylesheet,
     _napari_canvas_background,
-    _napari_display_theme,
     _napari_viewer_theme,
 )
 from .trackers import _napari
@@ -344,7 +343,7 @@ class _SliceDirectionWidget:
             self_slider.axis_label.setFixedWidth(0)
             self_slider.totslice_label.hide()
             self_slider.totslice_label.setFixedWidth(0)
-            sep = self_slider.findChild(type(self_slider).__mro__[0])
+            self_slider.findChild(type(self_slider).__mro__[0])
             from PySide6.QtWidgets import QFrame
 
             for child in self_slider.findChildren(QFrame):

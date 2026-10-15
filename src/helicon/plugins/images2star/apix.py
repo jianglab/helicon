@@ -1,8 +1,7 @@
 """Handler for the apix option."""
 
 from __future__ import annotations
-import helicon
-from helicon.lib.io import getPixelSize, setPixelSize
+from helicon.lib.io import setPixelSize
 
 
 option_name = "apix"

@@ -7,7 +7,6 @@ import helicon
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-from helicon.lib.exceptions import HeliconError
 
 logger = logging.getLogger(__name__)
 

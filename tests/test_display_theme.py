@@ -1,7 +1,6 @@
 """One look for the file browser and the windows it opens."""
 
 import pytest
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from helicon.lib.gui import file_browser as fb

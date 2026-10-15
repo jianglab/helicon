@@ -43,7 +43,7 @@ class TestKilledWorker:
     def test_the_period_fits_are_repeated_one_at_a_time(self, pairs, monkeypatch):
         tasks = [dict(periods=np.arange(380.0, 420.0, 2.0)) for _ in range(3)]
         monkeypatch.setattr(helicon, "available_cpu", lambda *a, **k: 4)
-        serial = (
+        (
             ph._estimate_periods.__wrapped__(pairs, tasks)
             if hasattr(ph._estimate_periods, "__wrapped__")
             else None

@@ -1,7 +1,6 @@
 """Handler for the keepParm option."""
 
 from __future__ import annotations
-import helicon
 
 
 option_name = "keepParm"

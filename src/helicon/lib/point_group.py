@@ -122,7 +122,6 @@ class PointGroup:
 
         main_type_raw, n_str, suffix_raw = match.groups()
         main_type = main_type_raw.upper()
-        suffix = suffix_raw.lower()
         n = int(n_str) if n_str else 1
 
         # Identity is always present
@@ -347,7 +346,6 @@ class PointGroup:
         transformed_r1 = self.apply_symmetry_to_rotations(rots1)
 
         G = len(self.matrices)
-        N = len(rots1) if rots1.single is False else 1
 
         # We need to compare transformed_r1[g, n] with rots2[n]
         # Distance = min_g mean_n dist(S_g * R1_n, R2_n)

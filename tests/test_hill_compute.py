@@ -1,7 +1,6 @@
 """The filament radius estimate of HILL, and its memory."""
 
 import numpy as np
-import pytest
 
 from helicon.webApps.lib import hill_compute as hill
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 import argparse
-import helicon
-import numpy as np
 from helicon.lib.exceptions import HeliconError
 import logging
 

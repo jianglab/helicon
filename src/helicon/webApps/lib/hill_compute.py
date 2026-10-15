@@ -978,8 +978,6 @@ def filament_straighten(data, tck, r_filament_pixel_display, y_start, y_end):
         (x_coord, y_coord), np.transpose(data), bounds_error=False, fill_value=0
     )
 
-    nx_out = 2 * int(r_filament_pixel_display)
-
     # Resample spline at uniform arc-length steps
     dense_y = np.linspace(y_start, y_end, 1000)
     dense_x = splev(dense_y, tck)

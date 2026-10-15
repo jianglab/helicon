@@ -32,7 +32,6 @@ are used here, the file name first because it is the more specific of the two.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from .cache import cache as _cache, setup_cache_dir as _setup_cache_dir

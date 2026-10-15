@@ -897,7 +897,7 @@ def denovo3d_tab_server(input, output, session):
     stitched_image_links = reactive.value([])
 
     initial_image = reactive.value([])
-    display_initial_image_value = reactive.value([""])
+    reactive.value([""])
 
     # Per-image (rotation_deg, shift_y_pixels) from auto-transform, one entry
     # per selected image. Empty means "nothing image-specific", which is the
@@ -2425,7 +2425,7 @@ def denovo3d_tab_server(input, output, session):
             else:
                 try:
                     data, apix = denovo3d_pipeline.get_images_from_file(image_file)
-                except Exception as e:
+                except Exception:
                     logger.error("Failed to read uploaded images", exc_info=True)
                     ui.modal_show(
                         ui.modal(
@@ -2442,7 +2442,7 @@ def denovo3d_tab_server(input, output, session):
         else:
             try:
                 data, apix = denovo3d_pipeline.get_images_from_file(image_file)
-            except Exception as e:
+            except Exception:
                 logger.error("Failed to read uploaded images", exc_info=True)
                 ui.modal_show(
                     ui.modal(
@@ -2485,7 +2485,7 @@ def denovo3d_tab_server(input, output, session):
         """Read the 2D images (or a 3D map) from a URL or a server file."""
         try:
             data, apix = denovo3d_pipeline.get_images_from_url(url)
-        except Exception as e:
+        except Exception:
             logger.error("Failed to read images from %s", url, exc_info=True)
             ui.modal_show(
                 ui.modal(
@@ -2520,7 +2520,7 @@ def denovo3d_tab_server(input, output, session):
         req(len(emdb_id) > 0)
         try:
             data, apix = denovo3d_pipeline.get_images_from_emdb(emdb_id=emdb_id)
-        except Exception as e:
+        except Exception:
             logger.error("Failed to obtain map from EMDB", exc_info=True)
             ui.modal_show(
                 ui.modal(
@@ -3469,7 +3469,6 @@ def denovo3d_tab_server(input, output, session):
             twist = np.round(helicon.set_to_periodic_range(twist, min=-180, max=180), 6)
             csym = input.dn_csym()
             apix = apix_binned
-            tilt_range_val = 0
             tilt = 0
             tilt_min = 0
             tilt_max = 0

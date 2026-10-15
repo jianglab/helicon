@@ -151,7 +151,7 @@ def main(args: argparse.Namespace) -> None:
     if args.verbose > 10:
         logger.debug(data)
 
-    exp_group_id_names_all = helicon.all_matched_attrs(data, query_str="exp_group_id")
+    helicon.all_matched_attrs(data, query_str="exp_group_id")
     exp_group_id_name = helicon.first_matched_attr(
         data,
         attrs="ctf/exp_group_id location/exp_group_id mscope_params/exp_group_id".split(),
@@ -358,12 +358,12 @@ def check_args(
     args.all_options = plugin_options_in_argv(sys.argv[1:], parser, _plugins)
 
     if (args.projectID or args.jobID or args.groupIndex) and args.csFile:
-        msg = f"You should only specify options for CryoSPARC server (--projectID --jobID) or local file (--csFile), but not both"
+        msg = "You should only specify options for CryoSPARC server (--projectID --jobID) or local file (--csFile), but not both"
         logger.error(msg)
         raise HeliconValidationError(msg)
 
     if not ((args.projectID and args.jobID) or args.csFile):
-        msg = f"You should specify options for either CryoSPARC server (--projectID --jobID) or local file (--csFile)"
+        msg = "You should specify options for either CryoSPARC server (--projectID --jobID) or local file (--csFile)"
         logger.error(msg)
         raise HeliconValidationError(msg)
 

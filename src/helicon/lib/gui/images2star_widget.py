@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 import helicon
-from helicon.lib.exceptions import HeliconError, HeliconIOError
+from helicon.lib.exceptions import HeliconIOError
 from helicon.lib.gui.workers import release_threads
 from helicon.lib.images2star_engine import (
     apply_options,
@@ -324,7 +324,6 @@ class _DataFramePreviewModel(QAbstractTableModel):
         sort numerically so 2 < 10; everything else sorts by string. Missing
         values always sort last, and ties keep their original (stable) order.
         """
-        n = len(series)
         missing = series.isna().to_numpy()
         values = series.to_numpy()
         try:

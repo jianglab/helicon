@@ -180,7 +180,7 @@ class TestSymmetrizeTransformMap(object):
             # This function calls apply_helical_symmetry which
             # requires valid parameters; with default fraction=1.0,
             # it may produce output. We just verify it returns an array.
-            result = utils.symmetrize_transform_map(
+            utils.symmetrize_transform_map(
                 data=data,
                 apix=1.0,
                 twist_degree=30,

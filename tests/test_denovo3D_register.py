@@ -6,8 +6,6 @@ be inconsistent around a loop, and composing two transforms can silently
 introduce a half-pixel shift. Each of those has a test.
 """
 
-import itertools
-
 import numpy as np
 import pytest
 

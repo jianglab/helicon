@@ -118,13 +118,25 @@ filterwarnings = [
 ]
 
 # Static checks, started small: the rules that find real mistakes (a name that does not exist,
-# a name used before it is assigned, a function defined twice). A rule is added when the code is
+# a name used before it is assigned, a name defined twice, a variable never used, an f-string with
+# nothing to put in). A rule is added when the code is
 # clean for it. Run: ruff check src tests
 [tool.ruff]
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["F821", "F823"]
+select = ["F401", "F821", "F823", "F811", "F541", "F841"]
+
+[tool.ruff.lint.per-file-ignores]
+# the public names of the package, and of the display command (which re-exports the names that
+# moved to helicon.lib.gui, so that what imports them from here keeps working)
+"src/helicon/__init__.py" = ["F401"]
+"src/helicon/commands/display.py" = ["F401"]
+# the facade of the caching helpers, which helicon/__init__.py takes from here
+"src/helicon/lib/util.py" = ["F401"]
+# the web apps: a tab's module is read for names it only imports (BOOKMARK_DEFAULTS, found by name
+# by helicon.webApps.bookmark), and tests patch the names a module imports from another
+"src/helicon/webApps/**" = ["F401"]
 
 [tool.setuptools_scm]
 # release tags look like v2026.10

@@ -1,7 +1,6 @@
 """Handler for the keepOneParticlePerHelicalTube option."""
 
 from __future__ import annotations
-import helicon
 from helicon.lib.exceptions import HeliconError
 import logging
 

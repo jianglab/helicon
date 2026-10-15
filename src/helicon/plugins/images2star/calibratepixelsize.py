@@ -1,12 +1,9 @@
 """Handler for the calibratePixelSize option."""
 
 from __future__ import annotations
-import helicon
 from helicon.lib.exceptions import HeliconError
 import numpy as np
 from pathlib import Path
-from tqdm import tqdm
-import mrcfile
 from helicon.lib.io import getPixelSize, setPixelSize
 import logging
 
@@ -95,7 +92,6 @@ def handle(data, args, index_d, param):
             theta_samples=180,
             return_R_only=False,
         ):
-            import finufft
             import numpy as np
 
             R0 = 1 / res_low if res_low > 0 else 0
@@ -233,7 +229,7 @@ def handle(data, args, index_d, param):
 
             plt.plot(R, pwr_mean, label=f"original pixel size={apix}")
             plt.axvline(x=1 / target_res, color="r", linestyle="dashed")
-            plt.xlabel(f"Spatial Frequency (1/Å)")
+            plt.xlabel("Spatial Frequency (1/Å)")
             plt.ylabel("Power Spectra")
             plt.title(f"{standard_sample}: expected peak at {target_res} Å")
         if apix_new != apix:

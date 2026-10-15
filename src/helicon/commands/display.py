@@ -1666,7 +1666,6 @@ def _open_xyz_slice_gallery(
     """
     from helicon.lib.gui.gallery_backends import Class3dGallery, Refine3dGallery
 
-    name = Path(star_path).name
     is_refine = any(p.startswith("Refine3D") for p in Path(star_path).parts)
     gallery = Refine3dGallery(star_path) if is_refine else Class3dGallery(star_path)
     return gallery.open(reuse_window=reuse_window, tracker=tracker)

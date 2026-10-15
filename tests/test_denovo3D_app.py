@@ -1,13 +1,9 @@
 """UI-level tests for the denovo3D tab in the unified Helicon Lab app."""
 
-import pytest
-import numpy as np
 from pathlib import Path
 from shiny.pytest import create_app_fixture
-from shiny.playwright import controller
 from playwright.sync_api import Page
 from shiny.run import ShinyAppProc
-from helicon.webApps.lib.helical_projection_utils import _combine_images_for_display
 
 APP_PATH = Path(__file__).parents[1] / "src/helicon/webApps/app.py"
 

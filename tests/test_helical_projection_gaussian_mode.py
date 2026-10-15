@@ -15,7 +15,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-import helicon
 from helicon.webApps.lib import helical_projection_compute as compute
 from helicon.webApps.lib import map_gauss_fit as mgf
 

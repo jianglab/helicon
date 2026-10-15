@@ -1,7 +1,6 @@
 """Handler for the path option."""
 
 from __future__ import annotations
-import helicon
 from pathlib import Path
 
 

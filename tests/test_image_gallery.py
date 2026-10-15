@@ -601,7 +601,6 @@ class TestGallerySave:
 
 def _mock_viewer():
     """A minimal fake napari viewer that records window + image calls."""
-    added = {}
 
     class FakeLayer:
         def __init__(self, data, name, scale, contrast_limits):

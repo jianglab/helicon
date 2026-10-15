@@ -7,7 +7,6 @@ from pathlib import Path
 
 import mrcfile
 import numpy as np
-import pandas as pd
 
 import helicon
 from helicon.lib.average_power_spectra import average_power_spectra_from_dataframe

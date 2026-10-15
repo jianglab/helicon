@@ -900,7 +900,7 @@ def hill_tab_server(input, output, session):
     straightened_filaments_for_avg = reactive.value([])
 
     # Error display state
-    error_msg = reactive.value("")
+    reactive.value("")
 
     # ── Bokeh plot objects ──────────────────────────────────────
     init_img = np.ones((_INIT_NY, _INIT_NX))
@@ -912,7 +912,6 @@ def hill_tab_server(input, output, session):
     from bokeh.layouts import gridplot, layout, row
     from bokeh.models import (
         ColumnDataSource,
-        CustomJS,
         Range1d,
         Span,
         Slider,
@@ -1095,9 +1094,7 @@ def hill_tab_server(input, output, session):
         data=dict(value=[spinner_csym.value], revision=[0])
     )
     csym_controls.syncable = False
-    csym_callbacks = _setup_csym_control_js(
-        spinner_csym, csym_controls, session.ns("hill_csym")
-    )
+    _setup_csym_control_js(spinner_csym, csym_controls, session.ns("hill_csym"))
 
     # Send complete parameter sets through the module's actual input IDs.
     helix_input_ids = {
@@ -1360,8 +1357,6 @@ def hill_tab_server(input, output, session):
             return
         # Subtract space for the slider row (~40px),
         # plot title (~30px), toolbar (~60px), and margins (~20px).
-        available_width = max(int(pw) - 60, 1)
-        available_height = max(int(ph) - 100, 1)
         # Keep the figures responsive in width so the gridplot row (PS, YP, PD)
         # plus its right-side toolbar fits the container instead of overflowing
         # and cropping the right edge. ``width_policy="fit"`` makes each figure
@@ -3766,7 +3761,7 @@ def _csym_warning_text(group):
 
 def _init_layer_lines(fig_ellipses, figs_image):
     """Initialize layer line renderers with default values."""
-    pass  # Not strictly needed; layer lines are built reactively
+    # Not strictly needed; layer lines are built reactively
 
 
 # A Bokeh slider of the helix whose number can be typed in place, as on the

@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QMenuBar,
     QDialog,
     QDialogButtonBox,
     QMessageBox,
@@ -63,10 +62,7 @@ from PySide6.QtCore import (
     QModelIndex,
     Signal,
     Qt,
-    QDir,
-    QFileInfo,
     QThread,
-    QObject,
     QSettings,
     QSize,
     QTimer,
@@ -3796,7 +3792,6 @@ def _find_chimerax() -> str | None:
     Checks common install locations on each platform, then falls back to the
     ``PATH``. Returns the executable path or ``None`` if not found.
     """
-    import shutil
 
     candidates = [
         "ChimeraX",

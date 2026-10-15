@@ -1,14 +1,11 @@
 """A command line tool to compute True FSC curve with optimal mask and phase randomization"""
 
-import argparse
 import logging
 import sys
 from pathlib import Path
 from datetime import datetime
 
 import numpy as np
-from scipy import ndimage
-from scipy.interpolate import interp1d
 
 import helicon
 from helicon.lib.exceptions import HeliconError
@@ -215,7 +212,6 @@ def compute_truefsc(
 
     # Phase-randomize maps
     from helicon.lib.filters import randomize_phases_lowpass
-    from scipy.fft import rfftn
 
     logger.info("Randomizing phases below %.2f Angstrom", cutoff_res_val)
     F1r = randomize_phases_lowpass(map1, pix_size, cutoff_res_val, return_fft=True)
@@ -729,7 +725,6 @@ def _fit_fsc_curve(saxis, fsc, order=4):
         return np.mean(np.abs(f_fit - pred))
 
     best_error = np.inf
-    best_fitted = f_fit.copy()
     best_res = _find_resolution(s_fit, f_fit, 0.143)
 
     # Try Fermi fit

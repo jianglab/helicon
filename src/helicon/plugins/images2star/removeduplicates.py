@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import logging
-import helicon
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +45,7 @@ def handle(data, args, index_d, param):
             logger.warning("%s are not valid parameters", vars)
         vars = [v for v in param if v in data]
         if len(vars) < 1:
-            logger.info(f"\tnothing to do when no valid parameter is provided")
+            logger.info("\tnothing to do when no valid parameter is provided")
         else:
             data2 = data.drop_duplicates(vars)
             if args.verbose:

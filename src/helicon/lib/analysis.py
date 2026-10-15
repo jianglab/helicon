@@ -802,7 +802,6 @@ def compute_radial_profile(data: np.ndarray) -> np.ndarray:
 
     r = np.arange(0, rmax, 1, dtype=np.float32)
     theta = np.arange(0, 360, 1, dtype=np.float32) * np.pi / 180.0
-    n_theta = len(theta)
 
     theta_grid, r_grid = np.meshgrid(theta, r, indexing="ij", copy=False)
     y_grid = ny // 2 + r_grid * np.sin(theta_grid)
@@ -1107,7 +1106,7 @@ def estimate_inter_segment_distance(
         if attr not in data:
             return None, None, None, None
 
-    data, data_orig = data.copy(), data
+    data, _data_orig = data.copy(), data
     temp = data["rlnImageName"].str.split("@", expand=True)
     data.loc[:, "pid"] = temp.iloc[:, 0].astype(int)
     filename = "micrograph"
@@ -1847,7 +1846,7 @@ def split_distinct_filaments(
 
     # only an id whose segments stray from one straight axis needs a closer look
     piece = np.zeros(len(data), np.int64)
-    axes_ref, axes_rows = [], []
+    _axes_ref, _axes_rows = [], []
     for s0, e0 in zip(starts, ends):
         rows = order[s0:e0]
         if len(rows) < 2:

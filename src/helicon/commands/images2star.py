@@ -3,9 +3,8 @@
 """A command line tool that analyzes/transforms dataset(s) and saves the dataset in a RELION star file"""
 
 from __future__ import annotations
-import argparse, logging, math, sys
+import argparse, logging, sys
 from pathlib import Path
-import numpy as np
 import pandas as pd
 from helicon.lib.exceptions import (
     HeliconError,
@@ -17,7 +16,7 @@ from helicon.lib.images2star_engine import apply_options
 logger = logging.getLogger(__name__)
 
 import helicon
-from helicon.lib.io import getPixelSize, setPixelSize, pixelSizeAttrForImageAttr
+from helicon.lib.io import getPixelSize, pixelSizeAttrForImageAttr
 from helicon.lib.analysis import estimate_inter_segment_distance
 
 

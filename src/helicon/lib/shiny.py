@@ -2,7 +2,7 @@ from pathlib import Path
 
 import shiny
 from shiny import reactive
-from shiny.express import ui, module, render
+from shiny.express import ui, module
 import logging
 
 logger = logging.getLogger(__name__)
@@ -583,7 +583,7 @@ def image_gallery(
 
     if enable_selection and len(image_links()):
         raise ValueError(
-            f"image_gallery(): only allows either enable_selection or image_labels but not both"
+            "image_gallery(): only allows either enable_selection or image_labels but not both"
         )
 
     images_final = []
@@ -653,7 +653,7 @@ def image_gallery(
         return ui.div(
             ui_img,
             id=bid,
-            style=f"padding: 0px; border: 0px; margin: 0px; background-color: transparent;",
+            style="padding: 0px; border: 0px; margin: 0px; background-color: transparent;",
             onmouseover=(
                 f"if (this.querySelector('img').style.border !== '{image_border}px solid red') {{this.querySelector('img').style.border='{image_border}px solid blue'; this.querySelector('p').style.color='blue';}}"
                 if enable_selection

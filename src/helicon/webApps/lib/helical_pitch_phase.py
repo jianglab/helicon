@@ -436,7 +436,6 @@ def prepare_pairs(
     if len(df) == 0:
         raise ValueError("no segments of the selected classes")
     df = df.assign(_row=np.flatnonzero(keep))
-    row_of = {c: i for i, c in enumerate(class_ids)}
 
     apix = _micrograph_apix(params)
     refined = (

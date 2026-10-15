@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import logging
-import helicon
 from helicon.lib.exceptions import HeliconError
 import pandas as pd
 
@@ -45,7 +44,7 @@ def handle(data, args, index_d, param):
     if len(param) == 3:
         var, val1, val2 = param
         if var in data:
-            vmin, vmax = data[var].min(), data[var].max()
+            _vmin, _vmax = data[var].min(), data[var].max()
             if pd.api.types.is_integer_dtype(data[var]):
                 val1 = int(val1)
                 val2 = int(val2)

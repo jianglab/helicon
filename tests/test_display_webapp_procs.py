@@ -331,7 +331,6 @@ def test_open_browser_uses_single_launcher(monkeypatch):
 
 def test_terminate_escalates_to_kill(monkeypatch):
     """Hung children that ignore SIGTERM must be kill()'d."""
-    from helicon.commands import display as d
 
     class HungProc:
         def __init__(self):

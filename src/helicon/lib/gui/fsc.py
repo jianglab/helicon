@@ -107,7 +107,6 @@ class _FlowLayout(_FlowLayoutBase):
         return size
 
     def _do_layout(self, rect, test_only):
-        from PySide6.QtCore import Qt
 
         margins = self.contentsMargins()
         effective = rect.adjusted(

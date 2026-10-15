@@ -1,7 +1,7 @@
 import os
 import shutil
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pandas as pd
 
 from helicon.lib.dataset import EMDB
@@ -248,7 +248,7 @@ class TestASharedMirror:
             helicon, "download_file_from_url", self._fake_download(calls)
         )
         try:
-            got = self._fetch(emdb)
+            self._fetch(emdb)
         finally:
             os.chmod(emdb.local_emdb_mirror, 0o755)
         assert calls == [str(emdb.cache_dir / "emd_29999.map.gz")]

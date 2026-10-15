@@ -339,7 +339,6 @@ def assign_segments(pairs, scores, switch_cost=4.0, junk=0.3):
     np.ndarray
         State of every segment: 0 to ``n_rings - 1`` for a ring, ``n_rings`` for junk.
     """
-    n_rings = scores.shape[0]
     full = (
         scores if junk is None else np.vstack([scores, np.full(scores.shape[1], junk)])
     )

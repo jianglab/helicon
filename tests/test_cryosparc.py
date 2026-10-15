@@ -1,5 +1,4 @@
 import argparse
-import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -428,8 +427,6 @@ class TestCryosparcCopyAssignmentsHandler(object):
                 "ctf/exp_group_id": [1, 1],
             }
         )
-
-        from helicon.plugins.cryosparc.copyexposuregroupassignments import handle
 
         star_df = pd.DataFrame(
             {

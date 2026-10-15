@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import helicon
 import numpy as np
-from helicon.lib.exceptions import HeliconError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -85,7 +84,7 @@ def handle(
                 data[col_split][masks[mid_index]] = gi
 
         output_slots.add("alignments3D")
-        output_title += f"->per-micrograph split"
+        output_title += "->per-micrograph split"
 
         if args.verbose > 1:
             logger.info(

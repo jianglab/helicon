@@ -762,10 +762,6 @@ def refine_tilt_psi_dy(
     # Solve base system
     from scipy.sparse import vstack
 
-    A_full_0 = vstack((A_data_0, A_hsym)) if A_hsym is not None else A_data_0
-    b_full_0 = np.concatenate((b_data, b_hsym)) if b_hsym is not None else b_data
-    n_base_rows = A_data_0.shape[0]
-
     def _solve_system(A_data_cur, b_data_cur):
         """Solve the combined data + symmetry system."""
         if A_hsym is not None:

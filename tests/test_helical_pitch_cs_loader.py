@@ -5,8 +5,6 @@ job is to read a file, so a file it must be, but each holds only the fields
 under test.
 """
 
-import json
-
 import numpy as np
 import pandas as pd
 import pytest

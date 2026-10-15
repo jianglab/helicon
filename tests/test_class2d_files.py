@@ -1,6 +1,7 @@
 """Finding the other file of a 2D classification beside the one given."""
 
 import pytest
+from _source import contains
 
 from helicon.webApps import class2d_files as c2
 
@@ -98,10 +99,7 @@ class TestTheTabsUseIt:
         src = inspect.getsource(mod)
         assert "helicon.shiny.source_modes(deployment.is_cloud())" in src
         assert "\"input.input_mode_params === 'server'\"" in src
-        assert (
-            'file_picker_fill(\n            "params_browse",\n            "server_params"'
-            in src
-        )
+        assert contains(src, 'file_picker_fill( "params_browse", "server_params"')
         assert mod.BOOKMARK_DEFAULTS["server_params"] == ("server_params", "")
         assert mod.BOOKMARK_DEFAULTS["server_classes"] == ("server_classes", "")
 

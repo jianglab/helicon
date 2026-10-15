@@ -687,7 +687,7 @@ def get_amyloid_atlas(
     df = df[df["Method"].str.lower() == "cryoem"].copy()
 
     emdb = EMDB()
-    assert emdb.meta is not None, f"Failed to get the list of EMDB entries"
+    assert emdb.meta is not None, "Failed to get the list of EMDB entries"
 
     pdb2emd_mapping = {}
     for index, row in emdb.meta.iterrows():

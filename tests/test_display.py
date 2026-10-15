@@ -2942,7 +2942,7 @@ class TestFolderBrowser(object):
         assert "bbb.txt" in names
 
     def test_file_browser_model_lists_dirs_first(self, tmp_path):
-        from helicon.lib.gui.file_browser import FileBrowserModel, COL_NAME, COL_TYPE
+        from helicon.lib.gui.file_browser import FileBrowserModel, COL_TYPE
 
         (tmp_path / "adir").mkdir()
         (tmp_path / "file.txt").write_text("x")
@@ -3041,7 +3041,6 @@ class TestFolderBrowser(object):
         model = FileBrowserModel(str(tmp_path))
         for r in range(model.rowCount()):
             idx = model.index(r, 0)
-            name_idx = model.index(r, 0)
             name = model.item(r, 0).text()
             if name == "mydir":
                 assert model.is_dir(idx) is True
@@ -3089,7 +3088,6 @@ class TestFolderBrowser(object):
     def test_apply_dir_count_sets_size_cell(self, tmp_path):
         from helicon.lib.gui.file_browser import (
             FileBrowserModel,
-            COL_NAME,
             COL_SIZE,
             ROLE_SORT,
         )
@@ -3144,8 +3142,6 @@ class TestFolderBrowser(object):
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
         results = []
         widget.file_selected.connect(lambda p: results.append(p))
-        from PySide6.QtCore import Qt
-        from PySide6.QtTest import QTest
 
         index = widget._model.index(0, 0)
         widget._tree.doubleClicked.emit(index)

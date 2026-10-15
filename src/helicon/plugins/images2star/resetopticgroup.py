@@ -1,7 +1,6 @@
 """Handler for the resetOpticGroup option."""
 
 from __future__ import annotations
-import helicon
 import pandas as pd
 from helicon.lib.exceptions import HeliconError
 import logging

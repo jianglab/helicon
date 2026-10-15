@@ -1,10 +1,8 @@
 """The parts of the file browser: path bar, places sidebar, preview pane."""
 
-from pathlib import Path
-
 import numpy as np
 import pytest
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from helicon.lib.gui import browser_parts as bp

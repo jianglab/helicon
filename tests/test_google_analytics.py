@@ -4,7 +4,6 @@ import helicon
 
 
 def _page(monkeypatch, analytics=None):
-    from shiny import ui
 
     from helicon.webApps import app
 

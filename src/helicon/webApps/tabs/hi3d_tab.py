@@ -451,8 +451,8 @@ def hi3d_tab_server(input, output, session):
     csym_val = reactive.value(1)
     fitted = reactive.value(False)
 
-    dz_val = reactive.value(1.0)
-    da_val = reactive.value(1.0)
+    reactive.value(1.0)
+    reactive.value(1.0)
 
     radial_profile_data = reactive.value(None)
     rmin_val = reactive.value(0.0)
@@ -1012,7 +1012,7 @@ def hi3d_tab_server(input, output, session):
         cp = cylproj()
         if cp is None:
             return None
-        da = input.hi3d_da()
+        input.hi3d_da()
         dz = input.hi3d_dz()
         nz_cp = cp.shape[0]
         z_half = round(nz_cp // 2 * dz, 1)

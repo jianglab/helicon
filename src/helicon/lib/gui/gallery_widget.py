@@ -14,7 +14,6 @@ from PySide6.QtGui import (
     QFont,
     QImage,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
@@ -2087,7 +2086,7 @@ class _BCGPanel(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        lbl = sld = val_lbl = ""
+        sld = val_lbl = ""
 
         def _label(text):
             return QLabel(text)

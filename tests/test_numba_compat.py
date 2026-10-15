@@ -134,7 +134,6 @@ class TestLazyJit:
 
     def test_the_compiled_copy_has_numba_prange_and_the_module_keeps_its_own(self):
         pytest.importorskip("numba")
-        import numba
         import numpy as np
 
         from helicon.lib import transforms

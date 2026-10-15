@@ -86,7 +86,6 @@ def handle(data, args, index_d, param):
 
             with mrcfile.mmap(data["tmp_mgraph_name"].values[0]) as mrc:
                 ny, nx = mrc.data.shape[-2:]
-                apix = mrc.voxel_size.x
             if ny > 2048 and nx > 2048:
                 gradient_sigma = np.sqrt(min_area) * 10
                 if args.verbose > 1:
@@ -96,7 +95,6 @@ def handle(data, args, index_d, param):
 
         tasks = []
         for mi, (mgraphName, mgraphParticles) in enumerate(mgraphs):
-            pid = mgraphParticles["tmp_mgraph_pid"].astype(int) - 1
             outputFile = Path(outdir) / Path(mgraphName).name
             if outputFile.exists():
                 if outputFile.samefile(mgraphName):

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import logging, sys, os, time
+import logging, os, time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Any
-import numpy as np
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -118,7 +117,6 @@ def get_direct_url(url: str) -> str:
     str
         Direct download URL.
     """
-    import re
 
     if url.startswith("https://drive.google.com/file/d/"):
         hash = url.split("/")[5]

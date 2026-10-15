@@ -5,8 +5,6 @@ import logging
 import helicon
 import numpy as np
 from pathlib import Path
-from tqdm import tqdm
-import mrcfile
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +47,6 @@ def handle(data, args, index_d, param):
         outputFile, param_dict = helicon.parse_param_str(param)
 
         if Path(outputFile).suffix != ".mrcs":
-            suffix = Path(outputFile).suffix
             logger.error(
                 "a .mrcs file is expected while you have specified %s! I will not do anything",
                 outputFile,

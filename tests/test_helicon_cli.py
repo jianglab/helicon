@@ -6,8 +6,6 @@ installed; headless, or with neither installed, it falls through to the
 standard subcommand help.
 """
 
-import argparse
-import os
 import sys
 import types
 

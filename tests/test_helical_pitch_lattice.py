@@ -12,6 +12,7 @@ import pytest
 from helicon.webApps.lib import helical_pitch_lattice as hl
 from helicon.webApps.lib import helical_pitch_map as maps
 from helicon.webApps.lib import hill_compute
+from _source import contains
 
 APIX = 3.0
 
@@ -157,7 +158,7 @@ class TestTheTab:
         src = inspect.getsource(abinitio3d_tab)
         assert "result.lattice = _lattice(job, result)" in src
         assert "lattice.twist(r.period, rise, c, lat)" in src
-        assert '"projection"\n                if job["turns"] > 1' in src
+        assert contains(src, '"projection"\n                if job["turns"] > 1')
         assert 'ui.update_numeric("rise", value=round(float(lat.rise), 2))' in src
 
 

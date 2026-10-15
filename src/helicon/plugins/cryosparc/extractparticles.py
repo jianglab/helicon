@@ -7,8 +7,6 @@ import sys
 import helicon
 import numpy as np
 from pathlib import Path
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import mrcfile
 from cryosparc.dataset import Dataset
 from helicon.lib.exceptions import HeliconError
@@ -531,7 +529,6 @@ def extract_one_micrograph(
 
     apix = subset["location/micrograph_psize_A"][0] * box_size / fft_crop_size
 
-    import mrcfile
     import numpy as np
 
     skip = False

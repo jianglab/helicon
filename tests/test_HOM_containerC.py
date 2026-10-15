@@ -1,14 +1,11 @@
 import pytest
 
 import argparse
-import sys
-import os
-import numpy as np
 import pandas as pd
 from pathlib import Path
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 from helicon.commands import HOM_containerC
-from helicon.lib.exceptions import HeliconValidationError, HeliconFileExistsError
+from helicon.lib.exceptions import HeliconFileExistsError
 
 
 class TestHOMcontainerCArgs(object):

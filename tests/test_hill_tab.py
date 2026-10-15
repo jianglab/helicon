@@ -15,6 +15,7 @@ from bokeh.plotting import figure
 from shiny import reactive
 
 from helicon.webApps.tabs import hill_tab
+from _source import contains
 
 
 def test_resolution_limits_follow_pixel_size():
@@ -1217,7 +1218,7 @@ class TestDiameterOnTheInputsTab:
     def test_the_lines_follow_it_and_the_estimate_moves_it(self):
         src = Path(hill_tab.__file__).read_text(encoding="utf-8")
         assert "_rp_diameter_spans[0].location = -half" in src
-        assert 'ui.update_slider(\n            "hill_diameter"' in src
+        assert contains(src, 'ui.update_slider(\n            "hill_diameter"')
         assert 'ui.update_numeric("hill_diameter"' not in src
 
     def test_labels_and_the_image_title_are_as_asked(self):

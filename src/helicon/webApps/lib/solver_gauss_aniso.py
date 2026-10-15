@@ -113,7 +113,6 @@ def _chol(raw):
 
 def expand_project(amp, centre, raw_L, twist_deg, rise, csym, n_repeats, envelope=None):
     """Replicate by the screw and project along x. Returns 2D mixture tensors."""
-    G = amp.shape[0]
     L = _chol(raw_L)  # (G,3,3)
     Sigma = L @ L.transpose(-1, -2)  # (G,3,3)
     detS = torch.det(Sigma)  # rotation-invariant
@@ -123,7 +122,6 @@ def expand_project(amp, centre, raw_L, twist_deg, rise, csym, n_repeats, envelop
     k = ks.repeat_interleave(csym)
     j = js.repeat(len(ks))
     ang = torch.deg2rad(twist_deg) * k + 2 * np.pi * j / max(csym, 1)
-    C = ang.shape[0]
     ca, sa = torch.cos(ang), torch.sin(ang)
     zero, one = torch.zeros_like(ca), torch.ones_like(ca)
     R = torch.stack(

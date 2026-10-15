@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 import helicon
 from helicon.commands import images2star
-from helicon.lib.exceptions import HeliconValidationError, HeliconFileExistsError
+from helicon.lib.exceptions import HeliconFileExistsError
 
 
 def _make_optics(n_groups=1):

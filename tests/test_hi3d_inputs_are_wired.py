@@ -14,7 +14,6 @@ failure mode that looks, from the outside, exactly like nothing happening.
 import pathlib
 import re
 
-import pytest
 
 TAB = pathlib.Path(__file__).resolve().parents[1] / (
     "src/helicon/webApps/tabs/hi3d_tab.py"

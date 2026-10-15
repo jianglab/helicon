@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 import pandas as pd
 from helicon.lib import io

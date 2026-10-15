@@ -564,85 +564,85 @@ def _page(theme: str, initial_theme: str, active_tab: str):
         ui.tags.style(_LAZY_PANEL_CSS),
         ui.tags.style(_BUTTON_CSS),
         ui.tags.style(
-            f"""
-            :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {{
+            """
+            :root, [data-bs-theme="dark"], :root[data-helicon-theme="dark"] {
                 --helicon-page-bg: #1e1e1e;
                 --helicon-text: #e0e0e0;
                 --helicon-navbar-bg: #1a202c;
-            }}
-            [data-bs-theme="light"], :root[data-helicon-theme="light"] {{
+            }
+            [data-bs-theme="light"], :root[data-helicon-theme="light"] {
                 --helicon-page-bg: #f8f9fa;
                 --helicon-text: #212529;
                 --helicon-navbar-bg: #1a202c;
-            }}
-            html, body, .bslib-page-fill {{
+            }
+            html, body, .bslib-page-fill {
                 background-color: var(--helicon-page-bg) !important;
                 color: var(--helicon-text);
-            }}
-            .navbar, .navbar-default, .navbar-inverse {{
+            }
+            .navbar, .navbar-default, .navbar-inverse {
                 background-color: var(--helicon-navbar-bg) !important;
-            }}
-            .navbar .nav-link, .navbar-brand {{
+            }
+            .navbar .nav-link, .navbar-brand {
                 color: #ffffff !important;
-            }}
-            [data-bs-theme="dark"] .card {{
+            }
+            [data-bs-theme="dark"] .card {
                 background-color: #262626 !important;
                 color: #e0e0e0 !important;
                 border-color: #3d3d3d !important;
-            }}
-            [data-bs-theme="dark"] .card-header {{
+            }
+            [data-bs-theme="dark"] .card-header {
                 background-color: #1a1a1a !important;
                 color: #ffffff !important;
                 border-bottom: 1px solid #3d3d3d !important;
-            }}
+            }
             [data-bs-theme="dark"] .form-control,
             [data-bs-theme="dark"] .form-select,
             [data-bs-theme="dark"] select,
             [data-bs-theme="dark"] input[type="text"],
             [data-bs-theme="dark"] input[type="number"],
-            [data-bs-theme="dark"] textarea {{
+            [data-bs-theme="dark"] textarea {
                 background-color: #2b2b2b !important;
                 color: #ffffff !important;
                 border-color: #4a4a4a !important;
-            }}
+            }
             [data-bs-theme="dark"] label,
             [data-bs-theme="dark"] .form-label,
-            [data-bs-theme="dark"] .form-check-label {{
+            [data-bs-theme="dark"] .form-check-label {
                 color: #e0e0e0 !important;
-            }}
-            [data-bs-theme="light"] .card {{
+            }
+            [data-bs-theme="light"] .card {
                 background-color: #ffffff !important;
                 color: #212529 !important;
                 border-color: #dee2e6 !important;
-            }}
-            [data-bs-theme="light"] .card-header {{
+            }
+            [data-bs-theme="light"] .card-header {
                 background-color: #f1f3f5 !important;
                 color: #212529 !important;
                 font-weight: 600;
-            }}
+            }
             [data-bs-theme="light"] .form-control,
             [data-bs-theme="light"] .form-select,
             [data-bs-theme="light"] select,
             [data-bs-theme="light"] input[type="text"],
             [data-bs-theme="light"] input[type="number"],
-            [data-bs-theme="light"] textarea {{
+            [data-bs-theme="light"] textarea {
                 background-color: #ffffff !important;
                 color: #212529 !important;
                 border-color: #ced4da !important;
-            }}
+            }
             [data-bs-theme="light"] label,
             [data-bs-theme="light"] .form-label,
-            [data-bs-theme="light"] .form-check-label {{
+            [data-bs-theme="light"] .form-check-label {
                 color: #212529 !important;
-            }}
-            * {{ font-size: 10pt; padding: 0; border: 0; margin: 0; }}
-            aside {{ --_padding-icon: 10px; }}
-            html, body {{ height: 100%; margin: 0; padding: 0; overflow-x: hidden; }}
-            .nav {{ padding: 0 8px; }}
-            .layout-sidebar {{ gap: 4px !important; }}
-            .sidebar {{ padding-right: 4px !important; }}
-            .main {{ padding-left: 4px !important; }}
-            body.bslib-page-fill {{ padding: 0 !important; gap: 0 !important; }}
+            }
+            * { font-size: 10pt; padding: 0; border: 0; margin: 0; }
+            aside { --_padding-icon: 10px; }
+            html, body { height: 100%; margin: 0; padding: 0; overflow-x: hidden; }
+            .nav { padding: 0 8px; }
+            .layout-sidebar { gap: 4px !important; }
+            .sidebar { padding-right: 4px !important; }
+            .main { padding-left: 4px !important; }
+            body.bslib-page-fill { padding: 0 !important; gap: 0 !important; }
         """
         ),
         ui.navset_bar(

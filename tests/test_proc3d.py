@@ -3,10 +3,10 @@ import sys
 import pytest
 import numpy as np
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import helicon
 from helicon.commands import proc3d
-from helicon.lib.exceptions import HeliconValidationError, HeliconFileExistsError
+from helicon.lib.exceptions import HeliconFileExistsError
 
 
 class TestProc3dArgs(object):

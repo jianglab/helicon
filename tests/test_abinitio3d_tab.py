@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from helicon.webApps.tabs import abinitio3d_tab, helical_pitch_tab
+from _source import contains, count
 
 TABS = Path(__file__).resolve().parents[1] / "src/helicon/webApps/tabs"
 
@@ -174,7 +175,9 @@ class TestFileBrowserLaunch:
         import helicon.commands.display as display
 
         src = Path(display.__file__).read_text()
-        assert 'if mode == "abInitio3D":\n            _launch_abinitio3d(' in src
+        assert contains(
+            src, 'if mode == "abInitio3D":\n            _launch_abinitio3d('
+        )
 
 
 class TestRelionSymmetry:
@@ -500,7 +503,7 @@ class TestTypesGrouping:
 
     def test_the_grouping_runs_in_the_background(self):
         src = self._src()
-        assert 'helicon.shiny.background_task(\n        "types_run"' in src
+        assert contains(src, 'helicon.shiny.background_task(\n        "types_run"')
         work = src[src.index("def _types_work") : src.index("def _types_apply")]
         assert "types.class_similarity(" in work
 
@@ -531,7 +534,9 @@ class TestTypesGrouping:
         slider = src.index('"types_n"', card)
         controls = src.index('ui.output_ui("types_controls")', card)
         assert slider < controls
-        assert 'helicon.shiny.slider(\n                            "types_n"' in src
+        assert contains(
+            src, 'helicon.shiny.slider(\n                            "types_n"'
+        )
         dynamic = src[src.index("def types_controls") : src.index("def _chosen_group")]
         assert "types_n" not in dynamic
 
@@ -581,9 +586,9 @@ class TestTypesGrouping:
             assert "params()" not in rest.replace(
                 "req(params() is not None)", ""
             ), start
-        assert src.count("phase.select_segments(\n") == src.count(
-            "phase.select_segments(\n            analysis_params()"
-        ) + src.count("phase.select_segments(\n                    analysis_params()")
+        assert count(src, "phase.select_segments(\n") == count(
+            src, "phase.select_segments(\n analysis_params()"
+        )
 
     def test_the_restricted_table_is_defined_before_anything_uses_it(self):
         # a decorator that names it runs when the server function reaches it
@@ -625,7 +630,9 @@ class TestTypesGrouping:
 
     def test_the_two_repeat_test_runs_in_the_background_on_the_shown_groups(self):
         src = self._src()
-        assert 'helicon.shiny.background_task(\n        "types_pitch_run"' in src
+        assert contains(
+            src, 'helicon.shiny.background_task(\n        "types_pitch_run"'
+        )
         work = src[
             src.index("def _types_pitch_work") : src.index("def _types_pitch_apply")
         ]
@@ -720,7 +727,7 @@ class TestTypesGrouping:
 
     def test_add_group_adds_all_and_add_selected_the_picked_classes(self):
         src = self._src()
-        assert '"types_add_picked",\n                    "Add selected"' in src
+        assert contains(src, '"types_add_picked",\n                    "Add selected"')
         add = src[src.index("def add_type_group") : src.index("def add_picked_type")]
         assert "_type_positions(picked_only=False)" in add
         picked = src[
@@ -861,7 +868,7 @@ class TestFusedReconstruction:
         assert "relion.fused_extract_available(exe)" in state
         assert "relion.micrographs_found(params(), input.relion_project_dir())" in state
         # nothing is drawn without them: the layout is what it was
-        assert 'if state == "no":\n            return None' in ui_src
+        assert contains(ui_src, 'if state == "no":\n            return None')
         for name in ("relion_apix", "relion_diameter", "relion_length"):
             assert f'"{name}"' in ui_src
 

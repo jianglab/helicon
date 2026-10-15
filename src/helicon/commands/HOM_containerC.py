@@ -13,20 +13,17 @@ import math
 from PIL import Image
 from pathlib import Path
 
-from scipy.optimize import minimize, curve_fit, OptimizeWarning
+from scipy.optimize import curve_fit, OptimizeWarning
 from matplotlib import pyplot as plt
 
 import os
-import datetime, time
+import datetime
 
 logger = logging.getLogger(__name__)
 
-from uuid import uuid4
 import sys
 import warnings
 from helicon.lib.exceptions import (
-    HeliconError,
-    HeliconValidationError,
     HeliconFileExistsError,
 )
 
@@ -37,11 +34,9 @@ import starfile
 
 logger = logging.getLogger(__name__)
 
-import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"starfile(\.|$)")
 
-import platform
 
 # !pip install pylops
 # !pip install openpyxl
@@ -422,7 +417,6 @@ def HelicalSegmentConsistency(
 
     StarFileName = input_star_path
     logger.info("STAR file path: %s", StarFileName)
-    StarFileOutName = StarFileName[:-5] + "Out.star"
 
     num_m = 1201
 
@@ -437,12 +431,9 @@ def HelicalSegmentConsistency(
         os.mkdir(OutputFigsDir)
 
     logger.info("Output figs dir: %s", OutputFigsDir)
-    OUTPDFDIR = Path(OutputFigsDir + "/Stuff/")
     #  This is the subdirectory  where the jpg and PDFs get stored
-    pdf_path = "batch_" + StarFileName[:-5] + ".pdf"
     # This is the filename within Stuff
 
-    QThreshhold = 10000
     NumSegmentsMin = 25
 
     StarFileNameKey = StarFileName[9:-5]
@@ -636,7 +627,6 @@ def HelicalSegmentConsistency(
     Count = 0
     mManySegmentsArray = []
     SminManySegmentsArray = []
-    DEBUG = 0
 
     for HelixMicID in range(NumberUniqueHelices):
         # if Count >25: continue
@@ -720,9 +710,6 @@ def HelicalSegmentConsistency(
     )
     plt.grid(True)
     # plt.show()
-
-    YYY = sub["rlnAngleRot"] % Period
-    XXX = sub["rlnHelicalTrackLengthAngst"]
 
     # Get UTC time and convert to local time
 
@@ -824,7 +811,6 @@ def HelicalSegmentConsistency(
     #################################################################################
     #  Section 4.2: Make Global Plots of Long Good Helices
 
-    HelixMicIDsNP = np.asarray(HelixMicIDsManySegments)
     NumSegNP = np.asarray(NumSegmentsManySegmentsArray)
     mNP = np.asarray(mManySegmentsArray)
     SminNP = np.asarray(SminManySegmentsArray)
@@ -910,9 +896,9 @@ def HelicalSegmentConsistency(
         SSEneg = float(np.sum(np.abs(dneg)))
 
         if SSEpos <= SSEneg:
-            mFinal, rFinal, bFinal, dFinal, SSEfinal = mpos, rpos, bpos, dpos, SSEpos
+            mFinal, _rFinal, bFinal, _dFinal, SSEfinal = mpos, rpos, bpos, dpos, SSEpos
         else:
-            mFinal, rFinal, bFinal, dFinal, SSEfinal = mneg, rneg, bneg, dneg, SSEneg
+            mFinal, _rFinal, bFinal, _dFinal, SSEfinal = mneg, rneg, bneg, dneg, SSEneg
 
         # print(SSEpos,SSEneg)
         return float(mFinal), float(bFinal), float(SSEfinal)
@@ -1062,15 +1048,12 @@ def HelicalSegmentConsistency(
     plt.title("bFinalArray_2")
 
     HelixMicIDs1NP = np.asarray(HelixMicIDsManySegments_2)
-    Num1SegNP = np.asarray(NumSegmentsManySegmentsArray_2)
     m1NP = np.asarray(mManySegmentsArray_2)
     S1NP = np.asarray(SminManySegmentsArray_2)
 
     mask = S1NP < 600  # boolean mask instead of np.where(...)[0]
 
     idx1 = np.argsort(S1NP)  # ascending
-    S1NP_sorted = S1NP[idx1]  # key sorted
-    m1NP_sorted = m1NP[idx1]
     HelixMicIDs1NP_sorted = HelixMicIDs1NP[idx1]
 
     logger.info(" This is the number of long helices = " + str(len(m1NP)))
@@ -1118,12 +1101,9 @@ def HelicalSegmentConsistency(
     # ---- Your per-item plotting goes here ----
 
     def plot_one_unwrapped(ax, j, m_best):
-        Smin_Now = S1NP_sorted[j]  # key sorted
-        mNP_Now = m1NP_sorted[j]
         HelixMicID = HelixMicIDs1NP_sorted[j]
 
         subid = parts[parts["rlnHelicalTubeAndMicID"] == HelixMicID]
-        NumSegments = subid.shape[0]
         # idx = subid["rlnHelicalSegmentIndex"]
         idx = subid["rlnHelicalTrackLengthAngst"]
         angles_deg = subid["rlnAngleRot"] % Period
@@ -1201,7 +1181,7 @@ def HelicalSegmentConsistency(
             AngErrors, AbsAngErrors = plot_one_unwrapped(ax, start + k, mBest)
             AngErrorsChunks.append(AngErrors)
             if p + k == 0:
-                AngErrors0 = AngErrors
+                pass
 
         # Hide any unused axes on the last page
         for k in range(count, PER_PAGE):
@@ -1226,8 +1206,6 @@ def HelicalSegmentConsistency(
     #    Section 7:  More plots toward decision functions'
     logger.info("Section 7. More plots toward decision functions")
 
-    Smin_Now = S1NP_sorted[0]  # key sorted
-    mNP_Now = m1NP_sorted[0]
     HelixMicID = HelixMicIDs1NP_sorted[0]
 
     subid = parts[parts["rlnHelicalTubeAndMicID"] == HelixMicID]
@@ -1327,7 +1305,6 @@ def HelicalSegmentConsistency(
     # --------------------------------------------------
     counts, edges = np.histogram(data, bins="fd", range=(0, Period / 2))
     bin_centers = 0.5 * (edges[:-1] + edges[1:])  # x-values for the fit
-    widths = edges[1:] - edges[:-1]
 
     # Optional: treat histogram as counts with Poisson noise
     sigma_counts = np.sqrt(counts + 0.5)  # avoid zero error for empty bins

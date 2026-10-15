@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import logging, sys, os, math
-from pathlib import Path
-from typing import Optional, Any
+import logging, sys, os
+from typing import Any
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -233,7 +232,6 @@ def _numba_thread_limit() -> int | None:
         None when numba is not installed, so that it limits nothing.
     """
     import importlib.util
-    import os
     import sys
 
     if "numba" in sys.modules:
@@ -262,7 +260,6 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
     int
         Number of usable CPUs (at least 1).
     """
-    import os
 
     if "SLURM_CPUS_ON_NODE" in os.environ:
         cpu = int(os.environ["SLURM_CPUS_ON_NODE"])
@@ -296,7 +293,6 @@ def _load_omp_library():
     """
     import ctypes
     import ctypes.util
-    import sys
 
     lib_names = []
     if sys.platform == "darwin":

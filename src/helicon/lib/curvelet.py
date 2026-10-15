@@ -574,7 +574,6 @@ def _udct_compute_thresholds_mad_pooled(
     all_coeffs: list[list], sigma_scale: float
 ) -> list[list[float]]:
     n_scales = len(all_coeffs[0])
-    finest_pooled = np.concatenate([_udct_pool_wedge(img[-1][0]) for img in all_coeffs])
     thresholds = []
     for scale_idx in range(n_scales):
         n_wedges = len(all_coeffs[0][scale_idx])
@@ -1752,7 +1751,6 @@ def curvelet_denoise_3d_udct_tiled(
     - For a 4000³ volume with 256³ tiles: expect ~2-3 GB peak per tile with 3 scales
     - A cosine taper is applied to each tile to smooth seams between tiles
     """
-    import os
     from typing import Any
 
     vol = np.asarray(vol, dtype=np.float64)
@@ -2173,7 +2171,6 @@ def curvelet_denoise_3d_mct_tiled(
     np.ndarray
         Denoised volume.
     """
-    import os
 
     vol = np.asarray(vol, dtype=np.float64)
     if vol.ndim != 3:

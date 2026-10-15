@@ -4,7 +4,6 @@ import io as pyio
 import itertools
 import os
 import stat
-import sys
 from pathlib import Path
 from unittest.mock import patch
 

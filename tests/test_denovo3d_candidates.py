@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from helicon.webApps.tabs import denovo3d_tab as dn
+from _source import contains
 
 
 def _result(twist, rise, score):
@@ -172,7 +173,7 @@ class TestClickStartsTheReconstruction:
                 "def _reconstruct_picked_candidate"
             )
         ]
-        assert "if pair is not None:\n            tr_pairs = [pair]" in run
+        assert contains(run, "if pair is not None:\n            tr_pairs = [pair]")
         # one pair is what asks the solver for the map
         assert "return_3d = n_pairs == 1" in run
 
@@ -190,10 +191,10 @@ class TestClickStartsTheReconstruction:
             )
         ]
         # only a new search forgets them
-        assert "if pair is None:\n            # a new search" in run
+        assert contains(run, "if pair is None:\n            # a new search")
         assert "is_scan=pair is None and n_pairs > 1" in run
         task = src[src.index("async def _reconstruction_task") :]
-        assert "if is_scan:\n                scan_results.set(" in task
+        assert contains(task, "if is_scan:\n                scan_results.set(")
 
     def test_the_plot_shows_the_kept_candidates_with_the_picked_one_marked(self):
         src = self._src()
@@ -206,4 +207,6 @@ class TestClickStartsTheReconstruction:
 
     def test_a_new_selection_forgets_the_candidates(self):
         src = self._src()
-        assert "reconstruction_results.set([])\n        scan_results.set([])" in src
+        assert contains(
+            src, "reconstruction_results.set([])\n        scan_results.set([])"
+        )

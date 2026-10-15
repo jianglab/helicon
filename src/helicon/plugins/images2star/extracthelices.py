@@ -6,7 +6,6 @@ import helicon
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import mrcfile
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +81,6 @@ def handle(data, args, index_d, param):
                 import mrcfile
 
                 with mrcfile.open(mic_name, "r") as mic:
-                    mic_data = np.array(mic.data, dtype=np.float32)
                     apix = mic.voxel_size["x"]
                     get_apix = False
             cf = starfile.read(coordfile)

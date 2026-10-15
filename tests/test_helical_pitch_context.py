@@ -364,7 +364,6 @@ class TestSections:
         ch = _chains([[1] * 4, [1] * 6], n_classes=2)
         tp = self._tpost([0, 0, 0, 1] + [1] * 6)
         ft, share = hc.filament_types(ch, tp)
-        by_first = {int(ch.filament[i]): i for i in range(ch.n_segments)[::-1]}
         assert sorted(ft) == [0, 1]
         assert (share > 0.5).all()
 

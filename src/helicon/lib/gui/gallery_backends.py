@@ -166,7 +166,6 @@ class BaseGallery:
 
     def _setup_panel(self, container: Any, widget: Any) -> None:
         """Configure type-specific panel controls. Override in subclasses."""
-        pass
 
 
 class OrthogonalGallery:
@@ -349,7 +348,6 @@ class StackGallery(BaseGallery):
         from helicon.commands.display import (
             _parse_star_image_refs,
             _LazyStarStack,
-            _auto_contrast,
         )
 
         result = _parse_star_image_refs(self.star_path)
@@ -428,7 +426,6 @@ class Class3dGallery(BaseGallery):
         self._parsed = True
 
     def _read_image(self, i: int) -> np.ndarray:
-        import mrcfile
 
         mrc_idx = i // 3
         slice_idx = i % 3
@@ -530,7 +527,6 @@ class Refine3dGallery(BaseGallery):
         self._parsed = True
 
     def _read_image(self, i: int) -> np.ndarray:
-        import mrcfile
 
         mrc_idx = i // 3
         slice_idx = i % 3
@@ -607,7 +603,6 @@ class Class2dGallery(BaseGallery):
             _parse_class2d_model_star,
             _find_model_star_from_optimiser,
         )
-        import mrcfile
 
         settings = self._get_settings()
         self._sort_column = settings.value("sort_column", "Abundance", type=str)
@@ -655,7 +650,6 @@ class Class2dGallery(BaseGallery):
             self._order = [i for i, _ in indexed]
 
     def _read_image(self, i: int) -> np.ndarray:
-        import mrcfile
 
         orig_idx = self._order[i]
         mrc_path, frame_idx = self._entries[orig_idx]
@@ -714,7 +708,6 @@ class CryosparcClass2dGallery(Class2dGallery):
     """
 
     def _parse(self) -> None:
-        import mrcfile
 
         from helicon.lib import cryosparc_project
 

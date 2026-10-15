@@ -36,7 +36,7 @@ def load_h5_file(filepath: str) -> tuple[Any, Any, float, float, float]:
     import h5py
 
     extension = Path(filepath).suffix.lower()
-    assert extension == ".h5", f"ERROR: only hdf5 (.h5) files are supported"
+    assert extension == ".h5", "ERROR: only hdf5 (.h5) files are supported"
 
     file = h5py.File(filepath, "r")
     data = file["data"]
@@ -95,9 +95,6 @@ def reconstruct_ptychography(
     """
 
     import py4DSTEM
-    from py4DSTEM.process.phase import Parallax, SingleslicePtychography
-    from py4DSTEM.process.calibration import get_probe_size
-    from py4DSTEM import DataCube
     from pathlib import Path
     import numpy as np
 

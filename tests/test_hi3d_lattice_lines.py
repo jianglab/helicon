@@ -7,7 +7,6 @@ one edge and returns at the other, and must do so exactly -- a segment ending at
 continuous line if the plot were tiled.
 """
 
-import numpy as np
 import pytest
 
 from helicon.webApps.tabs.hi3d_tab import lattice_line_segments as segments

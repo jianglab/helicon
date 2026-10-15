@@ -275,7 +275,7 @@ class TestFileBrowserUsesTheProject:
         from PySide6.QtWidgets import QApplication
         from helicon.lib.gui.file_browser import FolderBrowserWidget
 
-        app = QApplication.instance() or QApplication([])
+        QApplication.instance() or QApplication([])
         with (
             patch(
                 "helicon.lib.gui.file_browser.FileBrowserModel.listed_paths",

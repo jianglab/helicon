@@ -6,7 +6,6 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 import numpy as np
 from .collections import assign_to_groups, all_matched_attrs
 from .epu import (

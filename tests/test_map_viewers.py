@@ -1,6 +1,5 @@
 """Opening a web app's map in napari or ChimeraX on this computer."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import mrcfile

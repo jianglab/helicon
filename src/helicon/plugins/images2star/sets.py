@@ -1,7 +1,6 @@
 """Handler for the sets option."""
 
 from __future__ import annotations
-import helicon
 import logging
 
 logger = logging.getLogger(__name__)

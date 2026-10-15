@@ -683,7 +683,7 @@ def fft_crop(
     if output_size is None or data.shape == output_size:
         return data
 
-    assert data.ndim in (2, 3), f"ERROR: only 2-D images and 3-D maps are supported"
+    assert data.ndim in (2, 3), "ERROR: only 2-D images and 3-D maps are supported"
     assert data.ndim == len(output_size)
 
     output_size = tuple(int(n) for n in output_size)

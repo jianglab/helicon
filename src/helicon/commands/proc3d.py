@@ -5,8 +5,6 @@
 from __future__ import annotations
 import argparse, logging, sys
 from helicon.lib.exceptions import (
-    HeliconError,
-    HeliconValidationError,
     HeliconFileExistsError,
 )
 from pathlib import Path

@@ -1,4 +1,3 @@
-import pytest
 import numpy as np
 import helicon
 from scipy.sparse import csr_matrix

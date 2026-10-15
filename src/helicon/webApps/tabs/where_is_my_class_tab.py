@@ -370,7 +370,6 @@ def where_is_my_class_tab_server(input, output, session):
         else:
             try:
                 data, apix = compute.get_class2d_from_file(filepath_classes())
-                nx = data.shape[-1]
             except Exception:
                 logger.error("Failed to read 2D class averages", exc_info=True)
                 m = ui.modal(

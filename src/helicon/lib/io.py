@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging, math, os
 from contextlib import closing
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
@@ -315,7 +315,6 @@ def assign_beamshifts_to_cluster(
     X = np.array(beamshifts)
 
     # Evaluate silhouette scores for different numbers of clusters
-    best_n_clusters = range_n_clusters[0]
     best_score = -1
     best_cluster_labels = None
 
@@ -703,11 +702,9 @@ def guess_data_type(string: str) -> type:
         One of ``int``, ``float``, or ``str``.
     """
     try:
-        v = int(string)
         return int
     except ValueError:
         try:
-            v = float(string)
             return float
         except ValueError:
             return str
@@ -1565,7 +1562,7 @@ def cs2dataframe(
         if p.name.startswith("particles_"):
             ptFile = f"*J[0-9]*_passthrough_{p.name}"  # Select2D
         else:
-            ptFile = f"*J[0-9]*_passthrough_particles.cs"  # Class2D
+            ptFile = "*J[0-9]*_passthrough_particles.cs"  # Class2D
         ptfs = list(p.parent.glob(ptFile))
         if ptfs:
             passthrough_files_final.append(ptfs[0])
