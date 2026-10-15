@@ -3,7 +3,6 @@
 import ast
 import asyncio
 import json
-from pathlib import Path
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -15,7 +14,7 @@ from bokeh.plotting import figure
 from shiny import reactive
 
 from helicon.webApps.tabs import hill_tab
-from _source import contains
+from _source import contains, tab_source
 
 
 def test_resolution_limits_follow_pixel_size():
@@ -210,7 +209,7 @@ class _Effects:
             helix_controls=controls,
         )
         self.effects = []
-        tree = ast.parse(Path(hill_tab.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(tab_source(hill_tab))
         self.server = next(
             n
             for n in tree.body
@@ -605,7 +604,7 @@ class TestEditableSliders:
         assert "slider.setv({value: v, value_throttled: v})" in js
 
     def test_no_separate_number_boxes(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         # none for the helix; the one number box is the csym, an integer that no
         # slider shows
         assert src.count("Spinner(") == 1 and "spinner_csym = Spinner(" in src
@@ -1216,7 +1215,7 @@ class TestDiameterOnTheInputsTab:
         assert html.count('id="hill-hill_mask_radius"') == 1
 
     def test_the_lines_follow_it_and_the_estimate_moves_it(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         assert "_rp_diameter_spans[0].location = -half" in src
         assert contains(src, 'ui.update_slider(\n            "hill_diameter"')
         assert 'ui.update_numeric("hill_diameter"' not in src
@@ -1234,11 +1233,11 @@ class TestDiameterOnTheInputsTab:
             np.zeros((8, 8)), 1.0, 1.0, title="t", title_font_size="14px"
         )
         assert fig.title.text_font_size == "14px"
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         assert 'title_font_size="14px"' in src
 
     def test_the_profile_lines_up_with_the_image_above_it(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         # the toolbar takes no width: above the plot, and only under the mouse
         assert 'fig_radial_profile.toolbar_location = "above"' in src
         assert "fig_radial_profile.toolbar.autohide = True" in src
@@ -1481,7 +1480,7 @@ class TestSymmetrySearchProgressBar:
 
     def test_the_search_passes_a_progress_callback_to_the_index(self):
         # the source: the task cannot be run without a session
-        source = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        source = tab_source(hill_tab)
         task = source[source.index("async def _symmetry_search") :]
         task = task[: task.index("def _poll_symmetry_progress")]
         assert "progress=progress" in task
@@ -1516,7 +1515,7 @@ class TestImageParametersStartsCollapsed:
         # Shiny does not run an output that is hidden: with the panel collapsed
         # hill_apix() had no value, and the transform, the spectra and the
         # symmetry search silently did nothing
-        source = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        source = tab_source(hill_tab)
         for name in ("hill_img_2d_uis", "hill_img_flags_ui"):
             head = source[: source.index(f"def {name}(")]
             decorators = head[head.rindex("\n\n") :]
@@ -1528,7 +1527,7 @@ class TestCsymBesideTheSliders:
     rise slider; the input in the Parameters tab is hidden, kept for what reads it."""
 
     def test_the_spinner_is_the_first_of_the_slider_row(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         row = src[src.index("            row(\n                spinner_csym,") :][:300]
         assert (
             row.index("spinner_csym")
@@ -1538,11 +1537,11 @@ class TestCsymBesideTheSliders:
         )
 
     def test_its_label_is_capitalised_like_the_sliders(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         assert 'title="Csym"' in src[src.index("spinner_csym = Spinner(") :][:120]
 
     def test_it_is_narrow_whole_and_starts_at_the_bookmark_default(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         box = src[src.index("spinner_csym = Spinner(") :][:260]
         assert 'mode="int"' in box and "low=1" in box and "width=64" in box
         assert 'BOOKMARK_DEFAULTS["csym"][1]' in box
@@ -1879,7 +1878,7 @@ class TestTheModelFollowsTheInputsBeforeDisplay:
             assert h.ns["_model_follows_inputs"]() is False
 
     def test_the_render_uses_it_before_returning_the_widget(self):
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         render = src[src.index("    def hill_main_plots():") :][:1100]
         assert "_model_follows_inputs()" in render
         assert render.index("update_from_model") < render.index(
@@ -1894,7 +1893,7 @@ class TestCollapsiblePanelsAreSafe:
     def test_no_panel_carries_open_as_a_stray_attribute(self):
         # on a panel `open` is only an HTML attribute and says nothing: the first
         # panel of an accordion is open whatever it says. It belongs to the accordion.
-        tree = ast.parse(Path(hill_tab.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(tab_source(hill_tab))
         stray = [
             node.lineno
             for node in ast.walk(tree)
@@ -1905,7 +1904,7 @@ class TestCollapsiblePanelsAreSafe:
         assert stray == []
 
     def test_every_accordion_says_whether_it_starts_open(self):
-        tree = ast.parse(Path(hill_tab.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(tab_source(hill_tab))
         silent = [
             node.lineno
             for node in ast.walk(tree)
@@ -1926,7 +1925,7 @@ class TestCollapsiblePanelsAreSafe:
             r'class="[^"]*shiny-\w+-output[^"]*" id="hill-(hill_\w+)"', body
         )
         assert "hill_img_2d_uis" in outputs and "hill_img_flags_ui" in outputs
-        source = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        source = tab_source(hill_tab)
         for name in outputs:
             head = source[: source.index(f"def {name}(")]
             decorators = head[head.rindex("\n\n") :]

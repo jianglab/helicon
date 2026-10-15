@@ -3,9 +3,11 @@
 from datetime import datetime, timedelta
 
 import pytest
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from _settings import own_settings as _own_settings
+from helicon.lib.gui import browser_model
 from helicon.lib.gui import file_browser as fb
 
 
@@ -16,10 +18,7 @@ def qapp():
 
 @pytest.fixture(autouse=True)
 def own_settings(tmp_path, monkeypatch):
-    ini = str(tmp_path / "settings.ini")
-    monkeypatch.setattr(
-        fb, "QSettings", lambda *a: QSettings(ini, QSettings.Format.IniFormat)
-    )
+    _own_settings(monkeypatch, tmp_path / "settings.ini")
 
 
 @pytest.fixture
@@ -71,7 +70,7 @@ class TestKinds:
             "plot",
             "file",
         ):
-            assert kind in fb._KIND_ICONS
+            assert kind in browser_model._KIND_ICONS
 
 
 class TestModel:

@@ -3,6 +3,7 @@
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from _settings import use_theme
 from helicon.lib.gui import file_browser as fb
 from helicon.lib.gui import gallery_widget as gw
 from helicon.lib.gui import theme
@@ -15,7 +16,7 @@ def qapp():
 
 @pytest.fixture(params=["Dark", "Light"])
 def saved_theme(request, monkeypatch):
-    monkeypatch.setattr(fb, "_saved_theme", lambda: request.param)
+    use_theme(monkeypatch, request.param)
     return request.param
 
 
@@ -97,5 +98,5 @@ class TestNapariTheme:
 
         monkeypatch.setattr(napari_theme, "register_theme", boom)
         monkeypatch.setattr(napari_theme, "available_themes", lambda: [])
-        monkeypatch.setattr(fb, "_saved_theme", lambda: "Dark")
+        use_theme(monkeypatch, "Dark")
         assert theme._napari_viewer_theme() == "dark"

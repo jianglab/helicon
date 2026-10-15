@@ -8,13 +8,12 @@ merely because maps were selected -- 751 selected maps is 751 downloads, and
 that is a decision rather than a surprise.
 """
 
-import inspect
-
 from helicon.webApps.tabs import helical_projection_tab as tab
+from _source import tab_source
 
 
 def _source():
-    return inspect.getsource(tab)
+    return tab_source(tab)
 
 
 class TestTheButtonsAreThere:

@@ -1,7 +1,7 @@
 """Finding the other file of a 2D classification beside the one given."""
 
 import pytest
-from _source import contains
+from _source import contains, tab_source
 
 from helicon.webApps import class2d_files as c2
 
@@ -72,9 +72,8 @@ class TestNeedsFilling:
 class TestTheTabsUseIt:
     def test_both_fields_fill_each_other(self, tab):
         import importlib
-        import inspect
 
-        src = inspect.getsource(importlib.import_module(f"helicon.webApps.tabs.{tab}"))
+        src = tab_source(importlib.import_module(f"helicon.webApps.tabs.{tab}"))
         # files on the server only: a URL has no folder to look in
         assert "@reactive.event(input.server_params)" in src
         assert "@reactive.event(input.server_classes)" in src
@@ -83,20 +82,18 @@ class TestTheTabsUseIt:
 
     def test_tube_ids_are_split_on_load(self, tab):
         import importlib
-        import inspect
 
         mod = importlib.import_module(f"helicon.webApps.tabs.{tab}")
-        src = inspect.getsource(mod)
+        src = tab_source(mod)
         assert "@reactive.event(params_raw, input.split_axis_distance)" in src
         assert "compute.split_distinct_filaments(raw, distance)" in src
         assert mod.BOOKMARK_DEFAULTS["split"] == ("split_axis_distance", 50)
 
     def test_the_server_mode_reads_its_own_fields(self, tab):
         import importlib
-        import inspect
 
         mod = importlib.import_module(f"helicon.webApps.tabs.{tab}")
-        src = inspect.getsource(mod)
+        src = tab_source(mod)
         assert "helicon.shiny.source_modes(deployment.is_cloud())" in src
         assert "\"input.input_mode_params === 'server'\"" in src
         assert contains(src, 'file_picker_fill( "params_browse", "server_params"')
@@ -268,7 +265,6 @@ class TestAbundanceErrorMessage:
 
 class TestTabsGiveTheCounts:
     def test_the_three_tabs_use_the_message(self):
-        import inspect
 
         from helicon.webApps.tabs import (
             abinitio3d_tab,
@@ -277,7 +273,7 @@ class TestTabsGiveTheCounts:
         )
 
         for tab in (abinitio3d_tab, helical_pitch_tab, where_is_my_class_tab):
-            src = inspect.getsource(tab)
+            src = tab_source(tab)
             assert "class2d_files.abundance_error_message(" in src, tab.__name__
             assert (
                 "Make sure that the two files are for the same Class2D job" not in src

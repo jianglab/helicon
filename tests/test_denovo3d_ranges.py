@@ -1,16 +1,16 @@
 """The twist and rise sliders of the Denovo3D tab cover the usual range."""
 
-import inspect
 import re
 
 import pytest
 
 from helicon.webApps.tabs import denovo3d_tab
+from _source import tab_source
 
 
 def _slider(input_id):
     """The keyword arguments of the range slider ``input_id``, as written."""
-    src = inspect.getsource(denovo3d_tab)
+    src = tab_source(denovo3d_tab)
     call = src[src.index(f'"{input_id}"') :]
     call = call[: call.index("width=")]  # the arguments before the width
     args = dict(re.findall(r"\b(min|max|step)=([-\d.]+)", call))

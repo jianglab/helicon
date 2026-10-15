@@ -42,7 +42,7 @@ def napari_available() -> bool:
 
 def chimerax_path() -> str | None:
     """The ChimeraX executable, or None."""
-    from helicon.lib.gui.file_browser import _find_chimerax
+    from helicon.lib.gui.browser_files import _find_chimerax
 
     return _find_chimerax()
 

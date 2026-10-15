@@ -4,15 +4,13 @@ The class averages are simulated: a helix of known twist, rise and symmetry seen
 several azimuths, as the averages of one filament type would be.
 """
 
-import inspect
-
 import numpy as np
 import pytest
 
 from helicon.webApps.lib import helical_pitch_lattice as hl
 from helicon.webApps.lib import helical_pitch_map as maps
 from helicon.webApps.lib import hill_compute
-from _source import contains
+from _source import contains, tab_source
 
 APIX = 3.0
 
@@ -155,7 +153,7 @@ class TestTheTab:
     def test_the_pitch_job_measures_the_lattice_and_the_map_uses_it(self):
         from helicon.webApps.tabs import abinitio3d_tab
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         assert "result.lattice = _lattice(job, result)" in src
         assert "lattice.twist(r.period, rise, c, lat)" in src
         assert contains(src, '"projection"\n                if job["turns"] > 1')

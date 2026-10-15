@@ -8,8 +8,6 @@ two mixtures. This covers the second one, from the wiring that reaches it to
 the placement it hands the display.
 """
 
-import inspect
-
 import numpy as np
 import pytest
 
@@ -17,6 +15,7 @@ torch = pytest.importorskip("torch")
 
 from helicon.webApps.lib import helical_projection_compute as compute
 from helicon.webApps.lib import map_gauss_fit as mgf
+from _source import tab_source
 
 
 def _helical_map(nz=64, ny=48, nx=48, apix=2.0, radius=9.0, sigma=3.5):
@@ -171,7 +170,7 @@ class TestTheTabReachesIt:
     def _source(self):
         from helicon.webApps.tabs import helical_projection_tab as tab
 
-        return inspect.getsource(tab), tab
+        return tab_source(tab), tab
 
     def test_the_search_fits_the_queries_and_passes_them_down(self):
         source, _ = self._source()
@@ -202,11 +201,10 @@ class TestTheDisplayedPlacementIsScaleCorrected:
 
     def test_one_result_is_re_placed_too(self):
         """A single selected map is when the placement is studied, not ranked."""
-        import inspect
 
         from helicon.webApps.tabs import helical_projection_tab as tab
 
-        body = inspect.getsource(tab)
+        body = tab_source(tab)
         body = body[body.index("def _compare_work") :]  # the search's work
         assert "if query_fits is not None and len(good):" in body
         assert "len(good) > 1" not in body

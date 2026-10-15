@@ -776,7 +776,7 @@ def _launch_chimerax(path: str) -> None:
     """
     import subprocess
 
-    from helicon.lib.gui.file_browser import _find_chimerax
+    from helicon.lib.gui.browser_files import _find_chimerax
 
     exe = _find_chimerax()
     if exe is None:

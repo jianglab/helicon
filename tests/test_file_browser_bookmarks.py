@@ -2,9 +2,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
+from _settings import own_settings as _own_settings
 from helicon.lib.gui import file_browser as fb
 
 
@@ -16,12 +16,7 @@ def qapp():
 @pytest.fixture(autouse=True)
 def own_settings(tmp_path, monkeypatch):
     """Keep the tests away from the real saved settings of the user."""
-    ini = str(tmp_path / "settings.ini")
-
-    def settings(*args):
-        return QSettings(ini, QSettings.Format.IniFormat)
-
-    monkeypatch.setattr(fb, "QSettings", settings)
+    _own_settings(monkeypatch, tmp_path / "settings.ini")
 
 
 def _dirs(tmp_path, *names):

@@ -7,12 +7,11 @@ session, so the rule here is: the map is skipped, the user is told, and
 everything else carries on.
 """
 
-import inspect
-
 import numpy as np
 import pytest
 
 from helicon.webApps.lib import helical_projection_compute as compute
+from _source import tab_source
 
 
 def _unloadable():
@@ -82,7 +81,7 @@ class TestTheTabWarnsAndSurvives:
     def _source(self):
         from helicon.webApps.tabs import helical_projection_tab as tab
 
-        return inspect.getsource(tab)
+        return tab_source(tab)
 
     def test_a_worker_that_raises_does_not_escape_the_effect(self):
         # f.result() re-raises whatever the worker raised, and an exception
@@ -143,7 +142,7 @@ class TestMapsWithoutATwist:
     def test_they_are_skipped_without_a_dialog(self):
         from helicon.webApps.tabs import helical_projection_tab as tab
 
-        source = inspect.getsource(tab)
+        source = tab_source(tab)
         start = source[source.index("def _compare_projections") :]
         assert "compute.has_twist" in start
         # reported when the results come back, in the background task's apply
@@ -157,7 +156,7 @@ class TestMapsWithoutATwist:
     def test_a_selection_with_no_twists_at_all_says_so(self):
         from helicon.webApps.tabs import helical_projection_tab as tab
 
-        body = inspect.getsource(tab)
+        body = tab_source(tab)
         body = body[body.index("def _compare_projections") :]
         assert "Nothing to search" in body
         assert "if not active_maps:" in body

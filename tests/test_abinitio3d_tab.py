@@ -12,13 +12,13 @@ import numpy as np
 import pytest
 
 from helicon.webApps.tabs import abinitio3d_tab, helical_pitch_tab
-from _source import contains, count
+from _source import contains, count, tab_source
 
 TABS = Path(__file__).resolve().parents[1] / "src/helicon/webApps/tabs"
 
 
 def _declared(module):
-    src = Path(module.__file__).read_text()
+    src = tab_source(module)
     return set(
         re.findall(
             r'(?:ui\.input_\w+|helicon\.shiny\.(?:range_)?slider)\(\s*"(\w+)"', src
@@ -27,12 +27,12 @@ def _declared(module):
 
 
 def _read(module):
-    return set(re.findall(r"input\.(\w+)\b", Path(module.__file__).read_text()))
+    return set(re.findall(r"input\.(\w+)\b", tab_source(module)))
 
 
 class TestTheSplit:
     def test_helical_pitch_has_no_inter_class_controls(self):
-        src = Path(helical_pitch_tab.__file__).read_text()
+        src = tab_source(helical_pitch_tab)
         for name in ("phase_run", "map_run", "relion_run", "pitch_band", "rot_fold"):
             assert f'"{name}"' not in src
         assert "Inter-class" not in src
@@ -42,7 +42,7 @@ class TestTheSplit:
         declared = _declared(helical_pitch_tab)
         for name in ("min_len", "max_len", "bins", "rise", "run"):
             assert name in declared
-        assert "_auto_run_at_start" in Path(helical_pitch_tab.__file__).read_text()
+        assert "_auto_run_at_start" in tab_source(helical_pitch_tab)
 
     def test_abinitio3d_has_its_own_inputs(self):
         declared = _declared(abinitio3d_tab)
@@ -95,7 +95,7 @@ class TestRegistration:
         from helicon.webApps import app
 
         assert app._TAB_MODULE_MAP["AbInitio3D"] == ("abinitio3d", abinitio3d_tab)
-        src = Path(app.__file__).read_text()
+        src = tab_source(app)
         assert 'ui.nav_panel("AbInitio3D", abinitio3d_tab_ui("abinitio3d"))' in src
         assert '"AbInitio3D": lambda: abinitio3d_tab_server("abinitio3d")' in src
         # the navbar puts it right after Denovo3D
@@ -174,7 +174,7 @@ class TestFileBrowserLaunch:
     def test_the_display_dispatches_the_mode(self):
         import helicon.commands.display as display
 
-        src = Path(display.__file__).read_text()
+        src = tab_source(display)
         assert contains(
             src, 'if mode == "abInitio3D":\n            _launch_abinitio3d('
         )
@@ -185,9 +185,8 @@ class TestRelionSymmetry:
     ticked, as the map from the class averages does."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_the_symmetry_follows_impose_c(self):
         src = self._src()
@@ -210,9 +209,8 @@ class TestLongWorkInTheBackground:
     worker threads, so one visitor's run does not stall every other session."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     @pytest.mark.parametrize(
         "button, task",
@@ -239,9 +237,8 @@ class TestLongWorkInTheBackground:
 
 class TestRelionOnAHost:
     def _body(self):
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         body = src[src.index("def relion_ui") :]
         return body[: body.index("@render.ui")]
 
@@ -265,9 +262,8 @@ class TestRelionOnAHost:
         assert "text-muted" not in body
 
     def test_the_run_is_refused_on_the_server_too(self):
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         run = src[src.index("def run_relion") :]
         run = run[: run.index("relion_task.invoke(")]
         assert "deployment.refuse_server_mode()" in run
@@ -278,9 +274,8 @@ class TestRepeatSearchRange:
     twist, not a fixed 1500 A."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_the_input_sits_left_of_the_estimate_button(self):
         src = self._src()
@@ -314,9 +309,8 @@ class TestRepeatSearchRange:
 
 class TestRingColours:
     def test_the_fit_colour_always_spans_0_to_1(self):
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         plot = src[src.index("def phase_circle_plot") :]
         plot = plot[: plot.index("@render.")]
         assert "cmin=0.0" in plot and "cmax=1.0" in plot
@@ -327,9 +321,8 @@ class TestRankedFits:
     per-filament histogram."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_it_sits_below_the_ring_right_of_the_histogram(self):
         src = self._src()
@@ -376,9 +369,8 @@ class TestResultsAppearInOrder:
     """The controls under the plots wait for the plots."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_the_results_controls_wait_for_the_plots(self):
         css = str(abinitio3d_tab._RESULTS_ORDER_CSS)
@@ -404,9 +396,8 @@ class TestHiddenGalleryStillUpdates:
     def test_the_class_gallery_is_drawn_while_hidden(self):
         """Remove picked and the suggestions' Add buttons redraw it; with the
         Parameters tab in front a suspended output made them do nothing."""
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         at = src.index("def select_classes_gallery")
         assert "@output(suspend_when_hidden=False)" in src[at - 200 : at]
 
@@ -425,9 +416,8 @@ class TestHiddenUntilThereIsSomethingToShow:
         assert html.index(rule) < html.index('id="abinitio3d-results_visibility"')
 
     def test_the_server_only_shows_them(self):
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         body = src[src.index("def results_visibility") :]
         body = body[: body.index("@render")]
         assert "display: none" not in body
@@ -438,9 +428,8 @@ class TestClassAverageCheck:
     """The ring against the registered class averages (helical_pitch_pixel)."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_it_runs_after_the_pitch_estimate_and_never_breaks_it(self):
         src = self._src()
@@ -486,9 +475,8 @@ class TestTypesGrouping:
     """The filaments grouped by the classes they use (helical_pitch_types)."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_the_card_sits_with_the_selection_and_the_suggestions(self):
         src = self._src()
@@ -746,9 +734,8 @@ class TestTypesGrouping:
 
 class TestVetoOfAHalfRepeat:
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_the_class_averages_are_given_to_the_pitch_estimate(self):
         src = self._src()
@@ -765,9 +752,8 @@ class TestPixelAgreementThreshold:
     """The second removal threshold, on the pixel agreement of each class."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_it_is_off_by_default_and_bookmarked(self):
         assert abinitio3d_tab.BOOKMARK_DEFAULTS["agree_cut"] == ("agree_threshold", 0.0)
@@ -809,9 +795,8 @@ class TestSuggestionsAndAgreement:
     """Suggest classes holds back what either threshold would remove."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def test_the_shown_suggestions_follow_both_thresholds(self):
         src = self._src()
@@ -852,9 +837,8 @@ class TestFusedReconstruction:
     pixel size and in another box, when relion_reconstruct has --fused_extract."""
 
     def _src(self):
-        import inspect
 
-        return inspect.getsource(abinitio3d_tab)
+        return tab_source(abinitio3d_tab)
 
     def _fused_ui(self):
         src = self._src()
@@ -925,9 +909,8 @@ class TestFusedReconstruction:
 
 class TestProjectFolderGuess:
     def test_it_is_the_folder_with_the_pipeline_file_above_the_star_file(self):
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         guess = src[
             src.index("def _relion_project_guess") : src.index("relion_prev_apix =")
         ]
@@ -1257,9 +1240,8 @@ class TestFilamentJointFigure:
         assert {d.type for d in small} == {"scatter"}
 
     def test_the_plot_uses_the_figure_in_its_box(self):
-        import inspect
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         plot = src[src.index("def filament_pitch_plot") : src.index("def _write_star")]
         assert "_filament_joint_figure(" in plot
         assert "_fig_to_html(" in plot

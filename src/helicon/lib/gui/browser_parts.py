@@ -643,7 +643,7 @@ def build_preview(path: str | Path) -> dict:
         elif suffix == ".cs":
             _preview_cs(path, out)
         else:
-            from helicon.lib.gui.file_browser import _is_text_file
+            from helicon.lib.gui.browser_files import _is_text_file
 
             if _is_text_file(str(path)):
                 out["kind"] = "text"
@@ -746,7 +746,7 @@ def _preview_cs(path: Path, out: dict) -> None:
 
 
 def _preview_star(path: Path, out: dict) -> None:
-    from helicon.lib.gui.file_browser import _get_file_info
+    from helicon.lib.gui.browser_files import _get_file_info
 
     out["kind"] = "table"
     info, n_images, pixel = _get_file_info(str(path))

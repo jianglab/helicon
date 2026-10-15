@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from helicon.webApps.lib import helical_pitch_context as hc
+from _source import tab_source
 
 
 def _chains(classes_per_filament, prob=0.7, n_classes=None, step=10.0):
@@ -508,11 +509,10 @@ class TestCardIntegration:
         assert len(a) == len(b) == 1
 
     def test_the_tab_offers_the_method_and_runs_it(self):
-        from pathlib import Path
 
         from helicon.webApps.tabs import abinitio3d_tab as tab
 
-        src = Path(tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(tab)
         assert re.search(r'ui\.input_select\(\s*"types_method"', src)
         assert set(tab._TYPES_METHODS) == {"markers", "context"}
         assert tab.BOOKMARK_DEFAULTS["types_method"] == ("types_method", "markers")
@@ -647,11 +647,10 @@ class TestDirection:
         assert info["backward_share"] == pytest.approx(0.0)
 
     def test_the_tab_pairs_the_counterparts_for_it(self):
-        from pathlib import Path
 
         from helicon.webApps.tabs import abinitio3d_tab as tab
 
-        src = Path(tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(tab)
         assert "counterparts=counterparts" in src
         assert "merge=bool(input.merge_counterparts())" in src
         # every class with segments enough is modelled, those that look like no other

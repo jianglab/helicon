@@ -281,7 +281,7 @@ class _DataFramePreviewModel(QAbstractTableModel):
     @staticmethod
     def _error_color() -> str:
         """Return the theme's error color used to flag missing-file cells."""
-        from helicon.lib.gui.file_browser import (
+        from helicon.lib.gui.browser_style import (
             _THEME_COLORS,
             _resolved_theme,
             _saved_theme,
@@ -1515,7 +1515,7 @@ class Images2StarDialog(QDialog):
         the whole widget, so the compact framing would otherwise be lost as
         soon as the error color is applied.
         """
-        from helicon.lib.gui.file_browser import (
+        from helicon.lib.gui.browser_style import (
             _THEME_COLORS,
             _resolved_theme,
             _saved_theme,

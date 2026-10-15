@@ -14,6 +14,7 @@ import pytest
 from scipy import ndimage as ndi
 
 import helicon
+from _source import file_source
 from helicon.webApps import auto_method_ui
 from helicon.webApps.lib import helix_transform as ht
 from helicon.webApps.lib import hill_compute
@@ -216,11 +217,11 @@ class TestTheControl:
             ("denovo3d_tab.py", "dn_auto_method"),
             ("helical_projection_tab.py", "auto_method"),
         ):
-            src = (root / tab).read_text()
+            src = file_source(root / tab)
             assert re.search(rf'ui\.input_select\(\s*"{input_id}"', src), tab
             assert f"input.{input_id}()" in src, tab
             assert "auto_method_ui.CHOICES" in src, tab
-        projection = (root / "helical_projection_tab.py").read_text()
+        projection = file_source(root / "helical_projection_tab.py")
         assert re.search(r'"auto_method": \("auto_method", "threshold"\)', projection)
 
 

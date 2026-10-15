@@ -7,10 +7,10 @@ opening it restores them through Shiny's own input restoration.
 
 import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _source import file_source
 
 from helicon.webApps import bookmark
 
@@ -136,7 +136,7 @@ class TestTheTables:
                 if lazy
                 else module.__file__
             )
-            src = Path(path).read_text()
+            src = file_source(path)
             declared = set(
                 re.findall(
                     r"(?:ui\.input_\w+|helicon\.shiny\.(?:range_)?slider)"

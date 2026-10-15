@@ -1,12 +1,11 @@
 """The EMDB table's entry ids, and where they take you."""
 
-import inspect
-
 from helicon.webApps.tabs import helical_projection_tab as tab
+from _source import tab_source
 
 
 def _source():
-    return inspect.getsource(tab)
+    return tab_source(tab)
 
 
 class TestTheEntryIdsAreLinks:

@@ -915,7 +915,7 @@ class Proc3dDialog(QDialog):
 
     def _status_stylesheet(self, error: bool) -> str:
         """Return the stylesheet for the read-only status row."""
-        from helicon.lib.gui.file_browser import (
+        from helicon.lib.gui.browser_style import (
             _THEME_COLORS,
             _resolved_theme,
             _saved_theme,

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from helicon.webApps import deployment
+from _source import tab_source
 
 
 class _Root:
@@ -119,7 +120,6 @@ class TestRefuseServerMode:
         assert not deployment.refuse_server_mode() and len(shown) == 1
 
     def test_every_server_mode_loader_checks(self):
-        import inspect
 
         from helicon.webApps.tabs import (
             abinitio3d_tab,
@@ -141,16 +141,15 @@ class TestRefuseServerMode:
             where_is_my_class_tab: 1,
         }
         for module, n in counts.items():
-            src = inspect.getsource(module)
+            src = tab_source(module)
             assert src.count("deployment.refuse_server_mode()") == n, module
 
     def test_companion_lookups_are_off_on_a_host(self):
-        import inspect
 
         from helicon.webApps.tabs import abinitio3d_tab, helical_pitch_tab
 
         for module in (abinitio3d_tab, helical_pitch_tab):
-            src = inspect.getsource(module)
+            src = tab_source(module)
             body = src[src.index("def _fill_companion") :][:300]
             assert "deployment.is_cloud()" in body
 
@@ -244,14 +243,13 @@ class TestClampNumber:
         assert clamp_number(7.9, 1, 0, 5, float) == 5.0
 
     def test_the_tabs_clamp_their_costly_inputs(self):
-        import inspect
 
         from helicon.webApps.tabs import abinitio3d_tab, helical_pitch_tab
 
-        src = inspect.getsource(abinitio3d_tab)
+        src = tab_source(abinitio3d_tab)
         assert "clamp_number(input.phase_n_boot(), 20, 2, 200)" in src
         assert "max(2, int(n_boot))" not in src
-        src = inspect.getsource(helical_pitch_tab)
+        src = tab_source(helical_pitch_tab)
         assert "bins=input.bins()" not in src
 
 
@@ -263,7 +261,7 @@ class TestGalleryDefaults:
 
         from helicon.lib import shiny as hs
 
-        src = inspect.getsource(hs)
+        src = tab_source(hs)
         assert "=reactive.value(" not in src
         for p in inspect.signature(hs.image_gallery).parameters.values():
             assert not isinstance(p.default, reactive.Value), p.name

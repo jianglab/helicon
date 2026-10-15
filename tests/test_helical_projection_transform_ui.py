@@ -7,13 +7,12 @@ a change of selection lives in helix_transform.reconcile_transforms and is
 tested there; these pin how the tab uses it.
 """
 
-import inspect
-
 from helicon.webApps.tabs import helical_projection_tab as tab
+from _source import tab_source
 
 
 def _source():
-    return inspect.getsource(tab)
+    return tab_source(tab)
 
 
 def _body(name, until):

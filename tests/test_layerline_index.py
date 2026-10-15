@@ -5,14 +5,13 @@ so each takes a few seconds: the parity of the orders of the layer lines, the
 way images add, and the search itself.
 """
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 from helicon.lib import layerlines
 from helicon.webApps.lib import hill_compute
 from helicon.webApps.lib import layerline_index as li
+from _source import tab_source
 
 APIX = 4.6876  # a box of 128 pixels as wide as 256 at the pixel size of HILL's default
 CUTOFF = 14.0
@@ -252,7 +251,7 @@ class TestHillCandidates:
         assert "phases across the meridian" in text
         even = hill_tab._csym_warning_text([(1, 6), (2, 8)])
         assert "phases across the meridian" not in even
-        src = Path(hill_tab.__file__).read_text(encoding="utf-8")
+        src = tab_source(hill_tab)
         assert 'ui.output_ui("hill_symmetry_warning")' in src
         assert 'class_="alert alert-warning"' in src
 
@@ -275,12 +274,11 @@ class TestHillCandidates:
         assert sharp(turned) < 0.5 * sharp(upright)
 
     def test_the_tab_offers_it_and_applies_a_choice(self):
-        import inspect
         import re
 
         from helicon.webApps.tabs import hill_tab
 
-        src = inspect.getsource(hill_tab)
+        src = tab_source(hill_tab)
         assert re.search(r'ui\.input_action_button\(\s*"hill_suggest_symmetry"', src)
         assert 'ui.output_data_frame("hill_symmetry_candidates")' in src
         # the search uses the diameter and the resolution limit the user sees

@@ -1,13 +1,11 @@
 """The candidate twist/rise solutions of Denovo3D: each says what a click does, and a
 click reconstructs a 3D map for it."""
 
-import inspect
-
 import numpy as np
 import pytest
 
 from helicon.webApps.tabs import denovo3d_tab as dn
-from _source import contains
+from _source import contains, tab_source
 
 
 def _result(twist, rise, score):
@@ -137,7 +135,7 @@ class TestClickReachesTheApp:
         assert "priority: 'event'" in html
 
     def test_the_plot_is_drawn_with_the_click_input_of_the_module(self):
-        src = inspect.getsource(dn)
+        src = tab_source(dn)
         plot = src[
             src.index("def dn_scores_plot") : src.index(
                 "def dn_reconstructed_projections"
@@ -148,7 +146,7 @@ class TestClickReachesTheApp:
 
 class TestClickStartsTheReconstruction:
     def _src(self):
-        return inspect.getsource(dn)
+        return tab_source(dn)
 
     def test_the_click_reconstructs_the_pair_without_touching_the_ranges(self):
         src = self._src()

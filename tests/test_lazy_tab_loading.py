@@ -1,9 +1,9 @@
 """The tabs that load on first use say so while they load."""
 
-import inspect
 import re
 
 from helicon.webApps import app
+from _source import tab_source
 
 
 class TestLoadingNote:
@@ -20,17 +20,17 @@ class TestLoadingNote:
         assert "display: none" in css
 
     def test_every_lazy_tab_has_its_note(self):
-        source = inspect.getsource(app)
+        source = tab_source(app)
         labelled = dict(re.findall(r'_lazy_panel\(\s*"(\w+)",\s*"(\w+)"\s*\)', source))
         assert {spec["prefix"] for spec in app._LAZY_TABS.values()} <= set(labelled)
         for name, spec in app._LAZY_TABS.items():
             assert labelled[spec["prefix"]] == name
 
     def test_the_style_is_in_the_page(self):
-        assert "_LAZY_PANEL_CSS" in inspect.getsource(app)
-        assert "ui.tags.style(_LAZY_PANEL_CSS)" in inspect.getsource(app)
+        assert "_LAZY_PANEL_CSS" in tab_source(app)
+        assert "ui.tags.style(_LAZY_PANEL_CSS)" in tab_source(app)
 
     def test_a_tab_that_cannot_be_imported_shows_the_error_not_the_note_for_ever(self):
-        source = inspect.getsource(app)
+        source = tab_source(app)
         assert "could not be loaded" in source
         assert "failed to load tab" in source

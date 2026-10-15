@@ -1,7 +1,6 @@
 """The web app's tabs share nothing: a value set in one never changes another,
 and nothing one session computes reaches another's."""
 
-import inspect
 import re
 import threading
 from pathlib import Path
@@ -11,6 +10,7 @@ import pytest
 
 from helicon.webApps import app
 from helicon.webApps.lib import helical_pitch_phase as ph
+from _source import tab_source
 
 TABS = Path(app.__file__).parent / "tabs"
 
@@ -32,7 +32,7 @@ class TestNoSharedState:
             ), (tab, args)
 
     def test_the_app_hands_the_tabs_nothing(self):
-        src = inspect.getsource(app)
+        src = tab_source(app)
         for call in re.findall(r"\w+_tab_server\(([^)]*)\)", src):
             if call.strip() in ("input, output, session", "input, session"):
                 continue

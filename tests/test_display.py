@@ -3350,7 +3350,7 @@ class TestFolderBrowser(object):
     def test_launch_chimerax_invokes_executable(self, tmp_path):
         import subprocess
 
-        from helicon.lib.gui import file_browser
+        from helicon.lib.gui import browser_files
 
         called = {}
 
@@ -3362,7 +3362,7 @@ class TestFolderBrowser(object):
             return object()
 
         with (
-            patch.object(file_browser, "_find_chimerax", fake_find),
+            patch.object(browser_files, "_find_chimerax", fake_find),
             patch.object(subprocess, "Popen", fake_popen),
         ):
             display._launch_chimerax("/d/map.mrc")
@@ -3744,7 +3744,7 @@ class TestAsyncFileInfo(object):
     def test_populate_fills_columns_async(self, tmp_path, qapp):
         from PySide6.QtWidgets import QApplication
 
-        from helicon.lib.gui import file_browser
+        from helicon.lib.gui import browser_model
         from helicon.lib.gui.file_browser import (
             COL_IMAGES,
             COL_INFO,
@@ -3758,7 +3758,7 @@ class TestAsyncFileInfo(object):
             n = int("".join(c for c in name if c.isdigit()) or "1")
             return f"{n*10}x{n*10}", str(n), f"{n}.00 Å"
 
-        with patch.object(file_browser, "_get_file_info", fake_info):
+        with patch.object(browser_model, "_get_file_info", fake_info):
             for i in range(1, 6):
                 (tmp_path / f"img_{i}.mrc").write_bytes(b"\x00" * 512)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))
@@ -3787,7 +3787,7 @@ class TestAsyncFileInfo(object):
     def test_initial_directory_populates_on_construction(self, tmp_path, qapp):
         from PySide6.QtWidgets import QApplication
 
-        from helicon.lib.gui import file_browser
+        from helicon.lib.gui import browser_model
         from helicon.lib.gui.file_browser import (
             COL_IMAGES,
             COL_INFO,
@@ -3803,7 +3803,7 @@ class TestAsyncFileInfo(object):
             n = int("".join(c for c in name if c.isdigit()) or "1")
             return f"{n*10}x{n*10}", str(n), f"{n}.00 Å"
 
-        with patch.object(file_browser, "_get_file_info", fake_info):
+        with patch.object(browser_model, "_get_file_info", fake_info):
             for i in range(1, 4):
                 (tmp_path / f"img_{i}.mrc").write_bytes(b"\x00" * 512)
             widget = FolderBrowserWidget(start_dir=str(tmp_path))

@@ -20,7 +20,7 @@ from .trackers import _napari
 
 def _display_theme_stylesheet() -> str:
     """Return the shared Qt stylesheet for button-launched display windows."""
-    from helicon.lib.gui.file_browser import (
+    from helicon.lib.gui.browser_style import (
         _THEME_COLORS,
         _resolved_theme,
         _saved_theme,
@@ -96,7 +96,7 @@ def _display_theme_stylesheet() -> str:
 def _display_theme_palette():
     """Build a Qt palette matching the persisted display theme."""
     from PySide6.QtGui import QPalette, QColor
-    from helicon.lib.gui.file_browser import (
+    from helicon.lib.gui.browser_style import (
         _THEME_COLORS,
         _resolved_theme,
         _saved_theme,
@@ -118,7 +118,7 @@ def _display_theme_palette():
 
 def _display_plot_theme_colors() -> dict[str, str]:
     """Return colors for plot widgets in the resolved display theme."""
-    from helicon.lib.gui.file_browser import _resolved_theme, _saved_theme
+    from helicon.lib.gui.browser_style import _resolved_theme, _saved_theme
 
     if _resolved_theme(_saved_theme()) == "Light":
         return {
@@ -168,7 +168,7 @@ def _refresh_display_theme_windows() -> None:
 
 def _get_display_theme() -> str:
     """Return the persisted file-browser/web-app theme."""
-    from helicon.lib.gui.file_browser import _saved_theme
+    from helicon.lib.gui.browser_style import _saved_theme
 
     return _saved_theme()
 
@@ -188,7 +188,7 @@ def _napari_viewer_theme() -> str:
     take them.
     """
     try:
-        from helicon.lib.gui.file_browser import _THEME_COLORS, _resolved_theme
+        from helicon.lib.gui.browser_style import _THEME_COLORS, _resolved_theme
         from napari.utils.theme import available_themes, get_theme, register_theme
 
         resolved = _resolved_theme(_get_display_theme())
@@ -216,7 +216,7 @@ def _napari_viewer_theme() -> str:
 
 def _napari_canvas_background() -> str:
     """Return the napari canvas background for the saved display theme."""
-    from helicon.lib.gui.file_browser import _resolved_theme
+    from helicon.lib.gui.browser_style import _resolved_theme
 
     if _resolved_theme(_get_display_theme()) == "Light":
         return "#ffffff"

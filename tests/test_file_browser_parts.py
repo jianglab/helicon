@@ -2,10 +2,10 @@
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from helicon.lib.gui import browser_parts as bp
+from _settings import own_settings as _own_settings
 from helicon.lib.gui import file_browser as fb
 
 
@@ -16,10 +16,7 @@ def qapp():
 
 @pytest.fixture(autouse=True)
 def own_settings(tmp_path, monkeypatch):
-    ini = str(tmp_path / "settings.ini")
-    monkeypatch.setattr(
-        fb, "QSettings", lambda *a: QSettings(ini, QSettings.Format.IniFormat)
-    )
+    _own_settings(monkeypatch, tmp_path / "settings.ini")
 
 
 @pytest.fixture
