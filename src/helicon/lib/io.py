@@ -620,11 +620,9 @@ def image2dataframe(
             ignore_bad_micrograph_path,
         )
     elif inputFile.endswith(".csv"):  # cryosparc v0, v1
-        p = csv2dataframe(
-            inputFile,
-            alternative_folders,
-            ignore_bad_particle_path,
-            ignore_bad_micrograph_path,
+        raise HeliconIOError(
+            f"{inputFile}: CryoSPARC v0/v1 .csv files are not supported; "
+            "use the .cs file of CryoSPARC v2 or later"
         )
     elif inputFile.endswith(".cs"):  # cryosparc v2+
         p = cs2dataframe(

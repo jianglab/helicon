@@ -5,8 +5,12 @@ from __future__ import annotations
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
 from .exceptions import HeliconIOError
+
+if TYPE_CHECKING:
+    import numpy as np
 
 __all__ = [
     "EPU_micrograph_path_2_movie_xml_path",

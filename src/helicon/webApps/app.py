@@ -781,10 +781,11 @@ def server(input, output, session):
             start_server = getattr(module, spec["server"])
         except Exception as error:
             logger.error("failed to load tab %s", tab, exc_info=True)
+            reason = str(error)  # (the name `error` is gone when this block ends)
 
             def failed():
                 return ui.div(
-                    f"{tab} could not be loaded: {error}",
+                    f"{tab} could not be loaded: {reason}",
                     class_="alert alert-danger m-3",
                 )
 

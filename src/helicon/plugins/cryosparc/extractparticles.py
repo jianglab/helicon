@@ -450,8 +450,6 @@ def handle(
                     result = future.result()
                     results.append(result)
 
-        from cryosparc.dataset import Dataset
-
         data = Dataset.append(*results, assert_same_fields=True)
         data = fill_missing_fields(data)
 

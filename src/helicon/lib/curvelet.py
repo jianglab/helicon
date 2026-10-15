@@ -5,10 +5,15 @@ from __future__ import annotations
 import io
 import logging
 from contextlib import redirect_stdout
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from helicon.lib.system import has_curvelet_udct_gpu
+
+if TYPE_CHECKING:  # (torch is imported lazily, below)
+    import torch
 
 # torch is imported lazily rather than here at module level.  It is only ever
 # needed by the GPU-backed denoisers, and it bundles its own libomp; loading a

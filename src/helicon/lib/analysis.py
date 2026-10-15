@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 import helicon
+
+if TYPE_CHECKING:  # (pandas is imported where it is used)
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 

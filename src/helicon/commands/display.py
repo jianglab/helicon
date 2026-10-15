@@ -10,8 +10,16 @@ re-exported here so existing callers that import from
 
 from __future__ import annotations
 
+import threading
+from typing import TYPE_CHECKING
+
 import sys
 import warnings
+
+if TYPE_CHECKING:  # (the Qt classes are imported where they are used)
+    from PySide6.QtWidgets import QMainWindow, QWidget
+
+    from helicon.lib.gui.gallery_widget import ImageGalleryWidget
 
 # Suppress harmless mrcfile divide-by-zero warnings when reading headers.
 warnings.filterwarnings(
