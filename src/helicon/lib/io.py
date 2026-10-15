@@ -1151,7 +1151,7 @@ def star2dataframe(
     return data
 
 
-def star_to_dataframe(starFile, logger=None):
+def star_to_dataframe(starFile, logger=None, ignore_bad_particle_path=0):
     """Convert a RELION STAR file to a DataFrame with image index and filename.
 
     Parses the STAR file, identifies the image name column
@@ -1164,13 +1164,19 @@ def star_to_dataframe(starFile, logger=None):
         Path to the STAR file.
     logger : logging.Logger, optional
         Logger for error messages.
+    ignore_bad_particle_path : int, optional
+        As for :func:`star2dataframe`: 0 (default) stops at a particle image file that
+        cannot be found, 1 checks but ignores missing files, 2 does not look for the
+        files at all. Use 2 when only the table is needed.
 
     Returns
     -------
     pd.DataFrame
         DataFrame with additional ``pid`` and ``filename`` columns.
     """
-    df = star2dataframe(starFile=starFile)
+    df = star2dataframe(
+        starFile=starFile, ignore_bad_particle_path=ignore_bad_particle_path
+    )
 
     fileNameCol = ""
     for col in ["rlnImageName", "rlnReferenceImage"]:

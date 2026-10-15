@@ -230,7 +230,9 @@ def get_class_file_stem(param_file):
 
 def get_class2d_params_from_file(params_file):
     if params_file.endswith(".star"):
-        params = _star_to_dataframe(params_file)
+        # only the table is used here: the particle images need not be on this computer
+        # (a star file of a public data set, given by its url, never has them)
+        params = _star_to_dataframe(params_file, ignore_bad_particle_path=2)
     elif params_file.endswith(".cs"):
         params = cs_to_dataframe(params_file)
     else:

@@ -351,6 +351,20 @@ class TestGetClass2dParamsFromFile(object):
             result = compute.get_class2d_params_from_file("test.star")
         assert isinstance(result, pd.DataFrame)
 
+    def test_reads_a_star_file_whose_particle_images_are_not_here(self, tmp_path):
+        # a star file of a public data set, or one given by its url, names stacks that
+        # are not on this computer; only its table is used
+        star = tmp_path / "run_it020_data.star"
+        star.write_text(
+            "data_optics\n\nloop_\n_rlnOpticsGroup\n_rlnImagePixelSize\n1 1.5\n\n"
+            "data_particles\n\nloop_\n_rlnImageName\n_rlnHelicalTubeID\n"
+            "_rlnHelicalTrackLengthAngst\n_rlnClassNumber\n_rlnCoordinateX\n_rlnCoordinateY\n"
+            "000001@Extract/job009/missing_stack.mrcs 1 0.0 3 50.0 100.0\n"
+            "000002@Extract/job009/missing_stack.mrcs 1 30.0 4 80.0 100.0\n"
+        )
+        result = compute.get_class2d_params_from_file(str(star))
+        assert list(result["rlnClassNumber"]) == [3, 4]
+
     def test_accepts_cs_file(self):
         with patch(
             "helicon.webApps.lib.whereismyclass_compute.cs_to_dataframe",
