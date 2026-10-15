@@ -34,10 +34,16 @@ class TestLongFolders:
         return tmp_path
 
     def test_a_long_folder_is_listed_in_slices_and_the_window_answers_between(
-        self, qapp, many
+        self, qapp, many, monkeypatch
     ):
+        # a slice is as many rows as fit in INSERT_SLICE_S: on a fast machine all of the 600
+        # rows fit in the first, and nothing would be left to see between slices. One slice
+        # that ends after the first twenty rows makes the test the same on every machine.
+        from helicon.lib.gui import browser_model
+
+        monkeypatch.setattr(browser_model, "INSERT_SLICE_S", 0.0)
         model = fb.FileBrowserModel(str(many))
-        assert model._loading or model.rowCount() < fb.SYNC_ROWS + 401
+        assert model._loading and model.rowCount() < fb.SYNC_ROWS + 401
         seen = []
         model.load_finished.connect(lambda: seen.append(True))
         slices = 0
@@ -45,6 +51,7 @@ class TestLongFolders:
             slices += 1
             qapp.processEvents()
             assert slices < 5000
+        assert slices >= 10  # the rows came in many slices, not in one
         assert model.rowCount() == fb.SYNC_ROWS + 401
         # folders first, then the files in order
         assert model.item(0, 0).text() == "sub/"

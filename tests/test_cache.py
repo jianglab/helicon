@@ -15,7 +15,34 @@ DEFAULT_PRUNE_INTERVAL_CAPPED = cache_mod._PRUNE_INTERVAL_CAPPED
 
 
 def _dir_size_mb(path) -> float:
-    return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file()) / 1e6
+    """The size of the files in a folder that a background sweep may be emptying: a file that
+    goes between the listing and the stat is not counted, not an error."""
+    total = 0
+    for p in Path(path).rglob("*"):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total / 1e6
+
+
+def test_the_size_helper_survives_a_file_that_goes_while_it_counts(
+    tmp_path, monkeypatch
+):
+    # the sweep of a capped cache deletes files on a thread of its own: on a slow machine
+    # one went between the listing and the stat, and the test died with FileNotFoundError
+    (tmp_path / "a").write_bytes(b"x" * 1000)
+    (tmp_path / "b").write_bytes(b"x" * 1000)
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == "b":
+            raise FileNotFoundError(self)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert _dir_size_mb(tmp_path) == pytest.approx(0.001)
 
 
 def _n_entries(path) -> int:
