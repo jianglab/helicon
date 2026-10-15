@@ -65,11 +65,22 @@ class TestTheAppFollowsIt:
         monkeypatch.setenv("HELICON_DEPLOYMENT", "cloud" if cloud else "local")
         return str(ui.page_fluid(app._page("System", "dark", "Home")))
 
-    def test_on_a_host_whereismyclass_shows_a_note(self, monkeypatch):
+    def test_on_a_host_whereismyclass_is_there_and_reads_by_url(self, monkeypatch):
+        # its micrographs are downloaded from the address of the star file, so it needs
+        # nothing on the server; the launcher of the file explorer is the only thing missing
         html = self._page(monkeypatch, cloud=True)
-        assert "WhereIsMyClass runs only where your data are" in html
-        assert 'id="where_is_my_class-wimc_input_mode' not in html
+        assert "runs only where your data are" not in html
+        assert 'id="lazy_tab_where_is_my_class"' in html
         assert home_tab._DISPLAY_LABEL not in html
+
+    def test_the_url_of_a_micrograph_is_checked_like_any_other_url(self):
+        import inspect
+
+        from helicon.webApps.tabs import where_is_my_class_tab
+
+        source = inspect.getsource(where_is_my_class_tab)
+        assert "deployment.url_allowed(address)" in source
+        assert source.count("deployment.refuse_local_path(") == 1
 
     def test_locally_everything_is_there(self, monkeypatch):
         html = self._page(monkeypatch, cloud=False)

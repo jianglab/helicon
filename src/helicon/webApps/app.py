@@ -469,27 +469,6 @@ def app_ui(request: Request):
         return _page(theme, initial_theme, active_tab)
 
 
-def _local_only_note(app: str, needs: str):
-    """What a tab shows on a hosting service in place of a feature that needs
-    the user's files on the server."""
-    host = deployment.hosting_service() or "a hosting service"
-    return ui.div(
-        ui.h3(f"{app} runs only where your data are"),
-        ui.p(
-            f"This copy of Helicon runs on {host}, which cannot reach {needs}. "
-            f"Run {app} on a computer that can: follow the instructions on ",
-            ui.a(
-                "https://jianglab.science.psu.edu/helicon/",
-                href="https://jianglab.science.psu.edu/helicon/",
-                target="_blank",
-            ),
-            " to install helicon, and start it with helicon webApps, or open "
-            "the Class2D job from the file browser (helicon display).",
-        ),
-        style="max-width: 46em; margin: 3em auto;",
-    )
-
-
 def _page(theme: str, initial_theme: str, active_tab: str):
     """The page, with every tab's UI; see app_ui."""
     return ui.page_fillable(
@@ -648,12 +627,7 @@ def _page(theme: str, initial_theme: str, active_tab: str):
         ui.navset_bar(
             ui.nav_panel(HOME_TAB, home_tab_ui()),
             ui.nav_panel(
-                "WhereIsMyClass",
-                (
-                    _local_only_note("WhereIsMyClass", "the micrographs")
-                    if deployment.is_cloud()
-                    else _lazy_panel("where_is_my_class", "WhereIsMyClass")
-                ),
+                "WhereIsMyClass", _lazy_panel("where_is_my_class", "WhereIsMyClass")
             ),
             ui.nav_panel(
                 "HelicalProjection", helical_projection_tab_ui("helical_projection")
@@ -821,12 +795,7 @@ def server(input, output, session):
                 logger.error("failed to initialise tab %s", tab, exc_info=True)
 
     _TAB_STARTERS: dict[str, object] = {
-        # nothing to start on a hosting service: the tab shows a note instead
-        "WhereIsMyClass": (
-            (lambda: None)
-            if deployment.is_cloud()
-            else (lambda: _start_lazy_tab("WhereIsMyClass"))
-        ),
+        "WhereIsMyClass": lambda: _start_lazy_tab("WhereIsMyClass"),
         "HelicalProjection": lambda: helical_projection_tab_server(
             "helical_projection"
         ),

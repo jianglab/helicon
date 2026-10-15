@@ -91,6 +91,16 @@ def where_is_my_class_tab_ui():
                         col_widths=6,
                         style="align-items: flex-start;",
                     ),
+                    ui.input_checkbox(
+                        "wimc_download_micrographs",
+                        "Download the micrographs of a star file given by url",
+                        value=True,
+                    ),
+                    ui.help_text(
+                        "A star file at <project>/<JobType>/jobNNN/ on a web server has its "
+                        "micrographs at <project>/<micrograph name>: one is downloaded, and kept, "
+                        "when you select a filament."
+                    ),
                     ui.layout_columns(
                         ui.input_numeric(
                             "wimc_rise",
@@ -228,6 +238,8 @@ def where_is_my_class_tab_server(input, output, session):
     # ── Reactive state (mirrors the original app.py) ──
     params = reactive.value(None)
     project_root_dir = reactive.value(None)
+    # the project of a star file given by url, whose micrographs can be downloaded
+    project_root_url = reactive.value(None)
     filepath_classes = reactive.value(None)
 
     data_all = reactive.value(None)
@@ -242,6 +254,8 @@ def where_is_my_class_tab_server(input, output, session):
     selected_image_labels = reactive.value([])
 
     displayed_micrograph_filename = reactive.value(None)
+    # its name in the star file (the file of a downloaded micrograph is named by its address)
+    displayed_micrograph_title = reactive.value("")
     displayed_micrograph_data = reactive.value(None)
     displayed_micrograph_apix_original = reactive.value(0)
     displayed_helix_ids = reactive.value([])
@@ -280,6 +294,7 @@ def where_is_my_class_tab_server(input, output, session):
             return
 
         project_root_dir.set(compute.get_project_root_dir(filepath))
+        project_root_url.set(None)
         filepath_classes.set(compute.get_class_file(filepath))
 
         try:
@@ -316,6 +331,10 @@ def where_is_my_class_tab_server(input, output, session):
         local_path = pathlib.Path(url)
         if local_path.exists():
             project_root_dir.set(compute.get_project_root_dir(url))
+            project_root_url.set(None)
+        else:
+            project_root_dir.set(None)
+            project_root_url.set(compute.get_project_root_url(url))
 
         try:
             df = compute.get_class2d_params_from_url(url)
@@ -564,33 +583,70 @@ def where_is_my_class_tab_server(input, output, session):
 
     # ── Micrograph display ──
     @reactive.effect
-    def get_selected_helices():
+    async def get_selected_helices():
         helices_selected = wimc_helices_dataframe.data_view(selected=True)
-        req(project_root_dir() is not None)
         req(len(helices_selected) > 0)
 
         helix = helices_selected.iloc[0]
-        micrograph = project_root_dir() / helix["rlnMicrographName"]
-        if not micrograph.exists():
-            m = ui.modal(
-                f"{str(micrograph)} is not available",
+        # what is read before the first wait: reactive values cannot be read after it
+        root = project_root_dir()
+        url_root = project_root_url()
+        download = input.wimc_download_micrographs()
+        name = helix["rlnMicrographName"]
+
+        displayed_helix_ids.set([int(helix["helixID"])])
+        displayed_helices_class_ids.set(
+            list(map(int, str(helix["classes"]).split(",")))
+        )
+
+        if root is not None:
+            micrograph = root / name
+            if not micrograph.exists():
+                _micrograph_not_available(str(micrograph))
+                return
+        elif url_root is not None and download:
+            address = compute.micrograph_url(url_root, name)
+            # (on a hosting service a visitor must not make the server fetch from its own network)
+            if address is None or not deployment.url_allowed(address):
+                _micrograph_not_available(str(name))
+                return
+            import asyncio
+
+            note = f"wimc_download_{abs(hash(address))}"
+            ui.notification_show(
+                f"Downloading {pathlib.PurePosixPath(str(name)).name} …",
+                id=note,
+                duration=None,
+                close_button=False,
+            )
+            try:
+                micrograph = await asyncio.to_thread(
+                    compute.download_micrograph, address
+                )
+            except Exception:
+                logger.warning("Could not download %s", address, exc_info=True)
+                _micrograph_not_available(address)
+                return
+            finally:
+                ui.notification_remove(note)
+        else:
+            return  # no micrographs to show: the classes of the filament are shown
+
+        displayed_micrograph_title.set(pathlib.PurePosixPath(str(name)).name)
+        displayed_micrograph_filename.set(micrograph)
+
+    def _micrograph_not_available(where):
+        ui.modal_show(
+            ui.modal(
+                f"{where} is not available",
                 title="ERROR: micrograph not available",
                 easy_close=True,
                 footer=None,
             )
-            ui.modal_show(m)
-            # Clear stale micrograph state so the old plot disappears.
-            displayed_micrograph_filename.set(None)
-            displayed_micrograph_data.set(None)
-            return
-
-        displayed_micrograph_filename.set(micrograph)
-
-        helix_ids = [int(helix["helixID"])]
-        classe_ids = list(map(int, str(helix["classes"]).split(",")))
-
-        displayed_helix_ids.set(helix_ids)
-        displayed_helices_class_ids.set(classe_ids)
+        )
+        # clear the state of the one before, so that its plot disappears
+        displayed_micrograph_filename.set(None)
+        displayed_micrograph_data.set(None)
 
     @reactive.effect
     @reactive.event(
@@ -619,7 +675,7 @@ def where_is_my_class_tab_server(input, output, session):
             ui.modal_show(
                 ui.modal(
                     f"Could not read the micrograph file "
-                    f"<b>{displayed_micrograph_filename().name}</b>.<br><br>"
+                    f"<b>{displayed_micrograph_title()}</b>.<br><br>"
                     f"<i>{e}</i>",
                     title="Micrograph read error",
                     easy_close=True,
@@ -637,7 +693,7 @@ def where_is_my_class_tab_server(input, output, session):
 
         fig = compute.plot_micrograph(
             micrograph=displayed_micrograph_data(),
-            title=f"{displayed_micrograph_filename().name}",
+            title=displayed_micrograph_title(),
             apix=input.wimc_target_apix(),
             plot_height=input.wimc_plot_height(),
         )
