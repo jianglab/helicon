@@ -80,11 +80,13 @@ class TestHasCurvelet:
     """Tests for has_curvelet_fdct."""
 
     def test_fdct_returns_true_when_installed(self):
+        pytest.importorskip("curvepy")
         import helicon
 
         assert helicon.has_curvelet_fdct() is True
 
     def test_public_api_fdct_available(self):
+        pytest.importorskip("curvepy")
         import helicon
 
         assert hasattr(helicon, "curvelet_denoise_fdct")
@@ -93,11 +95,13 @@ class TestHasCurvelet:
         assert callable(helicon.curvelet_denoise_batch_fdct)
 
     def test_udct_returns_true_when_installed(self):
+        pytest.importorskip("curvelets")
         import helicon
 
         assert helicon.has_curvelet_udct() is True
 
     def test_public_api_udct_available(self):
+        pytest.importorskip("curvelets")
         import helicon
 
         assert hasattr(helicon, "curvelet_denoise_udct")
@@ -516,8 +520,11 @@ class TestUDCTGPU:
         assert hasattr(helicon, "has_curvelet_udct_gpu")
 
     def test_gpu_available(self):
+        pytest.importorskip("curvelets")
         import helicon
 
+        if not helicon.has_curvelet_udct_gpu():
+            pytest.skip("no GPU backend for the curvelet transform here")
         assert helicon.has_curvelet_udct_gpu() is True
 
     def test_gpu_single_image(self):
@@ -831,6 +838,7 @@ class TestMCTDenoising:
         assert abs(result.mean() - 0.5) < 0.02
 
     def test_mct_imported_via_helicon(self):
+        pytest.importorskip("curvelets")
         import helicon
 
         assert hasattr(helicon, "curvelet_denoise_mct")

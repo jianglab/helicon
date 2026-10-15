@@ -498,6 +498,7 @@ class TestProc3dHandlers(object):
         assert index_d["denoiseCurvelet"] == 1
 
     def test_denoise_curvelet3d_mct_unknown_transform_errors(self):
+        pytest.importorskip("curvelets")
         from helicon.plugins.proc3d.denoiseCurvelet import handle
         from helicon.lib.exceptions import HeliconError
 

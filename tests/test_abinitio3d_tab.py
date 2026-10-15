@@ -11,8 +11,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from helicon.webApps.tabs import abinitio3d_tab, helical_pitch_tab
+from helicon.webApps.tabs import abinitio3d_tab, abinitio3d_ui, helical_pitch_tab
 from _source import contains, count, tab_source
+from _ui import page
+
+
+@pytest.fixture(scope="module")
+def ab_page():
+    """The page the tab draws: the tests below look at it, not at the code that makes it."""
+    return page(abinitio3d_ui.abinitio3d_tab_ui)
+
 
 TABS = Path(__file__).resolve().parents[1] / "src/helicon/webApps/tabs"
 
@@ -277,18 +285,21 @@ class TestRepeatSearchRange:
 
         return tab_source(abinitio3d_tab)
 
-    def test_the_input_sits_left_of_the_estimate_button(self):
-        src = self._src()
-        row = src[
-            src.index('class_="ab-pitch-row"')
-            - 3000 : src.index('class_="ab-pitch-row"')
-        ]
-        row = row[row.rindex("ui.div(") :]
-        assert row.index('"min_twist"') < row.index('"phase_run"')
-        assert re.search(r'"min_twist",.*?value=0\.3,', row, re.S)
-        params = src[src.index('"Parameters"') :]
-        params = params[: params.index('"3D map from classes"')]
-        assert '"min_twist"' not in params
+    def test_the_input_sits_left_of_the_estimate_button(self, ab_page):
+        assert ab_page.comes_before("min_twist", "phase_run")
+        row = ab_page.element("min_twist")
+        assert ab_page.element("phase_run") in {
+            n
+            for up in row.ancestors()
+            if "ab-pitch-row" in up.classes()
+            for n in up.walk()
+        }
+        assert ab_page.element("min_twist").attrs["value"] == "0.3"
+        # it is next to the estimate, not among the parameters
+        assert not any(
+            up.attrs.get("data-value") == "Parameters"
+            for up in ab_page.element("min_twist").ancestors()
+        )
         assert abinitio3d_tab.BOOKMARK_DEFAULTS["min_twist"] == ("min_twist", 0.3)
 
     def test_the_range_follows_rise_and_twist(self):
@@ -324,15 +335,14 @@ class TestRankedFits:
 
         return tab_source(abinitio3d_tab)
 
-    def test_it_sits_below_the_ring_right_of_the_histogram(self):
-        src = self._src()
-        ring = src.index('ui.output_ui("phase_circle_plot")')
-        hist = src.index('ui.output_ui("filament_pitch_plot")')
-        rank = src.index('ui.output_ui("class_fit_rank_plot")')
-        assert ring < hist < rank
+    def test_it_sits_below_the_ring_right_of_the_histogram(self, ab_page):
+        assert ab_page.comes_before(
+            "phase_circle_plot", "filament_pitch_plot", "class_fit_rank_plot"
+        )
         # the same two columns as the scan and the ring above
-        row = src[hist : rank + 2000]
-        assert "col_widths=(7, 5)" in row
+        assert ab_page.same_row("filament_pitch_plot", "class_fit_rank_plot")
+        assert ab_page.columns("filament_pitch_plot") == ("7,5", 0)
+        assert ab_page.columns("class_fit_rank_plot") == ("7,5", 1)
 
     def test_the_fallback_ranks_the_fits_best_first_sized_by_segments(self):
         src = self._src()
@@ -478,16 +488,13 @@ class TestTypesGrouping:
 
         return tab_source(abinitio3d_tab)
 
-    def test_the_card_sits_with_the_selection_and_the_suggestions(self):
-        src = self._src()
-        sug = src.index("id=_SUGGESTIONS_BOX")
-        card = src.index('ui.card_header("Types")')
-        assert sug < card
-        assert re.search(r'ui\.input_task_button\(\s*"types_run"', src)
+    def test_the_card_sits_with_the_selection_and_the_suggestions(self, ab_page):
+        card = ab_page.card_of(ab_page.heading("Types"))
+        assert ab_page.comes_before("ab_suggestions_box", "types_method", "types_run")
+        assert not ab_page.inside("ab_suggestions_box", card)
         # the button is to the right of the method selector, with a short label
-        card_src = src[card : src.index("types_group", card)]
-        assert card_src.index('"types_method"') < card_src.index('"types_run"')
-        assert 'label="Group filaments",' in card_src
+        assert ab_page.same_row("types_method", "types_run")
+        assert ab_page.element("types_run").text().startswith("Group filaments")
 
     def test_the_grouping_runs_in_the_background(self):
         src = self._src()
@@ -514,17 +521,13 @@ class TestTypesGrouping:
         assert d["types_n"][2] is abinitio3d_tab.bookmark.DERIVED
         assert "types_cut" not in d
 
-    def test_the_number_slider_is_part_of_the_card_not_of_what_needs_it(self):
+    def test_the_number_slider_is_part_of_the_card_not_of_what_needs_it(self, ab_page):
         # a slider drawn by the output that needs its value never gets drawn: the
         # groups wait for the number, and the number for the groups
+        card = ab_page.card_of(ab_page.heading("Types"))
+        assert ab_page.inside("types_n", card)
+        assert ab_page.comes_before("types_n", "types_controls")
         src = self._src()
-        card = src.index('ui.card_header("Types")')
-        slider = src.index('"types_n"', card)
-        controls = src.index('ui.output_ui("types_controls")', card)
-        assert slider < controls
-        assert contains(
-            src, 'helicon.shiny.slider(\n                            "types_n"'
-        )
         dynamic = src[src.index("def types_controls") : src.index("def _chosen_group")]
         assert "types_n" not in dynamic
 
@@ -779,16 +782,21 @@ class TestPixelAgreementThreshold:
             == "pixels disagree"
         )
 
-    def test_the_download_is_right_of_the_two_range_sliders(self):
-        src = self._src()
-        band = src.index('"pitch_band",')
-        length = src.index('"length_range",')
-        download = src.index('ui.output_ui("pitch_band_download")')
-        assert band < length < download
-        assert "col_widths=(7, 5)" in src[download : download + 200]
+    def test_the_download_is_right_of_the_two_range_sliders(self, ab_page):
+        assert ab_page.comes_before("pitch_band", "length_range", "pitch_band_download")
+        assert ab_page.columns("pitch_band_download") == ("7,5", 1)
+        assert ab_page.columns("pitch_band")[1] == 0
+        assert ab_page.columns("length_range")[1] == 0
 
-    def test_the_plots_column_is_the_wider_one(self):
-        assert "col_widths=(4, 8)" in self._src()
+    def test_the_plots_column_is_the_wider_one(self, ab_page):
+        # the controls in the left column, the plots in the wider right one
+        assert ab_page.columns("phase_circle_plot")[0] == "7,5"
+        widths = {
+            n.attrs.get("col-widths-sm")
+            for n in ab_page.root.walk()
+            if n.tag == "bslib-layout-columns"
+        }
+        assert "4,8" in widths
 
 
 class TestSuggestionsAndAgreement:
