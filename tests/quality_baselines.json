@@ -1,0 +1,20 @@
+{
+ "context.clean.ari": 1.0,
+ "context.noisy.ari": 0.8175,
+ "context.noisy.ll_per_segment": -2.1508,
+ "ring.joint.clean.period_error_pct": 0.7121,
+ "ring.joint.clean.phase_rms": 0.0009,
+ "ring.joint.mislabelled.period_error_pct": 1.1163,
+ "ring.joint.mislabelled.phase_rms": 0.004,
+ "ring.meta.clean.period_error_pct": 0.064,
+ "ring.meta.clean.phase_rms": 0.0013,
+ "ring.meta.mislabelled.period_error_pct": 0.4665,
+ "ring.meta.mislabelled.phase_rms": 0.012,
+ "ring.pixel.clean.period_error_pct": 2.3303,
+ "ring.pixel.clean.phase_rms": 0.0022,
+ "ring.pixel.mislabelled.period_error_pct": 2.0834,
+ "ring.pixel.mislabelled.phase_rms": 0.0028,
+ "types.one_type.gain": 0.0013,
+ "types.two_types.accuracy": 1.0,
+ "types.two_types.found_ratio_error": 0.0001
+}

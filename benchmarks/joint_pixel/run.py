@@ -117,7 +117,7 @@ def one(
                 alpha_basin=0.25 if alpha.endswith("25") else 0.0,
             )
             est["period"] = ph.calibrate_period(pairs, est["period"])["period"]
-        elif alpha.startswith("adapt2"):
+        elif isinstance(alpha, str) and alpha.startswith("adapt2"):
             short = {"adapt2": None, "adapt2_a75": 0.75, "adapt2_a90": 0.9}[alpha]
             est = px.estimate_period_adaptive(
                 pairs, offsets, similarity, alpha_short=short
