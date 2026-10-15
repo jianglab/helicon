@@ -79,8 +79,8 @@ class TestImages2starBeamShiftLabel(object):
         from helicon.plugins.images2star.assignopticgroupbybeamshiftlabel import handle
 
         micros = [
-            "250123_SF0431_01129_1-7.eer",
-            "250123_SF0431_01130_1-7.eer",
+            "250123_SF0000_01129_1-7.eer",
+            "250123_SF0000_01130_1-7.eer",
         ]
         data = _make_dataframe(micros, optics_groups=1)
 

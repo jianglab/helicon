@@ -457,28 +457,28 @@ class TestIo(object):
         # CS path with hash + _patch_aligned_doseweighted
         assert (
             io.clean_cs_micrograph_path(
-                "J298/motioncorrected/004163012191649015490_250123_SF0431_00004_1-4_patch_aligned_doseweighted.mrc"
+                "J298/motioncorrected/004163012191649015490_250123_SF0000_00004_1-4_patch_aligned_doseweighted.mrc"
             )
-            == "250123_SF0431_00004_1-4.mrc"
+            == "250123_SF0000_00004_1-4.mrc"
         )
         # Absolute path
         assert (
             io.clean_cs_micrograph_path(
-                "/net/scratch/CS-apoferritin/J298/motioncorrected/004163012191649015490_250123_SF0431_00004_1-4_patch_aligned_doseweighted.mrc"
+                "/data/P1/J298/motioncorrected/004163012191649015490_250123_SF0000_00004_1-4_patch_aligned_doseweighted.mrc"
             )
-            == "250123_SF0431_00004_1-4.mrc"
+            == "250123_SF0000_00004_1-4.mrc"
         )
         # Only _patch_aligned_doseweighted (no hash)
         assert (
             io.clean_cs_micrograph_path(
-                "250123_SF0431_00004_1-4_patch_aligned_doseweighted.mrc"
+                "250123_SF0000_00004_1-4_patch_aligned_doseweighted.mrc"
             )
-            == "250123_SF0431_00004_1-4.mrc"
+            == "250123_SF0000_00004_1-4.mrc"
         )
         # Already clean (no hash, no _patch_aligned_doseweighted)
         assert (
-            io.clean_cs_micrograph_path("250123_SF0431_00004_1-4.mrc")
-            == "250123_SF0431_00004_1-4.mrc"
+            io.clean_cs_micrograph_path("250123_SF0000_00004_1-4.mrc")
+            == "250123_SF0000_00004_1-4.mrc"
         )
 
 

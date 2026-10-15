@@ -4,3 +4,18 @@ repos:
     hooks:
       - id: black
         language_version: python3
+  - repo: local
+    hooks:
+      # What identifies private data, by its shape: no set-up (tools/check_private_names.py)
+      - id: private-names
+        name: what identifies private data
+        entry: python tools/check_private_names.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: private-names-message
+        name: what identifies private data, in the message
+        entry: python tools/check_private_names.py --message
+        language: system
+        stages: [commit-msg]

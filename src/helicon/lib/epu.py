@@ -39,7 +39,7 @@ def movie_filename_patterns() -> dict[str, str]:
         EPU=r"FoilHole_\d{7,8}_Data_\d{7,8}_(?P<beamshift>\d{1,3})_(?P<timestamp>\d{8}_\d{6})_",
         # e.g. SAVED4M-DNA3_39-103_001_X+0Y+0-1.tif
         serialEM_pncc=r"_(?P<serial_number>\d{3})_(?P<beamshift>[XY][\+-]\d[XY][\+-]\d-\d)",
-        # e.g. 250123_SF0431_01129_1-7.eer
+        # e.g. 250123_SF0000_01129_1-7.eer
         serialEM_embl_heidelberg=r"\d{6}_.{6}_(?P<serial_number>\d{5})_\d-(?P<beamshift>\d{1,2})[_\.]",
         # e.g. k2_1219_cva6X_00087.tif
         serialEM_cuhksz=r"_(?P<serial_number>\d{5})[_\.]",

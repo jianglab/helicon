@@ -318,11 +318,11 @@ class TestExtractionSettings:
         )
 
     def test_a_job_of_other_particles_gives_relions_defaults(self, tmp_path):
-        s = relion.extraction_settings(tmp_path, "1@Polish/job225/x_shiny.mrcs")
+        s = relion.extraction_settings(tmp_path, "1@Polish/job025/x_shiny.mrcs")
         assert s["invert"] and s["norm"] and s["helical_diameter"] is None
 
     def test_a_missing_job_gives_the_defaults_too(self, tmp_path):
-        s = relion.extraction_settings(tmp_path, "1@Extract/job999/x.mrcs")
+        s = relion.extraction_settings(tmp_path, "1@Extract/job099/x.mrcs")
         assert s["invert"] and s["norm"]
 
     def test_no_tube_without_helical_extraction(self, tmp_path):

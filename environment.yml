@@ -1,0 +1,13 @@
+# A development environment:  conda env create -f environment.yml && conda activate helicon
+name: helicon
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  - pip:
+      - -e ".[all,test]"
+      - pytest-xdist
+      - black==24.8.0
+      - ruff
+      - pre-commit

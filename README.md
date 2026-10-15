@@ -133,11 +133,18 @@ If Helicon is useful in your work, please cite:
 ```sh
 git clone https://github.com/jianglab/helicon.git
 cd helicon
-pip install -e ".[all,test]" pytest-xdist
+conda env create -f environment.yml && conda activate helicon   # or: pip install -e ".[all,test]" pytest-xdist
 pytest -n auto -m "not slow and not browser"   # the everyday run, a few minutes
 pytest -n auto                                 # everything (browser tests need `playwright install chromium`)
-pre-commit install                             # Black on every commit
+pre-commit install --hook-type pre-commit --hook-type commit-msg   # Black, and the names of private data
 ```
+
+Keep what identifies private or unpublished data out of the history (once pushed, it stays):
+home and cluster folders, RELION job folders with a three-digit job number, CryoSPARC project and
+job numbers, and your own user name and host name. The hooks, CI, and `python tools/check_private_names.py
+--range origin/main..HEAD` refuse such a message, path or added line; nothing to set up. A line
+about EMPIAR, or one that ends in `private-ok`, is skipped. Names that no rule can know can go,
+one a line, in `~/.config/helicon/private_names.txt` (outside the repository; optional).
 
 The tests that take 8 s or more are marked `slow` (the list is `tests/slow_tests.txt`,
 made by `tests/update_slow_tests.py`), and those that drive a web page are marked

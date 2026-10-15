@@ -18,20 +18,41 @@ env:
   QT_QPA_PLATFORM: offscreen
   MPLBACKEND: Agg
   PYTHONUNBUFFERED: "1"
+  # numba compiles the numerical code on first use, and each test process does it again
+  # without a cache; the cache is kept between runs (below), keyed by the code it was made from
+  NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the commits of the push are looked at, below
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       # the version of .pre-commit-config.yaml
       - run: pip install "black==24.8.0" ruff
-      - run: black --check src tests
+      - run: black --check src tests tools
       # the checks that find real mistakes (pyproject.toml, [tool.ruff.lint])
-      - run: ruff check src tests
+      - run: ruff check src tests tools
+      # what identifies private data (home and cluster folders, job numbers, ...) in the commits
+      # of this push or pull request: messages, paths and added lines (tools/check_private_names.py)
+      - name: no private data in the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          range=""
+          if [ "$EVENT" = pull_request ]; then
+            range="origin/$BASE_REF..$HEAD_SHA"
+          elif [ "$EVENT" = push ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="$BEFORE..$HEAD_SHA"
+          fi
+          if [ -n "$range" ]; then python tools/check_private_names.py --range "$range"; else echo "no range to check"; fi
 
   fast:
     runs-on: ubuntu-latest
@@ -48,6 +69,11 @@ jobs:
       - run: >
           sudo apt-get update && sudo apt-get install -y --no-install-recommends
           libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
+      - uses: actions/cache@v4
+        with:
+          path: .numba_cache
+          key: numba-${{ runner.os }}-${{ hashFiles('src/**/*.py') }}
+          restore-keys: numba-${{ runner.os }}-
       - run: pip install -e ".[test,gui,shiny]" pytest-xdist
       - run: pytest tests -n auto -m "not slow and not browser" -p no:cacheprovider --durations=15
 
@@ -90,6 +116,11 @@ jobs:
       - run: >
           sudo apt-get update && sudo apt-get install -y --no-install-recommends
           libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0
+      - uses: actions/cache@v4
+        with:
+          path: .numba_cache
+          key: numba-${{ runner.os }}-${{ hashFiles('src/**/*.py') }}
+          restore-keys: numba-${{ runner.os }}-
       - run: pip install -e ".[test,gui,shiny,gauss]" pytest-xdist
       - run: playwright install --with-deps chromium
       - run: pytest tests -n auto -p no:cacheprovider --durations=30

@@ -37,3 +37,4 @@ tests/output/
 .claude/
 output/
 /src/helicon/_version.py
+.numba_cache/

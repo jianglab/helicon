@@ -81,7 +81,7 @@ class TestExtractTimestamps(object):
         assert result[micrographs[0]] != result[micrographs[1]]
 
     def test_serialEM_serial_number_fallback(self):
-        micrographs = ["250123_SF0431_00592_1-14_patch_aligned_doseweighted.mrc"]
+        micrographs = ["250123_SF0000_00592_1-14_patch_aligned_doseweighted.mrc"]
         result = extract_timestamps(micrographs, "serialEM_embl_heidelberg")
         # No timestamp group in this pattern, falls back to serial_number=00592
         assert abs(result[micrographs[0]] - 592.0) < 1e-7
@@ -105,7 +105,7 @@ class TestExtractTimestamps(object):
 
     def test_path_with_directory(self):
         micrographs = [
-            "/path/to/J298/motioncorrected/010002802325146112512_250123_SF0431_00592_1-14_patch_aligned_doseweighted.mrc"
+            "/path/to/J298/motioncorrected/010002802325146112512_250123_SF0000_00592_1-14_patch_aligned_doseweighted.mrc"
         ]
         result = extract_timestamps(micrographs, "serialEM_embl_heidelberg")
         # serial_number=00592 extracted from basename
