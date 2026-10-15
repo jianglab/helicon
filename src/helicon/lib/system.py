@@ -139,19 +139,19 @@ def has_shiny() -> bool:
 
 
 def has_streamlit() -> bool:
-    """Check whether streamlit is available.
+    """Check whether streamlit is installed.
+
+    Looks it up without importing it: importing streamlit took 2.5 s (and pulled in
+    plotly) on every ``helicon --help``.
 
     Returns
     -------
     bool
-        True if streamlit can be imported, False otherwise.
+        True if streamlit is installed, False otherwise.
     """
-    try:
-        import streamlit
+    from importlib.util import find_spec
 
-        return True
-    except ImportError:
-        return False
+    return find_spec("streamlit") is not None
 
 
 def has_napari() -> bool:
