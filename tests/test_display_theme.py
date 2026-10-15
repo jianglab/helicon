@@ -88,10 +88,14 @@ class TestNapariTheme:
         assert str(t.background).lower() == colors["window"]
 
     def test_it_falls_back_to_the_napari_theme_where_registering_fails(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         pytest.importorskip("napari")
+        import napari.resources._icons as icons
         import napari.utils.theme as napari_theme
+
+        # no icons written by an earlier run
+        monkeypatch.setattr(icons, "_theme_path", lambda name: tmp_path / name)
 
         def boom(*a, **k):
             raise RuntimeError("no")
@@ -100,3 +104,62 @@ class TestNapariTheme:
         monkeypatch.setattr(napari_theme, "available_themes", lambda: [])
         use_theme(monkeypatch, "Dark")
         assert theme._napari_viewer_theme() == "dark"
+
+
+class TestNapariThemeIcons:
+    """The icon files of a napari theme are written once, not on every start."""
+
+    @pytest.fixture
+    def folder(self, monkeypatch, tmp_path):
+        pytest.importorskip("napari")
+        import napari.resources._icons as icons
+        import napari.utils.theme as napari_theme
+
+        monkeypatch.setattr(icons, "_theme_path", lambda name: tmp_path / name)
+        yield tmp_path
+        napari_theme._themes.pop("helicon-test", None)
+
+    def _colours(self):
+        from napari.utils.theme import get_theme
+
+        base = get_theme("dark").model_dump()
+        base.update(id="helicon-test", label="Helicon test")
+        return base
+
+    def test_the_second_start_does_not_write_the_icons_again(self, folder, monkeypatch):
+        import napari.utils.theme as napari_theme
+
+        base = self._colours()
+        theme._register_napari_theme("helicon-test", base)
+        assert any((folder / "helicon-test").glob("*.svg"))
+        napari_theme._themes.pop("helicon-test")
+
+        def not_again(*a, **k):
+            raise AssertionError("the icons were written again")
+
+        monkeypatch.setattr(napari_theme, "register_theme", not_again)
+        theme._register_napari_theme("helicon-test", base)
+        assert "helicon-test" in napari_theme.available_themes()
+
+    def test_other_colours_write_the_icons_again(self, folder, monkeypatch):
+        import napari.utils.theme as napari_theme
+
+        base = self._colours()
+        theme._register_napari_theme("helicon-test", base)
+        written = []
+        real = napari_theme.register_theme
+        monkeypatch.setattr(
+            napari_theme, "register_theme", lambda *a: written.append(a) or real(*a)
+        )
+        theme._register_napari_theme("helicon-test", dict(base, icon="#123456"))
+        assert len(written) == 1
+        assert str(napari_theme.get_theme("helicon-test").icon).lower() == "#123456"
+
+    def test_missing_icon_files_are_written_again(self, folder, monkeypatch):
+
+        base = self._colours()
+        theme._register_napari_theme("helicon-test", base)
+        for svg in (folder / "helicon-test").glob("*.svg"):
+            svg.unlink()
+        theme._register_napari_theme("helicon-test", base)
+        assert any((folder / "helicon-test").glob("*.svg"))

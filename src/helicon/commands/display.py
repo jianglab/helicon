@@ -1229,18 +1229,30 @@ def _run_standalone() -> None:
     inside an already-running viewer's event loop (fine on macOS, fatal
     under WSLg Wayland).
 
-    Expects ``sys.argv[1]`` = file path and optional ``sys.argv[2]`` = mode.
+    Expects ``sys.argv[1]`` = file path and optional ``sys.argv[2]`` = mode. With
+    ``--wait`` as ``sys.argv[1]`` it is a spare (see ``lib/gui/spare_viewer.py``): it
+    imports napari first and takes the file and the mode from its standard input.
     """
     _prepare_process_identity()
     _force_x11_platform_under_wslg()
     from PySide6.QtWidgets import QApplication
 
+    from helicon.lib.gui import spare_viewer
+
+    waiting = len(sys.argv) > 1 and sys.argv[1] == spare_viewer.WAIT_FLAG
+    if waiting:
+        _import_napari_modules()
+        job = spare_viewer.read_job(sys.stdin)
+        if job is None:  # the file browser ended before it needed this window
+            return
+        path, mode = job
+    else:
+        path = sys.argv[1]
+        mode = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+
     app = QApplication.instance() or QApplication(_qt_argv())
     _set_application_identity(app)
     napari = _load_napari()
-
-    path = sys.argv[1]
-    mode = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 
     viewer = _create_napari_viewer(title=f"Helicon - {Path(path).name}")
     _install_panel_toggle(viewer)
@@ -1251,23 +1263,32 @@ def _run_standalone() -> None:
     napari.run()
 
 
+def _import_napari_modules() -> None:
+    """Import the napari modules a viewer needs; a failure is left to the first display."""
+    try:
+        import napari  # noqa: F401
+        import napari.layers  # noqa: F401
+        import napari.utils.theme  # noqa: F401
+        import napari.viewer  # noqa: F401
+        import napari._qt.qt_main_window  # noqa: F401
+        import napari._qt.qt_viewer  # noqa: F401
+    except Exception:
+        pass
+
+
 def _warm_up_napari() -> "threading.Thread":
     """Import napari (the part that takes seconds) in a thread, ahead of the first display.
 
-    Only importing: no Qt object is made in the thread. If it fails, the first display
-    imports napari itself, as before.
+    Imports the layers, the theme and the Qt window and canvas modules that a viewer
+    needs, and the icon patch, which is where the first viewer used to wait. Only
+    importing: no Qt object is made in the thread. If it fails, the first display
+    imports what is missing itself, as before.
     """
     import threading
 
-    def work() -> None:
-        try:
-            import napari  # noqa: F401
-            import napari.layers  # noqa: F401
-            import napari.utils.theme  # noqa: F401
-        except Exception:
-            pass
-
-    thread = threading.Thread(target=work, name="helicon-napari-warmup", daemon=True)
+    thread = threading.Thread(
+        target=_import_napari_modules, name="helicon-napari-warmup", daemon=True
+    )
     thread.start()
     return thread
 
@@ -1388,20 +1409,13 @@ def main(args: argparse.Namespace) -> None:
                 print(f"[helicon] failed to display {path}: {exc}")
             return
 
-        import subprocess
+        from helicon.lib.gui import spare_viewer
 
         try:
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    "-c",
-                    "from helicon.commands.display import _run_standalone; "
-                    "_run_standalone()",
-                    path,
-                    mode or "",
-                ],
-                start_new_session=True,
-            )
+            spare_viewer.open_in_new_process(path, mode)
+            # the next window finds a process that has already imported napari; it starts
+            # once this window is up, so that the two do not compete for the processor
+            QTimer.singleShot(10_000, spare_viewer.start_spare)
         except Exception as exc:  # pragma: no cover - environment dependent
             print(f"[helicon] failed to open new display window: {exc}")
 

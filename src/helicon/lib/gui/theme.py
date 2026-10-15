@@ -179,6 +179,43 @@ def _napari_display_theme() -> str:
     return {"Dark": "dark", "Light": "light", "System": "system"}[theme]
 
 
+def _register_napari_theme(theme_id: str, base: dict) -> None:
+    """Register a napari theme, writing its icon files only when they are out of date.
+
+    ``napari.utils.theme.register_theme`` writes about 160 coloured SVG icons into napari's
+    cache folder every time, about a second on a network disk, although the files only
+    depend on the colours. A stamp of the colours, kept next to the icons, tells that they
+    are already there; any doubt (no stamp, other colours, a napari without these
+    internals) goes the long way.
+    """
+    import hashlib
+    import json
+
+    from napari.utils import theme as napari_theme
+
+    stamp = None
+    try:
+        from napari import __version__ as napari_version
+        from napari.resources._icons import _theme_path
+
+        folder = _theme_path(theme_id)
+        key = json.dumps([napari_version, base], sort_keys=True, default=str)
+        stamp = (folder, hashlib.sha1(key.encode()).hexdigest())
+        if (folder / ".helicon_stamp").read_text() == stamp[1] and any(
+            folder.glob("*.svg")
+        ):
+            napari_theme._themes[theme_id] = napari_theme.Theme(**base)
+            return
+    except Exception:
+        pass
+    napari_theme.register_theme(theme_id, base, "helicon")
+    if stamp is not None:
+        try:
+            (stamp[0] / ".helicon_stamp").write_text(stamp[1])
+        except OSError:
+            pass
+
+
 def _napari_viewer_theme() -> str:
     """The napari theme for a viewer: Helicon's own, in the colours of the browser.
 
@@ -189,7 +226,7 @@ def _napari_viewer_theme() -> str:
     """
     try:
         from helicon.lib.gui.browser_style import _THEME_COLORS, _resolved_theme
-        from napari.utils.theme import available_themes, get_theme, register_theme
+        from napari.utils.theme import available_themes, get_theme
 
         resolved = _resolved_theme(_get_display_theme())
         theme_id = f"helicon-{resolved.lower()}"
@@ -208,7 +245,7 @@ def _napari_viewer_theme() -> str:
                 icon=c["text"],
                 current=c["accent"],
             )
-            register_theme(theme_id, base, "helicon")
+            _register_napari_theme(theme_id, base)
         return theme_id
     except Exception:
         return _napari_display_theme()

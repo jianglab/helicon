@@ -21,10 +21,47 @@ from .theme import (
 from .trackers import _napari
 
 
+def _cache_gettext_lookups() -> None:
+    """Remember where ``gettext`` found (or did not find) a language file.
+
+    napari looks up every text of its window, a few hundred, with ``gettext.find``, which
+    asks the file system about the same language files each time: seconds when the Python
+    environment is on a network disk. The answers do not change while the program runs, so
+    the answer of the first ask is kept (it depends on the language variables of the
+    environment, which are part of the key).
+    """
+    import gettext
+    import os
+
+    if getattr(gettext, "_helicon_cached", False):
+        return
+    original = gettext.find
+    answers: dict = {}
+
+    def find(domain, localedir=None, languages=None, all=False):
+        key = (
+            domain,
+            str(localedir),
+            tuple(languages) if languages else None,
+            all,
+            tuple(
+                os.environ.get(v) for v in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG")
+            ),
+        )
+        if key not in answers:
+            answers[key] = original(domain, localedir, languages, all)
+        found = answers[key]
+        return list(found) if isinstance(found, list) else found
+
+    gettext.find = find
+    gettext._helicon_cached = True
+
+
 def _load_napari():
     """Import napari only when a napari-backed display is requested."""
     import napari
 
+    _cache_gettext_lookups()
     _patch_napari_value_bug()
     _patch_napari_icon()
     return napari

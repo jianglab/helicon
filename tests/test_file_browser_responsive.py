@@ -285,3 +285,59 @@ class TestWarmUp:
         thread.join(30)
         assert seen.get("thread") is thread
         assert thread.daemon
+
+
+class TestGettextLookups:
+    """napari asks gettext about the same language files hundreds of times."""
+
+    def test_the_file_system_is_asked_once_per_question(self, monkeypatch):
+        import gettext
+
+        from helicon.lib.gui import viewer
+
+        asked = []
+
+        def find(domain, localedir=None, languages=None, all=False):
+            asked.append((domain, localedir, languages, all))
+            return ["a.mo", "b.mo"] if all else None
+
+        monkeypatch.setattr(gettext, "find", find)
+        monkeypatch.delattr(gettext, "_helicon_cached", raising=False)
+        viewer._cache_gettext_lookups()
+        for _ in range(3):
+            assert gettext.find("napari", "/loc", ["de"]) is None
+        assert len(asked) == 1
+        assert gettext.find("napari", "/loc", ["de"], True) == ["a.mo", "b.mo"]
+        assert len(asked) == 2  # all=True is another question
+        assert gettext.find("napari", "/loc", ["fr"]) is None
+        assert len(asked) == 3
+        monkeypatch.delattr(gettext, "_helicon_cached")
+
+    def test_the_language_of_the_environment_is_part_of_the_question(self, monkeypatch):
+        import gettext
+
+        from helicon.lib.gui import viewer
+
+        asked = []
+        monkeypatch.setattr(gettext, "find", lambda *a, **k: asked.append(a) or "x.mo")
+        monkeypatch.delattr(gettext, "_helicon_cached", raising=False)
+        viewer._cache_gettext_lookups()
+        monkeypatch.setenv("LANGUAGE", "de")
+        gettext.find("napari", "/loc")
+        monkeypatch.setenv("LANGUAGE", "fr")
+        gettext.find("napari", "/loc")
+        assert len(asked) == 2
+        monkeypatch.delattr(gettext, "_helicon_cached")
+
+    def test_it_is_installed_once(self, monkeypatch):
+        import gettext
+
+        from helicon.lib.gui import viewer
+
+        monkeypatch.setattr(gettext, "find", gettext.find)
+        monkeypatch.delattr(gettext, "_helicon_cached", raising=False)
+        viewer._cache_gettext_lookups()
+        installed = gettext.find
+        viewer._cache_gettext_lookups()
+        assert gettext.find is installed
+        monkeypatch.delattr(gettext, "_helicon_cached")
