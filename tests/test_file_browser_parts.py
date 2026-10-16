@@ -148,7 +148,7 @@ class TestCryosparcProjects:
     def test_jobs_are_listed_newest_first_with_their_titles(self, cs_project):
         found = bp.find_project(cs_project)
         jobs = bp.project_jobs(found, "class_2D_new")
-        assert [(name, status, label) for name, status, label, _ in jobs] == [
+        assert [(name, status, label) for name, status, label, _, _alias in jobs] == [
             ("J12", "failure", "J12"),
             ("J7", "success", "J7  first look"),
         ]

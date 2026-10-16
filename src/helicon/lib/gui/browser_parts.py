@@ -414,22 +414,37 @@ def project_types(project: Project) -> list[tuple[str, str, str]]:
 
 
 def project_jobs(project: Project, key: str) -> list[tuple[str, str, str, str]]:
-    """The jobs of a type: ``[(folder name, status, label, tooltip), ...]``, newest first.
+    """The jobs of a type: ``[(folder name, status, label, tooltip, alias), ...]``, newest first.
 
-    The label of a CryoSPARC job is its number and title (``J45  my classes``).
+    The label of a CryoSPARC job is its number and title (``J45  my classes``); that of a RELION job
+    that has an alias is the job and the alias (``job010(my_alias)``).
     """
     if project.kind == "relion":
-        return [
-            (name, status, name, f"{project.root / key / name}  ({status})")
-            for name, status in list_jobs(project.root, key)
-        ]
+        from .job_alias import aliases
+
+        by_job = aliases(project.root / key)
+        out = []
+        for name, status in list_jobs(project.root, key):
+            alias = by_job.get(name, [""])[0]
+            label = f"{name}({alias})" if alias else name
+            tip = f"{project.root / key / name}  ({status})"
+            out.append(
+                (
+                    name,
+                    status,
+                    label,
+                    tip + (f"\nalias {alias}" if alias else ""),
+                    alias,
+                )
+            )
+        return out
     out = []
     for number, name, job in sorted(
         _cryosparc_jobs(project.root).get(key, []), reverse=True
     ):
         label = f"{name}  {job['title']}" if job["title"] else name
         raw = f" ({job['raw_status']})" if job["raw_status"] else ""
-        out.append((name, job["status"], label, f"{project.root / name}{raw}"))
+        out.append((name, job["status"], label, f"{project.root / name}{raw}", ""))
     return out
 
 
@@ -1205,14 +1220,23 @@ class PlacesSidebar(QTreeWidget):
         A place was clicked; the value is its folder.
     bookmark_removed(str)
         Remove was chosen from the menu of a bookmark.
+    bookmark_renamed(str, str)
+        Rename was chosen from the menu of a bookmark: its folder and the new name ("" for the
+        name of the folder).
+    alias_requested(str, str)
+        An alias was set, edited or removed from the menu of a RELION job: its folder and the new
+        alias ("" to remove it).
     """
 
     navigate = Signal(str)
     bookmark_removed = Signal(str)
+    bookmark_renamed = Signal(str, str)
+    alias_requested = Signal(str, str)
 
     _ROLE_PATH = Qt.ItemDataRole.UserRole
     _ROLE_KIND = Qt.ItemDataRole.UserRole + 1
     _ROLE_TYPE = Qt.ItemDataRole.UserRole + 2
+    _ROLE_ALIAS = Qt.ItemDataRole.UserRole + 3
     _STATUS_COLORS = {
         "success": "#4caf50",
         "failure": "#e5534b",
@@ -1252,6 +1276,7 @@ class PlacesSidebar(QTreeWidget):
         self._seen: dict[tuple[str, str], tuple[list, dict]] = {}
         self._scan_serial = 0
         self._project_node: QTreeWidgetItem | None = None
+        self._bookmark_names: dict[str, str] = {}
 
     def set_theme(self, colors: dict[str, str]) -> None:
         self._colors = colors
@@ -1264,7 +1289,12 @@ class PlacesSidebar(QTreeWidget):
         self._signature = None
 
     def refresh(
-        self, current: str, bookmarks=(), recent=(), home: str | None = None
+        self,
+        current: str,
+        bookmarks=(),
+        recent=(),
+        home: str | None = None,
+        bookmark_names: dict | None = None,
     ) -> None:
         """Fill the sidebar for the folder ``current``, and mark it if it is a place."""
         home = home or str(Path.home())
@@ -1293,10 +1323,12 @@ class PlacesSidebar(QTreeWidget):
             tuple(recent),
             home,
             self._colors.get("folder"),
+            tuple(sorted((bookmark_names or {}).items())),
         )
         if signature != self._signature:
             self._signature = signature
             self._project = project
+            self._bookmark_names = dict(bookmark_names or {})
             self._rebuild(project, bookmarks, recent, home)
         elif newly is not None:
             self._expand_type(newly)  # in place: the rest of the tree stays as it is
@@ -1387,8 +1419,11 @@ class PlacesSidebar(QTreeWidget):
         if marked:
             marks = self._section("Bookmarks")
             for path in marked:
-                item = self._place(
-                    marks, Path(path).name or path, path, "fa5s.star", "#e0a93b"
+                label = self._bookmark_names.get(path) or Path(path).name or path
+                item = self._place(marks, label, path, "fa5s.star", "#e0a93b")
+                item.setToolTip(
+                    0,
+                    path if label == (Path(path).name or path) else f"{label}\n{path}",
                 )
                 item.setData(0, self._ROLE_KIND, "bookmark")
         if recent:
@@ -1524,8 +1559,9 @@ class PlacesSidebar(QTreeWidget):
         """List the jobs ``[(folder name, status, label, tooltip), ...]`` under a type."""
         while type_item.childCount():
             type_item.takeChild(0)
-        for name, status, label, tooltip in jobs:
+        for name, status, label, tooltip, alias in jobs:
             job = QTreeWidgetItem(type_item, [label])
+            job.setData(0, self._ROLE_ALIAS, alias)
             job.setData(
                 0,
                 self._ROLE_PATH,
@@ -1587,14 +1623,56 @@ class PlacesSidebar(QTreeWidget):
         if path:
             self.navigate.emit(str(path))
 
+    def _run_menu(self, menu: QMenu, pos):
+        """Show a menu at a place of the sidebar; the action that was chosen, or None."""
+        return menu.exec(self.viewport().mapToGlobal(pos))
+
     def _menu(self, pos) -> None:
         item = self.itemAt(pos)
-        if item is None or item.data(0, self._ROLE_KIND) != "bookmark":
+        if item is None:
             return
+        kind = item.data(0, self._ROLE_KIND)
+        path = str(item.data(0, self._ROLE_PATH))
         menu = QMenu(self)
-        action = menu.addAction("Remove bookmark")
-        if menu.exec(self.viewport().mapToGlobal(pos)) is action:
-            self.bookmark_removed.emit(str(item.data(0, self._ROLE_PATH)))
+        if kind == "bookmark":
+            rename = menu.addAction("Rename bookmark…")
+            remove = menu.addAction("Remove bookmark")
+            chosen = self._run_menu(menu, pos)
+            if chosen is remove:
+                self.bookmark_removed.emit(path)
+            elif chosen is rename:
+                self._rename_bookmark(item, path)
+        elif (
+            kind == "job"
+            and self._project is not None
+            and self._project.kind == "relion"
+        ):
+            alias = item.data(0, self._ROLE_ALIAS) or ""
+            edit = menu.addAction("Edit alias…" if alias else "Add alias…")
+            remove = menu.addAction("Remove alias") if alias else None
+            chosen = self._run_menu(menu, pos)
+            if chosen is edit:
+                from PySide6.QtWidgets import QInputDialog
+
+                text, ok = QInputDialog.getText(
+                    self, "Alias of the job", f"Alias of {Path(path).name}:", text=alias
+                )
+                if ok and text.strip() != alias:
+                    self.alias_requested.emit(path, text.strip())
+            elif remove is not None and chosen is remove:
+                self.alias_requested.emit(path, "")
+
+    def _rename_bookmark(self, item: QTreeWidgetItem, path: str) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        text, ok = QInputDialog.getText(
+            self,
+            "Rename bookmark",
+            f"Name of the bookmark of {path} (empty for the name of the folder):",
+            text=item.text(0),
+        )
+        if ok:
+            self.bookmark_renamed.emit(path, text.strip())
 
 
 def _pixmap_of(array, width: int) -> QPixmap:

@@ -24,6 +24,10 @@ helicon display <folder>    # browse a folder
 - **The sidebar** has *Places*, the *Bookmarks* you keep (menu *Bookmarks*), and the folders you opened
   last (*Recent*). In a **RELION or CryoSPARC project** it also shows the project: *Project folder*, and
   below it the job types and their jobs, so that you can move between jobs with a click.
+  A **bookmark** is called by the name of its folder; to give it a name of your own, right-click it in
+  the sidebar (*Rename bookmark…*), or use *Bookmarks* → *Manage Bookmarks…* → *Rename…* (a double click
+  on an entry does the same). The folder is still the tooltip, and what the *Bookmarks* menu shows after the
+  name; an empty name gives back the name of the folder.
 - **The preview** on the right shows what the selected file holds: a picture for an image, a stack or a
   map, the table for a star file, the text for a text file, with its size, pixel size and other facts.
 - **The action bar** at the bottom has a button for each way to open the selected file. Which buttons
@@ -105,6 +109,14 @@ its files (the files are in the list of the window), and has what is needed to m
 
 The graph of a large project is read and drawn in the background, so the window keeps answering; the
 labels are left out when you zoom out too far to read them.
+
+A RELION job can have an **alias**, a name of your own for it. RELION makes it a link to the job in the
+folder of the job type (`Class2D/thin_filaments` for `Class2D/job010`) and a line in
+`default_pipeline.star`. The sidebar and the list show the job and its alias in one row, `job010(thin_filaments)`,
+and not as two. To add, edit or remove one, right-click the job in the sidebar (*Add alias…*, *Edit alias…*,
+*Remove alias*); both the link and the pipeline are changed, as RELION does. An alias cannot have spaces or
+slashes, cannot look like a job name, and cannot be one that is in use; a project that RELION is writing
+at that moment is left alone, and you can try again.
 
 ## Open a file
 

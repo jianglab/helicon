@@ -86,9 +86,50 @@ def _is_wsl():
         return False
 
 
+def _restore_dock_geometry_now(dock) -> bool:
+    """Put the browser window where it was, before it is shown, so that it appears once in its
+    place, not first small at the default place and then moved and resized.
+
+    Returns
+    -------
+    bool
+        True if a saved geometry was applied (then :func:`_restore_geometry` has nothing to do
+        for a window without a viewer).
+    """
+    saved = _get_qsettings().value("dock_ba")
+    if saved is None:
+        return False
+    try:
+        applied = bool(dock.restoreGeometry(saved))
+    except (AttributeError, TypeError):
+        return False
+    dock.setProperty("geometry_restored", applied)
+    return applied
+
+
+def _place_dock_by_default(dock, width: int = 1280, height: int = 760) -> None:
+    """Give the browser window a size and a place (the middle of the screen) before it is shown,
+    when there is no saved one."""
+    from PySide6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return
+    area = screen.availableGeometry()
+    width, height = min(width, area.width()), min(height, area.height())
+    dock.resize(width, height)
+    dock.move(
+        area.x() + (area.width() - width) // 2, area.y() + (area.height() - height) // 2
+    )
+    dock.setProperty("geometry_restored", True)
+
+
 def _restore_geometry(dock, viewer):
     """Restore saved window sizes and reposition after the compositor places them."""
     from PySide6.QtCore import QTimer
+
+    if viewer is None and dock.property("geometry_restored"):
+        return  # it was placed before it was shown
 
     def _apply(attempt=0):
         settings = _get_qsettings()

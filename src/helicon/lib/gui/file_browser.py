@@ -56,6 +56,9 @@ from helicon.lib.gui.browser_model import (  # noqa: F401
 from helicon.lib.gui.browser_settings import (  # noqa: F401
     _BookmarksDialog,
     _add_bookmark,
+    _bookmark_text,
+    _get_bookmark_names,
+    _rename_bookmark,
     _add_recent_folder,
     _bookmark_key,
     _clear_bookmarks,
@@ -613,6 +616,8 @@ class FolderBrowserWidget(QMainWindow):
         self._sidebar = PlacesSidebar()
         self._sidebar.navigate.connect(self._navigate_to)
         self._sidebar.bookmark_removed.connect(self._on_bookmark_removed)
+        self._sidebar.bookmark_renamed.connect(self._on_bookmark_renamed)
+        self._sidebar.alias_requested.connect(self._on_alias_requested)
         self._preview = PreviewPane()
         self._preview.path_requested.connect(self._navigate_to)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -788,6 +793,7 @@ class FolderBrowserWidget(QMainWindow):
             self._model._root_path,
             bookmarks=_get_bookmarks(),
             recent=_get_recent_folders(),
+            bookmark_names=_get_bookmark_names(),
         )
 
     def _update_preview(self) -> None:
@@ -1294,16 +1300,16 @@ class FolderBrowserWidget(QMainWindow):
             menu.addAction("No bookmarks yet").setEnabled(False)
             return
         for path in marks:
-            action = menu.addAction(path)
+            action = menu.addAction(_bookmark_text(path))
             if Path(path).is_dir():
                 action.triggered.connect(partial(self._on_bookmark_selected, path))
             else:
-                action.setText(f"{path}  (not available)")
+                action.setText(f"{_bookmark_text(path)}  (not available)")
                 action.setEnabled(False)
         menu.addSeparator()
         remove_menu = menu.addMenu("Remove Bookmark")
         for path in marks:
-            action = remove_menu.addAction(path)
+            action = remove_menu.addAction(_bookmark_text(path))
             action.triggered.connect(partial(self._on_bookmark_removed, path))
         menu.addAction("Manage Bookmarks…").triggered.connect(self._manage_bookmarks)
         menu.addAction("Clear All Bookmarks").triggered.connect(
@@ -1328,6 +1334,24 @@ class FolderBrowserWidget(QMainWindow):
     def _on_bookmark_removed(self, path: str) -> None:
         _remove_bookmark(path)
         self._refresh_bookmarks_menu()
+
+    def _on_bookmark_renamed(self, path: str, name: str) -> None:
+        _rename_bookmark(path, name)
+        self._refresh_bookmarks_menu()
+
+    def _on_alias_requested(self, folder: str, alias: str) -> None:
+        """Give a RELION job an alias, or take it away (``alias`` empty), and show the change."""
+        from helicon.lib.gui.job_alias import set_alias
+
+        try:
+            set_alias(folder, alias or None)
+        except (ValueError, OSError) as e:
+            QMessageBox.warning(self, "Alias of the job", str(e))
+            return
+        self._sidebar.invalidate()
+        self._navigate_to(
+            self._model._root_path
+        )  # the list shows the job with its alias
 
     def _refresh_recent_combo(self) -> None:
         self._recent_combo.blockSignals(True)
