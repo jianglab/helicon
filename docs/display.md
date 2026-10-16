@@ -1,0 +1,136 @@
+# The file browser
+
+`helicon display` is a file browser for the files of cryo-EM work: images and image stacks, 3D
+maps, RELION star files and CryoSPARC `.cs` files, and also bild, eps, pdf, html and text files. It
+needs the `gui` extra (`pip install "helicon[gui]"`; see [Install](install.md)).
+
+```sh
+helicon display             # browse the current folder
+helicon display <folder>    # browse a folder
+```
+
+```{image} images/display.png
+:alt: The file browser on a RELION Class2D job
+:width: 100%
+```
+
+## What is in the window
+
+- **The path bar** at the top shows where you are; click any part of it to go there. The *Filter* box
+  next to it limits the list to the names that match (`*` is any text; tick *Regex* for a regular
+  expression).
+- **The list** shows the files with their size, type, and, for an image or a stack, the number of
+  images, their dimensions and the pixel size. Click a column to sort.
+- **The sidebar** has *Places*, the *Bookmarks* you keep (menu *Bookmarks*), and the folders you opened
+  last (*Recent*). In a **RELION or CryoSPARC project** it also shows the project: *Project folder*, and
+  below it the job types and their jobs, so that you can move between jobs with a click.
+- **The preview** on the right shows what the selected file holds: a picture for an image, a stack or a
+  map, the table for a star file, the text for a text file, with its size, pixel size and other facts.
+- **The action bar** at the bottom has a button for each way to open the selected file. Which buttons
+  there are depends on the file (below).
+
+The window stays responsive while a long folder is listed or a large file is read: the work is done in
+the background, and a folder of tens of thousands of files appears in a moment.
+
+## Open a file
+
+Select the file and click a button of the action bar, or double-click the file. The bar offers only what
+fits the file you selected, in alphabetical order. The buttons that open a viewer window are drawn plain; those
+that open a web app or a panel of tools are outlined in colour. Tick **New window** to open the file in a
+window of its own instead of the one already open. A file that Helicon cannot read gets no buttons.
+
+### Viewing images and maps
+
+**2D Image**, **2D Slice**, **PDF**, **EPS**, or **Image Slice**
+: The first button of an image file; its name tells what the file is: *2D Image* for an image or a stack
+  of images (including the particles of a star file), *2D Slice* for a 3D map (one section at a time, which
+  you move through), *PDF* and *EPS* for those documents. The file opens in a viewer window.
+
+**Gallery**
+: A grid of thumbnails of all the images of a stack, loaded as you scroll, so that a stack of tens of
+  thousands of particles opens at once. For a star file it shows the particles it lists.
+
+**3D Volume**
+: The map as a 3D volume that you can turn and zoom.
+
+**Ortho Slice**
+: An interactive viewer of the three orthogonal sections (XY, XZ and YZ) of a 3D map, with controls to
+  move each section.
+
+**ChimeraX**
+: Opens the file in ChimeraX, which must be installed; the button is greyed out, with a note, when Helicon
+  cannot find it (add it to your `PATH`).
+
+**XYZ Slice**
+: For the `optimiser.star` of a RELION job: the centre sections (Z, Y and X) of the maps that it refers to.
+
+**2D Classes**
+: The 2D class averages of a Class2D job, sorted by abundance (the number of particles of each).
+
+**3D Plot**
+: For a `.bild` file: the 3D coordinates it holds, drawn.
+
+**Browser**
+: For an `.html` file: opens it in your web browser.
+
+### Looking at tables and text
+
+**Text**
+: Opens the file as text. It is the way to read a star file, or any text file Helicon recognizes.
+
+**Stats**
+: For the particle table of a RELION 3D classification or refinement: estimates the **variance of the
+  tilt, psi and rot angles** of each filament and shows it, a quick check on the quality of the helical
+  alignment.
+
+**FSC**
+: For the `model.star` of a RELION job: the **FSC curve** of a refinement, or the SSNR-derived W_MAP curve
+  of a 3D classification. If the job folder holds several `model.star` files, you pick the iterations to
+  overlay.
+
+### Working on the data
+
+**Images2Star**
+: Opens a panel of tools, with a preview, to **select and transform the particles** of a star file (or a
+  cryoSPARC `.cs` file), and saves the result as a new RELION star file. It is the window version of
+  [`helicon images2star`](commands/images2star.md).
+
+**Proc3D**
+: Opens a panel of tools for a 3D map: flip the hand, clip, resample and more, with the result shown next
+  to the original, and saved as a new MRC file. It is the window version of
+  [`helicon proc3d`](commands/proc3d.md).
+
+**TrueFSC**
+: For the `model.star` of a RELION refinement: computes the **True FSC curve** from its two half maps
+  (see [`helicon trueFSC`](commands/trueFSC.md)).
+
+### Opening a web app
+
+These buttons open one of the [Web apps](apps/index.md) in your browser, with the file already loaded. They
+appear only for the files of a **helical** job (RELION marks it with `rlnIsHelix`, and Helicon knows
+cryoSPARC's), because that is what the apps are for.
+
+| Button | Offered for | Opens |
+|---|---|---|
+| **HelicalPitch** | the particle table (`*_data.star`) of a helical Class2D job, or the particle file of a helical cryoSPARC 2D classification (with its class averages beside it) | [HelicalPitch](apps/helicalpitch.md): the pitch and twist from the 2D classification |
+| **AbInitio3D** | the same | [AbInitio3D](apps/abinitio3d.md): a 3D map from the 2D classes |
+| **WhereIsMyClass** | the particle table of a helical Class2D job | [WhereIsMyClass](apps/whereismyclass.md): where the particles of a class are |
+| **HelicalProjection** | the class averages (`*_classes.mrcs`) of a helical Class2D job | [HelicalProjection](apps/helicalprojection.md): compare with projections of known structures |
+| **HILL** | the same | [HILL](apps/hill.md): indexing with Fourier layer lines |
+| **denovo3D** | the same, and the particles of a helical cryoSPARC job | [Denovo3D](apps/denovo3d.md): indexing and a 3D map from one image |
+| **HI3D** | a 3D map of a helical Class3D or Refine3D job, or of a helical cryoSPARC job | [HI3D](apps/hi3d.md): indexing from the cylindrical projection of the map |
+
+### Beside the list
+
+**Open RELION**
+: In the path bar, when you are in a RELION project: opens the project in RELION. Set the RELION
+  program up once with *Apps* → *Configure RELION…*.
+
+## Tips
+
+- The **Apps** menu has a *Terminal*, *Configure RELION…*, and the other Helicon programs.
+- Press the *refresh* button after a job has finished writing files.
+- To keep a folder: *Bookmarks* → *Bookmark This Folder* (`Ctrl+D`). *File* → *Recent Folders* lists the
+  last ones you opened.
+- The first image viewer or gallery window takes a few seconds to appear, because the viewer is
+  loaded when it is first needed. Opening further files is faster.

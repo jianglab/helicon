@@ -13,6 +13,27 @@ pytest -n auto                                 # everything (browser tests need 
 pre-commit install --hook-type pre-commit --hook-type commit-msg   # Black, and the names of private data
 ```
 
+## Documentation
+
+The user documentation is in `docs/` (Markdown, built by Sphinx; Read the Docs builds it from
+`.readthedocs.yaml`). It is for users of Helicon, not for developers: how to install it, what each app
+does, a walk-through on public data, and the command-line reference.
+
+```sh
+pip install -r docs/requirements.txt
+sphinx-build -b html docs docs/_build -W     # open docs/_build/index.html; -W: a warning is an error
+python docs/tools/gen_commands.py            # rewrite docs/commands/ from the programs' own help
+python docs/tools/screenshots.py             # the pictures of the web apps (pip install playwright)
+python docs/tools/screenshots_hill.py        # the figures of the HILL tutorial
+python docs/tools/screenshot_display.py      # the picture of the file browser
+```
+
+Change the page of an app in the same commit as the app. `docs/commands/` is generated: a test fails
+when it is out of date. The pictures come from the scripts, so that they show the apps as they are; run
+them again after a change to what an app looks like, and read the result before committing it. Keep
+the pictures small (a few hundred KB each), and take them on public data, with settings of their own:
+the scripts do, so that no bookmark, recent folder or path of yours is in a picture.
+
 ## Private data
 
 Keep what identifies private or unpublished data out of the history (once pushed, it stays):

@@ -1,0 +1,40 @@
+name: Report a problem
+description: Something does not work as it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: version
+    attributes:
+      label: Version and system
+      description: |
+        The output of `helicon --version`, how you installed Helicon (conda, pip, git checkout), your
+        operating system and `python --version`.
+      placeholder: "helicon 2026.10 (a1b2c3d); pip; Ubuntu 24.04; Python 3.13.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it happen?
+      options:
+        - A web app (name the tab below)
+        - The file browser (helicon display)
+        - A command-line program (give the command below)
+        - Installing or updating
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did, and what you expected
+      description: Step by step, with the app tab or the full command. A public data set (EMPIAR or EMDB id) is best.
+    validations:
+      required: true
+  - type: textarea
+    id: seen
+    attributes:
+      label: What you saw instead
+      description: The error message and, for an app or the file browser, the text in the terminal where you started Helicon. A screenshot helps.
+    validations:
+      required: true
