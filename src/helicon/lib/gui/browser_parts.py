@@ -281,8 +281,9 @@ def cryosparc_type_name(job_type: str) -> str:
 
 def read_cryosparc_job(folder: str | Path) -> dict | None:
     """What ``job.json`` says of a CryoSPARC job: ``uid``, ``type`` (the key), ``type_name``,
-    ``title``, ``status`` (as :func:`job_status` gives it), ``created``, ``completed``
-    and ``parents`` (the jobs feeding it); None if the folder holds no ``job.json``."""
+    ``title``, ``status`` (as :func:`job_status` gives it), ``created``, ``completed``,
+    ``parents`` (the jobs feeding it) and ``children`` (the jobs it feeds, as the file lists
+    them); None if the folder holds no ``job.json``."""
     folder = Path(folder)
     record = _read_json(folder / "job.json")
     if not record:
@@ -306,6 +307,7 @@ def read_cryosparc_job(folder: str | Path) -> dict | None:
         created=_cryosparc_time(record.get("started_at") or record.get("created_at")),
         completed=_cryosparc_time(record.get("completed_at")),
         parents=parents,
+        children=[str(c) for c in record.get("children") or []],
     )
 
 
@@ -431,6 +433,169 @@ def project_jobs(project: Project, key: str) -> list[tuple[str, str, str, str]]:
     return out
 
 
+def _cryosparc_links(root: Path, job: dict) -> dict[str, list[tuple[str, str | None]]]:
+    """The jobs before and after a CryoSPARC job, as ``(label, folder or None)``.
+
+    The children are those the file lists and those that name this job as a parent, so that a
+    file that lacks the list still gives them. A job whose folder is gone has no folder.
+    """
+    by_name = {
+        name: j for jobs in _cryosparc_jobs(root).values() for _n, name, j in jobs
+    }
+    children = list(job["children"])
+    for name, other in by_name.items():
+        if job["uid"] in other["parents"] and name not in children:
+            children.append(name)
+
+    def entry(uid: str) -> tuple[str, str | None]:
+        other = by_name.get(uid)
+        if other is None:
+            return uid, None
+        label = f"{uid}  {other['type_name']}"
+        if other["title"]:
+            label += f"  {other['title']}"
+        return label, str(root / uid)
+
+    def number(uid: str) -> int:
+        m = _CRYOSPARC_JOB.match(uid)
+        return int(m.group(1)) if m else 0
+
+    return dict(
+        parents=[entry(u) for u in sorted(job["parents"], key=number)],
+        children=[entry(u) for u in sorted(children, key=number)],
+    )
+
+
+# the pipeline of a RELION project by file, kept until the file changes
+_PIPELINES: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
+def _read_pipeline(root: Path) -> dict:
+    """The jobs of ``default_pipeline.star`` and how they are connected.
+
+    Returns ``{"processes": {name: alias}, "inputs": {process: [node, ...]}, "outputs":
+    {process: [node, ...]}}``; names are as RELION writes them (``Class2D/job010/``).
+    """
+    path = root / "default_pipeline.star"
+    try:
+        info = path.stat()
+        text = path.read_text(errors="replace")
+    except OSError:
+        return dict(processes={}, inputs={}, outputs={}, details={})
+    stamp = (info.st_mtime_ns, info.st_size)
+    cached = _PIPELINES.get(str(path))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    rows: dict[str, list[list[str]]] = {}
+    headers: dict[str, list[str]] = {}
+    block, in_loop, seen_rows = "", False, False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("data_"):
+            block, in_loop = line[5:], False
+        elif line == "loop_":
+            headers[block], in_loop, seen_rows = [], True, False
+        elif in_loop and line.startswith("_"):
+            headers[block].append(line.split()[0])
+        elif in_loop and line and not line.startswith("#"):
+            rows.setdefault(block, []).append(line.split())
+            seen_rows = True
+        elif not line and seen_rows:
+            in_loop = False  # an empty line ends the rows of a loop
+
+    def table(block_name: str, first: str, second: str) -> list[tuple[str, str]]:
+        """Two columns of a loop, found by their names in its header."""
+        header = headers.get(block_name, [])
+        if first not in header or second not in header:
+            return []
+        i, j = header.index(first), header.index(second)
+        return [(r[i], r[j]) for r in rows.get(block_name, []) if len(r) > max(i, j)]
+
+    processes = dict(
+        table(
+            "pipeline_processes", "_rlnPipeLineProcessName", "_rlnPipeLineProcessAlias"
+        )
+    )
+    # (type label, state label) of each process, for the graph of the project
+    details = {
+        name: (kind, state)
+        for name, kind, state in _table3(
+            headers,
+            rows,
+            "pipeline_processes",
+            (
+                "_rlnPipeLineProcessName",
+                "_rlnPipeLineProcessTypeLabel",
+                "_rlnPipeLineProcessStatusLabel",
+            ),
+        )
+    }
+    inputs: dict[str, list[str]] = {}
+    for node, process in table(
+        "pipeline_input_edges", "_rlnPipeLineEdgeFromNode", "_rlnPipeLineEdgeProcess"
+    ):
+        inputs.setdefault(process, []).append(node)
+    outputs: dict[str, list[str]] = {}
+    for process, node in table(
+        "pipeline_output_edges", "_rlnPipeLineEdgeProcess", "_rlnPipeLineEdgeToNode"
+    ):
+        outputs.setdefault(process, []).append(node)
+    result = dict(processes=processes, inputs=inputs, outputs=outputs, details=details)
+    _PIPELINES[str(path)] = (stamp, result)
+    return result
+
+
+def _table3(headers, rows, block, wanted):
+    """Three named columns of a loop of the pipeline."""
+    header = headers.get(block, [])
+    if any(w not in header for w in wanted):
+        return []
+    idx = [header.index(w) for w in wanted]
+    return [tuple(r[i] for i in idx) for r in rows.get(block, []) if len(r) > max(idx)]
+
+
+def _relion_links(root: Path, job: Path) -> dict[str, list[tuple[str, str | None]]]:
+    """The jobs before and after a RELION job, as ``(label, folder or None)``.
+
+    A parent is a job that wrote a file this job reads; a child is a job that reads a file this
+    job wrote. A file that no job wrote (an import, a file of your own) has no parent.
+    """
+    pipeline = _read_pipeline(root)
+    me = f"{job.parent.name}/{job.name}/"
+    writer = {
+        node: process
+        for process, nodes in pipeline["outputs"].items()
+        for node in nodes
+    }
+    parents, children = [], []
+    for node in pipeline["inputs"].get(me, []):
+        other = writer.get(node)
+        if other and other != me and other not in parents:
+            parents.append(other)
+    mine = set(pipeline["outputs"].get(me, []))
+    for process, nodes in pipeline["inputs"].items():
+        if process != me and mine.intersection(nodes) and process not in children:
+            children.append(process)
+
+    def entry(process: str) -> tuple[str, str | None]:
+        name = process.rstrip("/")
+        alias = pipeline["processes"].get(process, "None").rstrip("/")
+        label = name
+        if alias and alias != "None":
+            label += f"  {alias.rsplit('/', 1)[-1]}"
+        folder = root / name
+        return label, str(folder) if folder.is_dir() else None
+
+    def number(process: str) -> int:
+        m = re.search(r"job(\d+)", process)
+        return int(m.group(1)) if m else 0
+
+    return dict(
+        parents=[entry(p) for p in sorted(parents, key=number)],
+        children=[entry(p) for p in sorted(children, key=number)],
+    )
+
+
 def thumbnail_array(data, max_size: int = 256):
     """A grey-level picture of a 2D array: stretched between its 1st and 99th
     percentiles and cut down by whole steps to at most ``max_size`` pixels a side.
@@ -514,6 +679,7 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
     out["facts"].append(
         ("Contains", f"{len(entries) - n_dirs} files, {n_dirs} folders")
     )
+    links = None
     cs_job = read_cryosparc_job(path) if (path / "job.json").is_file() else None
     if cs_job is not None:
         out["facts"].append(
@@ -522,12 +688,11 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         if cs_job["title"]:
             out["facts"].append(("Title", cs_job["title"]))
         out["facts"].append(("State", cs_job["raw_status"] or "unknown"))
-        if cs_job["parents"]:
-            out["facts"].append(("Inputs from", ", ".join(cs_job["parents"])))
         for label, key in (("Started", "created"), ("Finished", "completed")):
             if cs_job[key]:
                 out["facts"].append((label, cs_job[key]))
         out["status"] = cs_job["status"]
+        links = _cryosparc_links(path.parent, cs_job)
     elif (path / "project.json").is_file():
         title = _read_json(path / "project.json").get("title") or ""
         n_jobs = sum(
@@ -538,14 +703,19 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         out["facts"].append(
             ("CryoSPARC project", f"{title}, {n_jobs} jobs".lstrip(", "))
         )
+        out["graph"] = dict(kind="cryosparc", root=str(path))
     elif _JOB_FOLDER.match(path.name):
         status = job_status(path)
         out["facts"].append(("RELION job", f"{path.parent.name}/{path.name}, {status}"))
         out["status"] = status
+        root = find_project_root(path)
+        if root is not None:
+            links = _relion_links(root, path)
     elif (path / "default_pipeline.star").is_file() and not _is_job_folder_of(path):
         out["facts"].append(
             ("RELION project", f"{len(list_job_types(path))} job types")
         )
+        out["graph"] = dict(kind="relion", root=str(path))
     try:
         out["facts"].append(
             (
@@ -555,6 +725,15 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         )
     except OSError:
         pass
+    if links is not None:
+        # the jobs before and after this one, to go to with a click
+        out["links"] = [
+            (title, links[key])
+            for title, key in (("Inputs from", "parents"), ("Used by", "children"))
+            if links[key]
+        ]
+    if "graph" in out:
+        return out  # the jobs as a graph to click, in place of the list of folders
     shown = [name + ("/" if is_dir else "") for name, is_dir in entries[:14]]
     if len(entries) > 14:
         shown.append(f"… {len(entries) - 14} more")
@@ -1238,7 +1417,16 @@ class _PreviewWorker(QThread):
 
 
 class PreviewPane(QWidget):
-    """A picture, the facts and the first lines of the selected file or folder."""
+    """A picture, the facts, the links (the jobs before and after a job) and the first lines of
+    the selected file or folder.
+
+    Signals
+    -------
+    path_requested(str)
+        A link to another job was clicked; the value is the folder of the job.
+    """
+
+    path_requested = Signal(str)
 
     _EMPTY = "Select a file to see a preview"
 
@@ -1264,6 +1452,18 @@ class PreviewPane(QWidget):
         self._facts.setTextFormat(Qt.TextFormat.RichText)
         self._facts.setWordWrap(True)
         self._facts.setObjectName("previewFacts")
+        # the jobs before and after a job: links to click, between the facts and the file list
+        self._links = QLabel("")
+        self._links.setTextFormat(Qt.TextFormat.RichText)
+        self._links.setWordWrap(True)
+        self._links.setObjectName("previewLinks")
+        self._links.setOpenExternalLinks(False)
+        self._links.linkActivated.connect(self._on_link)
+        # the graph of the jobs of a project, made when a project folder is shown
+        self._graph_box: QWidget | None = None
+        self._graph_view = None
+        self._graph_window = None
+        self._graph_info: dict | None = None
         self._text = QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFrameShape(QFrame.Shape.NoFrame)
@@ -1271,12 +1471,20 @@ class PreviewPane(QWidget):
         self._note = QLabel("")
         self._note.setWordWrap(True)
         self._note.setObjectName("previewNote")
-        for widget in (self._title, self._picture, self._facts, self._note):
+        for widget in (
+            self._title,
+            self._picture,
+            self._facts,
+            self._links,
+            self._note,
+        ):
             layout.addWidget(widget)
         layout.addWidget(self._text, 1)
         # the room left when there is no text goes to the bottom, not between the parts
         layout.addStretch(0)
         self._muted = "#8f8f8f"
+        self._accent = "#4a8fd6"
+        self._theme_colors: dict[str, str] = {}
         self._serial = 0
         self._pixmap: QPixmap | None = None
         self._worker: _PreviewWorker | None = None
@@ -1285,6 +1493,9 @@ class PreviewPane(QWidget):
 
     def set_theme(self, colors: dict[str, str]) -> None:
         self._muted = colors["muted"]
+        self._accent = colors.get("accent", self._accent)
+        self._theme_colors = dict(colors)
+        self._apply_graph_theme()
         self._note.setStyleSheet(f"color: {colors['muted']};")
         self._picture.setStyleSheet(f"background: {colors['alt']}; border-radius: 4px;")
         self._text.setStyleSheet(
@@ -1296,6 +1507,10 @@ class PreviewPane(QWidget):
         self._title.setText("")
         self._picture.hide()
         self._facts.setText("")
+        self._links.setText("")
+        self._links.hide()
+        if self._graph_box is not None:
+            self._graph_box.hide()
         self._text.hide()
         self._note.setText(self._EMPTY)
         self._note.show()
@@ -1341,6 +1556,8 @@ class PreviewPane(QWidget):
             for label, value in info.get("facts", [])
         )
         self._facts.setText(f"<table>{rows}</table>" if rows else "")
+        self._show_links(info.get("links", []))
+        self._show_graph(info.get("graph"))
         image = info.get("image")
         if image is not None:
             h, w = image.shape
@@ -1357,6 +1574,138 @@ class PreviewPane(QWidget):
         note = info.get("note", "")
         self._note.setText(note)
         self._note.setVisible(bool(note))
+
+    # more than this many jobs of one kind are cut, so that a hub job does not push the rest away
+    _MAX_LINKS = 12
+
+    def _show_links(self, groups: list) -> None:
+        """Show the jobs before and after a job, each a link to its folder.
+
+        ``groups`` is ``[(title, [(label, folder or None), ...]), ...]``: a job whose folder is
+        gone (``None``) is shown as text.
+        """
+        from html import escape
+        from urllib.parse import quote
+
+        rows = []
+        for title, items in groups:
+            lines = []
+            for label, folder in items[: self._MAX_LINKS]:
+                if folder is None:
+                    lines.append(
+                        f"<span style='color:{self._muted}'>{escape(label)}</span>"
+                    )
+                else:
+                    lines.append(
+                        f"<a href='{quote(str(folder))}' style='color:{self._accent}; "
+                        f"text-decoration:none'>{escape(label)}</a>"
+                    )
+            if len(items) > self._MAX_LINKS:
+                more = len(items) - self._MAX_LINKS
+                lines.append(f"<span style='color:{self._muted}'>… {more} more</span>")
+            rows.append(
+                f"<tr><td style='color:{self._muted}; padding-right:10px' valign='top'>"
+                f"{escape(title)}</td><td>{'<br>'.join(lines)}</td></tr>"
+            )
+        self._links.setText(f"<table>{''.join(rows)}</table>" if rows else "")
+        self._links.setVisible(bool(rows))
+
+    def _ensure_graph(self) -> None:
+        """Make the graph of the jobs when the first project is shown (it needs the graph module)."""
+        if self._graph_box is not None:
+            return
+        from .job_graph import JobGraphView
+
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        header = QHBoxLayout()
+        title = QLabel("Jobs")
+        title.setObjectName("previewGraphTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        detach = QToolButton()
+        detach.setText("Open in a window")
+        detach.setToolTip("Show the jobs in a window of its own, to zoom and pan")
+        detach.clicked.connect(self.open_graph_window)
+        header.addWidget(detach)
+        column.addLayout(header)
+        view = JobGraphView()
+        view.setMinimumHeight(180)
+        view.job_clicked.connect(self.path_requested)
+        view.graph_ready.connect(self._on_graph_ready)
+        column.addWidget(view)
+        self._graph_box, self._graph_view = box, view
+        # after the facts and the links, before the note and the text
+        self.layout().insertWidget(self.layout().indexOf(self._links) + 1, box)
+        # a project folder has no list of folders: the graph takes the height that is left
+        self.layout().setStretchFactor(box, 1)
+        self._graph_title = title
+        self._apply_graph_theme()
+
+    def _apply_graph_theme(self) -> None:
+        if self._graph_view is None or not self._theme_colors:
+            return  # the colours come with the theme of the browser
+        colors = dict(self._theme_colors)
+        self._graph_view.set_theme(colors)
+        self._graph_title.setStyleSheet(f"color: {self._muted};")
+        if self._graph_window is not None:
+            self._graph_window.set_theme(colors)
+
+    def _show_graph(self, graph: dict | None) -> None:
+        """Show the jobs of a project as a graph, read in the background."""
+        self._graph_info = graph
+        if graph is None:
+            if self._graph_box is not None:
+                self._graph_box.hide()
+            return
+        self._ensure_graph()
+        self._graph_box.show()
+        self._graph_view.load(graph["kind"], graph["root"])
+
+    def _on_graph_ready(self) -> None:
+        window = self._graph_window
+        if (
+            window is not None
+            and window.isVisible()
+            and self._graph_view.graph is not None
+        ):
+            window.view.set_graph(self._graph_view.graph)
+
+    def open_graph_window(self) -> None:
+        """Show the jobs in a window of its own, with the browser still where it is; a click
+        on a job there goes to it, as in the preview."""
+        if self._graph_info is None or self._graph_view is None:
+            return
+        from .job_graph import JobGraphWindow
+
+        if self._graph_window is None:
+            window = JobGraphWindow(self.window())
+            window.view.job_clicked.connect(self.path_requested)
+            self._graph_window = window
+            self._apply_graph_theme()
+        window = self._graph_window
+        graph = self._graph_view.graph
+        if graph is not None:
+            window.view.set_graph(graph)
+        else:
+            window.view.load(self._graph_info["kind"], self._graph_info["root"])
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def set_current(self, folder: str | None) -> None:
+        """Mark the job of the folder the browser is in on the graphs, in the preview and in the window."""
+        if self._graph_view is not None:
+            self._graph_view.set_current(folder)
+        if self._graph_window is not None:
+            self._graph_window.view.set_current(folder)
+
+    def _on_link(self, href: str) -> None:
+        from urllib.parse import unquote
+
+        self.path_requested.emit(unquote(href))
 
     def _fit_picture(self) -> None:
         if self._pixmap is None:

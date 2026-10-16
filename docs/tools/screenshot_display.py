@@ -56,6 +56,29 @@ def _project(root: Path) -> Path:
     return job
 
 
+PIPELINE = "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/default_pipeline.star"
+
+
+def _pipeline_project(root: Path) -> None:
+    """The jobs of the RELION project of EMPIAR-10940: its pipeline, and an empty folder for each job."""
+    import re
+
+    pipeline = root / "default_pipeline.star"
+    urllib.request.urlretrieve(PIPELINE, pipeline)
+    for line in pipeline.read_text().splitlines():
+        m = re.match(r"^(\w+)/(job\d+)/\s", line)
+        if m:
+            job = root / m.group(1) / m.group(2)
+            job.mkdir(parents=True, exist_ok=True)
+            # what RELION leaves in a job folder, so that the job has files and a state
+            state = {"Aborted": "ABORTED", "Failed": "FAILURE"}.get(
+                line.split()[-1], "SUCCESS"
+            )
+            (job / f"RELION_JOB_EXIT_{state}").write_text("")
+            (job / "note.txt").write_text(f"{m.group(1)}/{m.group(2)}/\n")
+            (job / "job.star").write_text("data_job\n")
+
+
 def main() -> int:
     from PySide6.QtWidgets import QApplication
 
@@ -87,6 +110,37 @@ def main() -> int:
         pump(4)
         IMAGES.mkdir(exist_ok=True)
         widget.grab().save(str(IMAGES / "display.png"))
+        widget._preview.wait()
+        widget.close()
+
+        # the jobs of a project as a graph, in its window, and the preview of a job
+        project = Path(tmp) / "pipeline-project"
+        project.mkdir()
+        _pipeline_project(project)
+        widget = fb.FolderBrowserWidget(start_dir=str(project / "Class2D" / "job010"))
+        widget.resize(1280, 720)
+        widget.show()
+        pump(3)
+        widget._preview.wait()
+        pump(2)
+        widget.grab().save(str(IMAGES / "display-job.png"))
+        widget._navigate_to(str(project))
+        pump(3)
+        widget._preview.wait()
+        widget._preview.open_graph_window()
+        window = widget._preview._graph_window
+        window.resize(760, 640)
+        window.view.set_current(str(project / "Class2D" / "job010"))
+        window.view.zoom(0.9)
+        pump(3)
+        # the pointer on a job: it, its inputs and the jobs that use its files are marked
+        graph = window.view.graph
+        window.view._set_hover(
+            next(i for i, n in enumerate(graph.nodes) if n.key == "Refine3D/job017")
+        )
+        pump(1)
+        window.grab().save(str(IMAGES / "display-job-graph.png"))
+        window.close()
         widget._preview.wait()
         widget.close()
     print(f"wrote {IMAGES / 'display.png'}")

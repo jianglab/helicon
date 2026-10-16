@@ -614,6 +614,7 @@ class FolderBrowserWidget(QMainWindow):
         self._sidebar.navigate.connect(self._navigate_to)
         self._sidebar.bookmark_removed.connect(self._on_bookmark_removed)
         self._preview = PreviewPane()
+        self._preview.path_requested.connect(self._navigate_to)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.addWidget(self._sidebar)
@@ -791,6 +792,8 @@ class FolderBrowserWidget(QMainWindow):
 
     def _update_preview(self) -> None:
         """Preview the selected file or folder, or else the folder shown."""
+        # the graph of the jobs (in the preview and in its own window) follows the folder shown
+        self._preview.set_current(self._model._root_path)
         if not self._preview_action.isChecked():
             return
         indexes = self._tree.selectionModel().selectedIndexes()

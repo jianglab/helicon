@@ -32,6 +32,42 @@ helicon display <folder>    # browse a folder
 The window stays responsive while a long folder is listed or a large file is read: the work is done in
 the background, and a folder of tens of thousands of files appears in a moment.
 
+## Jobs of a RELION or CryoSPARC project
+
+In a RELION or CryoSPARC project the sidebar lists the jobs by type, and a click on a job goes to it. The
+preview of the job says what it is and how it ended, and has what is needed to move around the project:
+
+- **Inputs from** lists the jobs whose files this job uses, and **Used by** the jobs that use its files.
+  Each is a link: click it to go to that job. (RELION reads this from `default_pipeline.star`, CryoSPARC
+  from the `parents` and `children` of `job.json`.)
+
+```{image} images/display-job.png
+:alt: The preview of a job, with the jobs before and after it as links
+:width: 100%
+```
+
+- **Project folder** (the first entry of the project in the sidebar) shows the jobs of the project as a
+  **graph** that runs down: a box for each job, below the jobs whose files it uses, coloured by how it
+  ended (green: done, red: failed or aborted, yellow: running, blue: queued, grey: not run), with an arrow
+  from each job to the jobs that use its files. A click on a box goes to that job. A large graph opens on
+  the newest jobs. **Open in a window** puts it in a window of its own:
+  - the **wheel scrolls** up and down (with `Shift`, sideways) and **`Ctrl` + wheel zooms**; a drag moves
+    the graph, and a double click on the background shows all of it again (also the *Fit* button and `F`);
+  - with the **pointer on a job**, the job, the jobs it takes its files from (its inputs) and the jobs that
+    use its files are marked in three colours, with their arrows; the others step back;
+  - a graph that is much longer than the window is wide is cut into **bands side by side**, to use the
+    width of the window (an arrow that goes on in the next band is dashed), and is cut again when you
+    resize the window;
+  - the box of the job that the browser is in is marked, and follows you as you go from job to job.
+
+```{image} images/display-job-graph.png
+:alt: The jobs of a RELION project as a graph, in its window
+:width: 80%
+```
+
+The graph of a large project is read and drawn in the background, so the window keeps answering; the
+labels are left out when you zoom out too far to read them.
+
 ## Open a file
 
 Select the file and click a button of the action bar, or double-click the file. The bar offers only what
