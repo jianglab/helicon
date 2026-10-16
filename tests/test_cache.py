@@ -472,6 +472,40 @@ class TestClearScope:
         f.clear_cache_dir()
 
 
+class TestIsCached:
+    def test_it_says_whether_a_call_has_an_answer_without_making_one(self, tmp_path):
+        n = {"calls": 0}
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            n["calls"] += 1
+            return x
+
+        assert not f.is_cached(1)
+        assert n["calls"] == 0  # asking does not call it
+        f(1)
+        assert f.is_cached(1) and not f.is_cached(2)
+        f.clear_cache()
+        assert not f.is_cached(1)
+
+    def test_an_expired_answer_is_not_there(self, tmp_path):
+        @helicon.cache(expires_after=datetime.timedelta(seconds=1), cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        f(1)
+        assert f.is_cached(1)
+        time.sleep(1.5)
+        assert not f.is_cached(1)
+
+    def test_without_a_usable_cache_folder_nothing_is_cached(self):
+        f = helicon.cache(expires_after=1, cache_dir="/proc/nonexistent/helicon")(
+            lambda x: x
+        )
+        f(1)
+        assert not f.is_cached(1)
+
+
 class TestEverythingUsesTheOneCacheRoot:
     """Every cache and log location has to come from ``setup_cache_dir``.
 

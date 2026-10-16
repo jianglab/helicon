@@ -403,9 +403,11 @@ def cache(
     overwritten if its exact key is requested again, so keys that fall out of
     use accumulate indefinitely.
 
-    The decorated function gains two methods: ``clear_cache()`` empties just
-    that function's entries, and ``clear_cache_dir()`` empties the whole
-    directory, which is usually shared with other cached functions.
+    The decorated function gains three methods: ``clear_cache()`` empties just
+    that function's entries, ``clear_cache_dir()`` empties the whole
+    directory, which is usually shared with other cached functions, and
+    ``is_cached(*args, **kwargs)`` says whether a call has a valid answer in the
+    cache, without making one.
 
     Parameters
     ----------
@@ -505,6 +507,14 @@ def cache(
             return cached_func(*args, **kwargs)
 
         wrapper.clear_cache = lambda: _clear_function_cache(_cached_func()[1])
+
+        # whether a call with these arguments has an answer in the cache that is still valid,
+        # without making one: to take a better answer that is there, or to start a slow one
+        def is_cached(*args, **kwargs) -> bool:
+            check = getattr(_cached_func()[1], "check_call_in_cache", None)
+            return bool(check(*args, **kwargs)) if check is not None else False
+
+        wrapper.is_cached = is_cached
         wrapper.clear_cache_dir = lambda: getattr(_memory(), "clear", lambda: None)()
         wrapper.get_cache_info = lambda: {
             "cache_dir": cache_dir,

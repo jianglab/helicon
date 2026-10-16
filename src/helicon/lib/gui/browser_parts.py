@@ -734,6 +734,21 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         ]
     if "graph" in out:
         return out  # the jobs as a graph to click, in place of the list of folders
+    if cs_job is not None or _JOB_FOLDER.match(path.name):
+        # what the job made, as pictures, in place of the list of its files
+        from .job_outcome import build_outcome
+
+        outcome = build_outcome(
+            path,
+            "cryosparc" if cs_job is not None else "relion",
+            cs_job["type"] if cs_job is not None else None,
+        )
+        if outcome is not None:
+            out["outcome"] = outcome
+            out["facts"].extend(outcome["facts"])
+        # the files of a job are in the list of the window: no list of them here either
+        out["text"] = ""
+        return out
     shown = [name + ("/" if is_dir else "") for name, is_dir in entries[:14]]
     if len(entries) > 14:
         shown.append(f"… {len(entries) - 14} more")
@@ -1140,6 +1155,46 @@ def _job_subpath(project: Project, type_item, name: str) -> str:
     return name
 
 
+# the threads that read a project for the sidebar: a sidebar that is closed meanwhile must not take
+# them down
+_SCANNING: set = set()
+
+
+class _ScanWorker(QThread):
+    """Reads the job types of a project and the jobs of some of them off the main thread (a project
+    on a network file system has thousands of folders to look at); ``done(serial, (types, jobs))``
+    at the end, ``types`` None when they were not asked for."""
+
+    done = Signal(int, object)
+
+    def __init__(
+        self,
+        serial: int,
+        project: "Project | None",
+        keys,
+        with_types: bool = True,
+        bookmarks=(),
+    ):
+        super().__init__()
+        self._serial = serial
+        self._project = project
+        self._keys = list(keys)
+        self._with_types = with_types
+        self._bookmarks = list(bookmarks)
+
+    def run(self) -> None:
+        types, jobs = None, {}
+        try:
+            if self._project is not None:
+                types = project_types(self._project) if self._with_types else None
+                jobs = {key: project_jobs(self._project, key) for key in self._keys}
+        except Exception:
+            types, jobs = None, {}
+        # a bookmark of a folder that is gone is not shown: looking is slow on a network file system
+        missing = [path for path in self._bookmarks if not Path(path).is_dir()]
+        self.done.emit(self._serial, (types, jobs, missing))
+
+
 class PlacesSidebar(QTreeWidget):
     """Places on the left: home, the bookmarks, the recent folders and, inside a RELION
     project, its jobs by type with their state.
@@ -1180,6 +1235,7 @@ class PlacesSidebar(QTreeWidget):
         self.customContextMenuRequested.connect(self._menu)
         self.itemClicked.connect(self._clicked)
         self.itemExpanded.connect(self._expanded)
+        self.itemCollapsed.connect(self._collapsed)
         self._colors = {
             "text": "#cccccc",
             "muted": "#8f8f8f",
@@ -1191,6 +1247,11 @@ class PlacesSidebar(QTreeWidget):
         self._last_project: Project | None = None
         self._open_types: set[str] = set()
         self._current = ""
+        # what was read of each project, to show at once when it is looked at again, and the
+        # numbers of the readings in progress (an answer for an earlier one is dropped)
+        self._seen: dict[tuple[str, str], tuple[list, dict]] = {}
+        self._scan_serial = 0
+        self._project_node: QTreeWidgetItem | None = None
 
     def set_theme(self, colors: dict[str, str]) -> None:
         self._colors = colors
@@ -1199,6 +1260,7 @@ class PlacesSidebar(QTreeWidget):
     def invalidate(self) -> None:
         """Read the projects again at the next refresh."""
         invalidate_project_cache()
+        self._seen.clear()
         self._signature = None
 
     def refresh(
@@ -1212,12 +1274,18 @@ class PlacesSidebar(QTreeWidget):
         elif self._last_project is not None and _is_project(self._last_project):
             # outside any project: the last one stays, so "Project folder" leads back
             project = self._last_project
-        if project is not None and _inside(current, project.root):
-            # the type of the job we are in is opened, so the job is seen
+        newly = None
+        if (
+            project is not None
+            and str(current) != self._current
+            and _inside(current, project.root)
+        ):
+            # going to a job opens its type (once, not at each refresh), so the job is seen; the
+            # types that were opened and closed by hand are left as they are
             key = self._type_of_job(project, current)
             if key is not None and key not in self._open_types:
                 self._open_types.add(key)
-                self._signature = None
+                newly = key
         signature = (
             str(project.root) if project else None,
             project.kind if project else None,
@@ -1230,6 +1298,8 @@ class PlacesSidebar(QTreeWidget):
             self._signature = signature
             self._project = project
             self._rebuild(project, bookmarks, recent, home)
+        elif newly is not None:
+            self._expand_type(newly)  # in place: the rest of the tree stays as it is
         self._current = str(current)
         self._select_current()
 
@@ -1277,6 +1347,10 @@ class PlacesSidebar(QTreeWidget):
 
     def _rebuild(self, project, bookmarks, recent, home) -> None:
         self.blockSignals(True)
+        self._scan_serial += (
+            1  # what is being read for the sidebar of before is of no use
+        )
+        self._project_node = None
         self.clear()
         c = self._colors
         places = self._section("Places")
@@ -1297,23 +1371,19 @@ class PlacesSidebar(QTreeWidget):
                 "fa5s.project-diagram",
                 c["file_icon"],
             ).setData(0, self._ROLE_KIND, "project")
-            for key, label, folder in project_types(project):
-                type_item = QTreeWidgetItem(node, [label])
-                type_item.setToolTip(0, label)
-                type_item.setData(0, self._ROLE_PATH, folder)
-                type_item.setData(0, self._ROLE_TYPE, key)
-                type_item.setData(0, self._ROLE_KIND, "type")
-                icon = themed_icon("fa5s.folder", c["folder"])
-                if icon is not None:
-                    type_item.setIcon(0, icon)
-                # the jobs are listed when it is opened
-                QTreeWidgetItem(type_item, ["…"]).setData(
+            self._project_node = node
+            seen = self._seen.get((str(project.root), project.kind))
+            if seen is not None:
+                self._populate(
+                    node, project, *seen
+                )  # until the reading that follows is there
+            else:
+                QTreeWidgetItem(node, ["Reading the jobs…"]).setData(
                     0, self._ROLE_KIND, "placeholder"
                 )
-                if key in self._open_types:
-                    self._fill_jobs(type_item)
-                    type_item.setExpanded(True)
-        marked = [path for path in bookmarks if Path(path).is_dir()]
+        marked = list(
+            bookmarks
+        )  # the ones that are gone are taken away when they are looked at
         if marked:
             marks = self._section("Bookmarks")
             for path in marked:
@@ -1328,28 +1398,133 @@ class PlacesSidebar(QTreeWidget):
                     hist, Path(path).name or path, path, "fa5s.history", c["muted"]
                 ).setData(0, self._ROLE_KIND, "recent")
         self.blockSignals(False)
+        self._scan(project, marked)
+
+    def _populate(self, node, project: "Project", types: list, jobs: dict) -> None:
+        """Put the job types of a project, and the jobs of the open ones, under its node."""
+        c = self._colors
+        while node.childCount() > 1:  # the first is "Project folder"
+            node.takeChild(1)
+        for key, label, folder in types:
+            type_item = QTreeWidgetItem(node, [label])
+            type_item.setToolTip(0, label)
+            type_item.setData(0, self._ROLE_PATH, folder)
+            type_item.setData(0, self._ROLE_TYPE, key)
+            type_item.setData(0, self._ROLE_KIND, "type")
+            icon = themed_icon("fa5s.folder", c["folder"])
+            if icon is not None:
+                type_item.setIcon(0, icon)
+            # the jobs are listed when it is opened
+            QTreeWidgetItem(type_item, ["…"]).setData(0, self._ROLE_KIND, "placeholder")
+            if key in self._open_types:
+                if key in jobs:
+                    self._add_jobs(type_item, project, jobs[key])
+                type_item.setExpanded(True)
+
+    def _scan(self, project: "Project | None", bookmarks=()) -> None:
+        """Read the types of the project and the jobs of the open ones, and look for the folders of
+        the bookmarks, in a thread."""
+        if project is None and not bookmarks:
+            return
+        worker = _ScanWorker(
+            self._scan_serial,
+            project,
+            sorted(self._open_types),
+            bookmarks=bookmarks,
+        )
+        _SCANNING.add(worker)
+        worker.done.connect(self._on_scanned)
+        worker.finished.connect(lambda w=worker: _SCANNING.discard(w))
+        worker.start(QThread.Priority.LowPriority)
+
+    def _on_scanned(self, serial: int, result) -> None:
+        types, jobs, missing = result
+        if serial != self._scan_serial:
+            return  # the sidebar was built again meanwhile
+        project, node = self._project, self._project_node
+        self.blockSignals(True)
+        if project is not None and node is not None:
+            self._seen[(str(project.root), project.kind)] = (types or [], jobs)
+            self._populate(node, project, types or [], jobs)
+        for i in range(self.topLevelItemCount()):
+            section = self.topLevelItem(i)
+            if section.text(0) != "BOOKMARKS":
+                continue
+            for j in reversed(range(section.childCount())):
+                if section.child(j).data(0, self._ROLE_PATH) in missing:
+                    section.takeChild(j)
+            if not section.childCount():
+                self.takeTopLevelItem(i)
+            break
+        self.blockSignals(False)
+        if project is not None and node is not None:
+            for i in range(node.childCount()):
+                item = node.child(i)
+                if item.data(0, self._ROLE_KIND) == "type" and item.isExpanded():
+                    self._load_jobs(item)
+        self._select_current()
+
+    def _expand_type(self, key: str) -> None:
+        """Open the type ``key`` in the tree, if it is there (its jobs are read when it opens)."""
+        node = self._project_node
+        for i in range(node.childCount() if node is not None else 0):
+            item = node.child(i)
+            if item.data(0, self._ROLE_TYPE) == key:
+                item.setExpanded(True)
+                return
+
+    def _collapsed(self, item: QTreeWidgetItem) -> None:
+        if item.data(0, self._ROLE_KIND) == "type":
+            self._open_types.discard(item.data(0, self._ROLE_TYPE))
 
     def _expanded(self, item: QTreeWidgetItem) -> None:
         if item.data(0, self._ROLE_KIND) != "type":
             return
         self._open_types.add(item.data(0, self._ROLE_TYPE))
-        if self._fill_jobs(item):
-            self._select_current()
+        self._load_jobs(item)
 
-    def _fill_jobs(self, type_item: QTreeWidgetItem) -> bool:
-        """List the jobs of a type under it, once; whether it did."""
-        if not (
+    def _load_jobs(self, item: QTreeWidgetItem) -> None:
+        """List the jobs of an open type: at once if they were read before, else in a thread."""
+        key = item.data(0, self._ROLE_TYPE)
+        project = self._project
+        if project is None or not self._has_placeholder(item):
+            return
+        seen = self._seen.get((str(project.root), project.kind))
+        if seen is not None and key in seen[1]:
+            self._add_jobs(item, project, seen[1][key])
+            self._select_current()
+            return
+        worker = _ScanWorker(self._scan_serial, project, [key], with_types=False)
+        _SCANNING.add(worker)
+        worker.done.connect(self._on_jobs)
+        worker.finished.connect(lambda w=worker: _SCANNING.discard(w))
+        worker.start(QThread.Priority.LowPriority)
+
+    def _on_jobs(self, serial: int, result) -> None:
+        _types, jobs, _missing = result
+        project, node = self._project, self._project_node
+        if serial != self._scan_serial or project is None or node is None:
+            return  # the sidebar was built again meanwhile
+        seen = self._seen.setdefault((str(project.root), project.kind), ([], {}))
+        seen[1].update(jobs)
+        for i in range(node.childCount()):
+            item = node.child(i)
+            key = item.data(0, self._ROLE_TYPE)
+            if key in jobs and self._has_placeholder(item):
+                self._add_jobs(item, project, jobs[key])
+        self._select_current()
+
+    def _has_placeholder(self, type_item: QTreeWidgetItem) -> bool:
+        return (
             type_item.childCount() == 1
             and type_item.child(0).data(0, self._ROLE_KIND) == "placeholder"
-        ):
-            return False
-        type_item.takeChild(0)
-        project = self._project
-        if project is None:
-            return True
-        for name, status, label, tooltip in project_jobs(
-            project, type_item.data(0, self._ROLE_TYPE)
-        ):
+        )
+
+    def _add_jobs(self, type_item: QTreeWidgetItem, project: "Project", jobs) -> None:
+        """List the jobs ``[(folder name, status, label, tooltip), ...]`` under a type."""
+        while type_item.childCount():
+            type_item.takeChild(0)
+        for name, status, label, tooltip in jobs:
             job = QTreeWidgetItem(type_item, [label])
             job.setData(
                 0,
@@ -1361,7 +1536,21 @@ class PlacesSidebar(QTreeWidget):
             icon = themed_icon("fa5s.circle", self._STATUS_COLORS[status], None)
             if icon is not None:
                 job.setIcon(0, icon)
-        return True
+
+    def wait(self, ms: int = 10000) -> None:
+        """Wait for what is being read for the sidebar, and show it (for tests and when closing)."""
+        import time
+
+        from PySide6.QtWidgets import QApplication
+
+        end = time.monotonic() + ms / 1000
+        while time.monotonic() < end:
+            QApplication.processEvents()  # an answer that has come may start another reading
+            if not any(w.isRunning() for w in list(_SCANNING)):
+                QApplication.processEvents()
+                if not any(w.isRunning() for w in list(_SCANNING)):
+                    break
+            time.sleep(0.005)
 
     # which place to mark when a folder is more than one: the most specific
     _RANK = {"job": 0, "type": 1, "project": 2, "place": 3, "bookmark": 4, "recent": 5}
@@ -1381,7 +1570,13 @@ class PlacesSidebar(QTreeWidget):
                     best, best_rank = item, rank
         if best is not None:
             best.setSelected(True)
-            self.scrollToItem(best)
+            # scrolling to an item opens the folders above it: not when one was closed by hand
+            parent, shown = best.parent(), True
+            while parent is not None:
+                shown = shown and parent.isExpanded()
+                parent = parent.parent()
+            if shown:
+                self.scrollToItem(best)
         self.blockSignals(False)
 
     # events
@@ -1402,6 +1597,21 @@ class PlacesSidebar(QTreeWidget):
             self.bookmark_removed.emit(str(item.data(0, self._ROLE_PATH)))
 
 
+def _pixmap_of(array, width: int) -> QPixmap:
+    """A picture (``(h, w)`` grey or ``(h, w, 3)`` colour, uint8) as a pixmap ``width`` wide."""
+    import numpy as np
+
+    array = np.ascontiguousarray(array, dtype=np.uint8)
+    h, w = array.shape[:2]
+    if array.ndim == 2:
+        image = QImage(array.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+    else:
+        image = QImage(array.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(image).scaledToWidth(
+        width, Qt.TransformationMode.SmoothTransformation
+    )
+
+
 class _PreviewWorker(QThread):
     """Reads a preview off the main thread; ``ready(serial, preview)`` at the end."""
 
@@ -1414,6 +1624,29 @@ class _PreviewWorker(QThread):
 
     def run(self) -> None:
         self.ready.emit(self._serial, build_preview(self._path))
+
+
+# the threads that count in the background: a pane that is closed meanwhile must not take them down
+_REFINING: set = set()
+
+
+class _RefineWorker(QThread):
+    """Makes the exact outcome of a job whose first outcome had an estimate in it (slow: it reads
+    all of a large table); ``done(serial, outcome)`` at the end, ``{}`` if it failed."""
+
+    done = Signal(int, dict)
+
+    def __init__(self, serial: int, refine):
+        super().__init__()
+        self._serial = serial
+        self._refine = refine
+
+    def run(self) -> None:
+        try:
+            outcome = self._refine() or {}
+        except Exception:
+            outcome = {}
+        self.done.emit(self._serial, outcome)
 
 
 class PreviewPane(QWidget):
@@ -1464,6 +1697,9 @@ class PreviewPane(QWidget):
         self._graph_view = None
         self._graph_window = None
         self._graph_info: dict | None = None
+        # what a job made: pictures with captions, in a scroll area
+        self._outcome_scroll = None
+        self._outcome_panels: list[tuple[QLabel, "np.ndarray"]] = []  # noqa: F821
         self._text = QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFrameShape(QFrame.Shape.NoFrame)
@@ -1486,6 +1722,7 @@ class PreviewPane(QWidget):
         self._accent = "#4a8fd6"
         self._theme_colors: dict[str, str] = {}
         self._serial = 0
+        self._base_facts: list = []
         self._pixmap: QPixmap | None = None
         self._worker: _PreviewWorker | None = None
         self._pending: str | None = None
@@ -1511,6 +1748,8 @@ class PreviewPane(QWidget):
         self._links.hide()
         if self._graph_box is not None:
             self._graph_box.hide()
+        if self._outcome_scroll is not None:
+            self._outcome_scroll.hide()
         self._text.hide()
         self._note.setText(self._EMPTY)
         self._note.show()
@@ -1537,7 +1776,9 @@ class PreviewPane(QWidget):
         worker.ready.connect(self._on_ready)
         worker.finished.connect(self._on_finished)
         self._worker = worker
-        worker.start()
+        worker.start(
+            QThread.Priority.LowPriority
+        )  # the window comes before a slow read
 
     def _on_finished(self) -> None:
         if self._pending is not None:
@@ -1547,17 +1788,30 @@ class PreviewPane(QWidget):
         if serial != self._serial:
             return  # another path was chosen meanwhile
         self.show_info(info)
+        outcome = info.get("outcome") or {}
+        if outcome.get("refine") is not None:
+            # the estimate is shown; the exact number comes when it has been counted
+            self._base_facts = list(info.get("facts", []))[
+                : len(info.get("facts", [])) - len(outcome.get("facts", []))
+            ]
+            worker = _RefineWorker(serial, outcome["refine"])
+            _REFINING.add(worker)
+            worker.done.connect(self._on_refined)
+            worker.finished.connect(lambda w=worker: _REFINING.discard(w))
+            worker.start()
+
+    def _on_refined(self, serial: int, outcome: dict) -> None:
+        if serial != self._serial or not outcome:
+            return  # another path was chosen meanwhile, or it could not be counted
+        self._set_facts(self._base_facts + list(outcome.get("facts", [])))
 
     def show_info(self, info: dict) -> None:
         """Show a preview made by :func:`build_preview`."""
         self._title.setText(info.get("title", ""))
-        rows = "".join(
-            f"<tr><td style='color:{self._muted}; padding-right:10px'>{label}</td><td>{value}</td></tr>"
-            for label, value in info.get("facts", [])
-        )
-        self._facts.setText(f"<table>{rows}</table>" if rows else "")
+        self._set_facts(info.get("facts", []))
         self._show_links(info.get("links", []))
         self._show_graph(info.get("graph"))
+        self._show_outcome(info.get("outcome"))
         image = info.get("image")
         if image is not None:
             h, w = image.shape
@@ -1574,6 +1828,13 @@ class PreviewPane(QWidget):
         note = info.get("note", "")
         self._note.setText(note)
         self._note.setVisible(bool(note))
+
+    def _set_facts(self, facts: list) -> None:
+        rows = "".join(
+            f"<tr><td style='color:{self._muted}; padding-right:10px'>{label}</td><td>{value}</td></tr>"
+            for label, value in facts
+        )
+        self._facts.setText(f"<table>{rows}</table>" if rows else "")
 
     # more than this many jobs of one kind are cut, so that a hub job does not push the rest away
     _MAX_LINKS = 12
@@ -1609,6 +1870,62 @@ class PreviewPane(QWidget):
             )
         self._links.setText(f"<table>{''.join(rows)}</table>" if rows else "")
         self._links.setVisible(bool(rows))
+
+    def _ensure_outcome(self) -> None:
+        """Make the area for what a job made when the first job is shown."""
+        if self._outcome_scroll is not None:
+            return
+        from PySide6.QtWidgets import QScrollArea
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        column = QVBoxLayout(inner)
+        column.setContentsMargins(0, 0, 4, 0)
+        column.setSpacing(6)
+        column.addStretch(1)
+        scroll.setWidget(inner)
+        self._outcome_scroll, self._outcome_column = scroll, column
+        self.layout().insertWidget(self.layout().indexOf(self._note), scroll, 1)
+
+    def _show_outcome(self, outcome: dict | None) -> None:
+        """Show what a job made: each picture with its title and a line of caption."""
+        if not outcome or not outcome["panels"]:  # counts only: the facts above say it
+            if self._outcome_scroll is not None:
+                self._outcome_scroll.hide()
+            return
+        self._ensure_outcome()
+        column = self._outcome_column
+        while column.count() > 1:  # all but the stretch at the end
+            item = column.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._outcome_panels = []
+        for panel in outcome["panels"]:
+            heading = QLabel(panel["title"])
+            font = heading.font()
+            font.setBold(True)
+            heading.setFont(font)
+            column.insertWidget(column.count() - 1, heading)
+            picture = QLabel()
+            picture.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            column.insertWidget(column.count() - 1, picture)
+            self._outcome_panels.append((picture, panel["image"]))
+            if panel.get("caption"):
+                caption = QLabel(panel["caption"])
+                caption.setWordWrap(True)
+                caption.setStyleSheet(f"color: {self._muted};")
+                column.insertWidget(column.count() - 1, caption)
+        self._fit_outcome()
+        self._outcome_scroll.show()
+        self._outcome_scroll.verticalScrollBar().setValue(0)
+
+    def _fit_outcome(self) -> None:
+        """Scale the pictures of the job to the width of the pane."""
+        width = max(self.width() - 40, 120)
+        for label, array in self._outcome_panels:
+            label.setPixmap(_pixmap_of(array, min(width, 420)))
 
     def _ensure_graph(self) -> None:
         """Make the graph of the jobs when the first project is shown (it needs the graph module)."""
@@ -1720,6 +2037,8 @@ class PreviewPane(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_picture()
+        if self._outcome_panels:
+            self._fit_outcome()
 
     def wait(self, ms: int = 5000) -> None:
         """Wait for a read in progress (for tests and when closing)."""

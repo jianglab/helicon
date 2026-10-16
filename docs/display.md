@@ -35,7 +35,45 @@ the background, and a folder of tens of thousands of files appears in a moment.
 ## Jobs of a RELION or CryoSPARC project
 
 In a RELION or CryoSPARC project the sidebar lists the jobs by type, and a click on a job goes to it. The
-preview of the job says what it is and how it ended, and has what is needed to move around the project:
+preview of the job says what it is and how it ended, shows **what the job made** in place of the list of
+its files (the files are in the list of the window), and has what is needed to move around the project:
+
+- **The outcome**: what the job made, as pictures and numbers. The files of the job are in the list of
+  the window, so the preview does not list them again. A job whose outcome is not known (a job of
+  another type, or one that has not made anything yet) shows only its state and its links.
+
+  | Job | What the preview shows |
+  |---|---|
+  | Import | the number of movies, micrographs or particles imported |
+  | MotionCorr (motion correction) | the histogram of the length of the motion trajectories, and the trajectories of a few micrographs, from the least to the most motion |
+  | CtfFind, CTF estimation | the histograms of the defocus and of the maximum resolution of the CTF fit |
+  | ManualPick, AutoPick, pickers | the number of particles (or filaments, when picked by their start and end), of micrographs, and the average per micrograph |
+  | Extract | the number of particles and micrographs, the average per micrograph, and a few of the particles |
+  | Select | the classes and the particles kept, of all of them (2D or 3D), with the percentage of the particles, and the selected 2D class averages |
+  | Class2D, 2D classification | the class averages of the last iteration, the most populated first, with the share of the particles of the first few |
+  | Class3D, InitialModel, 3D classification | the central section of each map |
+  | Refine3D, refinement | the central section of the map, the **FSC** curve with the resolution at FSC 0.143 (RELION only: CryoSPARC keeps the curve in its database, not in files), the **views**: how many particles there are at each rotation and tilt angle (the first 300,000 particles) |
+  | CtfRefine | the histogram of the change of the defocus of the particles (compared with the input of the job), and the fitted aberrations: beam tilt, higher-order aberrations and anisotropic magnification |
+  | Polish (RELION), reference-based motion correction (CryoSPARC) | how much each movie frame contributes at some resolutions: early frames count at high resolution, late ones only at low resolution |
+  | PostProcess | the central section of the sharpened map, the FSC curve, the resolution and the B-factor |
+  | MaskCreate | the central section of the mask |
+  | Reconstruct3D, reconstruction | the central section of the map |
+  | LocalRes | the central section of the local resolution map, and the histogram of its values |
+  | ModelAngelo | the number of chains, residues and atoms of the model |
+  | Sharpen (CryoSPARC) | the central section of the sharpened map |
+  | Curate exposures, particle subsets, downsampling (CryoSPARC) | the numbers: exposures accepted of all, subsets and their sizes, particles and box size |
+
+  The number of filaments in a table of many GB (CryoSPARC stores a table row by row, so counting needs
+  all of the file) is first an estimate from a few blocks of it, marked "about"; the preview counts them
+  exactly in the background, replaces the estimate when it is done, and keeps the number in the cache
+  of the user (in the cache folder of Helicon, `~/.cache/helicon` unless `HELICON_CACHE_DIR` says otherwise), so that it is there at once the next time and
+  until the table is written again.
+
+  A CryoSPARC project shows it for the jobs that import, correct the motion (also the reference-based
+  one), estimate the CTF, pick, extract, select, classify (2D and 3D), refine, reconstruct and sharpen;
+  the change of the defocus and the fitted aberrations of a CTF refinement, polishing, post-processing,
+  mask creation, local resolution and ModelAngelo are RELION jobs. A CryoSPARC refinement has no FSC curve here,
+  because CryoSPARC keeps it in its database.
 
 - **Inputs from** lists the jobs whose files this job uses, and **Used by** the jobs that use its files.
   Each is a link: click it to go to that job. (RELION reads this from `default_pipeline.star`, CryoSPARC

@@ -77,6 +77,12 @@ def _pipeline_project(root: Path) -> None:
             (job / f"RELION_JOB_EXIT_{state}").write_text("")
             (job / "note.txt").write_text(f"{m.group(1)}/{m.group(2)}/\n")
             (job / "job.star").write_text("data_job\n")
+    # the outcome of one job: the class averages of its last iteration and their shares
+    job = root / "Class2D" / "job010"
+    urllib.request.urlretrieve(CLASSES, job / "run_it020_classes.mrcs")
+    urllib.request.urlretrieve(
+        CLASSES.replace("classes.mrcs", "model.star"), job / "run_it020_model.star"
+    )
 
 
 def main() -> int:

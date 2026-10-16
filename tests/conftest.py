@@ -16,6 +16,8 @@ import tempfile
 
 _CONFIG_HOME = tempfile.mkdtemp(prefix="helicon-test-config-")
 os.environ["XDG_CONFIG_HOME"] = _CONFIG_HOME
+# nor the cache of Helicon (what the preview of a job keeps in it, say): the run has its own
+os.environ.setdefault("HELICON_CACHE_DIR", os.path.join(_CONFIG_HOME, "cache"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 atexit.register(shutil.rmtree, _CONFIG_HOME, ignore_errors=True)
 

@@ -174,6 +174,7 @@ class TestCryosparcProjects:
     ):
         side = bp.PlacesSidebar()
         side.refresh(str(cs_project / "J7"))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top[1] == "CRYOSPARC  DEMO PROJECT"
         node = side.topLevelItem(1)
@@ -196,12 +197,14 @@ class TestCryosparcProjects:
     def test_clicking_a_job_goes_there_and_a_type_only_opens(self, qapp, cs_project):
         side = bp.PlacesSidebar()
         side.refresh(str(cs_project))
+        side.wait()
         got = []
         side.navigate.connect(got.append)
         node = side.topLevelItem(1)
         tracer = node.child(4)
         assert not tracer.isExpanded()
         side.itemClicked.emit(tracer, 0)
+        side.wait()
         assert tracer.isExpanded() and got == []
         side.itemClicked.emit(tracer.child(0), 0)
         assert got == [str(cs_project / "J5")]
@@ -314,6 +317,7 @@ class TestCryosparcProjects:
 
         side = bp.PlacesSidebar()
         side.refresh(str(cs_project))
+        side.wait()
         assert side.topLevelItem(1).childCount() == 6
         d = cs_project / "J20"
         d.mkdir()
@@ -322,6 +326,7 @@ class TestCryosparcProjects:
         )
         side.invalidate()
         side.refresh(str(cs_project))
+        side.wait()
         assert side.topLevelItem(1).childCount() == 7
 
 
@@ -490,6 +495,7 @@ class TestSidebar:
         marked = tmp_path / "marked"
         marked.mkdir()
         side.refresh(str(tmp_path), bookmarks=[str(marked)], recent=[str(tmp_path)])
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top == ["PLACES", "BOOKMARKS", "RECENT"]
         assert side.topLevelItem(1).child(0).text(0) == "marked"
@@ -497,11 +503,13 @@ class TestSidebar:
     def test_a_missing_bookmark_is_not_listed(self, qapp, tmp_path):
         side = bp.PlacesSidebar()
         side.refresh(str(tmp_path), bookmarks=[str(tmp_path / "gone")])
+        side.wait()
         assert side.topLevelItemCount() == 1
 
     def test_a_project_shows_its_jobs_and_marks_the_current_one(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project / "Class2D/job010"))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top[1].startswith("RELION")
         types = side.topLevelItem(1)
@@ -520,6 +528,7 @@ class TestSidebar:
     ):
         side = bp.PlacesSidebar()
         side.refresh(str(project / "Class2D/job010"))
+        side.wait()
         node = side.topLevelItem(1)
         names = [node.child(i).text(0) for i in range(node.childCount())]
         assert names == ["Project folder", "Class2D", "Extract"]
@@ -531,6 +540,7 @@ class TestSidebar:
     def test_a_click_goes_there(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         got = []
         side.navigate.connect(got.append)
         item = side.topLevelItem(1).child(0)
@@ -542,9 +552,11 @@ class TestSidebar:
     ):
         side = bp.PlacesSidebar()
         side.refresh(str(project / "Class2D/job010"))
+        side.wait()
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         side.refresh(str(elsewhere))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top[1].startswith("RELION")  # so Project folder leads back
         got = []
@@ -558,25 +570,31 @@ class TestSidebar:
 
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         shutil.rmtree(project)
         side.refresh(str(tmp_path))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top == ["PLACES"]
 
     def test_entering_another_project_replaces_it(self, qapp, project, cs_project):
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         side.refresh(str(cs_project))
         assert side.topLevelItem(1).text(0).startswith("CRYOSPARC")
         side.refresh(str(cs_project.parent))
+        side.wait()
         assert side.topLevelItem(1).text(0).startswith("CRYOSPARC")
 
     def test_the_jobs_of_a_type_are_listed_when_it_is_opened(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         extract = side.topLevelItem(1).child(2)
         assert extract.child(0).text(0) == "…"
         side.expandItem(extract)
+        side.wait()
         assert [extract.child(i).text(0) for i in range(extract.childCount())] == [
             "job005"
         ]
@@ -584,6 +602,7 @@ class TestSidebar:
     def test_the_most_specific_place_is_marked(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project), recent=[str(project)])
+        side.wait()
         assert side.selectedItems()[0].text(0) == "Project folder"
 
 
@@ -658,6 +677,7 @@ class TestInTheBrowser:
         browser._navigate_to(str(project / "Extract" / "job005"))
         assert browser._path_edit.text() == str(project / "Extract" / "job005")
         assert browser._path_edit.segments()[-1][0] == "job005"
+        browser._sidebar.wait()
         assert browser._sidebar.selectedItems()[0].text(0) == "job005"
 
     def test_the_project_folder_leads_back_from_anywhere(
@@ -1023,3 +1043,83 @@ class TestLinksInThePane:
         finally:
             window._preview.wait()
             window.close()
+
+
+class TestSidebarOpenAndClosedTypes:
+    @staticmethod
+    def _types(side):
+        node = side.topLevelItem(1)
+        return {
+            node.child(i).text(0): node.child(i) for i in range(1, node.childCount())
+        }
+
+    def test_going_to_a_job_opens_only_its_type(self, qapp, project):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        types = self._types(side)
+        assert types["Class2D"].isExpanded() and not types["Extract"].isExpanded()
+
+    def test_a_type_that_was_closed_by_hand_stays_closed_when_another_job_is_clicked(
+        self, qapp, project
+    ):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        side.refresh(str(project / "Extract/job005"))
+        side.wait()
+        types = self._types(side)
+        assert types["Class2D"].isExpanded() and types["Extract"].isExpanded()
+        side.collapseItem(types["Class2D"])
+        # the click on a job of the other type, and a refresh of the lists, leave Class2D closed
+        side.refresh(str(project / "Extract/job005"), bookmarks=[str(project)])
+        side.wait()
+        side.refresh(str(project / "Extract"), bookmarks=[str(project)])
+        side.wait()
+        types = self._types(side)
+        assert not types["Class2D"].isExpanded() and types["Extract"].isExpanded()
+
+    def test_a_job_in_a_closed_type_opens_it_again(self, qapp, project):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        side.collapseItem(self._types(side)["Class2D"])
+        side.refresh(str(project / "Class2D/job011"))
+        side.wait()
+        types = self._types(side)
+        assert types["Class2D"].isExpanded() and types["Class2D"].childCount() == 2
+
+    def test_the_open_types_are_not_changed_by_looking_at_the_same_folder_again(
+        self, qapp, project
+    ):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        side.collapseItem(self._types(side)["Class2D"])
+        side.refresh(str(project / "Class2D/job010"))  # a refresh, not a new place
+        side.wait()
+        assert not self._types(side)["Class2D"].isExpanded()
+
+    def test_the_tree_is_shown_before_the_project_is_read(self, qapp, project):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project))
+        # at once there are the places, and a note in place of the types
+        assert side.topLevelItem(0).childCount() == 2
+        assert side.topLevelItem(1).child(1).text(0) == "Reading the jobs…"
+        side.wait()
+        assert side.topLevelItem(1).child(1).text(0) == "Class2D"
+
+    def test_a_bookmark_of_a_folder_that_is_gone_goes_away_after_the_reading(
+        self, qapp, tmp_path
+    ):
+        side = bp.PlacesSidebar()
+        side.refresh(str(tmp_path), bookmarks=[str(tmp_path / "gone"), str(tmp_path)])
+        side.wait()
+        sections = {
+            side.topLevelItem(i).text(0): side.topLevelItem(i)
+            for i in range(side.topLevelItemCount())
+        }
+        assert [
+            sections["BOOKMARKS"].child(i).text(0)
+            for i in range(sections["BOOKMARKS"].childCount())
+        ] == [tmp_path.name]
