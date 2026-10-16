@@ -97,6 +97,13 @@ its files (the files are in the list of the window), and has what is needed to m
     the graph, and a double click on the background shows all of it again (also the *Fit* button and `F`);
   - with the **pointer on a job**, the job, the jobs it takes its files from (its inputs) and the jobs that
     use its files are marked in three colours, with their arrows; the others step back;
+  - **right-click** a job for a menu: *Highlight … and its ancestors* marks the job and every job it
+    descends from (in two colours, with the arrows between them) and lets the others step back, until
+    *Clear the highlight*; *Save the highlighted graph as PDF…* writes those jobs, laid out on their own,
+    with the job marked, and *Save the entire graph as PDF…* writes all the jobs (a very long graph is cut
+    into bands side by side, and a page is never larger than a PDF reader opens). The files are vector
+    drawings with the labels as text, on a white page whatever the theme of the window. A right-click on
+    the background offers the entire graph only;
   - a graph that is much longer than the window is wide is cut into **bands side by side**, to use the
     width of the window (an arrow that goes on in the next band is dashed), and is cut again when you
     resize the window;

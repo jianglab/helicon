@@ -20,13 +20,26 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QMarginsF,
+    QPointF,
+    QRectF,
+    QSize,
+    QSizeF,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QFontMetricsF,
+    QPageSize,
     QPainter,
     QPainterPath,
+    QPdfWriter,
     QPen,
 )
 from PySide6.QtWidgets import (
@@ -35,8 +48,10 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsView,
+    QFileDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QToolBar,
     QToolButton,
 )
@@ -48,6 +63,7 @@ __all__ = [
     "JobNode",
     "build_job_graph",
     "layout_layers",
+    "render_graph_pdf",
 ]
 
 # the size of a node and the room between nodes, in scene units: a chain of jobs, which is what a
@@ -62,6 +78,20 @@ MIN_BAND_LAYERS = 6
 # the colours of the job under the pointer, of the jobs it takes its files from and of the jobs
 # that use its files (none is a colour of a state)
 HOVER_COLORS = dict(job="#d6409f", parents="#8e6cd8", children="#17b3c6")
+# the colours of a highlighted job and of the jobs it descends from
+PIN_COLORS = dict(pinjob=HOVER_COLORS["job"], pin="#e8833a")
+# a PDF page is not made larger than this (points): Acrobat opens no page of more than 200 inches
+PDF_MAX_POINTS = 14000.0
+# a graph of more layers than this is cut into bands side by side when it is saved
+PDF_ONE_BAND_LAYERS = 40
+PDF_COLORS = dict(
+    alt="#ffffff",
+    text="#222222",
+    muted="#666666",
+    accent="#4a8fd6",
+    border="#999999",
+    window="#ffffff",
+)
 
 STATUS_COLORS = {
     "success": "#4caf50",
@@ -129,6 +159,35 @@ class JobGraph:
                 parents[b].append(a)
             self._neighbours = (parents, children)
         return self._neighbours
+
+    def ancestors(self, index: int) -> set[int]:
+        """Every job that a job depends on, directly or not (not the job itself)."""
+        parents, _children = self.neighbours()
+        found: set[int] = set()
+        pending = list(parents[index])
+        while pending:
+            node = pending.pop()
+            if node not in found:
+                found.add(node)
+                pending.extend(parents[node])
+        found.discard(
+            index
+        )  # a cycle, which a project should not have, leads back to it
+        return found
+
+    def subgraph(self, indices, aspect: float | None = None) -> "JobGraph":
+        """The graph of some of the jobs, with the arrows between them, laid out on its own."""
+        keep = sorted(set(indices))
+        new = {old: i for i, old in enumerate(keep)}
+        sub = JobGraph(
+            kind=self.kind,
+            root=self.root,
+            nodes=[self.nodes[i] for i in keep],
+            edges=[(new[a], new[b]) for a, b in self.edges if a in new and b in new],
+        )
+        sub.places = layout_layers(len(sub.nodes), sub.edges)
+        sub.positions, sub.bands = pack_bands(sub.places, aspect)
+        return sub
 
     def laid_out(self, aspect: float | None = None) -> "JobGraph":
         """The same graph with the nodes placed for a window of this width over height.
@@ -401,6 +460,176 @@ class _Worker(QThread):
         self.ready.emit(self._serial, graph)
 
 
+def _edge_item(graph: JobGraph, colors: dict) -> QGraphicsPathItem:
+    """All the arrows as one item (and the ones that go on in the next band as a dashed one):
+    a graph of thousands of jobs has as many arrows."""
+    path, across = QPainterPath(), QPainterPath()
+    for a, b in graph.edges:
+        x1 = graph.positions[a][0] + NODE_W / 2
+        y1 = graph.positions[a][1] + NODE_H
+        x2, y2 = graph.positions[b][0] + NODE_W / 2, graph.positions[b][1]
+        target = across if y2 < y1 else path
+        target.moveTo(x1, y1)
+        bend = max(abs(y2 - y1) / 2, 14.0) if y2 >= y1 else 46.0
+        target.cubicTo(x1, y1 + bend, x2, y2 - bend, x2, y2)
+    pen = QPen(QColor(colors["muted"]), 1.2)
+    pen.setCosmetic(True)
+    item = QGraphicsPathItem(path)
+    item.setPen(pen)
+    item.setZValue(-2)
+    item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+    if not across.isEmpty():
+        dashed = QPen(pen)
+        dashed.setStyle(Qt.PenStyle.DashLine)
+        other = QGraphicsPathItem(across, item)  # shares the fate of the other
+        other.setPen(dashed)
+        other.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+    return item
+
+
+def _arrows(graph: JobGraph, edges, colour: str, width: float) -> QGraphicsPathItem:
+    """The arrows ``edges`` (pairs of nodes) drawn over the others, in a colour."""
+    path = QPainterPath()
+    for a, b in edges:
+        x1 = graph.positions[a][0] + NODE_W / 2
+        y1 = graph.positions[a][1] + NODE_H
+        x2, y2 = graph.positions[b][0] + NODE_W / 2, graph.positions[b][1]
+        bend = max(abs(y2 - y1) / 2, 14.0) if y2 >= y1 else 46.0
+        path.moveTo(x1, y1)
+        path.cubicTo(x1, y1 + bend, x2, y2 - bend, x2, y2)
+    item = QGraphicsPathItem(path)
+    pen = QPen(QColor(colour), width)
+    pen.setCosmetic(True)
+    item.setPen(pen)
+    item.setZValue(-1)
+    item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+    return item
+
+
+class _OnPaper:
+    """What a node asks of its view when it is drawn into a file: no pointer, no zoom, and the
+    colours of paper."""
+
+    always_labels = True
+
+    def __init__(self, current: int | None = None):
+        self._colors = dict(PDF_COLORS)
+        self._current = current
+
+    def role_of(self, index: int) -> str:
+        return "pinjob" if index == self._current else "none"
+
+    def _set_hover(self, index) -> None:
+        pass
+
+
+def render_graph_pdf(
+    graph: JobGraph,
+    path: str | Path,
+    title: str = "",
+    mark: int | None = None,
+    aspect: float | None = None,
+) -> Path:
+    """Write a graph as a PDF file: vector drawing, on a page as large as the graph needs.
+
+    Parameters
+    ----------
+    graph : JobGraph
+        With its nodes placed (:attr:`JobGraph.positions`).
+    path : str or pathlib.Path
+        The file to write.
+    title : str, optional
+        Written at the top.
+    mark : int, optional
+        A node to mark (the job that a highlighted graph is about).
+    aspect : float, optional
+        Width over height of the page for a long graph: it is cut into bands side by side, as
+        :func:`pack_bands` does. One band when omitted.
+
+    Returns
+    -------
+    pathlib.Path
+        The file.
+
+    Raises
+    ------
+    ValueError
+        There are no jobs.
+    OSError
+        The file cannot be written.
+    """
+    if not graph.nodes:
+        raise ValueError("there are no jobs to save")
+    path = Path(path)
+    if aspect and graph.places:
+        graph = graph.laid_out(aspect)
+    on_paper = _OnPaper(mark)
+    scene = QGraphicsScene()
+    scene.addItem(_edge_item(graph, on_paper._colors))
+    if mark is not None:
+        ancestors = graph.ancestors(mark) | {mark}
+        scene.addItem(
+            _arrows(
+                graph,
+                [(a, b) for a, b in graph.edges if a in ancestors and b in ancestors],
+                PIN_COLORS["pin"],
+                2.4,
+            )
+        )
+    for i, node in enumerate(graph.nodes):
+        item = _NodeItem(i, node, on_paper)
+        item.setPos(*graph.positions[i])
+        scene.addItem(item)
+    xs = [x for x, _ in graph.positions]
+    ys = [y for _, y in graph.positions]
+    margin = 24.0
+    source = QRectF(
+        min(xs) - margin,
+        min(ys) - margin,
+        max(xs) - min(xs) + NODE_W + 2 * margin,
+        max(ys) - min(ys) + NODE_H + 2 * margin,
+    )
+    header = 30.0 if title else 0.0
+    if title:
+        # a page narrower than the title (a chain of jobs is one node wide) is widened about the graph
+        font = QFont()
+        font.setPointSizeF(11.0)
+        font.setBold(True)
+        wanted = QFontMetricsF(font).horizontalAdvance(title) + 2 * margin
+        if wanted > source.width():
+            extra = wanted - source.width()
+            source.adjust(-extra / 2, 0, extra / 2, 0)
+    scale = min(1.0, PDF_MAX_POINTS / max(source.width(), source.height() + header))
+    width, height = source.width() * scale, source.height() * scale + header
+    writer = QPdfWriter(str(path))
+    writer.setResolution(72)  # a unit of the painter is a point
+    writer.setPageSize(QPageSize(QSizeF(width, height), QPageSize.Unit.Point))
+    writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+    writer.setCreator("Helicon")
+    writer.setTitle(title or "Jobs")
+    painter = QPainter(writer)
+    if not painter.isActive():
+        raise OSError(f"cannot write {path}")
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(QRectF(0, 0, width, height), QColor("white"))
+        if title:
+            font = QFont(painter.font())
+            font.setPointSizeF(11.0)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor(PDF_COLORS["text"]))
+            painter.drawText(
+                QRectF(margin * scale, 4, width - 2 * margin * scale, header - 6),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                title,
+            )
+        scene.render(painter, QRectF(0, header, width, height - header), source)
+    finally:
+        painter.end()
+    return path
+
+
 class _NodeItem(QGraphicsItem):
     """A job: a rounded box coloured by its state, with its type and label."""
 
@@ -435,6 +664,8 @@ class _NodeItem(QGraphicsItem):
                 0.35
             )  # something is under the pointer: the rest steps back
         scale = option.levelOfDetailFromTransform(painter.worldTransform())
+        if getattr(self._view, "always_labels", False):
+            scale = 1.0  # on paper, the labels are always written
         base = QColor(STATUS_COLORS.get(self.node.status, STATUS_COLORS["unknown"]))
         fill = QColor(colors["alt"])
         fill = QColor(
@@ -444,8 +675,8 @@ class _NodeItem(QGraphicsItem):
         )
         current = self.index == self._view._current
         painter.setBrush(QBrush(fill))
-        if role in HOVER_COLORS:
-            painter.setPen(QPen(QColor(HOVER_COLORS[role]), 3.5))
+        if role in HOVER_COLORS or role in PIN_COLORS:
+            painter.setPen(QPen(QColor({**HOVER_COLORS, **PIN_COLORS}[role]), 3.5))
         else:
             painter.setPen(
                 QPen(
@@ -491,10 +722,13 @@ class JobGraphView(QGraphicsView):
         A job was clicked; the value is its folder.
     graph_ready()
         The project was read and laid out (the nodes are drawn a few at a time after this).
+    pdf_saved(str)
+        A graph was saved as a PDF file; the value is the file.
     """
 
     job_clicked = Signal(str)
     graph_ready = Signal()
+    pdf_saved = Signal(str)
 
     SLICE_S = (
         0.012  # how long the main thread draws nodes before it lets the window answer
@@ -528,6 +762,12 @@ class JobGraphView(QGraphicsView):
         self._current_folder: str | None = None
         self._hover: int | None = None
         self._hover_items: list = []
+        # the job whose ancestors are highlighted (by key: it stays through a new layout), the jobs
+        # of the highlight and its arrows
+        self._pinned_key: str | None = None
+        self._pinned: int | None = None
+        self._pinned_set: frozenset[int] = frozenset()
+        self._pinned_items: list = []
         # the window cuts a long graph into bands to fill its width; the preview does not
         self.auto_bands = False
         self._relayout = QTimer(self)
@@ -607,7 +847,14 @@ class JobGraphView(QGraphicsView):
         self._scene.clear()
         self._items = []
         self._hover, self._hover_items = None, []
+        self._pinned_items = []
         self._current = graph.index_of_folder(self._current_folder)
+        self._pin(
+            next(
+                (i for i, n in enumerate(graph.nodes) if n.key == self._pinned_key),
+                None,
+            )
+        )
         if not graph.nodes:
             self._show_note("No jobs in this project yet")
             return
@@ -627,39 +874,24 @@ class JobGraphView(QGraphicsView):
         QTimer.singleShot(0, self, lambda: self._draw_nodes(serial, 0))
 
     def _edge_item(self, graph: JobGraph) -> QGraphicsPathItem:
-        """All the arrows as one item (and the ones that go on in the next band as a dashed one):
-        a graph of thousands of jobs has as many arrows."""
-        path, across = QPainterPath(), QPainterPath()
-        for a, b in graph.edges:
-            x1 = graph.positions[a][0] + NODE_W / 2
-            y1 = graph.positions[a][1] + NODE_H
-            x2, y2 = graph.positions[b][0] + NODE_W / 2, graph.positions[b][1]
-            target = across if y2 < y1 else path
-            target.moveTo(x1, y1)
-            bend = max(abs(y2 - y1) / 2, 14.0) if y2 >= y1 else 46.0
-            target.cubicTo(x1, y1 + bend, x2, y2 - bend, x2, y2)
-        pen = QPen(QColor(self._colors["muted"]), 1.2)
-        pen.setCosmetic(True)
-        item = QGraphicsPathItem(path)
-        item.setPen(pen)
-        item.setZValue(-2)
-        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        if not across.isEmpty():
-            dashed = QPen(pen)
-            dashed.setStyle(Qt.PenStyle.DashLine)
-            other = QGraphicsPathItem(across, item)  # shares the fate of the other
-            other.setPen(dashed)
-            other.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        return item
+        return _edge_item(graph, self._colors)
 
     # -- what is under the pointer ------------------------------------------
 
     def role_of(self, index: int) -> str:
         """What a job is to the job under the pointer: ``job``, ``parents`` (a job it takes its
         files from), ``children`` (a job that uses its files) or ``other``; ``none`` while
-        nothing is under the pointer."""
-        if self._hover is None or self._graph is None:
+        nothing is under the pointer. While a job is highlighted (:meth:`highlight_ancestors`) and
+        the pointer is on no job: ``pinjob`` (the job), ``pin`` (one it descends from), ``other``.
+        """
+        if self._graph is None:
             return "none"
+        if self._hover is None:
+            if self._pinned is None:
+                return "none"
+            if index == self._pinned:
+                return "pinjob"
+            return "pin" if index in self._pinned_set else "other"
         if index == self._hover:
             return "job"
         parents, children = self._graph.neighbours()
@@ -792,6 +1024,136 @@ class JobGraphView(QGraphicsView):
     def scale_factor(self) -> float:
         return self.transform().m11()
 
+    # -- the highlight of a job and its ancestors, and the files ------------
+
+    def highlight_ancestors(self, index: int) -> None:
+        """Mark a job and every job it descends from, and let the others step back, until
+        :meth:`clear_highlight`."""
+        if self._graph is None or not 0 <= index < len(self._graph.nodes):
+            return
+        self._pinned_key = self._graph.nodes[index].key
+        self._pin(index)
+
+    def clear_highlight(self) -> None:
+        self._pinned_key = None
+        self._pin(None)
+
+    def highlighted(self) -> list[int]:
+        """The jobs of the highlight: the job and its ancestors (none if nothing is highlighted)."""
+        return sorted(self._pinned_set)
+
+    def _pin(self, index: int | None) -> None:
+        for item in self._pinned_items:
+            if item.scene() is not None:
+                self._scene.removeItem(item)
+        self._pinned_items = []
+        graph = self._graph
+        if index is None or graph is None:
+            self._pinned, self._pinned_set = None, frozenset()
+        else:
+            self._pinned = index
+            self._pinned_set = frozenset(graph.ancestors(index) | {index})
+            edges = [
+                (a, b)
+                for a, b in graph.edges
+                if a in self._pinned_set and b in self._pinned_set
+            ]
+            item = _arrows(graph, edges, PIN_COLORS["pin"], 3.0)
+            self._scene.addItem(item)
+            self._pinned_items.append(item)
+        self.viewport().update()
+
+    def _run_menu(self, menu: QMenu, global_pos):
+        """Show a menu where the pointer is; the action that was chosen, or None."""
+        return menu.exec(global_pos)
+
+    def _ask_pdf_path(self, name: str) -> str:
+        """The file to save a PDF in, asked for; empty if it was not chosen."""
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save as PDF", name, "PDF files (*.pdf)"
+        )
+        if path and not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        return path
+
+    def contextMenuEvent(self, event) -> None:
+        graph = self._graph
+        if graph is None or not graph.nodes:
+            return
+        item = self.itemAt(event.pos())
+        clicked = item.index if isinstance(item, _NodeItem) else None
+        menu = QMenu(self)
+        highlight = clear = save_highlight = None
+        if clicked is not None:
+            label = graph.nodes[clicked].label
+            highlight = menu.addAction(f"Highlight {label} and its ancestors")
+        if self._pinned is not None:
+            clear = menu.addAction("Clear the highlight")
+        if clicked is not None or self._pinned is not None:
+            menu.addSeparator()
+        if self._pinned is not None:
+            name = graph.nodes[self._pinned].label
+            save_highlight = menu.addAction(
+                f"Save the highlighted graph ({name} and its ancestors) as PDF…"
+            )
+        save_all = menu.addAction("Save the entire graph as PDF…")
+        chosen = self._run_menu(menu, event.globalPos())
+        if chosen is None:
+            return
+        if chosen is highlight:
+            self.highlight_ancestors(clicked)
+        elif chosen is clear:
+            self.clear_highlight()
+        elif chosen is save_highlight:
+            self.save_pdf(highlighted=True)
+        elif chosen is save_all:
+            self.save_pdf(highlighted=False)
+
+    def save_pdf(self, highlighted: bool, path: str | None = None) -> str | None:
+        """Save the highlighted graph (the job and its ancestors), or the entire graph, as a PDF.
+
+        Parameters
+        ----------
+        highlighted : bool
+            The jobs of the highlight only, laid out on their own; else all the jobs.
+        path : str, optional
+            The file; asked for when omitted.
+
+        Returns
+        -------
+        str or None
+            The file, or None if none was chosen or the graph is empty.
+        """
+        graph = self._graph
+        if graph is None or not graph.nodes:
+            return None
+        if highlighted:
+            if self._pinned is None:
+                return None
+            keep = sorted(self._pinned_set)
+            job = graph.nodes[self._pinned]
+            sub = graph.subgraph(keep)
+            mark = keep.index(self._pinned)
+            title = f"{job.label} and the {len(keep) - 1} jobs it descends from"
+            name = f"{job.key.replace('/', '_')}_ancestors.pdf"
+            aspect = None
+        else:
+            sub, mark, aspect = graph, None, None
+            if graph.places:
+                layers = max(layer for layer, _row in graph.places) + 1
+                if layers > PDF_ONE_BAND_LAYERS:
+                    aspect = (
+                        1.4  # a long graph is cut into bands: a page of a readable size
+                    )
+            title = f"{Path(graph.root).name}: {len(graph.nodes)} jobs"
+            name = f"{Path(graph.root).name}_jobs.pdf"
+        path = path or self._ask_pdf_path(name)
+        if not path:
+            return None
+        render_graph_pdf(sub, path, title=title, mark=mark, aspect=aspect)
+        self.pdf_saved.emit(str(path))
+        return str(path)
+
     def wheelEvent(self, event) -> None:
         """The wheel scrolls the graph up and down (a graph that runs down is read like a page);
         with the Shift key it scrolls sideways, and with the Ctrl key it zooms."""
@@ -902,6 +1264,7 @@ class JobGraphWindow(QMainWindow):
         legend.setTextFormat(Qt.TextFormat.RichText)
         legend.setText(
             "&nbsp;&nbsp; wheel: scroll &nbsp; Ctrl+wheel: zoom &nbsp; drag: pan &nbsp; click: go to the job"
+            " &nbsp; right-click: highlight, save as PDF"
             " &nbsp;&nbsp; pointer on a job: "
             f"<span style='color:{HOVER_COLORS['job']}'>■ the job</span> "
             f"<span style='color:{HOVER_COLORS['parents']}'>■ its inputs</span> "
