@@ -122,6 +122,37 @@ def convert_2d_lattice_to_helical_lattice(a=(1, 0), b=(0, 1), endpoint=(10, 0)):
 def convert_helical_lattice_to_2d_lattice(
     twist=30, rise=20, csym=1, diameter=100, primitive_unitcell=False, horizontal=True
 ):
+    """The 2D lattice vectors of the helix ``twist``/``rise`` rolls up from.
+
+    Parameters
+    ----------
+    twist : float, optional
+        Twist per subunit, in degrees. A zero twist has no helix to unroll
+        and is refused.
+    rise : float, optional
+        Rise per subunit.
+    csym : int, optional
+        Axial symmetry.
+    diameter : float, optional
+        Helical diameter.
+    primitive_unitcell : bool, optional
+        Keep the primitive unit cell rather than the smallest orthogonal one.
+    horizontal : bool, optional
+        Put unit cell vector ``a`` along the x axis.
+
+    Returns
+    -------
+    tuple
+        The unit cell vectors ``a`` and ``b`` and the ``endpoint`` counts.
+
+    Raises
+    ------
+    ValueError
+        If ``twist`` is 0 (the conversion divides by it).
+    """
+    if twist == 0:
+        raise ValueError("twist must not be 0: there is no helix to unroll")
+
     def angle90(v1, v2):
         p = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
         p = np.clip(abs(p), 0, 1)
@@ -828,14 +859,17 @@ def helical_lattice_tab_server(input, output, session):
             ms = input.marker_size()
             fh = input.figure_height()
 
-            a, b, endpoint = convert_helical_lattice_to_2d_lattice(
-                twist=twist,
-                rise=rise,
-                csym=csym,
-                diameter=diameter,
-                primitive_unitcell=input.primitive_unitcell(),
-                horizontal=input.horizontal(),
-            )
+            try:
+                a, b, endpoint = convert_helical_lattice_to_2d_lattice(
+                    twist=twist,
+                    rise=rise,
+                    csym=csym,
+                    diameter=diameter,
+                    primitive_unitcell=input.primitive_unitcell(),
+                    horizontal=input.horizontal(),
+                )
+            except ValueError as error:
+                return ui.div(str(error), class_="alert alert-warning m-3")
 
             fig1 = plot_helical_lattice(
                 diameter,

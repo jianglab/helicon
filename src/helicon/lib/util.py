@@ -17,7 +17,6 @@ from .logging import (  # noqa: F401
     Timer,
 )
 from .collections import (  # noqa: F401
-    unique,
     assign_to_groups,
     flatten,
     order_by_unique_counts,
@@ -36,7 +35,6 @@ from .path_utils import (  # noqa: F401
     get_emdb_id,
     is_file_readable,
     is_file_writable,
-    file_ready,
     convert_file_path,
     convert_dataframe_file_path,
     check_required_columns,

@@ -3,10 +3,10 @@
 Ported from src/helicon/webApps/denovo3D/app.py (Shiny Express) into the
 consolidated Helicon Lab Shiny module pattern.
 
-Uses ``helicon.shiny.image_gallery`` (plain function) instead of
-``helicon.shiny.image_select`` (express module), ``pio.to_html`` + ``render.ui``
-instead of ``render_plotly``, and ``input_action_button`` instead of
-``input_task_button``.
+Uses ``helicon.shiny.image_gallery`` (plain function, called with the
+module's own session-namespaced ids) instead of an Express module, plus
+``pio.to_html`` + ``render.ui`` instead of ``render_plotly``, and
+``input_action_button`` instead of ``input_task_button``.
 """
 
 import asyncio
@@ -1818,6 +1818,10 @@ def denovo3d_tab_server(input, output, session):
         image_file = fileinfo[0]["datapath"]
 
         if image_file.split(".")[-1] == "star":
+            # the rows name image paths this server must read; on a hosting
+            # service the visitor's files are not here
+            if deployment.refuse_server_mode():
+                return
             df = helicon.star2dataframe(str(image_file))
             indices = range(len(df))
             if "rlnHelixImageName" in df.columns:

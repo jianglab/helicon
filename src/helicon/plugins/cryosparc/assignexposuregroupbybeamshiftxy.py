@@ -27,6 +27,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="0|1|xml_folder=<path>:min_micrographs_per_group=<n>",
         help="assign images to exposure groups by beam shift XY coordinates from EPU XML files. Requires EPU_old FoilHole XML files. disabled by default",
+        action="append",
         default=None,
     )
 

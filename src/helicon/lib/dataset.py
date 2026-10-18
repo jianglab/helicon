@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging, os
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 import numpy as np
@@ -235,11 +236,24 @@ class EMDB:
                     )
 
             if mirror_file.exists() and mirror_file.stat().st_size:
-                target_file.unlink(missing_ok=True)
-                target_file.symlink_to(mirror_file)
-                mtime = target_file.stat().st_mtime
-                os.utime(target_file, (mtime, mtime), follow_symlinks=False)
-                return target_file
+                link = target_file.with_name(
+                    f".{target_file.name}.{uuid.uuid4().hex}.link"
+                )
+                try:
+                    link.symlink_to(mirror_file)
+                    if not link.stat().st_size:
+                        raise FileNotFoundError(mirror_file)
+                    link.replace(target_file)
+                    mtime = target_file.stat().st_mtime
+                    os.utime(target_file, (mtime, mtime), follow_symlinks=False)
+                    return target_file
+                except OSError:
+                    link.unlink(missing_ok=True)
+                    if (
+                        target_file.is_symlink()
+                        and target_file.resolve() == mirror_file
+                    ):
+                        target_file.unlink()
 
         url = url_method(emd_id)
         downloaded = helicon.download_file_from_url(

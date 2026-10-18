@@ -69,7 +69,7 @@ def parse_param_str(param_str: str) -> tuple[str | None, dict[str, Any]]:
     d = {}
     for pi, p in enumerate(params):
         try:
-            k, v = p.split("=")
+            k, v = p.split("=", 1)
             if v.lower() == "true":
                 v = 1
             elif v.lower() == "false":

@@ -26,6 +26,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="<param>=<val>:...",
         help="apply a moving average filter along the z-axis",
+        action="append",
         default=None,
     )
 

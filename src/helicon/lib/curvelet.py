@@ -1690,6 +1690,27 @@ def _generate_cosine_taper(shape: tuple[int, ...], overlap: int) -> np.ndarray:
     return np.ones(shape, dtype=np.float64)
 
 
+def _blend_tile(output, weights, denoised_tile, weight_tile, z_slc, y_slc, x_slc):
+    """Add one denoised tile and its weight to the output accumulators.
+
+    Accumulating as each tile arrives, instead of keeping every tile until the
+    end, bounds peak memory to the output plus one tile (plus the workers in
+    flight): keeping them all costs another volume or two on the maps this is
+    for. A tile that runs past the volume edge is cropped to the part inside.
+    """
+    nz, ny, nx = output.shape
+    z_valid = min(z_slc.stop, nz) - z_slc.start
+    y_valid = min(y_slc.stop, ny) - y_slc.start
+    x_valid = min(x_slc.stop, nx) - x_slc.start
+    box = (
+        slice(z_slc.start, z_slc.start + z_valid),
+        slice(y_slc.start, y_slc.start + y_valid),
+        slice(x_slc.start, x_slc.start + x_valid),
+    )
+    output[box] += denoised_tile[:z_valid, :y_valid, :x_valid]
+    weights[box] += weight_tile[:z_valid, :y_valid, :x_valid]
+
+
 def curvelet_denoise_3d_udct_tiled(
     vol: np.ndarray,
     sigma: float | None = None,
@@ -1799,8 +1820,9 @@ def curvelet_denoise_3d_udct_tiled(
     tiles = _get_tile_indices((nx, ny, nz), tile_with_overlap, overlap)
 
     grid_cache: dict[tuple, Any] = {}
-    results = []
     retained_pcts = []
+    output = np.zeros_like(vol_norm)
+    weights = np.zeros_like(vol_norm)
 
     if n_jobs is None or n_jobs == 1:
         for tile_idx in tiles:
@@ -1840,7 +1862,7 @@ def curvelet_denoise_3d_udct_tiled(
             denoised_cropped = denoised[dz:dz_end, dy:dy_end, dx:dx_end]
 
             weight = _generate_cosine_taper(tile_data.shape, overlap)
-            results.append((denoised_cropped, weight, z_slc, y_slc, x_slc))
+            _blend_tile(output, weights, denoised_cropped, weight, z_slc, y_slc, x_slc)
     else:
         from joblib import Parallel, delayed
 
@@ -1882,30 +1904,26 @@ def curvelet_denoise_3d_udct_tiled(
             weight = _generate_cosine_taper(tile_data.shape, overlap)
             return denoised_cropped, weight, z_slc, y_slc, x_slc, retained_pct
 
-        tile_results = Parallel(n_jobs=n_jobs)(
-            delayed(process_tile)(tile_idx) for tile_idx in tiles
-        )
-        results = [(r[0], r[1], r[2], r[3], r[4]) for r in tile_results]
-        retained_pcts = [r[5] for r in tile_results]
-
-    output = np.zeros_like(vol_norm)
-    weights = np.zeros_like(vol_norm)
-
-    for denoised_tile, weight_tile, z_slc, y_slc, x_slc in results:
-        z_valid = min(z_slc.stop, nz) - z_slc.start
-        y_valid = min(y_slc.stop, ny) - y_slc.start
-        x_valid = min(x_slc.stop, nx) - x_slc.start
-
-        output[
-            z_slc.start : z_slc.start + z_valid,
-            y_slc.start : y_slc.start + y_valid,
-            x_slc.start : x_slc.start + x_valid,
-        ] += denoised_tile[:z_valid, :y_valid, :x_valid]
-        weights[
-            z_slc.start : z_slc.start + z_valid,
-            y_slc.start : y_slc.start + y_valid,
-            x_slc.start : x_slc.start + x_valid,
-        ] += weight_tile[:z_valid, :y_valid, :x_valid]
+        # one chunk of tiles at a time: blending each chunk as it arrives keeps
+        # the memory bounded, where holding every tile for the final blend cost
+        # several times the volume
+        chunk = max(1, int(n_jobs))
+        for start in range(0, len(tiles), chunk):
+            for (
+                denoised_cropped,
+                weight,
+                z_slc,
+                y_slc,
+                x_slc,
+                retained_pct,
+            ) in Parallel(n_jobs=n_jobs)(
+                delayed(process_tile)(tile_idx)
+                for tile_idx in tiles[start : start + chunk]
+            ):
+                retained_pcts.append(retained_pct)
+                _blend_tile(
+                    output, weights, denoised_cropped, weight, z_slc, y_slc, x_slc
+                )
 
     if retained_pcts:
         logger.info(
@@ -2215,8 +2233,9 @@ def curvelet_denoise_3d_mct_tiled(
     tiles = _get_tile_indices((nx, ny, nz), tile_with_overlap, overlap)
 
     grid_cache: dict[tuple, object] = {}
-    results = []
     retained_pcts = []
+    output = np.zeros_like(vol_norm)
+    weights = np.zeros_like(vol_norm)
 
     if n_jobs is None or n_jobs == 1:
         for tile_idx in tiles:
@@ -2251,7 +2270,7 @@ def curvelet_denoise_3d_mct_tiled(
             denoised_cropped = denoised[dz:dz_end, dy:dy_end, dx:dx_end]
 
             weight = _generate_cosine_taper(tile_data.shape, overlap)
-            results.append((denoised_cropped, weight, z_slc, y_slc, x_slc))
+            _blend_tile(output, weights, denoised_cropped, weight, z_slc, y_slc, x_slc)
     else:
         from joblib import Parallel, delayed
 
@@ -2288,11 +2307,26 @@ def curvelet_denoise_3d_mct_tiled(
             weight = _generate_cosine_taper(tile_data.shape, overlap)
             return denoised_cropped, weight, z_slc, y_slc, x_slc, retained_pct
 
-        tile_results = Parallel(n_jobs=n_jobs)(
-            delayed(process_tile)(tile_idx) for tile_idx in tiles
-        )
-        results = [(r[0], r[1], r[2], r[3], r[4]) for r in tile_results]
-        retained_pcts = [r[5] for r in tile_results]
+        # one chunk of tiles at a time: blending each chunk as it arrives keeps
+        # the memory bounded, where holding every tile for the final blend cost
+        # several times the volume
+        chunk = max(1, int(n_jobs))
+        for start in range(0, len(tiles), chunk):
+            for (
+                denoised_cropped,
+                weight,
+                z_slc,
+                y_slc,
+                x_slc,
+                retained_pct,
+            ) in Parallel(n_jobs=n_jobs)(
+                delayed(process_tile)(tile_idx)
+                for tile_idx in tiles[start : start + chunk]
+            ):
+                retained_pcts.append(retained_pct)
+                _blend_tile(
+                    output, weights, denoised_cropped, weight, z_slc, y_slc, x_slc
+                )
 
     if retained_pcts:
         logger.info(
@@ -2301,25 +2335,6 @@ def curvelet_denoise_3d_mct_tiled(
             min(retained_pcts),
             max(retained_pcts),
         )
-
-    output = np.zeros_like(vol_norm)
-    weights = np.zeros_like(vol_norm)
-
-    for denoised_tile, weight_tile, z_slc, y_slc, x_slc in results:
-        z_valid = min(z_slc.stop, nz) - z_slc.start
-        y_valid = min(y_slc.stop, ny) - y_slc.start
-        x_valid = min(x_slc.stop, nx) - x_slc.start
-
-        output[
-            z_slc.start : z_slc.start + z_valid,
-            y_slc.start : y_slc.start + y_valid,
-            x_slc.start : x_slc.start + x_valid,
-        ] += denoised_tile[:z_valid, :y_valid, :x_valid]
-        weights[
-            z_slc.start : z_slc.start + z_valid,
-            y_slc.start : y_slc.start + y_valid,
-            x_slc.start : x_slc.start + x_valid,
-        ] += weight_tile[:z_valid, :y_valid, :x_valid]
 
     mask = weights > 1e-10
     output[mask] /= weights[mask]

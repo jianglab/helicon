@@ -102,6 +102,148 @@ def _mask_angle_range(cp, ang_min, ang_max, da):
     return cp
 
 
+def _indexing_compute(
+    data,
+    da,
+    dz,
+    apix,
+    rmin,
+    rmax,
+    zrange,
+    sqrt_transform,
+    acf_2x,
+    peak_width,
+    peak_height,
+):
+    """The HI3D chain: cylindrical projection, autocorrelation, peaks, fit.
+
+    Takes plain values and returns them: it runs in a worker thread so the
+    event loop every session shares stays free, and a thread may not read a
+    reactive source. ``zrange`` is ``(ang_min, ang_max, z_min, z_max)`` or
+    None for the whole projection.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        The 3D map.
+    da, dz : float
+        Angular and axial step of the projection (degrees, angstroms).
+    apix : float
+        Pixel size of the map in angstroms.
+    rmin, rmax : float
+        Radial range of the projection in angstroms.
+    zrange : tuple or None
+        The ROI in the projection, or None.
+    sqrt_transform : bool
+        Apply the square-root transform in the autocorrelation.
+    acf_2x : bool
+        Autocorrelate twice.
+    peak_width, peak_height : float
+        Peak-shape parameters for ``find_peaks``.
+
+    Returns
+    -------
+    dict
+        ``cp``, ``cp_work``, ``cp_sq``, ``acf``, ``peaks``, ``masses``,
+        ``twist``, ``rise``, ``csym`` and ``fitted``.
+    """
+    from ..lib.hi3d_core import (
+        auto_correlation,
+        consistent_twist_rise_cn_sets,
+        cylindrical_projection,
+        find_peaks,
+        fit_helical_lattice,
+        make_square_shape,
+        refine_twist_rise,
+    )
+
+    cp = cylindrical_projection(
+        data,
+        da=da,
+        dz=dz / apix,
+        dr=1,
+        rmin=rmin / apix,
+        rmax=rmax / apix,
+        interpolation_order=1,
+    )
+
+    cp_work = cp.copy()
+    nz_cp, na_cp = cp.shape
+    if zrange is None:
+        ang_min, ang_max = -180.0, 180.0
+        z_min, z_max = -nz_cp // 2 * dz, nz_cp // 2 * dz
+    else:
+        ang_min, ang_max, z_min, z_max = zrange
+
+    draw_box = not (
+        ang_min == -180
+        and ang_max == 180
+        and abs(z_min + nz_cp // 2 * dz) < 0.1
+        and abs(z_max - nz_cp // 2 * dz) < 0.1
+    )
+    if draw_box:
+        _mask_angle_range(cp_work, ang_min, ang_max, da)
+        if z_min > -nz_cp // 2 * dz:
+            z0 = int(round(z_min / dz)) + nz_cp // 2
+            cp_work[:z0, :] = 0
+        if z_max < nz_cp // 2 * dz:
+            z1 = int(round(z_max / dz)) + nz_cp // 2
+            cp_work[z1:, :] = 0
+
+    cp_sq = make_square_shape(cp_work)
+    acf = auto_correlation(
+        cp_sq,
+        sqrt_transform=sqrt_transform,
+        high_pass_fraction=1.0 / cp_sq.shape[0],
+    )
+    if acf_2x:
+        acf = auto_correlation(
+            acf,
+            sqrt_transform=sqrt_transform,
+            high_pass_fraction=1.0 / cp_sq.shape[0],
+        )
+
+    peaks, masses = find_peaks(
+        acf,
+        da=da,
+        dz=dz,
+        peak_width=peak_width,
+        peak_height=peak_height,
+        minmass=1.0,
+    )
+
+    twist = rise = None
+    csym = 1
+    fitted = False
+    if peaks is not None and len(peaks) >= 3:
+        try:
+            trc1, trc2 = fit_helical_lattice(peaks, acf, da=da, dz=dz)
+            trc_mean = consistent_twist_rise_cn_sets([trc1], [trc2], epsilon=1.0)
+            if trc_mean:
+                t, r, c = trc_mean[0]
+                twist, rise = refine_twist_rise(acf, da, dz, t, r, c)
+                csym = c
+            else:
+                twist, rise = trc1[0], trc1[1]
+                csym = int(trc1[2])
+            fitted = True
+        except Exception as e:
+            logger.error("Fit failed: %s", e)
+
+    return {
+        "cp": cp,
+        "cp_work": cp_work,
+        "cp_sq": cp_sq,
+        "acf": acf,
+        "peaks": peaks,
+        "masses": masses,
+        "twist": twist,
+        "rise": rise,
+        "csym": csym,
+        "fitted": fitted,
+    }
+
+
 def lattice_line_segments(twist, phase_degree, rise, y_min, y_max):
     """One lattice line, wrapped into the plot's twist axis and cut at its edges.
 
@@ -411,14 +553,8 @@ def hi3d_tab_server(input, output, session):
         )
 
     from ..lib.hi3d_core import (
-        cylindrical_projection,
-        auto_correlation,
-        find_peaks,
-        fit_helical_lattice,
         refine_twist_rise,
-        consistent_twist_rise_cn_sets,
         generate_bokeh_figure,
-        make_square_shape,
         compute_radial_profile,
         estimate_radial_range,
         normalize,
@@ -1068,7 +1204,7 @@ def hi3d_tab_server(input, output, session):
         rmax_val,
         map_data,
     )
-    def _run_computation():
+    async def _run_computation():
         data = map_data()
         if data is None:
             return
@@ -1084,114 +1220,46 @@ def hi3d_tab_server(input, output, session):
             rmax = rmax_val()
             da = input.hi3d_da()
             dz = input.hi3d_dz()
-
-            cp = cylindrical_projection(
-                data,
-                da=da,
-                dz=dz / apix,
-                dr=1,
-                rmin=rmin / apix,
-                rmax=rmax / apix,
-                interpolation_order=1,
-            )
-            cylproj.set(cp)
-
-            # Apply ROI
-            cp_work = cp.copy()
-            nz_cp, na_cp = cp.shape
-            z_min = -nz_cp // 2 * dz
-            z_max = nz_cp // 2 * dz
             try:
                 ang_min, ang_max = input.hi3d_angle()
                 z_min, z_max = input.hi3d_z()
+                zrange = (ang_min, ang_max, z_min, z_max)
             except Exception:
-                ang_min = -180.0
-                ang_max = 180.0
+                zrange = None
 
-            draw_box = not (
-                ang_min == -180
-                and ang_max == 180
-                and abs(z_min + nz_cp // 2 * dz) < 0.1
-                and abs(z_max - nz_cp // 2 * dz) < 0.1
+            # seconds to minutes on a 500^3 map: run it in a worker thread, like
+            # the other tabs, so the one event loop every session shares keeps
+            # answering
+            result = await asyncio.to_thread(
+                _indexing_compute,
+                data,
+                da,
+                dz,
+                apix,
+                rmin,
+                rmax,
+                zrange,
+                input.hi3d_show_scf(),
+                input.hi3d_acf_2x(),
+                input.hi3d_peak_width(),
+                input.hi3d_peak_height(),
             )
-            if draw_box:
-                _mask_angle_range(cp_work, ang_min, ang_max, da)
-                if z_min > -nz_cp // 2 * dz:
-                    z0 = int(round(z_min / dz)) + nz_cp // 2
-                    cp_work[:z0, :] = 0
-                if z_max < nz_cp // 2 * dz:
-                    z1 = int(round(z_max / dz)) + nz_cp // 2
-                    cp_work[z1:, :] = 0
-            cylproj_work.set(cp_work)
 
-            cp_sq = make_square_shape(cp_work)
-            cylproj_square.set(cp_sq)
+            cylproj.set(result["cp"])
+            cylproj_work.set(result["cp_work"])
+            cylproj_square.set(result["cp_sq"])
+            acf_img.set(result["acf"])
 
-            do_scf = input.hi3d_show_scf()
-            do_2x = input.hi3d_acf_2x()
-            acf_result = auto_correlation(
-                cp_sq,
-                sqrt_transform=do_scf,
-                high_pass_fraction=1.0 / cp_sq.shape[0],
-            )
-            if do_2x:
-                acf_result = auto_correlation(
-                    acf_result,
-                    sqrt_transform=do_scf,
-                    high_pass_fraction=1.0 / cp_sq.shape[0],
-                )
-            acf_img.set(acf_result)
-
-            peak_w = input.hi3d_peak_width()
-            peak_h = input.hi3d_peak_height()
-            pks, m = find_peaks(
-                acf_result,
-                da=da,
-                dz=dz,
-                peak_width=peak_w,
-                peak_height=peak_h,
-                minmass=1.0,
-            )
+            pks = result["peaks"]
             if pks is not None and len(pks) >= 3:
                 peaks_data.set(pks)
-                masses_data.set(m)
+                masses_data.set(result["masses"])
                 npeaks_all.set(len(pks))
-
-                # Fit helical lattice
-                npeaks = len(pks)  # use all peaks for initial fit
-                try:
-                    trc1, trc2 = fit_helical_lattice(
-                        pks[:npeaks],
-                        acf_result,
-                        da=da,
-                        dz=dz,
-                    )
-                    trc_mean = consistent_twist_rise_cn_sets(
-                        [trc1],
-                        [trc2],
-                        epsilon=1.0,
-                    )
-                    if trc_mean:
-                        t, r, c = trc_mean[0]
-                        t_ref, r_ref = refine_twist_rise(
-                            acf_result,
-                            da,
-                            dz,
-                            t,
-                            r,
-                            c,
-                        )
-                        twist_val.set(t_ref)
-                        rise_val.set(r_ref)
-                        csym_val.set(c)
-                    else:
-                        twist_val.set(trc1[0])
-                        rise_val.set(trc1[1])
-                        csym_val.set(int(trc1[2]))
-                    fitted.set(True)
-                except Exception as e:
-                    logger.error("Fit failed: %s", e)
-                    fitted.set(False)
+                if result["twist"] is not None:
+                    twist_val.set(result["twist"])
+                    rise_val.set(result["rise"])
+                    csym_val.set(result["csym"])
+                fitted.set(result["fitted"])
             else:
                 peaks_data.set(None)
                 masses_data.set(None)

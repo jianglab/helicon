@@ -57,6 +57,21 @@ def handle(data, args, index_d, param):
         images.columns = ["pid", "filename"]
         images["pid"] = images["pid"].astype(int)
 
+        resolved = images["filename"].map(lambda f: Path(f).resolve())
+        if (resolved == Path(outputFile).resolve()).any():
+            logger.error(
+                "the output stack %s is also one of the input images. I will not do anything",
+                outputFile,
+            )
+            return data, index_d
+
+        if Path(outputFile).exists() and not int(param_dict.get("force", 0)):
+            logger.error(
+                "output file %s exists. Use force=1 to overwrite it. I will not do anything",
+                outputFile,
+            )
+            return data, index_d
+
         attr = helicon.unique_attr_name(data, attr_prefix="rlnImageNameOrig")
         data[attr] = data["rlnImageName"]
 
@@ -67,55 +82,41 @@ def handle(data, args, index_d, param):
         float16 = int(param_dict.get("float16", 1))
 
         import mrcfile
+        from tqdm import tqdm
 
-        force = int(param_dict.get("force", 0))
-        if not force:
-            if Path(outputFile).exists():
-                with mrcfile.open(outputFile, header_only=True) as mrc:
-                    if not (
-                        mrc.header.nx == newsize
-                        and mrc.header.ny == newsize
-                        and mrc.header.nz == nImage
-                    ):
-                        force = 1
-            else:
-                force = 1
-        if force:
-            from tqdm import tqdm
-
-            if float16:
-                mrc_mode = 12
-            else:
-                mrc_mode = 2
-            with mrcfile.new_mmap(
-                outputFile,
-                shape=(nImage, newsize, newsize),
-                mrc_mode=mrc_mode,
-                fill=None,
-                overwrite=True,
-            ) as mrc:
-                with mrcfile.open(images["filename"].iloc[0], header_only=True) as m:
-                    apix0 = float(m.voxel_size.x)
-                for i in tqdm(
-                    list(range(nImage)), unit=" particles", disable=args.verbose > 1
-                ):
-                    if args.verbose > 1:
-                        logger.info(
-                            "\t%d/%d: adding %s:%d"
-                            % (
-                                i + 1,
-                                nImage,
-                                images["filename"].iloc[i],
-                                images["pid"].iloc[i],
-                            )
+        if float16:
+            mrc_mode = 12
+        else:
+            mrc_mode = 2
+        with mrcfile.new_mmap(
+            outputFile,
+            shape=(nImage, newsize, newsize),
+            mrc_mode=mrc_mode,
+            fill=None,
+            overwrite=True,
+        ) as mrc:
+            with mrcfile.open(images["filename"].iloc[0], header_only=True) as m:
+                apix0 = float(m.voxel_size.x)
+            for i in tqdm(
+                list(range(nImage)), unit=" particles", disable=args.verbose > 1
+            ):
+                if args.verbose > 1:
+                    logger.info(
+                        "\t%d/%d: adding %s:%d"
+                        % (
+                            i + 1,
+                            nImage,
+                            images["filename"].iloc[i],
+                            images["pid"].iloc[i],
                         )
-                    d = helicon.read_image_2d(
-                        images["filename"].iloc[i], int(images["pid"].iloc[i] - 1)
                     )
-                    if newsize != nx:
-                        d = resize_image(d, newsize)
-                    mrc.data[i, :, :] = d
-                mrc.voxel_size = apix0 * nx / newsize
+                d = helicon.read_image_2d(
+                    images["filename"].iloc[i], int(images["pid"].iloc[i] - 1)
+                )
+                if newsize != nx:
+                    d = resize_image(d, newsize)
+                mrc.data[i, :, :] = d
+            mrc.voxel_size = apix0 * nx / newsize
         images["pid"] = np.arange(nImage) + 1
         data["rlnImageName"] = images["pid"].astype(str) + "@" + outputFile
         optics = data.attrs.get("optics")

@@ -81,12 +81,16 @@ def handle(data, args, index_d, param):
             data[tmp_col] = data[image_col].str.split("@", expand=True).iloc[:, -1]
 
             unique_stacks = data[tmp_col].unique()
-            images = []
+            n_denoised = 0
             for stack_path in unique_stacks:
+                # one stack at a time: holding every particle of every stack at
+                # once would need tens of GB
+                rows = data[data[tmp_col] == stack_path]
                 with mrcfile.open(stack_path, permissive=True) as mrc:
                     stack_data = mrc.data
                 single_image = stack_data.ndim == 2
-                for i, row in data[data[tmp_col] == stack_path].iterrows():
+                images = []
+                for _, row in rows.iterrows():
                     if single_image:
                         img = np.asarray(stack_data, dtype=np.float64)
                     else:
@@ -94,79 +98,59 @@ def handle(data, args, index_d, param):
                         img = np.asarray(stack_data[particle_idx], dtype=np.float64)
                     images.append(img)
 
-            if args.verbose > 1:
-                device_tag = "GPU" if use_gpu else "CPU"
-                logger.info(
-                    "\tdenoising %d particles with %d workers (%s on %s) ...",
-                    len(images),
-                    n_jobs,
-                    transform.upper(),
-                    device_tag,
-                )
-
-            if tile_size is not None:
-                denoised = [
-                    _denoise_tiled(
-                        img,
-                        transform,
-                        sigma,
-                        num_scales,
-                        wedges_per_dir,
-                        tile_size,
-                        overlap,
+                if args.verbose > 1:
+                    device_tag = "GPU" if use_gpu else "CPU"
+                    logger.info(
+                        "\tdenoising %d particles of %s with %d workers (%s on %s) ...",
+                        len(images),
+                        stack_path,
                         n_jobs,
-                        use_gpu,
+                        transform.upper(),
+                        device_tag,
                     )
-                    for img in images
-                ]
-            else:
-                denoised = _denoise_batch(
-                    images,
-                    transform,
-                    sigma=sigma,
-                    num_scales=num_scales,
-                    wedges_per_dir=wedges_per_dir,
-                    n_jobs=n_jobs,
-                    use_gpu=use_gpu,
-                )
 
-            new_stacks = {}
-            for stack_path in unique_stacks:
-                out_stack = str(Path(outdir) / Path(stack_path).name)
-                new_stacks[stack_path] = out_stack
-
-            idx = 0
-            for stack_path in unique_stacks:
-                n_in_stack = len(data[data[tmp_col] == stack_path])
-                out_stack = new_stacks[stack_path]
-                if Path(out_stack).exists():
-                    with mrcfile.open(out_stack, permissive=True) as mrc:
-                        existing = mrc.data
-                    stacked = np.concatenate(
-                        [existing, np.stack(denoised[idx : idx + n_in_stack])]
-                    )
-                    with mrcfile.new(out_stack, overwrite=True) as mrc:
-                        mrc.set_data(stacked.astype(np.float32))
-                else:
-                    with mrcfile.new(out_stack, overwrite=True) as mrc:
-                        mrc.set_data(
-                            np.stack(denoised[idx : idx + n_in_stack]).astype(
-                                np.float32
-                            )
+                if tile_size is not None:
+                    denoised = [
+                        _denoise_tiled(
+                            img,
+                            transform,
+                            sigma,
+                            num_scales,
+                            wedges_per_dir,
+                            tile_size,
+                            overlap,
+                            n_jobs,
+                            use_gpu,
                         )
-                idx += n_in_stack
+                        for img in images
+                    ]
+                else:
+                    denoised = _denoise_batch(
+                        images,
+                        transform,
+                        sigma=sigma,
+                        num_scales=num_scales,
+                        wedges_per_dir=wedges_per_dir,
+                        n_jobs=n_jobs,
+                        use_gpu=use_gpu,
+                    )
 
-            for i, row in data.iterrows():
-                orig_path = row[tmp_col]
-                particle_num = row[image_col].split("@")[0]
-                data.at[i, image_col] = f"{particle_num}@{new_stacks[orig_path]}"
+                # always rebuild the output stack: appending to an existing one
+                # would leave the rewritten particle numbers pointing at the old images
+                out_stack = str(Path(outdir) / Path(stack_path).name)
+                with mrcfile.new(out_stack, overwrite=True) as mrc:
+                    mrc.set_data(np.stack(denoised).astype(np.float32))
+                data.loc[rows.index, image_col] = [
+                    f"{k + 1}@{out_stack}" for k in range(len(rows))
+                ]
+                n_denoised += len(denoised)
 
             data.drop(tmp_col, inplace=True, axis=1)
 
             if args.verbose > 1:
                 logger.info(
                     "\tdenoised %d particles written to %s",
-                    len(denoised),
+                    n_denoised,
                     outdir,
                 )
 

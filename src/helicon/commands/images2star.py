@@ -214,17 +214,16 @@ def main(args: argparse.Namespace) -> None:
     if len(data) == 0:
         raise HeliconError("nothing to do with 0 particles. I am going to quit")
 
-    if args.first or args.last:
-        if 0 < args.first < len(data):
-            first = args.first
-        else:
-            first = 0
-        if first < args.last < len(data):
-            last = args.last
-        else:
-            last = len(data)
+    if args.first or args.last != -1:
+        first = args.first
+        last = len(data) if args.last < 0 else args.last
+        if not 0 <= first < last <= len(data):
+            raise HeliconValidationError(
+                "--first=%d and --last=%d do not select rows of the %d-particle input"
+                % (args.first, args.last, len(data))
+            )
         data = data.iloc[first:last]
-        data = data.reset_index(drop=True)  # important to do this
+    data = data.reset_index(drop=True)  # important to do this
 
     data = apply_options(data, args.all_options, args, args.append_options)
     if args.path != "absolute":
@@ -256,16 +255,28 @@ def main(args: argparse.Namespace) -> None:
                 )
             if var == "rlnHelicalTubeID":
                 var = ["rlnMicrographName", "rlnHelicalTubeID"]
+            # the subsets below are row positions, so the labels must be positions
+            data = data.reset_index(drop=True)
             mgraphs = data.groupby(var, sort=False)
             mgraphs = sorted(
                 mgraphs, key=lambda x: len(x[1]), reverse=True
             )  # largest group -> smallest group
+            if len(mgraphs) < args.splitNumSets:
+                raise HeliconValidationError(
+                    "--splitNumSets=%d is more than the %d %s(s) in the input"
+                    % (args.splitNumSets, len(mgraphs), args.splitMode)
+                )
             for mgraphName, mgraphParticles in mgraphs:
                 smallest_subset = min(subsets, key=lambda x: len(x))
                 smallest_subset += list(mgraphParticles.index)
         else:
             if args.splitMode == "random":
                 data = data.sample(frac=1).reset_index(drop=True)
+            if len(data) < args.splitNumSets:
+                raise HeliconValidationError(
+                    "--splitNumSets=%d is more than the %d particles in the input"
+                    % (args.splitNumSets, len(data))
+                )
             for si in range(args.splitNumSets):
                 subsets[si] = list(range(si, len(data), args.splitNumSets))
 
@@ -552,13 +563,6 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=1,
     )
     parser.add_argument(
-        "--tag",
-        metavar="<str>",
-        type=str,
-        help="add this tag to new binary image files",
-        default="",
-    )
-    parser.add_argument(
         "--folder",
         metavar="<dirname>",
         type=str,
@@ -612,13 +616,6 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         metavar="<0|1>",
         help="force overwrite output images. default to 0",
         default=0,
-    )
-    parser.add_argument(
-        "--ppid",
-        metavar="<n>",
-        type=int,
-        help="Set the PID of the parent process, used for cross platform PPID",
-        default=-1,
     )
 
     # Plugin-discovered arguments

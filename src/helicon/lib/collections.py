@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     import pandas as pd
 
 __all__ = [
-    "unique",
     "assign_to_groups",
     "flatten",
     "order_by_unique_counts",
@@ -17,26 +16,6 @@ __all__ = [
     "first_matched_attr",
     "DotDict",
 ]
-
-
-def unique(inputList: list) -> list:
-    """Return unique elements from a list while preserving order.
-
-    Parameters
-    ----------
-    inputList : list
-        Input list.
-
-    Returns
-    -------
-    list
-        List with duplicates removed, order preserved.
-    """
-    ret = []
-    for v in inputList:
-        if v not in ret:
-            ret.append(v)
-    return ret
 
 
 def assign_to_groups(numbers: Iterable, group_size: int) -> dict:
@@ -191,39 +170,36 @@ def split_array(arr: list) -> tuple[list, list]:
         Indices of elements in group 1 and group 2.
     """
     total_sum = sum(arr)
-    target_sum = total_sum // 2
+    target_sum = int(total_sum // 2)
     n = len(arr)
 
-    # Create a 2D DP table
-    dp = [[False for _ in range(target_sum + 1)] for _ in range(n + 1)]
-
-    # Initialize the first column
-    for i in range(n + 1):
-        dp[i][0] = True
-
-    # Fill the DP table
-    for i in range(1, n + 1):
-        for j in range(1, target_sum + 1):
-            if arr[i - 1] <= j:
-                dp[i][j] = dp[i - 1][j] or dp[i - 1][j - arr[i - 1]]
-            else:
-                dp[i][j] = dp[i - 1][j]
+    # bitset of reachable sums: bit j set means some subset sums to j. A 2D table
+    # costs len(arr) * total_sum booleans (GBs for a whole-dataset particle count).
+    mask = (1 << (target_sum + 1)) - 1
+    reached = 1
+    # parent[s] is the element that first made the sum s reachable
+    parent = np.full(target_sum + 1, -1, dtype=np.int32)
+    for i in range(n):
+        v = int(arr[i])
+        added = ((reached << v) & mask) & ~reached
+        reached |= (reached << v) & mask
+        while added:
+            bit = added & -added
+            parent[bit.bit_length() - 1] = i
+            added ^= bit
 
     # Find the largest sum <= target_sum that can be achieved
-    achieved_sum = 0
-    for j in range(target_sum, -1, -1):
-        if dp[n][j]:
-            achieved_sum = j
-            break
+    achieved_sum = target_sum
+    while not (reached >> achieved_sum) & 1:
+        achieved_sum -= 1
 
     # Backtrack to find the elements in the first group
     group1 = []
-    i, j = n, achieved_sum
-    while i > 0 and j > 0:
-        if not dp[i - 1][j]:
-            group1.append(i - 1)
-            j -= arr[i - 1]
-        i -= 1
+    j = achieved_sum
+    while j > 0:
+        i = int(parent[j])
+        group1.append(i)
+        j -= int(arr[i])
 
     # The second group consists of all elements not in the first group
     group2 = [i for i in range(n) if i not in group1]

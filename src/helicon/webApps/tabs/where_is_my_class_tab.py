@@ -453,6 +453,18 @@ def where_is_my_class_tab_server(input, output, session):
             images = [images[i] for i in included]
         else:
             included = display_seq_all
+
+        if not images:
+            m = ui.modal(
+                "Every class average is blank, or the file has none: there "
+                "is nothing to show with the blank ones ignored.",
+                title="No classes to show",
+                easy_close=True,
+                footer=None,
+            )
+            ui.modal_show(m)
+            return
+
         image_labels = [f"{i+1}: {abundance()[i]:,d}" for i in included]
 
         displayed_class_ids.set(included)

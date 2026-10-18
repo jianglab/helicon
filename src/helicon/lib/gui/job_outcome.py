@@ -1871,7 +1871,7 @@ def _cs_class2d(folder: Path, uid: str) -> dict | None:
     particles = folder / f"{uid}_{iteration:03d}_particles.cs"
     if particles.is_file():
         try:
-            table = np.load(particles, allow_pickle=True)
+            table = np.load(particles, allow_pickle=False)
             if "alignments2D/class" in (table.dtype.names or ()):
                 classes, number = np.unique(
                     table["alignments2D/class"], return_counts=True
@@ -1901,18 +1901,12 @@ def _cs_class2d(folder: Path, uid: str) -> dict | None:
 
 
 def _cs_table(path: Path):
-    """A ``.cs`` file as a structured array (not read into memory when it can be mapped), or None."""
+    """A ``.cs`` file as a structured array mapped from disk, or None."""
     import numpy as np
 
     try:
         return np.load(path, mmap_mode="r")
-    except ValueError:  # the table holds Python objects: it cannot be mapped
-        pass
-    except Exception:
-        return None
-    try:
-        return np.load(path, allow_pickle=True)
-    except Exception:
+    except Exception:  # also a table of Python objects: a pickle is never run
         return None
 
 

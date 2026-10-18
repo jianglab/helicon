@@ -5,6 +5,12 @@ from helicon.lib import util
 
 
 class TestUtil(object):
+    def test_timedelta2string_counts_a_year_as_365_days(self):
+        assert util.timedelta2string(366 * 24 * 3600) == "1 years, 1 days"
+        assert (
+            util.timedelta2string(2 * 24 * 3600 + 90) == "2 days, 1 minutes, 30 seconds"
+        )
+
     def test_parse_param_str(self):
         assert util.parse_param_str("a=b:c=d,e") == (None, {"a": "b", "c": "d,e"})
         assert util.parse_param_str("opt:a=b:c=d,e") == ("opt", {"a": "b", "c": "d,e"})
@@ -62,9 +68,6 @@ class TestUtil(object):
         assert util.flatten([1, [2, 3], [4, [5, 6]]]) == [1, 2, 3, 4, 5, 6]
         assert util.flatten((1, (2, 3), (4, (5, 6)))) == (1, 2, 3, 4, 5, 6)
 
-    def test_unique(self):
-        assert util.unique([1, 2, 2, 3, 1, 4]) == [1, 2, 3, 4]
-
     def test_order_by_unique_counts(self):
         labels = np.array([1, 1, 2, 2, 2, 3, 3, 3, 3, -1])
         ordered_labels = util.order_by_unique_counts(labels)
@@ -75,6 +78,12 @@ class TestUtil(object):
         group1, group2 = util.split_array(arr)
         assert sum(arr[i] for i in group1) == 7
         assert sum(arr[i] for i in group2) == 8
+
+    def test_split_array_is_a_partition_of_a_large_input(self):
+        arr = list(range(1, 1001))
+        group1, group2 = util.split_array(arr)
+        assert sorted(group1 + group2) == list(range(1000))
+        assert abs(sum(arr[i] for i in group1) - sum(arr[i] for i in group2)) <= 1
 
     def test_assign_to_groups(self):
         numbers = [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]

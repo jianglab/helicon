@@ -32,6 +32,15 @@ def plugin_options_in_argv(
     flag_to_dest = {
         s.lstrip("-"): a.dest for a in parser._actions for s in a.option_strings
     }
+
+    def dest_of(flag: str) -> str:
+        if flag in flag_to_dest:
+            return flag_to_dest[flag]
+        # argparse accepts a unique abbreviation of a long option; resolve it the
+        # same way, so e.g. "--random" for "--randomSample" is not silently dropped
+        candidates = {d for f, d in flag_to_dest.items() if f.startswith(flag)}
+        return candidates.pop() if len(candidates) == 1 else flag
+
     plugin_names = set(plugin_names)
-    dests = [flag_to_dest.get(o, o) for o in get_option_list(argv)]
+    dests = [dest_of(o) for o in get_option_list(argv)]
     return [d for d in dests if d in plugin_names]

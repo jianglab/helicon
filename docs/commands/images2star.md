@@ -23,11 +23,10 @@ usage: helicon images2star [-h] [--csparcPassthroughFiles <filename> [<filename>
                            [--splitNumSets <n>]
                            [--splitMode <evenodd|random|micrograph|helicaltube>]
                            [--ignoreBadParticlePath <0|1|2|3>]
-                           [--ignoreBadMicrographPath <0|1>] [--tag <str>]
-                           [--folder [<dirname> ...]] [--verbose <0|1|2>] [--cpu <n>]
-                           [--micrographStar <starfile>]
+                           [--ignoreBadMicrographPath <0|1>] [--folder [<dirname> ...]]
+                           [--verbose <0|1|2>] [--cpu <n>] [--micrographStar <starfile>]
                            [--joinFilaments <0|1>[:epsilon=<1.0>]] [--force <0|1>]
-                           [--ppid <n>] [--addParm <var> <val> <var> <val>] [--apix <A/pixel>]
+                           [--addParm <var> <val> <var> <val>] [--apix <A/pixel>]
                            [--assignOpticGroupByBeamShiftLabel <no|auto|EPU|serialEM_pncc>]
                            [--assignOpticGroupByBeamShiftXY 0|1|xml_folder=<path>:min_micrographs_per_group=<n>]
                            [--assignOpticGroupByTime <n>]
@@ -98,7 +97,6 @@ options:
                         lst files. default: 0
   --ignoreBadMicrographPath <0|1>
                         ignore bad micrograph image file path. default: 1
-  --tag <str>           add this tag to new binary image files
   --folder [<dirname> ...]
                         Search these folders if the images cannot be found. default: ""
   --verbose <0|1|2>     verbose mode. default to 2
@@ -116,7 +114,6 @@ options:
                         the |ab|-|pa|-|pb|<epsilon test of point p on line segment ab. default
                         to 1
   --force <0|1>         force overwrite output images. default to 0
-  --ppid <n>            Set the PID of the parent process, used for cross platform PPID
   --addParm <var> <val> <var> <val>
                         modify parameter: var+=val
   --apix <A/pixel>      set mag to have this sampling

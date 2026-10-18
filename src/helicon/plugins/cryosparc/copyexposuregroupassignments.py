@@ -27,7 +27,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="<star file>",
         help="copy the optics group assignments from this star file. rlnMicrographMovieName and rlnOpticsGroup must be in this star file. disabled by default",
-        default=0,
+        action="append",
+        default=None,
     )
 
 

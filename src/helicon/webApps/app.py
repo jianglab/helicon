@@ -250,7 +250,7 @@ class _AppControl:
 
     def __init__(self):
         self.seen_tokens: set[str] = set()
-        self.pending: dict | None = None
+        self.pending: dict[str, dict] = {}
         self.active_sessions = 0
         self.start_ts = time.monotonic()
         self.last_poll_ts = time.monotonic()
@@ -291,7 +291,7 @@ class _AppControl:
 
             query_string += "&helicon_token=" + urllib.parse.quote(token, safe="")
         with self._lock:
-            self.pending = {"query_string": query_string}
+            self.pending[token] = {"query_string": query_string}
         return {"ok": True, "alive": self.is_alive()}
 
     def poll(self, token: str) -> dict:
@@ -299,13 +299,19 @@ class _AppControl:
         if token not in self.seen_tokens:
             return {"pending": False}
         with self._lock:
-            pending = self.pending
-            self.pending = None
+            pending = self.pending.pop(token, None)
         if pending is None:
             return {"pending": False}
         return {"pending": True, "query_string": pending["query_string"]}
 
     def start_watchdog(self) -> None:
+        if os.environ.get("HELICON_WEBAPP_SELF_REAP") != "1":
+            # Self-reaping is for a server a viewer launched for itself
+            # (``helicon display``). A server the user started (``helicon
+            # webApps``) and a hosted deployment must outlive a quiet spell:
+            # killing it drops a running computation and the URL stops
+            # answering, and no session open does not mean no job running.
+            return
         if self._watchdog_started:
             return
         self._watchdog_started = True
@@ -682,23 +688,26 @@ def install_error_modal(session) -> None:
     orig_unhandled = root._unhandled_error
 
     async def _show_error_modal(e: Exception) -> None:
-        tb_str = "".join(_tb.format_exception(type(e), e, e.__traceback__)).strip()
-        try:
-            ui.modal_show(
-                ui.modal(
-                    ui.pre(
-                        tb_str,
-                        style="white-space: pre-wrap; word-break: break-word;"
-                        " font-size: 9pt; max-height: 60vh; overflow-y: auto;",
+        # the traceback names server files and internals: only the local owner
+        # sees it. A hosted deployment logs it and shows the visitor nothing.
+        if not deployment.is_cloud():
+            tb_str = "".join(_tb.format_exception(type(e), e, e.__traceback__)).strip()
+            try:
+                ui.modal_show(
+                    ui.modal(
+                        ui.pre(
+                            tb_str,
+                            style="white-space: pre-wrap; word-break: break-word;"
+                            " font-size: 9pt; max-height: 60vh; overflow-y: auto;",
+                        ),
+                        title="Unhandled Error",
+                        easy_close=True,
+                        footer=None,
                     ),
-                    title="Unhandled Error",
-                    easy_close=True,
-                    footer=None,
-                ),
-                session=root,
-            )
-        except Exception:
-            logger.debug("could not show the error modal", exc_info=True)
+                    session=root,
+                )
+            except Exception:
+                logger.debug("could not show the error modal", exc_info=True)
         await orig_unhandled(e)
 
     root._unhandled_error = _show_error_modal

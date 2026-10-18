@@ -161,7 +161,7 @@ def timedelta2string(total_seconds: float | int) -> str:
         Human-readable string (e.g. ``"2 hours, 30 minutes"``).
     """
     years = int(total_seconds // (60 * 60 * 24 * 365))
-    tmp = total_seconds - years * (60 * 60 * 2 * 365)
+    tmp = total_seconds - years * (60 * 60 * 24 * 365)
     days = int(tmp // (60 * 60 * 24))
     tmp -= days * (60 * 60 * 24)
     hours = int(tmp // (60 * 60))

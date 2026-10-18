@@ -93,3 +93,19 @@ class TestThe3DAlignmentIsTaken:
         imported, _ = converted
         # the original star file has no rlnAngleRot at all: they come from cryoSPARC's pose
         assert imported["rlnAngleRot"].abs().max() > 1.0
+
+
+class TestNoPickledCs:
+    def test_a_cs_file_with_a_pickled_column_is_refused_not_run(self, tmp_path):
+        import numpy as np
+        import pytest
+
+        import helicon
+
+        table = np.zeros(2, dtype=[("uid", "u8"), ("blob/path", object)])
+        table["blob/path"] = ["a.mrcs", "b.mrcs"]
+        path = tmp_path / "particles.cs"
+        np.save(path.with_suffix(".npy"), table, allow_pickle=True)
+        path.with_suffix(".npy").rename(path)
+        with pytest.raises(ValueError):
+            helicon.cs2dataframe(str(path))

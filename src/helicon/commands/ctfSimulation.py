@@ -10,18 +10,23 @@ from helicon.lib.exceptions import HeliconError
 
 logger = logging.getLogger(__name__)
 
+# Pinned to a commit rather than to the branch: whatever the branch holds at
+# launch time would run on the user's machine without a helicon release.
+# Re-pin deliberately when the upstream app changes.
+URL = "https://raw.githubusercontent.com/jianglab/ctfsimulation/7616a7991cc3e2e28904ed141789f8e24b1a0ac2/ctf_simulation.py"
+
 
 def main(args):
     """Launch the CTF simulation web app via Streamlit."""
     import subprocess
 
-    url = "https://raw.githubusercontent.com/jianglab/ctfsimulation/refs/heads/master/ctf_simulation.py"
+    print(URL)
     cmd = [
         sys.executable,
         "-m",
         "streamlit",
         "run",
-        url,
+        URL,
         "--server.enableCORS",
         "false",
         "--server.enableXsrfProtection",

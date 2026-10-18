@@ -590,12 +590,18 @@ def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
     Least squares, not a cosine: a cosine is scale-invariant, so L1/L2 against
     it is degenerate -- shrinking every amplitude lowers the penalty without
     changing the fit, and the penalties simply do nothing.
+
+    ``tol`` is relative to the largest coefficient, so the sweeps stop on the
+    same criterion whatever the scale of the data; an absolute threshold could
+    never be reached when the amplitudes are large, and the loop then always
+    ran all ``iters`` sweeps.
     """
     G = len(u)
     a = np.zeros(G)
     d = np.diag(M).copy()
     d[d <= 0] = 1e-12
     r = u.copy()
+    scale = 1.0
     for _ in range(iters):
         delta = 0.0
         for j in range(G):
@@ -605,8 +611,9 @@ def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
                 r -= M[:, j] * (new - aj)
                 delta = max(delta, abs(new - aj))
                 a[j] = new
-        if delta < tol:
+        if delta <= tol * max(1.0, scale):
             break
+        scale = float(np.abs(a).max())
     return a
 
 

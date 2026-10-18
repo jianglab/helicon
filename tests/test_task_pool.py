@@ -81,3 +81,12 @@ class TestDenovo3dStop:
 
         src = Path(denovo3d_pipeline.__file__).read_text(encoding="utf-8")
         assert "cpu = min(helicon.available_cpu(), max(1, int(n_cpu)))" in src
+
+
+class TestMemoryCap:
+    def test_workers_fit_in_the_free_memory(self):
+        pool = pools.TaskPool(10_000, gb_per_worker=1.0)
+        try:
+            assert 1 <= pool._executor._max_workers < 10_000
+        finally:
+            pool.shutdown()

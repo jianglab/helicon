@@ -76,6 +76,7 @@ def _reset_prune_throttle():
     cache_mod._prune_next.clear()
     cache_mod._prune_interval.clear()
     cache_mod._dir_bytes_limit.clear()
+    cache_mod._uncapped.clear()
     yield
     (
         cache_mod._PRUNE_INTERVAL,
@@ -85,6 +86,7 @@ def _reset_prune_throttle():
     cache_mod._prune_next.clear()
     cache_mod._prune_interval.clear()
     cache_mod._dir_bytes_limit.clear()
+    cache_mod._uncapped.clear()
 
 
 class TestExpiry:
@@ -192,6 +194,8 @@ class TestPruning:
         assert _n_entries(tmp_path) == 5
 
     def test_no_pruning_when_cache_never_expires(self, tmp_path):
+        helicon.set_cache_dir_limit(tmp_path, None)  # these are about age alone
+
         @helicon.cache(expires_after=None, cache_dir=tmp_path)
         def f(x):
             return b"x" * 50_000
@@ -205,6 +209,7 @@ class TestPruning:
 
     def test_sweep_is_throttled_by_the_stamp_file(self, tmp_path):
         """A recent stamp means another process already swept; skip the walk."""
+        helicon.set_cache_dir_limit(tmp_path, None)  # these are about age alone
         cache_mod._PRUNE_INTERVAL = datetime.timedelta(hours=1)
 
         @helicon.cache(expires_after=datetime.timedelta(seconds=1), cache_dir=tmp_path)
@@ -420,6 +425,36 @@ class TestDenovo3DCap:
         finally:
             monkeypatch.delenv("HELICON_DENOVO3D_CACHE_LIMIT", raising=False)
             importlib.reload(pipeline)
+
+
+class TestDefaultCap:
+    def test_a_cached_function_gets_a_cap_for_its_folder(self, tmp_path):
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        assert (
+            cache_mod._dir_bytes_limit[str(tmp_path)]
+            == cache_mod.DEFAULT_DIR_BYTES_LIMIT
+        )
+
+    def test_a_cap_set_by_the_user_is_kept(self, tmp_path):
+        helicon.set_cache_dir_limit(tmp_path, "1G")
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        assert cache_mod._dir_bytes_limit[str(tmp_path)] == "1G"
+
+    def test_no_cap_stays_no_cap(self, tmp_path):
+        helicon.set_cache_dir_limit(tmp_path, None)
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        assert str(tmp_path) not in cache_mod._dir_bytes_limit
 
 
 class TestClearScope:

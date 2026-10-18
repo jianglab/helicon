@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging, os, time
+import logging, os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,7 +21,6 @@ __all__ = [
     "get_emdb_id",
     "is_file_readable",
     "is_file_writable",
-    "file_ready",
     "convert_file_path",
     "convert_dataframe_file_path",
     "check_required_columns",
@@ -182,15 +181,14 @@ def download_file_from_url(
     target_file_name : str, optional
         If given, write to this file path.
     return_filename : bool, optional
-        If True, return the filename instead
-        of a file object.
+        If True, return the filename instead of a file object. Only with
+        ``target_file_name``.
 
     Returns
     -------
     file object or str
-        Opened file (readable binary) or filename. A temporary file whose
-        name is returned (``return_filename`` without ``target_file_name``)
-        is left for the caller to delete.
+        Opened file (readable binary), or with ``return_filename`` and
+        ``target_file_name`` the name of the file written.
 
     Raises
     ------
@@ -201,7 +199,19 @@ def download_file_from_url(
     import requests
     import os
 
+    if return_filename and not target_file_name:
+        raise ValueError("return_filename needs target_file_name")
     if Path(url).is_file():
+        if target_file_name:
+            # honour the same contract as the download branch: a caller that
+            # asked for a file at target_file_name must find it there
+            import shutil
+
+            target = Path(target_file_name)
+            if Path(url).resolve() != target.resolve():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(url, target)
+            return str(target) if return_filename else open(target, "rb")
         return open(url, "rb")
     if target_file_name:
         # Written under a temporary name in the same directory and renamed
@@ -239,11 +249,6 @@ def download_file_from_url(
         with requests.get(url, timeout=_REQUEST_TIMEOUT) as r:
             r.raise_for_status()  # Check for request success
             content = r.content
-        if return_filename:
-            # the caller owns the file: it must outlive this function
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(content)
-            return f.name
         fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
         fileobj.write(content)
         fileobj.flush()  # so readers that open fileobj.name see the data
@@ -319,56 +324,6 @@ def is_file_writable(filename: str) -> bool:
     if not str(pdir):
         pdir = Path(".")
     return os.access(pdir, os.W_OK)
-
-
-def file_ready(
-    filenames, wait: int = 0, minSize: int = 0
-) -> int:  # wait given seconds and check again
-    """Check whether a file or list of files exists and has content.
-
-    If ``wait > 0``, polls until the file is ready or the deadline passes.
-
-    Parameters
-    ----------
-    filenames : str or list of str
-        File path(s) to check.
-    wait : int, optional
-        Maximum seconds to wait. Defaults to 0 (no wait).
-    minSize : int, optional
-        Minimum file size (bytes) required.
-
-    Returns
-    -------
-    int
-        1 if ready, 0 otherwise.
-    """
-    if type(filenames) == type([]):
-        ready = 1
-        for f in filenames:
-            if not (Path(f).exists() and Path(f).stat().st_size):
-                ready = 0
-                break
-        return ready
-    else:
-        ready = Path(filenames).exists() and Path(filenames).stat().st_size > minSize
-    if ready:
-        return 1
-    elif wait > 0:
-        deadline = time.time() + wait
-        delay = 1
-        while time.time() <= deadline:
-            time.sleep(delay)
-            ready = file_ready(filenames, wait=0, minSize=minSize)
-            if ready:
-                return 1
-            else:
-                delay *= 2
-                now = time.time()
-                if now + delay > deadline:
-                    delay = deadline - now
-        return file_ready(filenames, wait=0)
-    else:
-        return 0
 
 
 _PATH_FORMATS = "current absolute abs real relative rel shortest".split()

@@ -61,6 +61,18 @@ def handle(data, args, index_d, param):
         topLengthFraction = param_dict.get("topLengthFraction", None)
         lengthCutoffAngst = param_dict.get("lengthCutoffAngst", None)
 
+        missing = [
+            c
+            for c in ["rlnMicrographName", "rlnMicrographCoordinates"]
+            if c not in data
+        ]
+        if missing:
+            logger.error(
+                "extractHelices needs %s in the input. I will not do anything",
+                " and ".join(missing),
+            )
+            return data, index_d
+
         outPath = str(Path(outPath).resolve())
 
         import starfile
@@ -76,7 +88,10 @@ def handle(data, args, index_d, param):
                 "helixLength",
             ]
         )
-        for _, mic_name, coordfile in data.itertuples():
+        pairs = data[
+            ["rlnMicrographName", "rlnMicrographCoordinates"]
+        ].drop_duplicates()
+        for mic_name, coordfile in pairs.itertuples(index=False):
             if get_apix:
                 import mrcfile
 
@@ -121,7 +136,7 @@ def handle(data, args, index_d, param):
         cpu = args.cpu
         tasks = []
         helix_idx = 0
-        coord_df.reset_index(drop=True)
+        coord_df = coord_df.reset_index(drop=True)
         out_names = []
         for _, startX, startY, endX, endY, mic_name, _ in coord_df.itertuples():
             mic_prefix = ".".join(mic_name.split("/")[-1].split(".")[:-1])
@@ -168,4 +183,5 @@ def handle(data, args, index_d, param):
 
         data = coord_df
         # print(data)
+        index_d[option_name] += 1
     return data, index_d

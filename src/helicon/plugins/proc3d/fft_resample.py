@@ -26,6 +26,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="<param>=<val>:...",
         help="fft_resample parameter",
+        action="append",
         default=None,
     )
 

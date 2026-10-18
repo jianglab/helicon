@@ -14,6 +14,7 @@ from helicon.webApps.tabs import (
     abinitio3d_tab,
     denovo3d_tab,
     helical_projection_tab,
+    hi3d_tab,
 )
 
 
@@ -58,3 +59,10 @@ class TestLongWorkInBackgroundTasks:
     def test_helical_projection_has_no_work_in_place(self):
         # a ui.Progress block in an effect is the sign of work done in place
         assert "ui.Progress(" not in _src(helical_projection_tab)
+
+    def test_hi3d_indexing_runs_off_the_event_loop(self):
+        # the projection and the fits take seconds to minutes on a real map:
+        # they must not run in the effect every session's loop is serving
+        src = _src(hi3d_tab)
+        assert "await asyncio.to_thread(" in src
+        assert "def _indexing_compute(" in src

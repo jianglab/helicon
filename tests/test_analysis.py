@@ -1,5 +1,7 @@
 from unittest.mock import patch
 import numpy as np
+import pandas as pd
+import pytest
 from helicon.lib import analysis
 
 
@@ -122,6 +124,26 @@ class TestAnalysis(object):
         assert mask[5, 7, 5]
         assert not mask[5, 9, 5]
 
+    def test_get_cylindrical_mask_matches_a_full_coordinate_grid(self):
+        # the mask is built from one (ny, nx) plane and broadcast over z; a
+        # full meshgrid of coordinates costs GBs on a 512^3 map
+        nz, ny, nx = 4, 9, 11
+        mask = analysis.get_cylindrical_mask(nz, ny, nx, rmin=2, rmax=4)
+        k = np.arange(nz) - nz // 2
+        j = np.arange(ny) - ny // 2
+        i = np.arange(nx) - nx // 2
+        _z, y, x = np.meshgrid(k, j, i, indexing="ij")
+        ref = ((x * x + y * y) < 16) & ((x * x + y * y) >= 4)
+        assert mask.dtype == bool
+        assert np.array_equal(mask, ref)
+
+    def test_get_cylindrical_mask_returns_xyz_on_request(self):
+        mask, (z, y, x) = analysis.get_cylindrical_mask(
+            3, 4, 5, rmax=1, return_xyz=True
+        )
+        assert mask.shape == (3, 4, 5)
+        assert z.shape == y.shape == x.shape == (3, 4, 5)
+
     def test_cross_correlation_coefficient(self):
         a = np.array([1, 2, 3])
         b = np.array([1, 2, 3])
@@ -162,3 +184,47 @@ class TestAnalysis(object):
         )
         clustering.fit(X)
         assert clustering.n_clusters_ == 2
+
+
+class TestInterSegmentDistance:
+    def _data(self, track_lengths):
+        return pd.DataFrame(
+            {
+                "rlnImageName": [f"{i + 1}@m1.mrc" for i in range(len(track_lengths))],
+                "rlnHelicalTubeID": [1] * len(track_lengths),
+                "rlnCoordinateX": [float(i) for i in range(len(track_lengths))],
+                "rlnCoordinateY": [0.0] * len(track_lengths),
+                "rlnHelicalTrackLengthAngst": track_lengths,
+            }
+        )
+
+    def test_missing_columns_give_none(self):
+        assert analysis.estimate_inter_segment_distance(pd.DataFrame({"x": [1]})) == (
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_a_single_segment_helix_gives_none(self):
+        # no pair of segments: there is no distance to estimate
+        assert analysis.estimate_inter_segment_distance(self._data([100.0])) == (
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_a_real_helix_reports_its_distance(self):
+        median, mean, sigma, n_max = analysis.estimate_inter_segment_distance(
+            self._data([0.0, 10.0, 20.0])
+        )
+        assert median == pytest.approx(10.0)
+        assert mean == pytest.approx(10.0)
+        assert sigma == pytest.approx(0.0)
+        assert n_max == 3
+
+    def test_reset_gives_none_when_the_distance_cannot_be_estimated(self):
+        data = self._data([100.0])
+        assert analysis.reset_inter_segment_distance(data, 50.0, 1.0) is None
+        assert analysis.estimate_helicalTube_length(data) is None

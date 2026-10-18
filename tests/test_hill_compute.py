@@ -57,3 +57,20 @@ class TestEstimateRadialRange:
         before = image.copy()
         hill.estimate_radial_range(image)
         np.testing.assert_array_equal(image, before)
+
+
+class TestFilamentStraighten:
+    def test_a_straight_filament_along_y_does_not_divide_by_zero(self):
+        # x does not change as y does: the spline's slope is exactly 0, and the
+        # normal is built as 1/slope. The result used to be all nan.
+        from scipy.interpolate import splrep
+
+        image = np.zeros((60, 40))
+        image[:, 20] = 1.0
+        ys = np.arange(0, 60, dtype=float)
+        xs = np.full(ys.shape, 20.0)
+        tck = splrep(ys, xs, s=0)
+
+        out = hill.filament_straighten(image, tck, 5, 0.0, 59.0)
+        assert np.isfinite(out).all()
+        assert out.max() > 0.0

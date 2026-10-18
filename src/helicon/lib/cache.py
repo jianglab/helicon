@@ -191,6 +191,11 @@ _prune_lock = threading.Lock()
 # several cached functions usually share a directory, and joblib's reduce_size
 # operates on the directory as a whole.
 _dir_bytes_limit: dict = {}
+# the size a cache directory is held to unless set_cache_dir_limit says otherwise: entries are
+# recent for a week, so age alone does not stop many users from filling the disk of a host
+DEFAULT_DIR_BYTES_LIMIT = "5G"
+# directories whose cap was taken away on purpose (set_cache_dir_limit with None)
+_uncapped: set = set()
 # cache_dir -> the sweep interval currently in force, in seconds.  It is also
 # written into the stamp file, so a process that has never swept this directory
 # -- a fresh worker in a pool, say -- still honours the shorter interval that
@@ -219,7 +224,9 @@ def set_cache_dir_limit(cache_dir: Any, bytes_limit: Any) -> None:
     with _prune_lock:
         if bytes_limit is None:
             _dir_bytes_limit.pop(key, None)
+            _uncapped.add(key)
         else:
+            _uncapped.discard(key)
             _dir_bytes_limit[key] = bytes_limit
         # Drop the in-memory throttle so the next call reconsiders this
         # directory under its new limit, and the interval with it: one learned
@@ -463,6 +470,8 @@ def cache(
 
     if cache_dir is None:
         cache_dir = setup_cache_dir()
+    if str(cache_dir) not in _uncapped:
+        _dir_bytes_limit.setdefault(str(cache_dir), DEFAULT_DIR_BYTES_LIMIT)
 
     # joblib.Memory makes its folder when it is constructed, and many cached
     # functions are decorated at import time, so the Memory (and the folder) is

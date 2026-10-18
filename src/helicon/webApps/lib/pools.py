@@ -80,13 +80,21 @@ class TaskPool:
     threads : int, optional
         Threads each worker may use (in BLAS and numba), so that the workers
         together do not use more CPUs than there are. Defaults to 1.
+    gb_per_worker : float, optional
+        Memory a worker needs (its copy of the data); the pool has no more workers than the free
+        memory holds, so that two users starting runs at once do not use it all. Defaults to 1.
     """
 
-    def __init__(self, max_workers, threads=1):
+    def __init__(self, max_workers, threads=1, gb_per_worker=1.0):
         from concurrent.futures import ProcessPoolExecutor
 
+        import helicon
+
+        max_workers = min(
+            int(max_workers), int(helicon.available_cpu(mem_gb_per_cpu=gb_per_worker))
+        )
         self._executor = ProcessPoolExecutor(
-            max_workers=max(1, int(max_workers)),
+            max_workers=max(1, max_workers),
             mp_context=pool_context(),
             initializer=_limit_threads,
             initargs=(threads,),

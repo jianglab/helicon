@@ -30,7 +30,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="box_size=<n>:fft_crop_size=<n>[:recenter=<0|1>][replace_ctf=<0|1>][normalize=<0|1>][fill_mode=<mean|random>][sign=<-1|1>][n_micrographs=<-1|n>][fp16=<0|1>][:micrographs_cs_file=<filename>|micrographs_job_id=<JXXX>][reuse_job_id=<JXXX>]",
         help="split the dataset by micrograph. disabled by default",
-        default="",
+        action="append",
+        default=None,
     )
 
 

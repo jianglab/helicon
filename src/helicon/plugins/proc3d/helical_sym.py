@@ -26,6 +26,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="<param>=<val>:...",
         help="helical_sym parameter",
+        action="append",
         default=None,
     )
 

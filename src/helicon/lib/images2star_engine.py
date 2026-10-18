@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 from helicon.plugins.images2star import dispatch
 
+from . import plugin_pipeline
+
 logger = logging.getLogger(__name__)
 
 # Operations that write image/plot files or need CLI-only infrastructure.
@@ -78,7 +80,8 @@ def apply_options(
     append_options : Iterable of str, optional
         Dest names whose argparse action type is ``_AppendAction``. For these
         the engine consumes one parameter value per occurrence in ``options``,
-        matching the CLI's index tracking.
+        in order; the loop counts the occurrences itself, so a handler
+        bumping ``index_d`` cannot make it skip a value.
 
     Returns
     -------
@@ -94,13 +97,12 @@ def apply_options(
     append_set = set(append_options)
     for option_name in options:
         values = args.__dict__[option_name]
-        if option_name in append_set:
-            param = values[index_d[option_name]]
-        else:
-            param = values
+        occurrence = index_d[option_name]
+        param = values[occurrence] if option_name in append_set else values
         if getattr(args, "verbose", 0):
             logger.info("%s: %s", option_name, param)
         data, index_d = dispatch(option_name, data, args, index_d, param)
+        index_d[option_name] = occurrence + 1
     return data
 
 
@@ -121,42 +123,7 @@ def operation_specs() -> dict[str, dict]:
     """
     from helicon.plugins import images2star as plugins
 
-    specs = {}
-    for name in sorted(plugins._plugins):
-        mod = plugins._plugins[name]
-        if not hasattr(mod, "add_args"):
-            continue
-        parser = argparse.ArgumentParser(add_help=False)
-        try:
-            mod.add_args(parser)
-        except Exception:
-            continue
-        action = next((a for a in parser._actions if a.dest != "help"), None)
-        if action is None:
-            continue
-        specs[name] = {
-            "dest": action.dest,
-            "option_string": (
-                action.option_strings[0]
-                if action.option_strings
-                else f"--{action.dest}"
-            ),
-            "metavar": _metavar_text(action.metavar),
-            "type": action.type if action.type is not None else str,
-            "nargs": action.nargs,
-            "choices": list(action.choices) if action.choices else None,
-            "default": action.default,
-            "help": action.help or "",
-            "append": type(action) is argparse._AppendAction,
-        }
-    return specs
-
-
-def _metavar_text(metavar) -> str:
-    """Normalize an argparse metavar (str or tuple) to a single string."""
-    if isinstance(metavar, (tuple, list)):
-        return " ".join(str(m) for m in metavar)
-    return str(metavar) if metavar is not None else ""
+    return plugin_pipeline.operation_specs(plugins)
 
 
 def gui_operation_specs() -> dict[str, dict]:
@@ -270,31 +237,14 @@ def stack_to_namespace(
     """
     from helicon.commands import images2star
 
-    parser = argparse.ArgumentParser(add_help=False)
-    images2star.add_args(parser)
-    args = argparse.Namespace()
-    for action in parser._actions:
-        if action.dest == "help":
-            continue
-        value = action.default
-        setattr(args, action.dest, value)
+    return plugin_pipeline.stack_to_namespace(
+        stack, specs, images2star.add_args, _seed_defaults, **extra
+    )
+
+
+def _seed_defaults(args: argparse.Namespace, extra: dict) -> None:
+    """The CLI infrastructure defaults a GUI-built namespace needs."""
     args.verbose = 0
     args.cpu = 1
     args.input_imageFiles = [extra.pop("input_imageFiles", "")]
     args.output_starFile = extra.pop("output_starFile", "")
-
-    values = {}
-    for name, param in stack:
-        if name not in specs:
-            raise ValueError(f"unknown operation: {name}")
-        if specs[name]["append"]:
-            values.setdefault(name, []).append(param)
-        else:
-            if name in values:
-                raise ValueError(f"option {name} can only be applied once")
-            values[name] = param
-    for name, param in values.items():
-        setattr(args, name, param)
-    for key, value in extra.items():
-        setattr(args, key, value)
-    return args

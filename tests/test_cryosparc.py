@@ -76,6 +76,26 @@ class TestCryosparcArgs(object):
         missing = expected - actions
         assert not missing, f"Missing args: {missing}"
 
+    def test_repeated_options_keep_each_occurrence_value(self):
+        # Repeated options are a pipeline: each occurrence keeps its own value
+        parser = argparse.ArgumentParser()
+        cryosparc.add_args(parser)
+        args = parser.parse_args(
+            [
+                "--csFile",
+                "a.cs",
+                "--splitByMicrograph",
+                "1",
+                "--changePixelSize",
+                "2",
+                "--splitByMicrograph",
+                "0",
+            ]
+        )
+        assert args.splitByMicrograph == [1, 0]
+        assert args.changePixelSize == [2.0]
+        assert args.resetExposureGroups is None
+
     def _make_args(self, **kwargs):
         defaults = dict(
             csFile=[],

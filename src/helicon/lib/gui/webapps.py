@@ -8,6 +8,7 @@ while ``New``-checked clicks spawn coexisting servers.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 
@@ -141,6 +142,9 @@ def _spawn_web_app(query_params: dict) -> _WebAppState:
         block=False,
         query_params=params,
         url_callback=_on_url,
+        # the server was started for this viewer, so it may reap itself when the
+        # viewer is gone; a server the user starts keeps running
+        env={**os.environ, "HELICON_WEBAPP_SELF_REAP": "1"},
     )
     new_state.proc = proc
     new_state.touch()

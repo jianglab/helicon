@@ -555,18 +555,6 @@ def _get_file_info(filepath: str) -> tuple[str, str, str]:
     elif ext in (".html", ".htm"):
         pass
 
-    elif ext == ".cs":
-        try:
-            import numpy as np
-
-            with np.load(filepath, allow_pickle=True) as data:
-                if "particles" in data:
-                    n = len(data["particles"])
-                    n_images = str(n)
-                    info = f"{n} particles"
-        except Exception:
-            pass
-
     return info, n_images, pixel_size
 
 

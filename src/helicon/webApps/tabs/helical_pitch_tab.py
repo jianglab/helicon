@@ -677,6 +677,19 @@ def helical_pitch_tab_server(input, output, session):
             images = [images[i] for i in included]
         else:
             included = display_seq_all
+
+        if not images:
+            ui.modal_show(
+                ui.modal(
+                    "Every class average is blank, or the file has none: "
+                    "there is nothing to show with the blank ones ignored.",
+                    title="No classes to show",
+                    easy_close=True,
+                    footer=None,
+                )
+            )
+            return
+
         image_labels = [f"{i+1}: {abundance()[i]:,d}" for i in included]
         displayed_class_ids.set(included)
         displayed_class_images.set(images)

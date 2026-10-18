@@ -254,6 +254,35 @@ class TestElasticnetSolver:
         A = sga.design_matrix(grid, 1.2, 0.95, 1, 10, 16, 32)
         assert A.shape == (16 * 32, len(grid[0]))
 
+    def test_it_matches_the_non_negative_least_squares_solution(self):
+        from scipy.optimize import nnls
+
+        rng = np.random.default_rng(2)
+        A = rng.normal(0, 1, (30, 8))
+        b = rng.normal(0, 1, 30)
+        M = A.T @ A
+        u = A.T @ b
+        got = sga.nn_elasticnet(M, u)
+        assert np.allclose(got, nnls(A, b)[0], atol=1e-6)
+
+    def test_the_stopping_rule_does_not_depend_on_the_data_scale(self):
+        # the threshold is relative to the largest coefficient; an absolute one
+        # was unreachable when the amplitudes were large, so every fit ran all
+        # 500 sweeps
+        M = np.eye(6) * 4.0
+        u = np.array([1e6, 2e6, -3e6, 0.0, 5e6, 6e6])
+        got = sga.nn_elasticnet(M, u)
+        assert np.allclose(got, np.maximum(0.0, u / 4.0))
+
+    def test_an_unreachable_sweep_cap_still_returns_a_finite_answer(self):
+        rng = np.random.default_rng(4)
+        A = rng.normal(0, 1, (20, 5))
+        M = A.T @ A + np.eye(5)
+        u = A.T @ rng.normal(0, 1, 20)
+        got = sga.nn_elasticnet(M, u, iters=1)
+        assert np.isfinite(got).all()
+        assert (got >= 0).all()
+
 
 class TestSolverEntryPoint:
     """The pipeline contract: ((rec3d, set1, set2), score).

@@ -50,6 +50,23 @@ class TestErrorModal:
         assert shown == [b]
         assert b.closed == [err] and a.closed == []
 
+    def test_a_hosted_copy_shows_the_visitor_nothing(self, monkeypatch):
+        from helicon.webApps import app
+
+        shown = []
+        monkeypatch.setattr(
+            app.ui, "modal_show", lambda m, session=None: shown.append(session)
+        )
+        monkeypatch.setattr(app.deployment, "is_cloud", lambda: True)
+        a = _Root()
+        app.install_error_modal(a)
+
+        err = RuntimeError("boom")
+        asyncio.run(a._unhandled_error(err))
+        # the traceback names server files and internals; it is logged, not shown
+        assert shown == []
+        assert a.closed == [err]
+
 
 class TestPublicHosts:
     @pytest.mark.parametrize(
@@ -134,7 +151,7 @@ class TestRefuseServerMode:
         counts = {
             abinitio3d_tab: 3,  # classes, params, relion_reconstruct
             helical_pitch_tab: 2,
-            denovo3d_tab: 1,
+            denovo3d_tab: 2,  # server path, uploaded STAR naming server paths
             helical_projection_tab: 2,
             hill_tab: 1,
             hi3d_tab: 1,
