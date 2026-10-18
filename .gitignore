@@ -43,3 +43,4 @@ output/
 docs/_build/
 apoe_out/
 joint_pixel_out/
+benchmarks/

@@ -5,15 +5,11 @@ are windows of its side view, so they register on each other well, and not so
 well on those of the other. Filaments use the classes of their own type.
 """
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
-from joint_pixel import synthetic as syn  # noqa: E402
+import synthetic_pitch as syn
 
 from helicon.webApps.lib import helical_pitch_types as ty  # noqa: E402
 
