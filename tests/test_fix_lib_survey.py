@@ -345,6 +345,9 @@ class _FakeResponse:
     def __init__(self, content):
         self.content = content
 
+    def iter_content(self, chunk_size=1):
+        yield self.content
+
     def raise_for_status(self):
         pass
 

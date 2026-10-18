@@ -16,7 +16,6 @@ __all__ = [
     "which",
     "find_relion_project_folders",
     "get_direct_url",
-    "get_file_size",
     "download_file_from_url",
     "get_emdb_id",
     "is_file_readable",
@@ -146,27 +145,29 @@ def get_direct_url(url: str) -> str:
         return url
 
 
-def get_file_size(url: str) -> int | None:
-    """Get the file size of a remote resource via a HEAD request.
+def _get(url: str, **kwargs):
+    """``requests.get``; on a hosting service every redirect hop is checked too.
 
-    Parameters
-    ----------
-    url : str
-        URL to check.
-
-    Returns
-    -------
-    int or None
-        File size in bytes, or None if unknown.
+    A public URL that redirects to 169.254.169.254 or the server's own network
+    would pass a check of the first host alone. (A name that changes its address
+    between the check and the fetch is not covered.)
     """
     import requests
+    from urllib.parse import urljoin
 
-    response = requests.head(url, timeout=_REQUEST_TIMEOUT)
-    if "Content-Length" in response.headers:
-        file_size = int(response.headers["Content-Length"])
-        return file_size
-    else:
-        return None
+    from ..webApps import deployment
+
+    if not deployment.is_cloud():
+        return requests.get(url, **kwargs)
+    for _ in range(5):
+        if not deployment.url_allowed(url):
+            raise IOError(f"ERROR: {url} is not a public URL")
+        r = requests.get(url, allow_redirects=False, **kwargs)
+        if not r.is_redirect:
+            return r
+        url = urljoin(url, r.headers.get("location", ""))
+        r.close()
+    raise IOError("ERROR: too many redirects")
 
 
 def download_file_from_url(
@@ -229,7 +230,7 @@ def download_file_from_url(
             ".%s.%d.%s.part" % (target.name, os.getpid(), uuid.uuid4().hex[:8])
         )
         try:
-            with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
+            with _get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
                 r.raise_for_status()
                 with open(partial, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
@@ -244,13 +245,12 @@ def download_file_from_url(
             raise
         return str(target) if return_filename else open(target, "rb")
     try:
-        local_filename = url.split("/")[-1]
-        suffix = "." + local_filename
-        with requests.get(url, timeout=_REQUEST_TIMEOUT) as r:
-            r.raise_for_status()  # Check for request success
-            content = r.content
+        suffix = "." + url.split("/")[-1]
         fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
-        fileobj.write(content)
+        with _get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
+            r.raise_for_status()  # Check for request success
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                fileobj.write(chunk)
         fileobj.flush()  # so readers that open fileobj.name see the data
         fileobj.seek(0)
         return fileobj

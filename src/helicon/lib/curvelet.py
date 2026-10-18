@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+from functools import lru_cache
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -61,7 +62,7 @@ def _apply_mps_patch(torch) -> None:
                 exec(_code, _obj.__globals__, _ns)
                 setattr(_mod, _name, _ns[_name])
     except Exception:
-        pass
+        logger.warning("could not patch curvelets for MPS", exc_info=True)
 
 
 def _ensure_torch():
@@ -101,8 +102,6 @@ __all__ = [
     "has_curvelet_udct_gpu",
 ]
 
-_GRID_CACHE: dict[tuple[int, int, int], object] = {}
-
 
 def _curvepy():
     """``(CurveletFrequencyGrid, soft_threshold)`` from curvepy, imported on first use.
@@ -117,12 +116,9 @@ def _curvepy():
     return CurveletFrequencyGrid, soft_threshold
 
 
+@lru_cache(maxsize=8)  # a grid is large: the least recently used go
 def _get_grid(shape: tuple[int, int], num_scales: int):
-    key = (shape[0], shape[1], num_scales)
-    if key not in _GRID_CACHE:
-        grid_class = _curvepy()[0]
-        _GRID_CACHE[key] = grid_class(shape[0], shape[1], scales=num_scales)
-    return _GRID_CACHE[key]
+    return _curvepy()[0](shape[0], shape[1], scales=num_scales)
 
 
 _auto_num_scales_logged: set = set()
@@ -418,8 +414,6 @@ def curvelet_denoise_batch_fdct(
 # UDCT backend (curvelets package)
 # ---------------------------------------------------------------------------
 
-_UDCT_GRID_CACHE: dict[tuple, object] = {}
-
 
 def _udct_compatible_shape(shape: tuple[int, ...], num_scales: int) -> tuple[int, ...]:
     factor = 2 ** (num_scales - 1)
@@ -478,22 +472,18 @@ def _move_grid_to_device(grid, device):
     return grid
 
 
+@lru_cache(maxsize=8)
 def _get_udct_grid(
     shape: tuple[int, ...],
     num_scales: int,
     wedges_per_dir: int = 3,
     use_gpu: bool = False,
 ):
-    key = (*shape, num_scales, wedges_per_dir, use_gpu)
-    if key not in _UDCT_GRID_CACHE:
-        if use_gpu:
-            from curvelets.torch import UDCT
-        else:
-            from curvelets.numpy import UDCT
-        _UDCT_GRID_CACHE[key] = UDCT(
-            shape, num_scales=num_scales, wedges_per_direction=wedges_per_dir
-        )
-    return _UDCT_GRID_CACHE[key]
+    if use_gpu:
+        from curvelets.torch import UDCT
+    else:
+        from curvelets.numpy import UDCT
+    return UDCT(shape, num_scales=num_scales, wedges_per_direction=wedges_per_dir)
 
 
 def _coeffs_to_numpy(tree: list, keep_as_numpy: bool = False) -> list:

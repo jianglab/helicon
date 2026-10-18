@@ -37,7 +37,7 @@ class TestPyprojectMetadata:
         assert "version" not in project
 
     def test_requests_is_a_runtime_dependency(self):
-        # lib/path_utils.py imports requests in get_file_size() and
+        # lib/path_utils.py imports requests in
         # download_file_from_url(), which core code reaches (the EMDB fetch of
         # lib/dataset.py), so a plain `pip install helicon` must bring it in.
         assert "requests" in _names(_project()["dependencies"])

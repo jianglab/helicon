@@ -41,3 +41,5 @@ output/
 
 # built user documentation
 docs/_build/
+apoe_out/
+joint_pixel_out/

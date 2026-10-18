@@ -20,6 +20,8 @@ from .. import bookmark, deployment
 
 logger = logging.getLogger(__name__)
 
+MAX_CLOUD_DOWNLOAD = 2 << 30  # bytes
+
 _DEFAULT_URL = (
     "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/"
     "EMD-10499/map/emd_10499.map.gz"
@@ -739,17 +741,20 @@ def hi3d_tab_server(input, output, session):
         worker thread, where reactive writes are not allowed. The coroutine that
         started the thread polls it.
         """
-        import requests
+        from helicon.lib.path_utils import _get
 
-        resp = requests.get(url, timeout=60, stream=True)
-        resp.raise_for_status()
-        if progress is not None:
-            progress["total"] = int(resp.headers.get("content-length") or 0)
-        for chunk in resp.iter_content(chunk_size=1 << 20):
-            if chunk:
-                handle.write(chunk)
-                if progress is not None:
-                    progress["done"] += len(chunk)
+        with _get(url, timeout=60, stream=True) as resp:
+            resp.raise_for_status()
+            if progress is not None:
+                progress["total"] = int(resp.headers.get("content-length") or 0)
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    handle.write(chunk)
+                    if progress is not None:
+                        progress["done"] += len(chunk)
+                    # a hosted copy: an endless stream must not fill the disk
+                    if deployment.is_cloud() and handle.tell() > MAX_CLOUD_DOWNLOAD:
+                        raise IOError("The file is too large for this copy of Helicon")
 
     async def _run_download(label, work, progress):
         """Run a download off the loop, reporting bytes as they arrive.

@@ -3,6 +3,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 import helicon
 
 TABS = Path(helicon.__file__).parent / "webApps" / "tabs"
@@ -63,3 +65,33 @@ class TestUrlLoadersAreGuarded:
             "def load(url):\n    return compute.get_images_from_url(url)\n"
         )
         assert _unguarded(tree) == ["load"]
+
+
+class TestRedirectsOnAHostedCopy:
+    def test_a_redirect_to_a_private_address_is_refused(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from helicon.lib import path_utils
+        from helicon.webApps import deployment
+
+        monkeypatch.setattr(deployment, "is_cloud", lambda e=None: True)
+        monkeypatch.setattr(
+            deployment, "host_is_public", lambda h: h == "public.example"
+        )
+        import requests
+
+        seen = []
+
+        def fake_get(url, **kw):
+            seen.append(url)
+            assert kw["allow_redirects"] is False
+            return SimpleNamespace(
+                is_redirect=True,
+                headers={"location": "http://169.254.169.254/latest"},
+                close=lambda: None,
+            )
+
+        monkeypatch.setattr(requests, "get", fake_get)
+        with pytest.raises(IOError):
+            path_utils._get("https://public.example/x")
+        assert seen == ["https://public.example/x"]

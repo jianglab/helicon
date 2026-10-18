@@ -32,9 +32,12 @@ are used here, the file name first because it is the more specific of the two.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from .cache import cache as _cache, setup_cache_dir as _setup_cache_dir
+
+logger = logging.getLogger(__name__)
 
 # A project directory holds these; a job directory holds ``job.json``. The
 # project marker is a file rather than a name pattern on purpose -- projects
@@ -243,7 +246,9 @@ def job_type(path: str | Path) -> str | None:
         if isinstance(found, str) and found:
             value = found
     except (OSError, ValueError):
-        value = None
+        # a file being written or unreadable now: ask again, do not remember "no type"
+        logger.warning("could not read %s", marker, exc_info=True)
+        return None
     _JOB_TYPE_CACHE[key] = value
     return value
 

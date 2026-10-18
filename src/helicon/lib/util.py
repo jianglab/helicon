@@ -30,7 +30,6 @@ from .path_utils import (  # noqa: F401
     which,
     find_relion_project_folders,
     get_direct_url,
-    get_file_size,
     download_file_from_url,
     get_emdb_id,
     is_file_readable,
