@@ -761,6 +761,12 @@ def _folder_preview(path: Path, now: datetime | None = None) -> dict:
         if outcome is not None:
             out["outcome"] = outcome
             out["facts"].extend(outcome["facts"])
+        if cs_job is None:
+            for name in _MICROGRAPH_STARS:
+                if (path / name).is_file():
+                    _add_micrographs(path / name, out)
+                    if "micrographs" in out:
+                        break
         # the files of a job are in the list of the window: no list of them here either
         out["text"] = ""
         return out
@@ -954,6 +960,28 @@ def _preview_cs(path: Path, out: dict) -> None:
     out["text"] = "\n".join(f"{g}: {n}" for g, n in groups.items())
 
 
+def _add_micrographs(path: Path, out: dict) -> None:
+    """Mark a star file whose positions can be shown on the micrographs: a table of particles,
+    the listing of a picking job, or the coordinate file of one micrograph of a picking job (the
+    window then opens on the listing, at that micrograph). A button opens them."""
+    from .job_outcome import (
+        has_particle_coordinates,
+        is_pick_listing,
+        listing_of_coordinates,
+    )
+
+    if has_particle_coordinates(path) or is_pick_listing(path):
+        out["micrographs"] = str(path)
+        return
+    found = listing_of_coordinates(path)
+    if found is not None:
+        out["micrographs"], out["micrograph"] = str(found[0]), found[1]
+
+
+# the star files of a job folder whose positions can be shown on the micrographs, the first found
+_MICROGRAPH_STARS = ("manualpick.star", "autopick.star", "particles.star")
+
+
 def _preview_star(path: Path, out: dict) -> None:
     from helicon.lib.gui.browser_files import _get_file_info
 
@@ -966,11 +994,7 @@ def _preview_star(path: Path, out: dict) -> None:
     if pixel:
         out["facts"].append(("Pixel size", pixel))
     out["text"] = _star_header(path)
-    from .job_outcome import has_particle_coordinates
-
-    if has_particle_coordinates(path):
-        # a button opens the micrographs of the table, each with its particles on it
-        out["micrographs"] = str(path)
+    _add_micrographs(path, out)
     if path.name.endswith("_data.star"):
         from .job_outcome import busiest_micrograph, is_particle_table
 
@@ -1794,6 +1818,7 @@ class PreviewPane(QWidget):
         )
         self._micrographs.clicked.connect(self.open_micrographs_window)
         self._micrographs_star: str | None = None
+        self._micrographs_first: str | None = None
         self._micrograph_windows: dict = {}
         # the graph of the jobs of a project, made when a project folder is shown
         self._graph_box: QWidget | None = None
@@ -1925,6 +1950,7 @@ class PreviewPane(QWidget):
         self._set_facts(info.get("facts", []))
         self._show_links(info.get("links", []))
         self._micrographs_star = info.get("micrographs")
+        self._micrographs_first = info.get("micrograph")
         self._micrographs.setVisible(self._micrographs_star is not None)
         self._show_graph(info.get("graph"))
         self._show_outcome(info.get("outcome"))
@@ -2137,8 +2163,10 @@ class PreviewPane(QWidget):
         from .micrograph_viewer import MicrographViewer
 
         window = self._micrograph_windows.get(star)
+        if window is not None and self._micrographs_first is not None:
+            window.select(self._micrographs_first)
         if window is None:
-            window = MicrographViewer(star, self.window())
+            window = MicrographViewer(star, self.window(), self._micrographs_first)
             window.destroyed.connect(
                 lambda _=None, s=star: self._micrograph_windows.pop(s, None)
             )

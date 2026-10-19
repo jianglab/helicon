@@ -1959,7 +1959,10 @@ class TestTheParticlesOfEachMicrograph:
         pane.show()
         pane.show_info(info)
         assert pane._micrographs.isVisible()
-        pane.show_info(bp.build_preview(relion / "Extract/job005"))
+        # the job folder too: its particles.star
+        assert bp.build_preview(relion / "Extract/job005")["micrographs"] == str(star)
+        (relion / "MotionCorr/job002").mkdir(parents=True)
+        pane.show_info(bp.build_preview(relion / "MotionCorr/job002"))
         assert not pane._micrographs.isVisible()
 
     def test_the_window_lists_the_micrographs_and_shows_one(self, qapp, relion):
@@ -1986,6 +1989,115 @@ class TestTheParticlesOfEachMicrograph:
             qapp.processEvents()
         assert window._caption.text().startswith("1 particle\n")
         assert "Micrograph not found" in window._caption.text()
+        window.close()
+
+
+def _pick_job(relion, kind="ManualPick", options="", general="", tube=False):
+    """A picking job: mic_a has four picks (two filaments, by their start and end, in start-end
+    mode), mic_b has none; the coordinate files are under Movies/ of the job, as RELION writes them."""
+    job = relion / kind / "job004"
+    suffix = kind.lower()
+    picks = [(50, 40), (250, 40), (60, 150), (260, 150)]
+    columns = ["rlnCoordinateX", "rlnCoordinateY", "rlnClassNumber", "rlnAnglePsi"]
+    rows = [(x, y, 0, -999) for x, y in picks]
+    if tube:
+        columns.append("rlnHelicalTubeID")
+        rows = [r + (1 + i // 2,) for i, r in enumerate(rows)]
+    _star_file(job / f"Movies/mic_a_{suffix}.star", _loop("", columns, rows))
+    listing = [
+        ("MotionCorr/job002/mic_a.mrc", f"{kind}/job004/Movies/mic_a_{suffix}.star"),
+        ("MotionCorr/job002/mic_b.mrc", f"{kind}/job004/Movies/mic_b_{suffix}.star"),
+    ]
+    head = f"data_general\n\n_rlnMicrographPickType {general}\n\n" if general else ""
+    _star_file(
+        job / f"{suffix}.star",
+        head
+        + _loop(
+            "coordinate_files", ["rlnMicrographName", "rlnMicrographCoordinates"], listing
+        ),
+    )
+    if options:
+        (job / "job.star").write_text(options)
+    _mrc(relion / "MotionCorr/job002/mic_a.mrc", np.zeros((200, 300)), apix=2.0)
+    return job / f"{suffix}.star"
+
+
+class TestThePicksOfAPickingJob:
+    def test_the_pick_mode(self, relion):
+        assert jo.pick_mode(_pick_job(relion)) == "particles"
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        assert jo.pick_mode(listing) == "startend"
+        listing = _pick_job(relion, "AutoPick", options="do_pick_helical_segments Yes\n")
+        assert jo.pick_mode(listing) == "segments"
+        assert jo.pick_mode(_pick_job(relion, "AutoPick", tube=True)) == "segments"
+
+    def test_the_pick_type_of_relion_5_1(self, relion):
+        listing = _pick_job(relion, "External", general="startend")
+        assert jo.is_pick_listing(listing)
+        assert jo.pick_mode(listing) == "startend"
+
+    def test_single_particles_with_their_diameter(self, relion):
+        listing = _pick_job(relion, options="diameter 120\n")
+        found = jo.coordinates_by_micrograph(listing)
+        assert found["mode"] == "particles" and found["diameter"] == 120
+        mics = found["micrographs"]
+        assert list(mics) == ["MotionCorr/job002/mic_a.mrc", "MotionCorr/job002/mic_b.mrc"]
+        assert len(mics["MotionCorr/job002/mic_a.mrc"]["x"]) == 4
+        assert len(mics["MotionCorr/job002/mic_b.mrc"]["x"]) == 0
+
+    def test_filaments_by_their_start_and_end(self, relion):
+        listing = _pick_job(
+            relion, options="do_startend Yes\nhelical_tube_outer_diameter 40\n"
+        )
+        found = jo.picks_by_micrograph(listing)
+        assert found["mode"] == "startend" and found["diameter"] == 40
+        mic_a = found["micrographs"]["MotionCorr/job002/mic_a.mrc"]
+        assert mic_a["tube"].tolist() == [0, 0, 1, 1]
+        assert [len(x) for x, _y in jo.particle_groups(mic_a)] == [2, 2]
+
+    def test_each_mode_is_drawn_in_its_style(self, relion):
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        mic_a = jo.picks_by_micrograph(listing)["micrographs"]["MotionCorr/job002/mic_a.mrc"]
+        grey = np.full((200, 300), 128, np.uint8)
+        # a filament: its middle is coloured; a single particle: a ring, its centre is not
+        band = jo.draw_coordinates(grey, 1, mic_a, "startend", radius=10)
+        assert len(set(band[40, 150])) > 1
+        assert len(set(band[100, 150])) == 1
+        rings = jo.draw_coordinates(grey, 1, mic_a, "particles", radius=10)
+        assert len(set(rings[40, 60])) > 1  # on the circle, 10 pixels from (50, 40)
+        assert len(set(rings[40, 50])) == 1  # its centre
+        dots = jo.draw_coordinates(grey, 1, mic_a, "segments")
+        assert len(set(dots[40, 50])) > 1
+
+    def test_a_coordinate_file_belongs_to_its_listing(self, relion):
+        listing = _pick_job(relion)
+        coords = relion / "ManualPick/job004/Movies/mic_a_manualpick.star"
+        found = jo.listing_of_coordinates(coords)
+        assert found == (listing.resolve(), "MotionCorr/job002/mic_a.mrc")
+        assert jo.listing_of_coordinates(listing) is None
+
+    def test_the_previews_have_the_button(self, relion):
+        listing = _pick_job(relion)
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        assert bp.build_preview(listing)["micrographs"] == str(listing)
+        coords = bp.build_preview(relion / "ManualPick/job004/Movies/mic_a_manualpick.star")
+        assert coords["micrographs"] == str(listing.resolve())
+        assert coords["micrograph"] == "MotionCorr/job002/mic_a.mrc"
+        assert bp.build_preview(listing.parent)["micrographs"] == str(listing)
+
+    def test_the_window_shows_filaments_by_their_start_and_end(self, qapp, relion):
+        from helicon.lib.gui.micrograph_viewer import MicrographViewer
+
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        window = MicrographViewer(listing, select="MotionCorr/job002/mic_a.mrc")
+        window.show()
+        for _ in range(3):
+            window.wait()
+            qapp.processEvents()
+        assert window._list.headerItem().text(1) == "Filaments"
+        assert "Picked as filaments" in window._summary.text()
+        assert window._show_dots.text() == "Show picks"
+        assert window._caption.text() == "2 filaments"
         window.close()
 
 

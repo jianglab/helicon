@@ -946,14 +946,18 @@ def _micrograph_picture(path: Path, max_size: int = MICROGRAPH_PIXELS):
 
 
 def _draw_segments(picture, filaments, step: int):
-    """The picture in colour with a dot at each segment, one colour to each filament.
+    """The picture (grey, or already in colour) in colour with a dot at each segment, one colour
+    to each filament.
 
     ``filaments`` is ``[(x, y), ...]``, the coordinates of the segments of each filament in pixels
     of the micrograph."""
     import numpy as np
 
-    rgb = np.repeat(picture[:, :, None], 3, axis=2)
-    h, w = picture.shape
+    if picture.ndim == 3:  # already in colour: the dots go over what is drawn
+        rgb = picture.copy()
+    else:
+        rgb = np.repeat(picture[:, :, None], 3, axis=2)
+    h, w = picture.shape[:2]
     radius = max(2, round(max(h, w) / 170))
     dy, dx = np.mgrid[-radius : radius + 1, -radius : radius + 1]
     disk = dy**2 + dx**2 <= radius**2
@@ -1166,6 +1170,316 @@ def draw_particles(picture, step: int, particles: dict):
     """A picture of a micrograph (binned by ``step``) in colour with a dot at each particle, one
     colour to each filament of helical segments."""
     return _draw_segments(picture, particle_groups(particles), step)
+
+
+# ── the picks of a ManualPick or AutoPick job ────────────────────────────────
+
+# how the positions on a micrograph are shown, by what they are:
+#   "particles": single particles picked, a circle as large as the particle at each
+#   "startend":  filaments picked by their start and their end, a band along each filament
+#   "segments":  helical segments, a dot at each segment, one colour to each filament
+#   "points":    the particles of a table (an extraction, a classification...), a dot at each
+PICK_MODES = ("particles", "startend", "segments", "points")
+# a RELION job folder
+_JOB_FOLDER = re.compile(r"job\d+")
+# the files of a picking job that list the coordinate file of each micrograph
+PICK_LISTINGS = ("manualpick.star", "autopick.star")
+# the options of a picking job that give the diameter of a particle (Å), the first one set
+_PARTICLE_DIAMETER_OPTIONS = (
+    "diameter",  # ManualPick
+    "topaz_particle_diameter",
+    "log_diam_max",
+    "particle_diameter",
+)
+_PICK_COLOR = (120, 230, 120)
+
+
+def _loop_columns(path: Path, block: str, lines: int = 200) -> list[str]:
+    """The column names of the loop of a data block of a star file, from its first lines."""
+    names: list[str] = []
+    inside = False
+    try:
+        with open(path, errors="replace") as f:
+            for i, line in enumerate(f):
+                text = line.strip()
+                if text.startswith("data_"):
+                    if inside:
+                        break
+                    inside = text == f"data_{block}"
+                elif inside and text.startswith("_"):
+                    names.append(text.split()[0].lstrip("_"))
+                elif inside and names and text and not text.startswith("#"):
+                    break
+                if i > lines and not inside:
+                    break
+    except OSError:
+        pass
+    return names
+
+
+def is_pick_listing(path: str | Path) -> bool:
+    """If a star file lists the coordinate file of each micrograph, as ``manualpick.star`` and
+    ``autopick.star`` of a RELION picking job do (``data_coordinate_files``)."""
+    names = _loop_columns(Path(path), "coordinate_files")
+    return "rlnMicrographName" in names and "rlnMicrographCoordinates" in names
+
+
+def _pick_type(listing: Path) -> str:
+    """``rlnMicrographPickType`` of the ``data_general`` block of a listing (RELION 5.1), lower case."""
+    try:
+        with open(listing, errors="replace") as f:
+            for i, line in enumerate(f):
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "_rlnMicrographPickType":
+                    return parts[1].strip("\"'").lower()
+                if i > 50 or (parts and parts[0] == "data_coordinate_files"):
+                    break
+    except OSError:
+        pass
+    return ""
+
+
+def pick_mode(listing: str | Path, helical_columns: bool = False) -> str:
+    """How the picks of a listing were made, one of :data:`PICK_MODES` but ``"points"``: from the
+    pick type of the listing, the options of its job, or the columns of the coordinate files
+    (``helical_columns``: they have ``rlnHelicalTubeID``)."""
+    listing = Path(listing)
+    kind = _pick_type(listing)
+    if "start" in kind:
+        return "startend"
+    if "helic" in kind or "segment" in kind or "filament" in kind:
+        return "segments"
+    job = listing.parent
+    if _job_option(job, "do_startend") == "Yes":
+        return "startend"
+    if helical_columns or _job_option(job, "do_pick_helical_segments") == "Yes":
+        return "segments"
+    return "particles"
+
+
+def pick_diameter(job: str | Path, mode: str) -> float | None:
+    """The diameter (Å) of a particle, or of a filament, given to a picking job; None if not set."""
+    job = Path(job)
+    names = ("helical_tube_outer_diameter",) if mode != "particles" else ()
+    for name in names + _PARTICLE_DIAMETER_OPTIONS:
+        try:
+            value = float(_job_option(job, name) or "")
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def picks_by_micrograph(listing: str | Path) -> dict:
+    """The picks of a RELION picking job, by micrograph, from its listing (``manualpick.star``,
+    ``autopick.star``) and the coordinate files it names.
+
+    It reads all of the coordinate files, so it is meant to run in a thread.
+
+    Returns
+    -------
+    dict
+        ``mode`` (see :data:`PICK_MODES`), ``diameter`` (Å or None), ``picked`` (True: the
+        positions are picks, not particles of a table) and ``micrographs``, as
+        :func:`particles_by_micrograph` (a micrograph without picks has none): for filaments picked
+        by their start and end, ``tube`` pairs the two ends of each.
+    """
+    import numpy as np
+
+    listing = Path(listing)
+    table = _star_loop(listing, "coordinate_files")
+    mics = table.get("rlnMicrographName", [])
+    files = table.get("rlnMicrographCoordinates", [])
+    read: dict[str, tuple] = {}
+    helical_columns = False
+    for mic, name in zip(mics, files):
+        path = _find_micrograph(name, listing)
+        rows = np.empty((0, 2))
+        tube = None
+        if path is not None:
+            names = _particle_header(path)
+            wanted = ["rlnCoordinateX", "rlnCoordinateY"]
+            if "rlnHelicalTubeID" in names:
+                wanted.append("rlnHelicalTubeID")
+                helical_columns = True
+            try:
+                found = np.array(list(_particle_rows(path, wanted)), dtype=float)
+            except (OSError, ValueError):
+                found = np.empty((0, len(wanted)))
+            if found.size:
+                rows = found[:, :2]
+                if found.shape[1] > 2:
+                    tube = found[:, 2].astype(int)
+        read[mic] = (rows, tube)
+    mode = pick_mode(listing, helical_columns)
+    micrographs = {}
+    for mic, (rows, tube) in read.items():
+        x, y = rows[:, 0], rows[:, 1]
+        if mode == "startend":
+            n = len(x) // 2 * 2  # a start without its end is not a filament
+            x, y, tube = x[:n], y[:n], np.arange(n) // 2
+        elif mode == "segments" and tube is None:
+            tube = np.zeros(len(x), dtype=int)
+        elif mode == "particles":
+            tube = None
+        micrographs[mic] = dict(x=x, y=y, tube=tube)
+    return dict(
+        mode=mode,
+        diameter=pick_diameter(listing.parent, mode),
+        micrographs=micrographs,
+        picked=True,
+    )
+
+
+def listing_of_coordinates(path: str | Path) -> tuple[Path, str] | None:
+    """The listing of the picking job that a coordinate file of one micrograph belongs to, and that
+    micrograph: ``(ManualPick/job005/manualpick.star, MotionCorr/job002/Movies/mic1.mrc)``; None
+    if the file is not a coordinate file of a picking job."""
+    path = Path(path).resolve()
+    names = _particle_header(path)
+    if "rlnCoordinateX" not in names or "rlnMicrographName" in names:
+        return None
+    for folder in path.parents:
+        for name in PICK_LISTINGS:
+            listing = folder / name
+            if not listing.is_file():
+                continue
+            table = _star_loop(listing, "coordinate_files")
+            for mic, coords in zip(
+                table.get("rlnMicrographName", []),
+                table.get("rlnMicrographCoordinates", []),
+            ):
+                if Path(coords).name != path.name:
+                    continue  # quick: most are another file
+                found = _find_micrograph(coords, listing)
+                if found is not None and found.resolve() == path:
+                    return listing, mic
+        if _JOB_FOLDER.fullmatch(folder.name):
+            break  # the listing is in the job folder, not above it
+    return None
+
+
+def coordinates_by_micrograph(star: str | Path) -> dict:
+    """The positions to show on each micrograph of a star file: the picks of a picking job or the
+    particles of a table, as :func:`picks_by_micrograph`."""
+    if is_pick_listing(star):
+        return picks_by_micrograph(star)
+    particles = particles_by_micrograph(star)
+    helical = any(p["tube"] is not None for p in particles.values())
+    return dict(
+        mode="segments" if helical else "points",
+        diameter=None,
+        micrographs=particles,
+        picked=False,
+    )
+
+
+def micrograph_pixel_size(mic: str, star: str | Path) -> float | None:
+    """The pixel size (Å) in the header of a micrograph named in a star file; None if not known."""
+    import mrcfile
+
+    path = _find_micrograph(mic, Path(star))
+    if path is None:
+        return None
+    try:
+        with mrcfile.open(path, header_only=True, permissive=True) as mrc:
+            apix = float(mrc.voxel_size.x)
+    except Exception:
+        return None
+    return apix if apix > 0 else None
+
+
+def _draw_rings(rgb, xs, ys, radius: float, color) -> None:
+    """Circles of ``radius`` (pixels of the picture) at the positions, with a dark rim inside."""
+    import numpy as np
+
+    h, w = rgb.shape[:2]
+    width = max(1.5, radius / 10)
+    reach = int(np.ceil(radius + width))
+    dy, dx = np.mgrid[-reach : reach + 1, -reach : reach + 1]
+    distance = np.sqrt(dy**2 + dx**2)
+    ring = np.abs(distance - radius) <= width / 2
+    rim = (distance < radius - width / 2) & (distance >= radius - width / 2 - 1)
+    color = np.array(color, np.uint8)
+    for x, y in zip(xs, ys):
+        cx, cy = int(round(x)), int(round(y))
+        y0, y1 = max(cy - reach, 0), min(cy + reach + 1, h)
+        x0, x1 = max(cx - reach, 0), min(cx + reach + 1, w)
+        if y0 >= y1 or x0 >= x1:
+            continue
+        sy = slice(y0 - cy + reach, y1 - cy + reach)
+        sx = slice(x0 - cx + reach, x1 - cx + reach)
+        patch = rgb[y0:y1, x0:x1]
+        patch[rim[sy, sx]] = 0
+        patch[ring[sy, sx]] = color
+
+
+def _draw_band(rgb, start, end, half_width: float, color, alpha: float) -> None:
+    """A band from ``start`` to ``end`` (pixels of the picture), blended over the picture."""
+    import numpy as np
+
+    h, w = rgb.shape[:2]
+    (ax, ay), (bx, by) = start, end
+    reach = half_width + 1
+    x0, x1 = int(max(min(ax, bx) - reach, 0)), int(min(max(ax, bx) + reach + 1, w))
+    y0, y1 = int(max(min(ay, by) - reach, 0)), int(min(max(ay, by) + reach + 1, h))
+    if x0 >= x1 or y0 >= y1:
+        return
+    py, px = np.mgrid[y0:y1, x0:x1]
+    vx, vy = bx - ax, by - ay
+    length2 = vx * vx + vy * vy
+    t = np.zeros(px.shape) if length2 == 0 else ((px - ax) * vx + (py - ay) * vy) / length2
+    t = np.clip(t, 0, 1)
+    distance = np.hypot(px - (ax + t * vx), py - (ay + t * vy))
+    inside = distance <= half_width
+    patch = rgb[y0:y1, x0:x1]
+    patch[inside] = (
+        patch[inside] * (1 - alpha) + np.array(color, float) * alpha
+    ).astype(np.uint8)
+
+
+def draw_coordinates(picture, step: int, entry: dict, mode: str, radius=None):
+    """A picture of a micrograph (binned by ``step``) in colour with the positions of an entry of
+    :func:`coordinates_by_micrograph` on it, in the style of the ``mode``.
+
+    Parameters
+    ----------
+    picture : numpy.ndarray
+        The micrograph, grey levels.
+    step : int
+        The pixels of the micrograph in a pixel of the picture.
+    entry : dict
+        ``x``, ``y`` (pixels of the micrograph) and ``tube``.
+    mode : str
+        One of :data:`PICK_MODES`.
+    radius : float, optional
+        The radius of a particle, or the half width of a filament, in pixels of the micrograph;
+        a size to see when it is not known.
+    """
+    import numpy as np
+
+    if mode in ("points", "segments"):
+        return _draw_segments(picture, particle_groups(entry), step)
+    rgb = np.repeat(picture[:, :, None], 3, axis=2)
+    h, w = picture.shape
+    if mode == "particles":
+        r = radius / step if radius else max(h, w) / 60
+        _draw_rings(rgb, entry["x"] / step, entry["y"] / step, max(r, 3), _PICK_COLOR)
+        return rgb
+    # start-end: a band as wide as the filament, a line along its middle and a dot at each end
+    half = radius / step if radius else max(h, w) / 120
+    line = max(1.0, half / 8)
+    dots = []
+    for i, (xs, ys) in enumerate(particle_groups(entry)):
+        if len(xs) < 2:
+            continue
+        color = _FILAMENT_COLORS[i % len(_FILAMENT_COLORS)]
+        start, end = (xs[0] / step, ys[0] / step), (xs[1] / step, ys[1] / step)
+        _draw_band(rgb, start, end, max(half, 2), color, 0.3)
+        _draw_band(rgb, start, end, line, color, 1.0)
+        dots.append((xs, ys))
+    return _draw_segments(rgb, dots, step) if dots else rgb
 
 
 # ── RELION ───────────────────────────────────────────────────────────────────
