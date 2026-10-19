@@ -345,6 +345,9 @@ class _FakeResponse:
     def __init__(self, content):
         self.content = content
 
+    def iter_content(self, chunk_size=1):
+        yield self.content
+
     def raise_for_status(self):
         pass
 
@@ -369,15 +372,10 @@ class TestDownloadFileFromUrl:
 
         with patch.object(requests, "get", side_effect=fake_get):
             fileobj = download_file_from_url("https://example.org/x.mrc")
-            name = download_file_from_url(
-                "https://example.org/y.mrc", return_filename=True
-            )
         assert Path(fileobj.name).read_bytes() == b"hello"
         assert fileobj.read() == b"hello"
-        try:
-            assert Path(name).read_bytes() == b"hello"
-        finally:
-            Path(name).unlink()
+        with pytest.raises(ValueError):
+            download_file_from_url("https://example.org/y.mrc", return_filename=True)
         assert all(c.get("timeout") for c in calls)
 
 

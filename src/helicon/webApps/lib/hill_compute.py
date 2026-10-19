@@ -991,19 +991,25 @@ def filament_straighten(data, tck, r_filament_pixel_display, y_start, y_end):
     uniform_arc_x = splev(uniform_arc_y, tck)
 
     new_im = np.zeros((len(uniform_arc_y), r_filament_pixel_display * 2))
+    offsets = np.arange(
+        -int(r_filament_pixel_display), int(r_filament_pixel_display), 1
+    )
     for row, (curr_y, curr_x) in enumerate(zip(uniform_arc_y, uniform_arc_x)):
         dxdy = splev(curr_y, tck, der=1)
-        orthog_dxdy = -(1.0 / dxdy)
-        rev_normal = lambda x: (x + orthog_dxdy * curr_y - curr_x) / orthog_dxdy
-        new_row_xs = (
-            np.arange(
-                -int(r_filament_pixel_display), int(r_filament_pixel_display), 1
-            ).T
-            * abs(orthog_dxdy)
-            / np.sqrt(1 + orthog_dxdy * orthog_dxdy)
-            + curr_x
-        )
-        new_row_ys = rev_normal(new_row_xs)
+        if abs(dxdy) < 1e-9:
+            # a filament straight along y: the tangent is (0, 1) and the normal
+            # runs along x. The formulas below divide by the tangent slope, so
+            # take their limit rather than 1/0, which yields a nan image.
+            new_row_xs = curr_x + offsets
+            new_row_ys = np.full(offsets.shape, curr_y, dtype=float)
+        else:
+            orthog_dxdy = -(1.0 / dxdy)
+            rev_normal = lambda x: (x + orthog_dxdy * curr_y - curr_x) / orthog_dxdy
+            new_row_xs = (
+                offsets * abs(orthog_dxdy) / np.sqrt(1 + orthog_dxdy * orthog_dxdy)
+                + curr_x
+            )
+            new_row_ys = rev_normal(new_row_xs)
         new_row_coords = np.vstack([new_row_xs, new_row_ys]).T
         new_row = interpol(new_row_coords)
         new_im[row, :] = new_row

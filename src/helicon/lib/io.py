@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import logging, math, os
-from contextlib import closing
+import logging, math, os, uuid
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import numpy as np
@@ -143,7 +143,8 @@ def getPixelSize(
     Returns
     -------
     float or (float, str) or None
-        Pixel size value, optionally with the source attribute name.
+        Pixel size value, optionally with the source attribute name. The
+        source is None when the value was read from an image header.
     """
     try:
         sources = [data.attrs["optics"]]
@@ -173,6 +174,12 @@ def getPixelSize(
                             apix = float(mrc.voxel_size.x)
                     except (OSError, ValueError, TypeError):
                         pass
+                    if apix is not None:
+                        if return_pixelSize_source:
+                            # the value came from an image header: the image
+                            # name column is not a pixel-size column to write back
+                            return apix, None
+                        return apix
                 else:
                     apix = float(source[attr].iloc[0])
                 if apix is not None:
@@ -199,12 +206,17 @@ def setPixelSize(
         If True, rescale defocus values by ``(apix_new / apix_old)^2``.
     """
     apix_old, pixelSize_source = getPixelSize(data, return_pixelSize_source=True)
-    if update_defocus:
+    if pixelSize_source in ("rlnImageName", "rlnMicrographName"):
+        # an image name is not a pixel-size column: never write a size into it
+        pixelSize_source = None
+    if update_defocus and apix_old:
         for attr in "rlnDefocusU rlnDefocusV".split():
             if attr in data:
                 data.loc[:, attr] = data.loc[:, attr].astype(float) * (
                     (apix_new / apix_old) ** 2
                 )
+    if pixelSize_source is None:
+        return
     try:
         data.attrs["optics"].loc[:, pixelSize_source] = apix_new
     except (KeyError, AttributeError):
@@ -702,9 +714,11 @@ def guess_data_type(string: str) -> type:
         One of ``int``, ``float``, or ``str``.
     """
     try:
+        int(string)
         return int
     except ValueError:
         try:
+            float(string)
             return float
         except ValueError:
             return str
@@ -784,6 +798,9 @@ def dataframe_guess_data_type(data: pd.DataFrame) -> pd.DataFrame:
             unknown_type_cols.append(col)
     if len(known_type_dict):
         for col, dtype in known_type_dict.items():
+            if dtype is int and data[col].isnull().any():
+                # int has no NaN; the reader drops those rows instead
+                continue
             data[col] = data[col].astype(dtype)
     if bytes2str_cols:
         for col in bytes2str_cols:
@@ -1124,23 +1141,25 @@ def star2dataframe(
     if "optics" in d:
         data.attrs["optics"] = d["optics"]
 
-    data = dataframe_guess_data_type(data)
+    # drop corrupted rows before the type cast: an int cast fails on NaN
     nans = data.isnull().any(axis=1)
-    if nans.sum() > 0:
+    n_bad = int(nans.sum())
+    if n_bad > 0:
         logger.warning(
             "%s: %d/%d particle rows are corrupted and thus ignored",
             starFile,
-            nans.sum(),
+            n_bad,
             len(data),
         )
         logger.warning(
             "    Corrupted particle indices:\n%s",
             nans.to_numpy().nonzero()[0],
         )
-        if nans.sum() < 100:
+        if n_bad < 100:
             # with pd.option_context("display.max_colwidth", None):
             logger.warning("\n%s", data[nans == True])
         data = data[nans == False]
+    data = dataframe_guess_data_type(data)
 
     data.attrs["source_path"] = starFile
     data.attrs["convention"] = "relion"
@@ -1151,7 +1170,7 @@ def star2dataframe(
     return data
 
 
-def star_to_dataframe(starFile, logger=None):
+def star_to_dataframe(starFile, logger=None, ignore_bad_particle_path=0):
     """Convert a RELION STAR file to a DataFrame with image index and filename.
 
     Parses the STAR file, identifies the image name column
@@ -1164,13 +1183,19 @@ def star_to_dataframe(starFile, logger=None):
         Path to the STAR file.
     logger : logging.Logger, optional
         Logger for error messages.
+    ignore_bad_particle_path : int, optional
+        As for :func:`star2dataframe`: 0 (default) stops at a particle image file that
+        cannot be found, 1 checks but ignores missing files, 2 does not look for the
+        files at all. Use 2 when only the table is needed.
 
     Returns
     -------
     pd.DataFrame
         DataFrame with additional ``pid`` and ``filename`` columns.
     """
-    df = star2dataframe(starFile=starFile)
+    df = star2dataframe(
+        starFile=starFile, ignore_bad_particle_path=ignore_bad_particle_path
+    )
 
     fileNameCol = ""
     for col in ["rlnImageName", "rlnReferenceImage"]:
@@ -1246,11 +1271,40 @@ def dataframe2star(data: pd.DataFrame, starFile: str | Any, format: str = "v3") 
 
     data2 = dataframe_guess_data_type(data2)
 
+    if not any(k.startswith("rln") for k in data2.columns):
+        raise HeliconValueError(
+            "dataframe2star(data, starFile=%s): no rln* columns to write"
+            % (starFile if isinstance(starFile, str) else "<stream>")
+        )
+
     if hasattr(starFile, "read") and callable(starFile.read):
         _write_star_blocks(starFile, data2, data_block_tag)
     else:
-        with open(starFile, "wt") as fp:
-            _write_star_blocks(fp, data2, data_block_tag)
+        # write beside the target and rename, so a failure leaves any old file intact
+        starFile = Path(starFile)
+        tmpFile = starFile.with_name(f"{starFile.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmpFile, "wt") as fp:
+                _write_star_blocks(fp, data2, data_block_tag)
+            tmpFile.replace(starFile)
+        except BaseException:
+            with suppress(OSError):
+                tmpFile.unlink()
+            raise
+
+
+def _star_quote(text: "pd.Series") -> "pd.Series":
+    """Wrap values STAR would split on whitespace in single quotes.
+
+    A value with a space or a quote cannot be written unquoted: a STAR reader
+    splits the row on whitespace, sees extra columns, shifts every later value
+    and misreads the file. Doubling an embedded quote is the STAR escape.
+    """
+    text = text.astype(str)
+    needs_quotes = text.str.contains(r"[\s'\"]", regex=True)
+    return text.where(
+        ~needs_quotes, "'" + text.str.replace("'", "''", regex=False) + "'"
+    )
 
 
 def _write_star_blocks(fp, data2: pd.DataFrame, data_block_tag: str) -> None:
@@ -1268,19 +1322,20 @@ def _write_star_blocks(fp, data2: pd.DataFrame, data_block_tag: str) -> None:
     try:
         optics = data2.attrs.get("optics")
         if optics is not None and len(optics) > 0:
-            fp.write("\n# version 30001\n")
-            fp.write("\ndata_optics\n\nloop_ \n")
             keys = [k for k in optics.columns if k.startswith("rln")]
-            for ki, k in enumerate(keys):
-                fp.write("_%s #%d \n" % (k, ki + 1))
-            lines = optics[keys[0]].astype(str)
-            for k in keys[1:]:
-                if optics[k].dtype == np.float64:
-                    lines += "\t" + optics[k].round(6).astype(str)
-                else:
-                    lines += "\t" + optics[k].astype(str)
-            fp.write("\n".join(lines))
-            fp.write("\n\n")
+            if keys:
+                fp.write("\n# version 30001\n")
+                fp.write("\ndata_optics\n\nloop_ \n")
+                for ki, k in enumerate(keys):
+                    fp.write("_%s #%d \n" % (k, ki + 1))
+                lines = _star_quote(optics[keys[0]])
+                for k in keys[1:]:
+                    if optics[k].dtype == np.float64:
+                        lines += "\t" + _star_quote(optics[k].round(6))
+                    else:
+                        lines += "\t" + _star_quote(optics[k])
+                fp.write("\n".join(lines))
+                fp.write("\n\n")
     except (KeyError, OSError):
         pass
 
@@ -1288,12 +1343,12 @@ def _write_star_blocks(fp, data2: pd.DataFrame, data_block_tag: str) -> None:
     keys = [k for k in data2.columns if k.startswith("rln")]
     for ki, k in enumerate(keys):
         fp.write("_%s #%d \n" % (k, ki + 1))
-    lines = data2[keys[0]].astype(str)
+    lines = _star_quote(data2[keys[0]])
     for k in keys[1:]:
         if data2[k].dtype == np.float64:
-            lines += "\t" + data2[k].round(6).astype(str)
+            lines += "\t" + _star_quote(data2[k].round(6))
         else:
-            lines += "\t" + data2[k].astype(str)
+            lines += "\t" + _star_quote(data2[k])
     fp.write("\n".join(lines))
     fp.write("\n")
 
@@ -1320,7 +1375,7 @@ def _detect_cs_import_origin(csFile: str) -> list:
     """
     try:
         cs_path = Path(csFile).resolve()
-        cs = np.load(str(cs_path), allow_pickle=True)
+        cs = np.load(str(cs_path), allow_pickle=False)
         if cs.dtype.names is None or "blob/path" not in cs.dtype.names or len(cs) == 0:
             return []
         paths = cs["blob/path"]
@@ -1337,7 +1392,7 @@ def _detect_cs_import_origin(csFile: str) -> list:
                 return []
             uids = []
             for chunk in chunks:
-                imp = np.load(str(chunk), allow_pickle=True)
+                imp = np.load(str(chunk), allow_pickle=False)
                 if imp.dtype.names is None or "uid" not in imp.dtype.names:
                     return []
                 uids.extend(int(u) for u in imp["uid"])
@@ -1385,7 +1440,7 @@ def _cs2dataframe_from_star_import(
     """
     import pandas as pd
 
-    cs = np.load(csFile, allow_pickle=True)
+    cs = np.load(csFile, allow_pickle=False)
     names = cs.dtype.names
     if "uid" not in names:
         raise HeliconIOError(
@@ -1478,6 +1533,39 @@ def _cs2dataframe_from_star_import(
         )
     if "alignments2D/pose" in names:
         data["rlnAnglePsi"] = -np.rad2deg(cs["alignments2D/pose"][k].astype(float))
+
+    # the 3D alignment of a refinement or a 3D classification, in the conventions of
+    # dataframe_cryosparc_to_relion (which sets them after the 2D ones, and so do we)
+    if "alignments3D/class" in names:
+        data["rlnClassNumber"] = cs["alignments3D/class"][k].astype(int) + 1
+    if "alignments3D/split" in names:
+        data["rlnRandomSubset"] = cs["alignments3D/split"][k].astype(int) + 1
+    if "alignments3D/cross_cor" in names:
+        data["rlnLogLikeliContribution"] = cs["alignments3D/cross_cor"][k]
+    if "alignments3D/pose" in names:
+        from scipy.spatial.transform import Rotation
+
+        # cryoSPARC's rotation is a rotation vector
+        rotvecs = np.stack(
+            [np.asarray(v, dtype=float) for v in cs["alignments3D/pose"][k]]
+        )
+        euler = Rotation.from_rotvec(rotvecs).as_euler("ZYZ", degrees=True)
+        data["rlnAngleRot"] = euler[:, 0]
+        data["rlnAngleTilt"] = euler[:, 1]
+        data["rlnAnglePsi"] = euler[:, 2]
+    if "alignments3D/shift" in names:
+        shift = np.round(
+            np.asarray(cs["alignments3D/shift"][k], dtype=float).reshape(len(k), -1), 2
+        )
+        apix = (
+            cs["blob/psize_A"][k].astype(float)
+            if "blob/psize_A" in names
+            else np.ones(len(k))
+        )
+        data["rlnOriginXAngst"] = np.round(shift[:, 0] * apix, 6)
+        data["rlnOriginYAngst"] = np.round(
+            shift[:, 1] * apix if shift.shape[1] > 1 else np.zeros(len(k)), 6
+        )
     ctf_overlays = [
         ("ctf/df1_A", "rlnDefocusU", 1.0),
         ("ctf/df2_A", "rlnDefocusV", 1.0),
@@ -1552,7 +1640,7 @@ def cs2dataframe(
         )
 
     # read CryoSPARC v2+ meta data
-    cs = np.load(csFile, allow_pickle=True)
+    cs = np.load(csFile, allow_pickle=False)
     data = pd.DataFrame.from_records(cs.tolist(), columns=cs.dtype.names)
     if passthrough_files:
         passthrough_files_final = passthrough_files * 1
@@ -1600,18 +1688,19 @@ def cs2dataframe(
 
     data = dataframe_guess_data_type(data)
     nans = data.isnull().any(axis=1)
-    if nans.sum() > 0:
+    n_bad = int(nans.sum())
+    if n_bad > 0:
         logger.warning(
             "%s: %d/%d particle rows are corrupted and thus ignored",
             csFile,
-            nans.sum(),
+            n_bad,
             len(data),
         )
         logger.warning(
             "    Corrupted particle indices:\n%s",
             nans.to_numpy().nonzero()[0],
         )
-        if nans.sum() < 100:
+        if n_bad < 100:
             logger.warning("\n%s", data[nans == True])
         data = data[nans == False]
     data.attrs["source_path"] = csFile
@@ -1661,8 +1750,17 @@ def dataframe2cs(data: pd.DataFrame, csFile: str) -> None:
     structured_array = np.empty(len(data), dtype=fields)
     for (col_name, *_), values in zip(fields, columns):
         structured_array[col_name] = values
-    with open(csFile, "wb") as f:
-        np.save(f, structured_array)
+    # write beside the target and rename, so a failure leaves any old file intact
+    csFile = Path(csFile)
+    tmpFile = csFile.with_name(f"{csFile.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmpFile, "wb") as f:
+            np.save(f, structured_array)
+        tmpFile.replace(csFile)
+    except BaseException:
+        with suppress(OSError):
+            tmpFile.unlink()
+        raise
 
 
 def cistem2dataframe(
@@ -1846,6 +1944,10 @@ def dataframe_normalize_filename(
     """
     if ignore_bad_particle_path >= 2:
         return data
+    # an empty frame (a header-only STAR, or every row corrupt) has no first
+    # row to inspect below
+    if len(data) == 0:
+        return data
 
     def getRealFileName(
         filename: str,
@@ -1986,7 +2088,7 @@ def dataframe_normalize_filename(
                 ignore_bad_path = ignore_bad_particle_path
             else:
                 ignore_bad_path = ignore_bad_micrograph_path
-            if "@" in data[attr][0]:
+            if "@" in data[attr].iloc[0]:
                 attrs_with_at.append((attr, ignore_bad_path))
             else:
                 attrs.append((attr, ignore_bad_path))
@@ -2537,14 +2639,29 @@ def mrc2mrcs(data: pd.DataFrame) -> pd.DataFrame:
 
             folder = mrc_path.parent
             if not os.access(str(folder), os.W_OK):
-                folder = Path("./mrc2mrcs")
-                folder.mkdir(parents=True, exist_ok=True)
+                # Put the links beside the STAR when we know it. A relative
+                # "./mrc2mrcs" only resolved from the directory the converter
+                # happened to run in, so the rewritten STAR pointed nowhere
+                # when read from anywhere else.
+                source = data.attrs.get("source_path")
+                candidates = [Path(source).parent] if source else []
+                candidates.append(Path.cwd())
+                for base in candidates:
+                    folder = base / "mrc2mrcs"
+                    try:
+                        folder.mkdir(parents=True, exist_ok=True)
+                        break
+                    except OSError:
+                        continue
                 mrcs_path = folder / (mrc_path.name + "s")
             mapping[name] = str(mrcs_path)
             if not mrcs_path.exists():
                 if mrcs_path.is_symlink():
                     mrcs_path.unlink()
-                os.symlink(str(mrc_resolved), str(mrcs_path))
+                try:
+                    os.symlink(str(mrc_resolved), str(mrcs_path))
+                except FileExistsError:
+                    pass  # a parallel process made the same link first
         data.loc[:, "filename"] = data["filename"].map(mapping)
     if "rlnImageName" in data:  # Relion star file
         data.loc[:, "rlnImageName"] = pid.astype(str) + "@" + data["filename"]

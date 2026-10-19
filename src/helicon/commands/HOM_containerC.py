@@ -16,7 +16,6 @@ from pathlib import Path
 from scipy.optimize import curve_fit, OptimizeWarning
 from matplotlib import pyplot as plt
 
-import os
 import datetime
 
 logger = logging.getLogger(__name__)
@@ -420,15 +419,16 @@ def HelicalSegmentConsistency(
 
     num_m = 1201
 
-    CurrentWorkingDir = os.getcwd()
-    OutputFigsDir = "Figs25_" + StarFileName[:-5]
-    OutputFigsDir = CurrentWorkingDir + "/Figs25_HOM_" + StarFileName[:-5]
+    # named after the STAR file itself, not its path: a STAR given as
+    # /data/out/run.star built a name with slashes in it, and the plain mkdir
+    # below then failed. Nothing chdirs any more, so the figures are written
+    # through this directory instead of relative to a changed working directory
+    OutputFigsDir = Path(f"Figs25_HOM_{Path(StarFileName).stem}").absolute()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if 0:
-        OutputFigsDir = "Figs" + stamp
-    if not Path(OutputFigsDir).is_dir():
-        os.mkdir(OutputFigsDir)
+        OutputFigsDir = Path("Figs" + stamp)
+    OutputFigsDir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Output figs dir: %s", OutputFigsDir)
     #  This is the subdirectory  where the jpg and PDFs get stored
@@ -546,10 +546,6 @@ def HelicalSegmentConsistency(
         "Section 2.5 PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z")
     )
 
-    os.chdir(OutputFigsDir)
-
-    logger.info("CWD: %s", os.getcwd())
-
     # HelixMicID = 12;#44
     Count = 0
 
@@ -610,8 +606,6 @@ def HelicalSegmentConsistency(
     now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
-    logger.info("CWD: %s", os.getcwd())
-
     #################################################################################
     #################################################################################
     #  Section 3: Assemble  all the slopes.
@@ -621,7 +615,6 @@ def HelicalSegmentConsistency(
 
     logger.info("Section 3: Get listing of all the slopes.  And make global plots")
 
-    os.chdir(OutputFigsDir)
     # print('HelixMicID,NumSegments, m_best, SMin, AveAngles')
 
     Count = 0
@@ -654,7 +647,7 @@ def HelicalSegmentConsistency(
         Count += 1
 
     plt.hist(mManySegmentsArray)
-    plt.savefig("mManySegmentsArray.jpg")
+    plt.savefig(OutputFigsDir / "mManySegmentsArray.jpg")
 
     #################################################################################
     #     Section 3.1   Find the best helix, plot and save it. Determine mBest (which is positive)
@@ -713,7 +706,7 @@ def HelicalSegmentConsistency(
 
     # Get UTC time and convert to local time
 
-    plt.savefig(f"{StarFileNameKey}BestHelix.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}BestHelix.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_local = now_utc.astimezone()
@@ -734,7 +727,7 @@ def HelicalSegmentConsistency(
     # np.argmax(NumSegmentsManySegmentsArray)
     # NumSegmentsManySegmentsArray[258]
 
-    plt.savefig(f"{StarFileNameKey}DistLongSegmentLengths.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}DistLongSegmentLengths.jpg")
 
     logger.info("Number Of long Helices for " + StarFileName + " = " + str(Count))
 
@@ -742,8 +735,6 @@ def HelicalSegmentConsistency(
     logger.info(
         "Total Segments In Long Helices = " + str(np.sum(NumSegmentsManySegmentsArray))
     )
-
-    logger.info("CWD: %s", os.getcwd())
 
     # Get UTC time and convert to local time
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -772,7 +763,7 @@ def HelicalSegmentConsistency(
     plt.axvline(x=mBest * 1, color="r", linestyle="-", linewidth=1)
     plt.title("Ave Tilt vs slope \n" + StarFileNameKey)
 
-    plt.savefig(f"{StarFileNameKey}HistogramSlopesTiltvsSlope.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}HistogramSlopesTiltvsSlope.jpg")
 
     #################################################################################
     #  Section 4.1: Make   Global Plots on Long Helices
@@ -800,13 +791,11 @@ def HelicalSegmentConsistency(
     plt.hist(SminManySegmentsArray, 20, label=label)
     plt.title(label)
 
-    plt.savefig(f"{StarFileNameKey}StatsLongHelicesGT25.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}StatsLongHelicesGT25.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_local = now_utc.astimezone()
     logger.info("PSU date and time: %s", now_local.strftime("%Y-%m-%d %H:%M:%S %Z"))
-
-    logger.info("CWD: %s", os.getcwd())
 
     #################################################################################
     #  Section 4.2: Make Global Plots of Long Good Helices
@@ -841,7 +830,7 @@ def HelicalSegmentConsistency(
     plt.hist(SminNP[mask], 20, label=label)
     plt.title(label)
 
-    plt.savefig(f"{StarFileNameKey}PlotsForGoodLongHelices.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}PlotsForGoodLongHelices.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_local = now_utc.astimezone()
@@ -961,7 +950,7 @@ def HelicalSegmentConsistency(
         + format(mFinal, ".3f")
     )
 
-    plt.savefig("AnotherGoodHelixNP.jpg")
+    plt.savefig(OutputFigsDir / "AnotherGoodHelixNP.jpg")
 
     logger.info("mBest = " + str(abs(mBest)))
 
@@ -971,8 +960,6 @@ def HelicalSegmentConsistency(
     #    Section 5.0           This is a recalculation of S with the second metric (where mBest is fixed)
 
     # os.chdir(MainPSUDir)#
-    os.chdir(OutputFigsDir)
-
     HelixMicIDsManySegments_2 = []
     NumSegmentsManySegmentsArray_2 = []
     mManySegmentsArray_2 = []
@@ -1058,7 +1045,7 @@ def HelicalSegmentConsistency(
 
     logger.info(" This is the number of long helices = " + str(len(m1NP)))
 
-    plt.savefig(f"{StarFileNameKey}SmandbForSecondMetric.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}SmandbForSecondMetric.jpg")
 
     logger.info("mBest: %s", mBest)
 
@@ -1085,17 +1072,12 @@ def HelicalSegmentConsistency(
     #
     # Feel free to rerun after editing `plot_one` to use your real data.
 
-    if not Path(OutputFigsDir).is_dir():
-        os.mkdir(OutputFigsDir)
-
-    os.chdir(OutputFigsDir)
-
     # ---- Config ----
     TOTAL = NumLongHelices
     # TOTAL = 48
     ROWS, COLS = 6, 8
     PER_PAGE = ROWS * COLS  # 50
-    OUTDIR = Path(OutputFigsDir + "/Stuff")
+    OUTDIR = OutputFigsDir / "Stuff"
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
     # ---- Your per-item plotting goes here ----
@@ -1285,7 +1267,7 @@ def HelicalSegmentConsistency(
     # plt.show()
     logger.error("BiggestErrorOnBestCurve = x ≈ %.1f Å", BiggestErrorOnBestCurve)
 
-    plt.savefig(f"{StarFileNameKey}BestFitWorstError.jpg")
+    plt.savefig(OutputFigsDir / f"{StarFileNameKey}BestFitWorstError.jpg")
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     now_local = now_utc.astimezone()

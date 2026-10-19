@@ -26,6 +26,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="0|1",
         help="assign images to exposure groups by beam shift label from filenames. One group per distinct beam shift value. disabled by default",
+        action="append",
         default=None,
     )
 

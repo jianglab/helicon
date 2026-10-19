@@ -17,6 +17,7 @@ from collections.abc import Iterable
 import numpy as np
 
 from helicon.plugins.proc3d import dispatch
+from . import plugin_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ def apply_options(
     from ``data.shape`` after every option so later options see the
     transformed geometry (e.g. a ``clip`` following a ``flip_hand``).
 
+    Options are applied in the order given and may repeat (a pipeline step is
+    repeated by repeating its option): an append option contributes one value
+    per occurrence, and the loop itself counts the occurrences.
+
     Parameters
     ----------
     data : np.ndarray
@@ -52,8 +57,10 @@ def apply_options(
         Namespace holding the parsed option values; the same object passed
         to every plugin handler.
     append_options : Iterable of str, optional
-        Dest names whose argparse action type is ``_AppendAction``. proc3d
-        currently has none; kept for parity with the images2star engine.
+        Dest names whose argparse action type is ``_AppendAction``; each one
+        consumes one value per occurrence in ``options``, in order. Every
+        proc3d plugin option is repeatable, so the CLI passes
+        ``args.append_options``.
 
     Returns
     -------
@@ -71,16 +78,14 @@ def apply_options(
     append_set = set(append_options)
     for option_name in options:
         values = args.__dict__[option_name]
-        if option_name in append_set:
-            param = values[index_d[option_name]]
-        else:
-            param = values
+        occurrence = index_d[option_name]
+        param = values[occurrence] if option_name in append_set else values
         if getattr(args, "verbose", 0):
             logger.info("%s: %s", option_name, param)
         data, apix, nx, ny, nz = dispatch(
             option_name, data, args, index_d, param, apix, nx, ny, nz
         )
-        index_d[option_name] += 1
+        index_d[option_name] = occurrence + 1
     return data, apix
 
 
@@ -101,42 +106,7 @@ def operation_specs() -> dict[str, dict]:
     """
     from helicon.plugins import proc3d as plugins
 
-    specs = {}
-    for name in sorted(plugins._plugins):
-        mod = plugins._plugins[name]
-        if not hasattr(mod, "add_args"):
-            continue
-        parser = argparse.ArgumentParser(add_help=False)
-        try:
-            mod.add_args(parser)
-        except Exception:
-            continue
-        action = next((a for a in parser._actions if a.dest != "help"), None)
-        if action is None:
-            continue
-        specs[name] = {
-            "dest": action.dest,
-            "option_string": (
-                action.option_strings[0]
-                if action.option_strings
-                else f"--{action.dest}"
-            ),
-            "metavar": _metavar_text(action.metavar),
-            "type": action.type if action.type is not None else str,
-            "nargs": action.nargs,
-            "choices": list(action.choices) if action.choices else None,
-            "default": action.default,
-            "help": action.help or "",
-            "append": type(action) is argparse._AppendAction,
-        }
-    return specs
-
-
-def _metavar_text(metavar) -> str:
-    """Normalize an argparse metavar (str or tuple) to a single string."""
-    if isinstance(metavar, (tuple, list)):
-        return " ".join(str(m) for m in metavar)
-    return str(metavar) if metavar is not None else ""
+    return plugin_pipeline.operation_specs(plugins)
 
 
 def gui_operation_specs() -> dict[str, dict]:

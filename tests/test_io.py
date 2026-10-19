@@ -597,3 +597,165 @@ class TestMergeOpticsGroups:
         assert io.merge_optics_groups([None, None]) is None
         optics = io.merge_optics_groups([None, self._optics([1], [300.0])])
         assert optics["rlnOpticsGroup"].tolist() == [1]
+
+
+def _particles_df():
+    return pd.DataFrame(
+        {
+            "rlnImageName": ["001@a.mrcs", "002@a.mrcs"],
+            "rlnClassNumber": [1, 2],
+            "rlnVoltage": [300.0, 300.0],
+            "rlnSphericalAberration": [2.7, 2.7],
+            "rlnMicrographOriginalPixelSize": [1.0, 1.0],
+            "rlnImageSize": [64, 64],
+            "rlnImagePixelSize": [1.0, 1.0],
+        }
+    )
+
+
+class TestStarWriteSafety:
+    def test_a_write_without_rln_columns_is_refused(self, tmp_path):
+        out = tmp_path / "out.star"
+        out.write_text("data_particles\n")
+        df = pd.DataFrame({"foo": [1]})
+        df.attrs["convention"] = "relion"
+        with pytest.raises(HeliconValueError, match="no rln"):
+            io.dataframe2star(df, str(out))
+        assert out.read_text() == "data_particles\n"
+
+    def test_a_failed_write_keeps_the_old_file(self, tmp_path):
+        out = tmp_path / "out.star"
+        io.dataframe2star(_particles_df(), str(out))
+        before = out.read_text()
+
+        def boom(fp, data, tag):
+            fp.write("half a star file")
+            raise OSError("disk full")
+
+        with patch.object(io, "_write_star_blocks", side_effect=boom):
+            with pytest.raises(OSError):
+                io.dataframe2star(_particles_df(), str(out))
+        assert out.read_text() == before
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_a_failed_cs_write_keeps_the_old_file(self, tmp_path):
+        out = tmp_path / "out.cs"
+        io.dataframe2cs(_particles_df(), str(out))
+        before = out.read_bytes()
+        with patch.object(io.np, "save", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                io.dataframe2cs(_particles_df(), str(out))
+        assert out.read_bytes() == before
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_a_value_with_a_space_is_quoted(self, tmp_path):
+        df = _particles_df()
+        df["rlnImageName"] = ["001@my data/mic 1.mrcs", "002@a.mrcs"]
+        out = tmp_path / "out.star"
+        io.dataframe2star(df, str(out))
+        text = out.read_text()
+        assert "'001@my data/mic 1.mrcs'" in text
+        assert "002@a.mrcs" in text
+        assert "'002@a.mrcs'" not in text
+
+    def test_a_quoted_value_round_trips(self, tmp_path):
+        # an unquoted name with a space gains columns in every STAR reader
+        df = _particles_df()
+        df["rlnImageName"] = ["001@my data/mic 1.mrcs", "002@a.mrcs"]
+        out = tmp_path / "out.star"
+        io.dataframe2star(df, str(out))
+        back = io.star2dataframe(str(out), ignore_bad_particle_path=2)
+        assert list(back["rlnImageName"]) == list(df["rlnImageName"])
+
+
+class TestEmptyStar:
+    def test_an_empty_frame_is_returned_unchanged(self):
+        # a header-only STAR (or every row corrupt) leaves no row to inspect
+        data = pd.DataFrame({"rlnImageName": pd.Series([], dtype=str)})
+        assert io.dataframe_normalize_filename(data) is data
+
+
+class TestPixelSize:
+    def test_the_columns_holding_the_pixel_size_are_updated(self):
+        data = pd.DataFrame({"rlnImagePixelSize": [1.0]})
+        data.attrs["optics"] = pd.DataFrame(
+            {"rlnOpticsGroup": [1], "rlnImagePixelSize": [1.0]}
+        )
+        io.setPixelSize(data, 2.0)
+        assert data["rlnImagePixelSize"].iloc[0] == 2.0
+        assert data.attrs["optics"]["rlnImagePixelSize"].iloc[0] == 2.0
+
+    def test_a_size_read_from_an_image_header_is_not_written_back(self):
+        # getPixelSize falls back to the image header: the image name column is
+        # not a pixel-size column and must not be overwritten
+        data = pd.DataFrame(
+            {
+                "rlnImageName": ["1@a.mrcs"],
+                "rlnDefocusU": [10000.0],
+                "rlnDefocusV": [10000.0],
+            }
+        )
+        data.attrs["optics"] = pd.DataFrame({"rlnOpticsGroup": [1]})
+        with patch.object(io, "getPixelSize", return_value=(1.0, None)):
+            io.setPixelSize(data, 2.0, update_defocus=True)
+        assert data["rlnImageName"].iloc[0] == "1@a.mrcs"
+        assert list(data.attrs["optics"].columns) == ["rlnOpticsGroup"]
+        assert data["rlnDefocusU"].iloc[0] == 40000.0  # (2.0 / 1.0) ** 2
+
+    def test_an_unknown_old_size_does_not_raise(self):
+        data = pd.DataFrame({"foo": [0.0, 1.0]})
+        io.setPixelSize(data, 2.0, update_defocus=True)
+        assert list(data.columns) == ["foo"]
+
+
+class TestDataTypeGuessing:
+    def test_guess_data_type_reports_what_parses(self):
+        assert io.guess_data_type("9") is int
+        assert io.guess_data_type("0.5") is float
+        assert io.guess_data_type("x") is str
+
+    def test_an_int_column_of_an_all_nan_row_keeps_its_dtype(self, tmp_path):
+        star = tmp_path / "bad.star"
+        star.write_text(
+            "data_particles\n\nloop_\n"
+            "_rlnImageName #1\n_rlnClassNumber #2\n_rlnImageSize #3\n"
+            "1@a.mrcs 1 64\n"
+            "2@a.mrcs\n"
+            "3@a.mrcs 3 64\n"
+        )
+        df = io.star2dataframe(str(star), ignore_bad_particle_path=2)
+        assert len(df) == 2
+        assert df["rlnClassNumber"].dtype == np.int64
+        assert df["rlnImageSize"].dtype == np.int64
+
+
+class TestMrc2Mrcs:
+    def test_a_link_made_by_another_process_is_tolerated(self, tmp_path):
+        mrc = tmp_path / "mic.mrc"
+        mrc.touch()
+        data = pd.DataFrame({"rlnImageName": [f"1@{mrc}"]})
+        with patch.object(io.os, "symlink", side_effect=FileExistsError):
+            out = io.mrc2mrcs(data)
+        assert out["rlnImageName"].iloc[0] == f"1@{mrc.with_suffix('.mrcs')}"
+
+    def test_a_read_only_folder_gets_links_beside_the_star(self, tmp_path):
+        # the old fallback wrote to a relative "./mrc2mrcs", so the rewritten
+        # STAR only resolved from the directory the converter ran in
+        mrc_dir = tmp_path / "images"
+        mrc_dir.mkdir()
+        mrc = mrc_dir / "mic.mrc"
+        mrc.touch()
+        star_dir = tmp_path / "star"
+        star_dir.mkdir()
+        data = pd.DataFrame({"rlnImageName": [f"1@{mrc}"]})
+        data.attrs["source_path"] = str(star_dir / "particles.star")
+
+        mrc_dir.chmod(0o500)
+        try:
+            out = io.mrc2mrcs(data)
+        finally:
+            mrc_dir.chmod(0o700)
+
+        link = Path(str(out["rlnImageName"].iloc[0]).split("@", 1)[1])
+        assert link.is_absolute()
+        assert link == star_dir / "mrc2mrcs" / "mic.mrcs"

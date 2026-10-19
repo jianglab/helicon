@@ -241,6 +241,14 @@ class TestCheckoutUpdate:
             update.update_checkout("v2.0")
         assert (checkout / "f.txt").read_text() == "mine"
 
+    def test_untracked_files_stop_it(self, repos):
+        _, checkout = repos
+        local = checkout / "local.txt"
+        local.write_text("keep")
+        with pytest.raises(HeliconError, match="uncommitted"):
+            update.update_checkout("v2.0")
+        assert local.read_text() == "keep"
+
     def test_a_checkout_that_has_the_tag_is_left_alone(self, repos):
         public, checkout = repos
         update.update_checkout("v2.0")

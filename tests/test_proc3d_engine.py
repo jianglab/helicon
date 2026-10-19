@@ -46,7 +46,8 @@ class TestOperationSpecs:
             assert spec["option_string"] == f"--{name}"
             assert spec["type"] is str
             assert spec["nargs"] in (None, "?")
-            assert spec["append"] is False
+            # every proc3d option is repeatable: a pipeline step may repeat
+            assert spec["append"] is True
 
     def test_gui_specs_equal_full_specs(self):
         # Every proc3d operation transforms the volume in memory, so the GUI
@@ -67,10 +68,17 @@ class TestStackToNamespace:
         assert args.verbose == 0
         assert args.cpu == 1
         assert args.force == 0
-        assert args.apix == "1.35"
+        assert args.apix == ["1.35"]
+
+    def test_repeated_option_accumulates_one_value_per_occurrence(self):
+        specs = operation_specs()
+        args = stack_to_namespace([("flip_hand", "x"), ("flip_hand", "z")], specs)
+        assert args.flip_hand == ["x", "z"]
 
     def test_duplicate_non_append_option_rejected(self):
-        specs = operation_specs()
+        # every proc3d option is repeatable, so this guard only fires for a
+        # caller that hands in its own single-valued spec
+        specs = {"flip_hand": dict(operation_specs()["flip_hand"], append=False)}
         with pytest.raises(ValueError, match="can only be applied once"):
             stack_to_namespace([("flip_hand", "x"), ("flip_hand", "y")], specs)
 
@@ -84,7 +92,10 @@ class TestApplyOptions:
     def _apply(self, data, stack, apix=1.0):
         specs = operation_specs()
         args = stack_to_namespace(stack, specs)
-        return apply_options(data, apix, [name for name, _ in stack], args)
+        append_options = [n for n, spec in specs.items() if spec["append"]]
+        return apply_options(
+            data, apix, [name for name, _ in stack], args, append_options
+        )
 
     def test_apix_updates_pixel_size_only(self):
         data = _volume()
@@ -134,6 +145,13 @@ class TestApplyOptions:
         # center_z=2, so the 3x3x3 window starts at [1, 1, 2].
         expected = data[:, :, ::-1][1:4, 1:4, 2:5]
         assert np.array_equal(out, expected)
+
+    def test_repeated_option_applies_each_occurrence_value(self):
+        # flip x then flip z. With both occurrences reusing one value the x
+        # flip would be lost, so this pins the per-occurrence values.
+        data = _volume()
+        out, _ = self._apply(data, [("flip_hand", "x"), ("flip_hand", "z")])
+        assert np.array_equal(out, data[::-1, :, ::-1])
 
     def test_source_volume_never_mutated(self):
         data = _volume()

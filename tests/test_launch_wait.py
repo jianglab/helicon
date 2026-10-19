@@ -131,7 +131,7 @@ class TestReloadWatchesThePackage:
     """``--reload`` watches the app's package, not only the app's directory."""
 
     @staticmethod
-    def _command(monkeypatch, reload):
+    def _command(monkeypatch, reload, **kwargs):
         import subprocess
 
         seen = {}
@@ -150,7 +150,9 @@ class TestReloadWatchesThePackage:
             return Proc()
 
         monkeypatch.setattr(subprocess, "Popen", popen)
-        shiny.launch_shiny_app("helicon.webApps.app:app", block=False, reload=reload)
+        shiny.launch_shiny_app(
+            "helicon.webApps.app:app", block=False, reload=reload, **kwargs
+        )
         return seen["cmd"]
 
     def test_the_whole_package_is_watched(self, monkeypatch):
@@ -168,3 +170,18 @@ class TestReloadWatchesThePackage:
     def test_nothing_is_watched_without_reload(self, monkeypatch):
         cmd = self._command(monkeypatch, reload=False)
         assert "--reload" not in cmd and "--reload-dir" not in cmd
+
+
+class TestLaunchHost:
+    """The server binds to this machine unless a host was asked for: several
+    tabs serve a file browser, so a wider bind must be deliberate."""
+
+    def test_it_binds_to_localhost_by_default(self, monkeypatch):
+        cmd = TestReloadWatchesThePackage._command(monkeypatch, reload=False)
+        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+
+    def test_an_explicit_host_is_passed_on(self, monkeypatch):
+        cmd = TestReloadWatchesThePackage._command(
+            monkeypatch, reload=False, host="0.0.0.0"
+        )
+        assert cmd[cmd.index("--host") + 1] == "0.0.0.0"

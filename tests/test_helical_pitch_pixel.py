@@ -5,14 +5,10 @@ its side view, and segments are labelled by the sector of the repeat they sit
 at, so the repeat and every class phase are known.
 """
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
-from joint_pixel import synthetic as syn  # noqa: E402
+import synthetic_pitch as syn
 
 from helicon.webApps.lib import helical_pitch_phase as ph  # noqa: E402
 from helicon.webApps.lib import helical_pitch_pixel as px  # noqa: E402

@@ -1333,3 +1333,32 @@ class TestClassPositions:
 
         with pytest.raises(KeyError):
             tab._class_positions([99], [5, 7, 9])
+
+
+class TestCounterpartCacheKey:
+    """The pair cache of the tab is keyed on the data, not just the class numbers."""
+
+    def test_the_same_data_is_the_same_key(self):
+        from helicon.webApps.tabs import abinitio3d_tab as tab
+
+        images = [np.zeros((2, 2)), np.ones((2, 2))]
+        assert tab._counterpart_key([2, 1], [3, 4], images) == tab._counterpart_key(
+            [1, 2], [3, 4], list(images)
+        )
+
+    def test_another_dataset_with_the_same_class_numbers_is_a_different_key(self):
+        from helicon.webApps.tabs import abinitio3d_tab as tab
+
+        images = [np.zeros((2, 2)), np.ones((2, 2))]
+        other = [np.zeros((2, 2)), np.full((2, 2), 2.0)]
+        assert tab._counterpart_key([1, 2], [3, 4], images) != tab._counterpart_key(
+            [1, 2], [3, 4], other
+        )
+
+    def test_another_selection_is_a_different_key(self):
+        from helicon.webApps.tabs import abinitio3d_tab as tab
+
+        images = [np.zeros((2, 2)), np.ones((2, 2))]
+        assert tab._counterpart_key([1, 2], [3, 4], images) != tab._counterpart_key(
+            [1, 2], [3, 5], images
+        )

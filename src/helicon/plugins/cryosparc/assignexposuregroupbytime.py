@@ -25,7 +25,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         metavar="<n>",
         help="assign images to exposure groups according to data collection time, n movies per group. disabled by default",
-        default=-1,
+        action="append",
+        default=None,
     )
 
 

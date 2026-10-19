@@ -930,16 +930,22 @@ def get_cylindrical_mask(
         Meshgrid coordinates ``(Z, Y, X)``, only returned if
         ``return_xyz`` is True.
     """
-    k = np.arange(0, nz, dtype=np.int32) - nz // 2
-    j = np.arange(0, ny, dtype=np.int32) - ny // 2
-    i = np.arange(0, nx, dtype=np.int32) - nx // 2
-    Z, Y, X = np.meshgrid(k, j, i, indexing="ij")
+    k = np.arange(0, nz) - nz // 2
+    j = np.arange(0, ny) - ny // 2
+    i = np.arange(0, nx) - nx // 2
     if rmax < 0:
         rmax = ny // 2 - 1
-    mask = X * X + Y * Y < rmax * rmax  # pixels inside a cylinder. axes order: z, y, x
+    # one (ny, nx) plane broadcast over z. A full meshgrid of coordinates costs
+    # three int64 arrays of every voxel (GBs for a 512^3 map) to build this mask.
+    yy = (j * j)[:, None]
+    xx = (i * i)[None, :]
+    radius2 = xx + yy
+    plane = radius2 < rmax * rmax  # pixels inside a cylinder. axes order: y, x
     if 0 < rmin < rmax:
-        mask &= X * X + Y * Y >= rmin * rmin
+        plane &= radius2 >= rmin * rmin
+    mask = np.broadcast_to(plane, (nz, ny, nx))
     if return_xyz:
+        Z, Y, X = np.meshgrid(k, j, i, indexing="ij")
         return mask, (Z, Y, X)
     else:
         return mask
@@ -1129,6 +1135,9 @@ def estimate_inter_segment_distance(
         )
         dists = dists[1:] - dists[:-1]
         dists_all.append(dists)
+    if not dists_all:
+        # every helix has a single segment: no distance to report
+        return None, None, None, None
     dists_all = np.hstack(dists_all)
     dist_seg_median = np.median(dists_all)  # Angstrom
     dist_seg_mean = np.mean(dists_all)  # Angstrom
@@ -1188,6 +1197,8 @@ def reset_inter_segment_distance(
 
     if current_inter_segment_distance <= 0:
         current_inter_segment_distance = estimate_inter_segment_distance(data)[0]
+        if current_inter_segment_distance is None:
+            return None
 
     if new_inter_segment_distance == current_inter_segment_distance:
         data.drop(["risd_filename", "risd_pid"], inplace=True, axis=1)
@@ -1286,6 +1297,8 @@ def estimate_helicalTube_length(
 
     if inter_segment_distance <= 0:
         inter_segment_distance = estimate_inter_segment_distance(data)[0]
+        if inter_segment_distance is None:
+            return None
 
     helices = data.groupby([filename, "rlnHelicalTubeID"], sort=False)
 

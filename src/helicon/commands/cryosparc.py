@@ -168,11 +168,12 @@ def main(args: argparse.Namespace) -> None:
     index_d = {option_name: 0 for option_name in args.all_options}
 
     for option_name in args.all_options:
-        if option_name in args.append_options:
-            param = args.__dict__[option_name][index_d[option_name]]
-            index_d[option_name] += 1
-        else:
-            param = args.__dict__[option_name]
+        # A repeatable option carries one value per occurrence, in the order
+        # given, so each dispatch takes its own occurrence's value. The loop
+        # owns the count: a handler bumping index_d cannot make it skip one.
+        values = args.__dict__[option_name]
+        occurrence = index_d[option_name]
+        param = values[occurrence] if option_name in args.append_options else values
 
         if args.verbose:
             logger.info("%s: %s", option_name, param)
@@ -191,6 +192,7 @@ def main(args: argparse.Namespace) -> None:
             micrograph_name,
             original_exp_group_ids,
         )
+        index_d[option_name] = occurrence + 1
         if data is None:  # the plugin has saved its own output (e.g. an external job)
             return
 

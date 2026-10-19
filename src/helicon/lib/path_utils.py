@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging, os, time
+import logging, os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,12 +16,10 @@ __all__ = [
     "which",
     "find_relion_project_folders",
     "get_direct_url",
-    "get_file_size",
     "download_file_from_url",
     "get_emdb_id",
     "is_file_readable",
     "is_file_writable",
-    "file_ready",
     "convert_file_path",
     "convert_dataframe_file_path",
     "check_required_columns",
@@ -147,27 +145,29 @@ def get_direct_url(url: str) -> str:
         return url
 
 
-def get_file_size(url: str) -> int | None:
-    """Get the file size of a remote resource via a HEAD request.
+def _get(url: str, **kwargs):
+    """``requests.get``; on a hosting service every redirect hop is checked too.
 
-    Parameters
-    ----------
-    url : str
-        URL to check.
-
-    Returns
-    -------
-    int or None
-        File size in bytes, or None if unknown.
+    A public URL that redirects to 169.254.169.254 or the server's own network
+    would pass a check of the first host alone. (A name that changes its address
+    between the check and the fetch is not covered.)
     """
     import requests
+    from urllib.parse import urljoin
 
-    response = requests.head(url, timeout=_REQUEST_TIMEOUT)
-    if "Content-Length" in response.headers:
-        file_size = int(response.headers["Content-Length"])
-        return file_size
-    else:
-        return None
+    from ..webApps import deployment
+
+    if not deployment.is_cloud():
+        return requests.get(url, **kwargs)
+    for _ in range(5):
+        if not deployment.url_allowed(url):
+            raise IOError(f"ERROR: {url} is not a public URL")
+        r = requests.get(url, allow_redirects=False, **kwargs)
+        if not r.is_redirect:
+            return r
+        url = urljoin(url, r.headers.get("location", ""))
+        r.close()
+    raise IOError("ERROR: too many redirects")
 
 
 def download_file_from_url(
@@ -182,15 +182,14 @@ def download_file_from_url(
     target_file_name : str, optional
         If given, write to this file path.
     return_filename : bool, optional
-        If True, return the filename instead
-        of a file object.
+        If True, return the filename instead of a file object. Only with
+        ``target_file_name``.
 
     Returns
     -------
     file object or str
-        Opened file (readable binary) or filename. A temporary file whose
-        name is returned (``return_filename`` without ``target_file_name``)
-        is left for the caller to delete.
+        Opened file (readable binary), or with ``return_filename`` and
+        ``target_file_name`` the name of the file written.
 
     Raises
     ------
@@ -201,7 +200,19 @@ def download_file_from_url(
     import requests
     import os
 
+    if return_filename and not target_file_name:
+        raise ValueError("return_filename needs target_file_name")
     if Path(url).is_file():
+        if target_file_name:
+            # honour the same contract as the download branch: a caller that
+            # asked for a file at target_file_name must find it there
+            import shutil
+
+            target = Path(target_file_name)
+            if Path(url).resolve() != target.resolve():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(url, target)
+            return str(target) if return_filename else open(target, "rb")
         return open(url, "rb")
     if target_file_name:
         # Written under a temporary name in the same directory and renamed
@@ -219,7 +230,7 @@ def download_file_from_url(
             ".%s.%d.%s.part" % (target.name, os.getpid(), uuid.uuid4().hex[:8])
         )
         try:
-            with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
+            with _get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
                 r.raise_for_status()
                 with open(partial, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
@@ -234,18 +245,12 @@ def download_file_from_url(
             raise
         return str(target) if return_filename else open(target, "rb")
     try:
-        local_filename = url.split("/")[-1]
-        suffix = "." + local_filename
-        with requests.get(url, timeout=_REQUEST_TIMEOUT) as r:
-            r.raise_for_status()  # Check for request success
-            content = r.content
-        if return_filename:
-            # the caller owns the file: it must outlive this function
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(content)
-            return f.name
+        suffix = "." + url.split("/")[-1]
         fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
-        fileobj.write(content)
+        with _get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
+            r.raise_for_status()  # Check for request success
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                fileobj.write(chunk)
         fileobj.flush()  # so readers that open fileobj.name see the data
         fileobj.seek(0)
         return fileobj
@@ -319,56 +324,6 @@ def is_file_writable(filename: str) -> bool:
     if not str(pdir):
         pdir = Path(".")
     return os.access(pdir, os.W_OK)
-
-
-def file_ready(
-    filenames, wait: int = 0, minSize: int = 0
-) -> int:  # wait given seconds and check again
-    """Check whether a file or list of files exists and has content.
-
-    If ``wait > 0``, polls until the file is ready or the deadline passes.
-
-    Parameters
-    ----------
-    filenames : str or list of str
-        File path(s) to check.
-    wait : int, optional
-        Maximum seconds to wait. Defaults to 0 (no wait).
-    minSize : int, optional
-        Minimum file size (bytes) required.
-
-    Returns
-    -------
-    int
-        1 if ready, 0 otherwise.
-    """
-    if type(filenames) == type([]):
-        ready = 1
-        for f in filenames:
-            if not (Path(f).exists() and Path(f).stat().st_size):
-                ready = 0
-                break
-        return ready
-    else:
-        ready = Path(filenames).exists() and Path(filenames).stat().st_size > minSize
-    if ready:
-        return 1
-    elif wait > 0:
-        deadline = time.time() + wait
-        delay = 1
-        while time.time() <= deadline:
-            time.sleep(delay)
-            ready = file_ready(filenames, wait=0, minSize=minSize)
-            if ready:
-                return 1
-            else:
-                delay *= 2
-                now = time.time()
-                if now + delay > deadline:
-                    delay = deadline - now
-        return file_ready(filenames, wait=0)
-    else:
-        return 0
 
 
 _PATH_FORMATS = "current absolute abs real relative rel shortest".split()

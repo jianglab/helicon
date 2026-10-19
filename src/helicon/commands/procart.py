@@ -10,18 +10,23 @@ from helicon.lib.exceptions import HeliconError
 
 logger = logging.getLogger(__name__)
 
+# Pinned to a commit rather than to the branch: whatever the branch holds at
+# launch time would run on the user's machine without a helicon release.
+# Re-pin deliberately when the upstream app changes.
+URL = "https://raw.githubusercontent.com/jianglab/procart/f0bd76ae724b583a72d0b3402970402246142062/procart.py"
+
 
 def main(args):
     """Launch the ProCart web app via Streamlit."""
     import subprocess
 
-    url = "https://raw.githubusercontent.com/jianglab/procart/main/procart.py"
+    print(URL)
     cmd = [
         sys.executable,
         "-m",
         "streamlit",
         "run",
-        url,
+        URL,
         "--server.enableCORS",
         "false",
         "--server.enableXsrfProtection",

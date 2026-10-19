@@ -39,14 +39,11 @@ def spec_for(name: str) -> tuple[str, float]:
     return SPECS[kind]
 
 
-def _synthetic_module(name: str):
-    """A module of ``benchmarks/<name>`` (the synthetic data makers live there)."""
-    import importlib
+def _synthetic_module(name: str = ""):
+    """The synthetic data makers of the pitch tests (``tests/synthetic_pitch.py``)."""
+    import synthetic_pitch
 
-    folder = str(ROOT / "benchmarks" / name)
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
-    return importlib.import_module("synthetic")
+    return synthetic_pitch
 
 
 def ring_period() -> dict[str, float]:
@@ -54,7 +51,7 @@ def ring_period() -> dict[str, float]:
     from helicon.webApps.lib import helical_pitch_phase as ph
     from helicon.webApps.lib import helical_pitch_pixel as px
 
-    syn = _synthetic_module("joint_pixel")
+    syn = _synthetic_module()
     period, n_classes, apix = 400.0, 12, 4.0
     out = {}
     for label, mislabel in (("clean", 0.0), ("mislabelled", 0.4)):
@@ -102,7 +99,7 @@ def two_types() -> dict[str, float]:
     from helicon.webApps.lib import helical_pitch_mixture as mx
     from helicon.webApps.lib import helical_pitch_phase as ph
 
-    syn = _synthetic_module("joint_pixel")
+    syn = _synthetic_module()
 
     def one(ratio, seed=0, length=800.0, share=0.5):
         periods = (400.0, 400.0 * ratio)

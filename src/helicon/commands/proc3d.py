@@ -61,10 +61,12 @@ def main(args: argparse.Namespace) -> None:
     index_d = {o: 0 for o in args.all_options}
 
     for option_name in args.all_options:
-        if option_name in args.append_options:
-            param = args.__dict__[option_name][index_d[option_name]]
-        else:
-            param = args.__dict__[option_name]
+        # A repeatable option carries one value per occurrence, in the order
+        # given, so each dispatch takes its own occurrence's value. The loop
+        # owns the count: a handler bumping index_d cannot make it skip one.
+        values = args.__dict__[option_name]
+        occurrence = index_d[option_name]
+        param = values[occurrence] if option_name in args.append_options else values
 
         if args.verbose:
             logger.info("%s: %s", option_name, param)
@@ -75,7 +77,7 @@ def main(args: argparse.Namespace) -> None:
             option_name, data, args, index_d, param, apix, nx, ny, nz
         )
 
-        index_d[option_name] += 1
+        index_d[option_name] = occurrence + 1
 
     if args.verbose > 1:
         logger.info(

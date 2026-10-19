@@ -55,6 +55,39 @@ def test_token_gate_rejects_unknown_token_once_registered():
     assert control.navigate("tok2", {"helicon_tab": '"X"'})["ok"] is False
 
 
+def test_only_a_launched_server_reaps_itself(monkeypatch):
+    """A server the user started must outlive a quiet spell.
+
+    ``helicon display`` launches a server for one viewer and sets the flag, so
+    that server may kill itself when the viewer is gone. ``helicon webApps``
+    and a hosted deployment must not: no session open does not mean no job
+    running, and the URL would stop answering.
+    """
+    monkeypatch.delenv("HELICON_WEBAPP_SELF_REAP", raising=False)
+    control = _AppControl()
+    control.start_watchdog()
+    assert control._watchdog_started is False
+
+    monkeypatch.setenv("HELICON_WEBAPP_SELF_REAP", "1")
+    control.start_watchdog()
+    assert control._watchdog_started is True
+
+
+def test_a_navigation_is_not_delivered_to_another_tokens_poll():
+    """Two launchers, one server: each poll sees only its own navigation."""
+    control = _AppControl()
+    control.register_token("?helicon_token=tok1")
+    control.register_token("?helicon_token=tok2")
+    assert control.navigate("tok2", {"helicon_tab": '"X"'})["ok"] is True
+
+    # The navigation was for tok2, so tok1's poll must not consume it.
+    assert control.poll("tok1") == {"pending": False}
+    polled = control.poll("tok2")
+    assert polled["pending"] is True
+    assert polled["query_string"] == "helicon_tab=%22X%22&helicon_token=tok2"
+    assert control.poll("tok2") == {"pending": False}
+
+
 def test_navigate_rejects_missing_or_non_dict_params():
     control = _AppControl()
     assert control.navigate("tok1", None)["ok"] is False

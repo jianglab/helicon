@@ -38,3 +38,9 @@ tests/output/
 output/
 /src/helicon/_version.py
 .numba_cache/
+
+# built user documentation
+docs/_build/
+apoe_out/
+joint_pixel_out/
+benchmarks/

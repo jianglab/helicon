@@ -13,7 +13,11 @@ import pandas as pd
 import pytest
 
 import helicon
-from helicon.lib.exceptions import HeliconError, HeliconFileExistsError
+from helicon.lib.exceptions import (
+    HeliconError,
+    HeliconFileExistsError,
+    HeliconValidationError,
+)
 
 
 def _write_mrc(path, data, apix=1.0):
@@ -43,6 +47,18 @@ class TestPluginOptionsInArgv:
             "bar",
         ]
 
+    def test_an_abbreviated_plugin_flag_is_dispatched(self):
+        from helicon.plugins import plugin_options_in_argv
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--verbose", type=int)
+        parser.add_argument("--summary2D", dest="summary2D", type=str)
+        argv = ["in", "--verbose=2", "--summary2=3"]
+        # argparse accepts a unique prefix of a long option
+        assert plugin_options_in_argv(argv, parser, ["summary2D"]) == ["summary2D"]
+        parser.add_argument("--summary2E", dest="summary2E", type=str)
+        assert plugin_options_in_argv(argv, parser, ["summary2D", "summary2E"]) == []
+
 
 class TestImages2starCheckArgsOptions:
     def test_infrastructure_options_are_not_dispatched(self, tmp_path):
@@ -58,8 +74,6 @@ class TestImages2starCheckArgsOptions:
             "1",
             "--sets",
             "2",
-            "--ppid",
-            "3",
             "--select",
             "rlnClassNumber",
             "1",
@@ -86,6 +100,39 @@ class TestProc3dCheckArgsOptions:
             args = proc3d.check_args(args, parser)
         assert args.all_options == ["flip_hand"]
         assert args.outputMapFile == Path(out)
+
+
+class TestProc3dRepeatedOptions:
+    """Repeated proc3d options are a pipeline: each occurrence applies its own value."""
+
+    def test_each_occurrence_uses_its_own_value(self, tmp_path):
+        from helicon.commands import proc3d
+
+        data = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
+        in_file = tmp_path / "in.mrc"
+        out_file = tmp_path / "out.mrc"
+        _write_mrc(in_file, data)
+        argv = [
+            str(in_file),
+            str(out_file),
+            "--flip_hand",
+            "x",
+            "--flip_hand",
+            "z",
+            "--verbose",
+            "0",
+        ]
+        parser = argparse.ArgumentParser()
+        proc3d.add_args(parser)
+        args = parser.parse_args(argv)
+        with patch.object(sys, "argv", ["helicon", "proc3d"] + argv):
+            args = proc3d.check_args(args, parser)
+        with patch.object(helicon, "log_command_line"):
+            proc3d.main(args)
+        with mrcfile.open(str(out_file)) as mrc:
+            result = mrc.data
+        # with one value reused for both occurrences the x flip would be lost
+        assert np.array_equal(result, data[::-1, :, ::-1])
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +178,33 @@ def _run_cryosparc(argv):
         args = cryosparc.check_args(args, parser)
     cryosparc.main(args)
     return args
+
+
+class TestCryosparcRepeatedOptions:
+    """Repeated cryosparc options are a pipeline: each takes its own value."""
+
+    def test_each_occurrence_uses_its_own_value(self, tmp_path, monkeypatch):
+        cs_file = _make_cs_particles(tmp_path / "P1")
+        outdir = tmp_path / "out"
+        outdir.mkdir()
+        monkeypatch.chdir(outdir)
+        _run_cryosparc(
+            [
+                "--csFile",
+                str(cs_file),
+                "--splitByMicrograph",
+                "1",
+                "--splitByMicrograph",
+                "0",
+                "--verbose",
+                "0",
+            ]
+        )
+        # the second occurrence turns the split off, so the split is recorded
+        # once: reusing the last value for both would title the output twice
+        assert sorted(p.name for p in outdir.glob("*.cs")) == [
+            "particles_per-micrograph-split.cs"
+        ]
 
 
 class TestCryosparcSaveOutput:
@@ -430,6 +504,44 @@ class TestCreateStack:
         assert ret.attrs["optics"]["rlnImagePixelSize"].iloc[0] == 2.0
         assert index_d["createStack"] == 1
 
+    def test_an_existing_output_needs_force(self, tmp_path):
+        from helicon.plugins.images2star import createstack
+
+        stack = tmp_path / "stack.mrcs"
+        _write_mrc(stack, np.random.default_rng(0).normal(size=(4, 32, 32)), apix=1.0)
+        data = _particles()
+        data["rlnImageName"] = [f"{i + 1:06d}@{stack}" for i in range(4)]
+        out = tmp_path / "new.mrcs"
+        _write_mrc(out, np.zeros((7, 16, 16)), apix=2.0)
+        before = out.read_bytes()
+        args = argparse.Namespace(verbose=0)
+        param = f"{out}:rescale2size=16:float16=0"
+        ret, index_d = createstack.handle(data, args, {"createStack": 0}, param)
+        assert out.read_bytes() == before
+        assert ret is data and "rlnImageNameOrig" not in ret
+        assert index_d["createStack"] == 0
+        ret, index_d = createstack.handle(
+            data, args, {"createStack": 0}, param + ":force=1"
+        )
+        with mrcfile.open(str(out)) as mrc:
+            assert mrc.data.shape == (4, 16, 16)
+        assert list(ret["rlnImageName"]) == [f"{i}@{out}" for i in range(1, 5)]
+
+    def test_the_output_may_not_be_an_input(self, tmp_path):
+        from helicon.plugins.images2star import createstack
+
+        stack = tmp_path / "stack.mrcs"
+        _write_mrc(stack, np.random.default_rng(0).normal(size=(4, 32, 32)), apix=1.0)
+        data = _particles()
+        data["rlnImageName"] = [f"{i + 1:06d}@{stack}" for i in range(4)]
+        before = stack.read_bytes()
+        ret, index_d = createstack.handle(
+            data, argparse.Namespace(verbose=0), {"createStack": 0}, f"{stack}:force=1"
+        )
+        assert stack.read_bytes() == before
+        assert ret is data and "rlnImageNameOrig" not in ret
+        assert index_d["createStack"] == 0
+
 
 class TestMinStack:
     def test_min_stack_keeps_particle_order(self, tmp_path):
@@ -543,6 +655,33 @@ def _run_images2star_main(argv, data):
     return written
 
 
+class TestImages2starRepeatedOptions:
+    """Repeated images2star options are a pipeline: each takes its own value."""
+
+    def test_each_occurrence_uses_its_own_value(self, tmp_path):
+        data = pd.DataFrame(
+            {
+                "rlnDefocusU": [2.0, 1.0, 3.0, 4.0],
+                "rlnDefocusV": [10.0, 10.0, 20.0, 20.0],
+            }
+        )
+        argv = [
+            "in.star",
+            str(tmp_path / "out.star"),
+            "--sortby",
+            "rlnDefocusU",
+            "--sortby",
+            "rlnDefocusV",
+            "--verbose",
+            "0",
+        ]
+        written = _run_images2star_main(argv, data)
+        frame = next(iter(written.values()))
+        # the last sort is primary and the first breaks its ties; reusing one
+        # value for both occurrences would leave rlnDefocusU unsorted
+        assert frame["rlnDefocusU"].tolist() == [1.0, 2.0, 3.0, 4.0]
+
+
 class TestSplitNumSets:
     def test_subset_filenames_in_output_folder(self):
         from helicon.commands.images2star import split_subset_filenames
@@ -588,6 +727,76 @@ class TestSplitNumSets:
         from helicon.commands import images2star
 
         assert "copy_on_write" not in inspect.getsource(images2star)
+
+    def test_micrograph_split_keeps_each_micrograph_together(self, tmp_path):
+        # the row labels are not positions: a split must not treat them as such
+        data = pd.DataFrame(
+            {
+                "rlnMicrographName": ["m1.mrc", "m1.mrc", "m2.mrc"],
+                "rlnClassNumber": [1, 2, 3],
+            },
+            index=[5, 6, 7],
+        )
+        argv = [
+            "in.star",
+            str(tmp_path / "out.star"),
+            "--splitNumSets",
+            "2",
+            "--splitMode",
+            "micrograph",
+            "--verbose",
+            "0",
+            "--path",
+            "absolute",
+        ]
+        written = _run_images2star_main(argv, data)
+        assert len(written) == 2
+        subsets = sorted(tuple(sorted(df["rlnClassNumber"])) for df in written.values())
+        assert subsets == [(1, 2), (3,)]
+
+    def test_more_sets_than_micrographs_is_refused(self, tmp_path):
+        data = pd.DataFrame({"rlnMicrographName": ["m1.mrc", "m2.mrc"]})
+        argv = [
+            "in.star",
+            str(tmp_path / "out.star"),
+            "--splitNumSets",
+            "3",
+            "--splitMode",
+            "micrograph",
+            "--verbose",
+            "0",
+        ]
+        with pytest.raises(HeliconValidationError, match="more than the 2 micrograph"):
+            _run_images2star_main(argv, data)
+
+    def test_more_sets_than_particles_is_refused(self, tmp_path):
+        data = pd.DataFrame({"rlnClassNumber": [1, 2]})
+        argv = [
+            "in.star",
+            str(tmp_path / "out.star"),
+            "--splitNumSets",
+            "3",
+            "--verbose",
+            "0",
+        ]
+        with pytest.raises(HeliconValidationError, match="more than the 2 particles"):
+            _run_images2star_main(argv, data)
+
+
+class TestFirstLast:
+    def test_first_and_last_select_a_range(self, tmp_path):
+        data = pd.DataFrame({"rlnClassNumber": [0, 1, 2, 3, 4]})
+        out = tmp_path / "out.star"
+        argv = ["in.star", str(out), "--first", "1", "--last", "4", "--verbose", "0"]
+        written = _run_images2star_main(argv, data)
+        assert list(written[str(out)]["rlnClassNumber"]) == [1, 2, 3]
+
+    @pytest.mark.parametrize("extra", [["--last", "9"], ["--first", "3"]])
+    def test_a_range_outside_the_input_is_refused(self, tmp_path, extra):
+        data = pd.DataFrame({"rlnClassNumber": [0, 1, 2]})
+        argv = ["in.star", str(tmp_path / "out.star"), "--verbose", "0"] + extra
+        with pytest.raises(HeliconValidationError, match="do not select rows"):
+            _run_images2star_main(argv, data)
 
 
 # ---------------------------------------------------------------------------
@@ -694,3 +903,102 @@ class TestStreamlitLaunchers:
         mod = importlib.import_module(f"helicon.commands.{name}")
         with patch("subprocess.call", return_value=0):
             mod.main(argparse.Namespace())
+
+
+# ---------------------------------------------------------------------------
+# images2star extractHelices and denoiseCurvelet
+# ---------------------------------------------------------------------------
+
+
+class TestExtractHelices:
+    def _data(self, tmp_path):
+        mic = tmp_path / "mic1.mrc"
+        _write_mrc(mic, np.random.default_rng(0).normal(size=(64, 64)), apix=1.5)
+        coords = tmp_path / "coords1.star"
+        coords.write_text(
+            "data_coordinates\n\nloop_\n"
+            "_rlnCoordinateX #1\n_rlnCoordinateY #2\n"
+            "10.0 10.0\n50.0 50.0\n"
+        )
+        # a particle star has many columns: only the two below are read
+        return pd.DataFrame(
+            {
+                "rlnMicrographName": [str(mic)],
+                "rlnMicrographCoordinates": [str(coords)],
+                "rlnClassNumber": [1],
+                "rlnDefocusU": [10000.0],
+            }
+        )
+
+    def test_helices_are_extracted_from_the_coordinate_file(self, tmp_path):
+        from helicon.plugins.images2star import extracthelices
+
+        data = self._data(tmp_path)
+        outdir = tmp_path / "helices"
+        ret, index_d = extracthelices.handle(
+            data,
+            argparse.Namespace(verbose=0, cpu=1),
+            {"extractHelices": 0},
+            f"width=8:outPath={outdir}",
+        )
+        assert index_d["extractHelices"] == 1
+        assert list(ret["rlnHelixImageName"]) == [
+            str(Path(outdir).resolve() / "helix_0_width_8px_mic1.mrc")
+        ]
+        assert ret["helixLength"].iloc[0] == pytest.approx(84.8528, abs=1e-3)
+        assert [p.name for p in outdir.glob("*.mrc")] == ["helix_0_width_8px_mic1.mrc"]
+
+    def test_data_without_coordinates_is_left_alone(self, tmp_path):
+        from helicon.plugins.images2star import extracthelices
+
+        data = pd.DataFrame({"rlnMicrographName": ["m1.mrc"], "rlnClassNumber": [1]})
+        ret, index_d = extracthelices.handle(
+            data,
+            argparse.Namespace(verbose=0, cpu=1),
+            {"extractHelices": 0},
+            f"width=8:outPath={tmp_path / 'helices'}",
+        )
+        assert ret is data
+        assert index_d["extractHelices"] == 0
+
+
+class TestDenoiseCurvelet:
+    def _run(self, tmp_path, monkeypatch, data, outdir):
+        from helicon.plugins.images2star import denoisecurvelet
+
+        monkeypatch.setattr(
+            denoisecurvelet, "_check_transform_dependencies", lambda *a: None
+        )
+        monkeypatch.setattr(
+            denoisecurvelet,
+            "_denoise_batch",
+            lambda images, *a, **k: [np.asarray(i) for i in images],
+        )
+        return denoisecurvelet.handle(
+            data,
+            argparse.Namespace(verbose=0, cpu=1),
+            {"denoiseCurvelet": 0},
+            f"transform=mct:sigma=3:outdir={outdir}",
+        )
+
+    def test_the_output_stack_is_rebuilt_with_sequential_numbers(
+        self, tmp_path, monkeypatch
+    ):
+        stack = tmp_path / "stack.mrcs"
+        images = ((np.arange(4)[:, None, None] + 1.0) * np.ones((4, 6, 6))).astype(
+            np.float32
+        )
+        _write_mrc(stack, images)
+        outdir = tmp_path / "denoised"
+        outdir.mkdir()
+        _write_mrc(outdir / "stack.mrcs", np.full((5, 6, 6), 7.0))
+        # the particles are not in stack order
+        data = pd.DataFrame({"rlnImageName": [f"3@{stack}", f"1@{stack}"]})
+        ret, index_d = self._run(tmp_path, monkeypatch, data, outdir)
+        assert index_d["denoiseCurvelet"] == 1
+        out_stack = Path(outdir).resolve() / "stack.mrcs"
+        assert list(ret["rlnImageName"]) == [f"1@{out_stack}", f"2@{out_stack}"]
+        with mrcfile.open(str(out_stack)) as mrc:
+            assert mrc.data.shape == (2, 6, 6)  # rebuilt, not appended to
+            assert mrc.data[0, 0, 0] == pytest.approx(3.0)
+            assert mrc.data[1, 0, 0] == pytest.approx(1.0)

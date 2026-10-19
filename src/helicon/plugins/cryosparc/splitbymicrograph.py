@@ -25,7 +25,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         metavar="<0|1>",
         help="split the dataset by micrograph. disabled by default",
-        default=0,
+        action="append",
+        default=None,
     )
 
 

@@ -16,8 +16,31 @@ import tempfile
 
 _CONFIG_HOME = tempfile.mkdtemp(prefix="helicon-test-config-")
 os.environ["XDG_CONFIG_HOME"] = _CONFIG_HOME
+# nor the cache of Helicon (what the preview of a job keeps in it, say): the run has its own
+os.environ.setdefault("HELICON_CACHE_DIR", os.path.join(_CONFIG_HOME, "cache"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 atexit.register(shutil.rmtree, _CONFIG_HOME, ignore_errors=True)
+
+try:
+    from PySide6.QtCore import QSettings
+except ImportError:  # no Qt stack in this environment
+    pass
+else:
+    # The run must never read or write the user's saved settings. On macOS the
+    # native format is ~/Library/Preferences, and QSettings(organization,
+    # application) is the native format whatever the default is set to, so
+    # point that constructor at the run's own ini file. Nothing has built a
+    # settings object yet.
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, _CONFIG_HOME)
+    _real_settings_init = QSettings.__init__
+
+    def _isolated_settings_init(self, *args, **kwargs):
+        if len(args) == 2 and all(isinstance(a, str) for a in args):
+            args = (QSettings.IniFormat, QSettings.UserScope, *args)
+        _real_settings_init(self, *args, **kwargs)
+
+    QSettings.__init__ = _isolated_settings_init
 
 import pytest
 import pandas as pd

@@ -76,6 +76,7 @@ def _reset_prune_throttle():
     cache_mod._prune_next.clear()
     cache_mod._prune_interval.clear()
     cache_mod._dir_bytes_limit.clear()
+    cache_mod._uncapped.clear()
     yield
     (
         cache_mod._PRUNE_INTERVAL,
@@ -85,6 +86,7 @@ def _reset_prune_throttle():
     cache_mod._prune_next.clear()
     cache_mod._prune_interval.clear()
     cache_mod._dir_bytes_limit.clear()
+    cache_mod._uncapped.clear()
 
 
 class TestExpiry:
@@ -192,6 +194,8 @@ class TestPruning:
         assert _n_entries(tmp_path) == 5
 
     def test_no_pruning_when_cache_never_expires(self, tmp_path):
+        helicon.set_cache_dir_limit(tmp_path, None)  # these are about age alone
+
         @helicon.cache(expires_after=None, cache_dir=tmp_path)
         def f(x):
             return b"x" * 50_000
@@ -205,6 +209,7 @@ class TestPruning:
 
     def test_sweep_is_throttled_by_the_stamp_file(self, tmp_path):
         """A recent stamp means another process already swept; skip the walk."""
+        helicon.set_cache_dir_limit(tmp_path, None)  # these are about age alone
         cache_mod._PRUNE_INTERVAL = datetime.timedelta(hours=1)
 
         @helicon.cache(expires_after=datetime.timedelta(seconds=1), cache_dir=tmp_path)
@@ -422,6 +427,36 @@ class TestDenovo3DCap:
             importlib.reload(pipeline)
 
 
+class TestDefaultCap:
+    def test_a_cached_function_gets_a_cap_for_its_folder(self, tmp_path):
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        assert (
+            cache_mod._dir_bytes_limit[str(tmp_path)]
+            == cache_mod.DEFAULT_DIR_BYTES_LIMIT
+        )
+
+    def test_a_cap_set_by_the_user_is_kept(self, tmp_path):
+        helicon.set_cache_dir_limit(tmp_path, "1G")
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        assert cache_mod._dir_bytes_limit[str(tmp_path)] == "1G"
+
+    def test_no_cap_stays_no_cap(self, tmp_path):
+        helicon.set_cache_dir_limit(tmp_path, None)
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        assert str(tmp_path) not in cache_mod._dir_bytes_limit
+
+
 class TestClearScope:
     def test_clear_cache_only_clears_that_function(self, tmp_path):
         n = {"a": 0, "b": 0}
@@ -470,6 +505,40 @@ class TestClearScope:
         )
         f.clear_cache()
         f.clear_cache_dir()
+
+
+class TestIsCached:
+    def test_it_says_whether_a_call_has_an_answer_without_making_one(self, tmp_path):
+        n = {"calls": 0}
+
+        @helicon.cache(expires_after=None, cache_dir=tmp_path)
+        def f(x):
+            n["calls"] += 1
+            return x
+
+        assert not f.is_cached(1)
+        assert n["calls"] == 0  # asking does not call it
+        f(1)
+        assert f.is_cached(1) and not f.is_cached(2)
+        f.clear_cache()
+        assert not f.is_cached(1)
+
+    def test_an_expired_answer_is_not_there(self, tmp_path):
+        @helicon.cache(expires_after=datetime.timedelta(seconds=1), cache_dir=tmp_path)
+        def f(x):
+            return x
+
+        f(1)
+        assert f.is_cached(1)
+        time.sleep(1.5)
+        assert not f.is_cached(1)
+
+    def test_without_a_usable_cache_folder_nothing_is_cached(self):
+        f = helicon.cache(expires_after=1, cache_dir="/proc/nonexistent/helicon")(
+            lambda x: x
+        )
+        f(1)
+        assert not f.is_cached(1)
 
 
 class TestEverythingUsesTheOneCacheRoot:

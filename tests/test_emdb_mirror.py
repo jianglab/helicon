@@ -153,6 +153,24 @@ class TestDownloadsAreAtomic:
             )
         assert target.read_bytes() == b"complete"
 
+    def test_a_local_path_honours_the_requested_target(self, tmp_path):
+        # the local shortcut returned an open file and ignored target_file_name,
+        # so a caller that then read the target found nothing
+        source = tmp_path / "in.map.gz"
+        source.write_bytes(b"local map")
+        target = tmp_path / "sub" / "out.map.gz"
+        got = helicon.download_file_from_url(
+            str(source), target_file_name=str(target), return_filename=True
+        )
+        assert got == str(target)
+        assert target.read_bytes() == b"local map"
+
+    def test_a_local_path_without_a_target_is_returned_open(self, tmp_path):
+        source = tmp_path / "in.map.gz"
+        source.write_bytes(b"local map")
+        with helicon.download_file_from_url(str(source)) as f:
+            assert f.read() == b"local map"
+
 
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
@@ -252,3 +270,24 @@ class TestASharedMirror:
         finally:
             os.chmod(emdb.local_emdb_mirror, 0o755)
         assert calls == [str(emdb.cache_dir / "emd_29999.map.gz")]
+
+    def test_disappearing_mirror_file_falls_back_to_user_cache(
+        self, tmp_path, monkeypatch
+    ):
+        emdb, calls = self._emdb(tmp_path), []
+        mirrored = emdb.local_emdb_mirror / self.RELPATH
+
+        def race_download(url, target_file_name=None, return_filename=False):
+            if Path(target_file_name) == mirrored:
+                mirrored.parent.mkdir(parents=True, exist_ok=True)
+                mirrored.write_bytes(b"map")
+                mirrored.unlink()
+                return
+            calls.append(target_file_name)
+            Path(target_file_name).write_bytes(b"map")
+            return target_file_name
+
+        monkeypatch.setattr(helicon, "download_file_from_url", race_download)
+        got = self._fetch(emdb)
+        assert got == emdb.cache_dir / "emd_29999.map.gz"
+        assert got.read_bytes() == b"map"

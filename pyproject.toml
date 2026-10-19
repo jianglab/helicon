@@ -17,7 +17,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dynamic = ["version"]
-dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'psutil', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
+dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'psutil', 'requests', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -44,11 +44,9 @@ helicon = "helicon.helicon:main"
 [project.optional-dependencies]
 shiny = ['ipywidgets', 'jupyter_bokeh', 'plotly', 'requests', 'shiny', 'shinywidgets', 'trackpy']
 
-streamlit = ['atomium', 'bokeh', 'kneebow', 'numpy', 'psutil', 'qrcode', 'shapely', 'st-clickable-images', 'streamlit', 'streamlit-bokeh', 'streamlit-drawable-canvas', 'trackpy']
+streamlit = ['atomium', 'bokeh', 'kneebow', 'qrcode', 'shapely', 'st-clickable-images', 'streamlit', 'streamlit-bokeh', 'streamlit-drawable-canvas', 'trackpy']
 
 gui = ['napari', 'PySide6', 'pyqtgraph', 'qtawesome']
-
-ptycho = ['py4dstem']
 
 curvelet_fdct = ['curvepy-fdct>=1.0']
 
@@ -67,6 +65,9 @@ gauss = ['torch']
 #                      it those tests ERROR rather than skip
 #   hypothesis         the property tests in test_angular_property.py
 #   pypdf              the PDF assertions in test_class2d_summary.py
+#   trove-classifiers  the list the classifier test asks PyPI about; without
+#                      it that test importorskip's itself everywhere
+#   pytest-xdist       the `-n auto` of the documented everyday run
 #
 # The feature extras are separate on purpose: a suite run against
 # helicon[test] alone still skips the tests that need shiny, napari or torch.
@@ -75,6 +76,8 @@ test = [
     'pytest-playwright',
     'hypothesis',
     'pypdf',
+    'trove-classifiers',
+    'pytest-xdist',
 ]
 
 all = [

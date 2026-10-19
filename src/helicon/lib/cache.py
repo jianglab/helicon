@@ -191,6 +191,11 @@ _prune_lock = threading.Lock()
 # several cached functions usually share a directory, and joblib's reduce_size
 # operates on the directory as a whole.
 _dir_bytes_limit: dict = {}
+# the size a cache directory is held to unless set_cache_dir_limit says otherwise: entries are
+# recent for a week, so age alone does not stop many users from filling the disk of a host
+DEFAULT_DIR_BYTES_LIMIT = "5G"
+# directories whose cap was taken away on purpose (set_cache_dir_limit with None)
+_uncapped: set = set()
 # cache_dir -> the sweep interval currently in force, in seconds.  It is also
 # written into the stamp file, so a process that has never swept this directory
 # -- a fresh worker in a pool, say -- still honours the shorter interval that
@@ -219,7 +224,9 @@ def set_cache_dir_limit(cache_dir: Any, bytes_limit: Any) -> None:
     with _prune_lock:
         if bytes_limit is None:
             _dir_bytes_limit.pop(key, None)
+            _uncapped.add(key)
         else:
+            _uncapped.discard(key)
             _dir_bytes_limit[key] = bytes_limit
         # Drop the in-memory throttle so the next call reconsiders this
         # directory under its new limit, and the interval with it: one learned
@@ -403,9 +410,11 @@ def cache(
     overwritten if its exact key is requested again, so keys that fall out of
     use accumulate indefinitely.
 
-    The decorated function gains two methods: ``clear_cache()`` empties just
-    that function's entries, and ``clear_cache_dir()`` empties the whole
-    directory, which is usually shared with other cached functions.
+    The decorated function gains three methods: ``clear_cache()`` empties just
+    that function's entries, ``clear_cache_dir()`` empties the whole
+    directory, which is usually shared with other cached functions, and
+    ``is_cached(*args, **kwargs)`` says whether a call has a valid answer in the
+    cache, without making one.
 
     Parameters
     ----------
@@ -461,6 +470,8 @@ def cache(
 
     if cache_dir is None:
         cache_dir = setup_cache_dir()
+    if str(cache_dir) not in _uncapped:
+        _dir_bytes_limit.setdefault(str(cache_dir), DEFAULT_DIR_BYTES_LIMIT)
 
     # joblib.Memory makes its folder when it is constructed, and many cached
     # functions are decorated at import time, so the Memory (and the folder) is
@@ -505,6 +516,14 @@ def cache(
             return cached_func(*args, **kwargs)
 
         wrapper.clear_cache = lambda: _clear_function_cache(_cached_func()[1])
+
+        # whether a call with these arguments has an answer in the cache that is still valid,
+        # without making one: to take a better answer that is there, or to start a slow one
+        def is_cached(*args, **kwargs) -> bool:
+            check = getattr(_cached_func()[1], "check_call_in_cache", None)
+            return bool(check(*args, **kwargs)) if check is not None else False
+
+        wrapper.is_cached = is_cached
         wrapper.clear_cache_dir = lambda: getattr(_memory(), "clear", lambda: None)()
         wrapper.get_cache_info = lambda: {
             "cache_dir": cache_dir,

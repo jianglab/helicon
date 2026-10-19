@@ -211,6 +211,7 @@ class FileBrowserModel(QStandardItemModel):
         self._stat_workers: list[_StatWorker] = []
         self._stats_running = 0
         self._cs_parents: dict[str, bool] = {}
+        self._aliases: dict[str, str] = {}  # job -> alias, in the folder shown
         # the files and the folders of the folder shown, as the rows are made
         self._listed_files: list[str] = []
         self._listed_dirs: list[str] = []
@@ -259,14 +260,33 @@ class FileBrowserModel(QStandardItemModel):
         try:
             # a listing needs no stat of the entries (a DirEntry knows if it is a folder)
             with os.scandir(path) as listing:
-                found = [(e.name, e.is_dir()) for e in listing]
+                found, links = [], []
+                for e in listing:
+                    found.append((e.name, e.is_dir()))
+                    if e.is_symlink():
+                        links.append((e.name, e.path))
         except OSError:
             self.load_finished.emit()
             return
+        # the alias of a RELION job is a link to it in the same folder: one row for the two,
+        # the job with its alias, not the job and the link
+        self._aliases = {}
+        hidden = set()
+        if links:
+            from helicon.lib.gui.job_alias import alias_target
+
+            names = {name for name, _is_dir in found}
+            for name, link in links:
+                job = alias_target(link, Path(path).name)
+                if job is not None and job in names:
+                    self._aliases.setdefault(job, name)
+                    hidden.add(name)
         entries = [
             (name, is_dir)
             for name, is_dir in found
-            if not name.startswith(".") and (is_dir or self._matches_filter(name))
+            if name not in hidden
+            and not name.startswith(".")
+            and (is_dir or self._matches_filter(name))
         ]
         # in the order the list is sorted in, so a long folder needs no sort afterwards
         column, order = self._sort_state
@@ -404,7 +424,12 @@ class FileBrowserModel(QStandardItemModel):
         filled in from a thread later, see :meth:`_start_stats`)."""
         if is_dir is None:
             is_dir = path.is_dir()
-        name_item = QStandardItem(path.name + "/" if is_dir else path.name)
+        alias = self._aliases.get(path.name) if is_dir else None
+        name_item = QStandardItem(
+            (f"{path.name}({alias})" if alias else path.name) + ("/" if is_dir else "")
+        )
+        if alias:
+            name_item.setToolTip(f"{path.name}, alias {alias}")
         name_item.setData(str(path), Qt.ItemDataRole.UserRole)
         (self._listed_dirs if is_dir else self._listed_files).append(str(path))
         self._name_items[str(path)] = name_item

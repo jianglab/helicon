@@ -2,7 +2,7 @@ from pathlib import Path
 
 import shiny
 from shiny import reactive
-from shiny.express import ui, module
+from shiny.express import ui
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,6 @@ __all__ = [
     "file_picker_server",
     "google_analytics",
     "image_gallery",
-    "image_select",
     "launch_shiny_app",
     "range_slider",
     "slider",
@@ -791,47 +790,6 @@ def image_gallery(
         return ui_images
 
 
-@module
-def image_select(
-    input,
-    output,
-    session,
-    label="Select Image(s):",
-    images=None,
-    display_image_labels=True,
-    display_dashed_line=False,
-    image_labels=None,
-    image_links=None,
-    image_size=None,
-    image_border=2,
-    gap=0,
-    justification="center",
-    enable_selection=True,
-    allow_multiple_selection=True,
-    initial_selected_indices=None,
-    style="",
-):
-    @shiny.render.ui
-    def show_image_gallery():
-        return image_gallery(
-            id=session.ns,
-            label=label,
-            images=images,
-            display_image_labels=display_image_labels,
-            display_dashed_line=display_dashed_line,
-            image_labels=image_labels,
-            image_links=image_links,
-            image_size=image_size,
-            initial_selected_indices=initial_selected_indices,
-            enable_selection=enable_selection,
-            allow_multiple_selection=allow_multiple_selection,
-            image_border=image_border,
-            gap=gap,
-            justification=justification,
-            style=style,
-        )
-
-
 # server-side file selection
 def google_analytics(id, tab_input="helicon_tab"):
     """The Google tag (gtag.js) for a page, reporting the page without its query.
@@ -1001,7 +959,13 @@ def _wait_until_serving(url, proc=None, timeout=180.0, interval=0.25):
 
 
 def launch_shiny_app(
-    app_file, env=None, block=True, query_params=None, reload=False, url_callback=None
+    app_file,
+    env=None,
+    block=True,
+    query_params=None,
+    reload=False,
+    url_callback=None,
+    host="127.0.0.1",
 ):
     """Launch a Shiny app with automatic browser opening.
 
@@ -1031,6 +995,11 @@ def launch_shiny_app(
         If given, called with the final app URL (including query params)
         instead of opening the browser.  Used by the file browser to record
         the launched URL for tab reuse.
+    host : str, optional
+        The address the server binds to. Defaults to "127.0.0.1" (this
+        machine only): several tabs offer a server-side file browser, so a
+        wider bind would expose an unauthenticated file-reading service to
+        the network. Pass "0.0.0.0" to serve other machines on purpose.
     """
     import importlib
     import re
@@ -1044,7 +1013,7 @@ def launch_shiny_app(
         "run",
         "--no-dev-mode" if not reload else "--reload",
         "--host",
-        "0.0.0.0",
+        host,
         "--port",
         "0",
     ]
@@ -1119,20 +1088,20 @@ def launch_shiny_app(
     for line in proc.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
-        m = re.search(r"Uvicorn running on http://[\d.]+:(\d+)", line)
-        if m:
-            url = f"http://localhost:{m.group(1)}/"
-            break
-
-    if url:
-        # the browser is opened once the server answers, not when it says it runs
-        _wait_until_serving(url, proc)
-        if query_params:
-            url += "?" + encode_query_params(query_params)
-        if url_callback is not None:
-            url_callback(url)
-        else:
-            _open_browser(url)
+        if url is None:
+            m = re.search(r"Uvicorn running on http://[\d.]+:(\d+)", line)
+            if m:
+                url = f"http://localhost:{m.group(1)}/"
+                # Keep reading the pipe after this. Uvicorn logs every request
+                # and a full 64 KiB pipe blocks the server, so the loop must run
+                # to EOF; stopping here froze the app after enough requests.
+                _wait_until_serving(url, proc)
+                if query_params:
+                    url += "?" + encode_query_params(query_params)
+                if url_callback is not None:
+                    url_callback(url)
+                else:
+                    _open_browser(url)
 
     proc.wait()
 

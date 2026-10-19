@@ -620,6 +620,19 @@ class TestUDCTDenoiseCurveletPluginGPU:
         _, d = parse_param_str("sigma=3")
         assert "gpu" not in d
 
+    def test_a_value_may_contain_an_equals_sign(self):
+        from helicon.lib.util import parse_param_str
+
+        _, d = parse_param_str("rlnMicrographName=/data/a=b.mrc")
+        assert d == {"rlnMicrographName": "/data/a=b.mrc"}
+
+    def test_a_leading_name_still_separates_from_the_pairs(self):
+        from helicon.lib.util import parse_param_str
+
+        name, d = parse_param_str("noEqualsHere:sigma=3")
+        assert name == "noEqualsHere"
+        assert d == {"sigma": 3}
+
     def test_fdct_gpu_rejected(self):
         pytest.importorskip("curvelets")
         from helicon.plugins.images2star.denoisecurvelet import handle
@@ -1025,3 +1038,36 @@ class TestDenoiseLooksCurvepyUpOnce:
         )
         assert len(calls) == 1  # 24 wedges
         assert 0.0 < retained < 100.0
+
+
+class TestBlendTile:
+    """Tiles are accumulated as they arrive, not kept for a final blend pass.
+
+    Holding every tile gave peak memory of the output plus every denoised tile
+    and its weight; the tiled path exists for the volumes where that does not
+    fit.
+    """
+
+    def test_a_tile_at_the_volume_edge_is_cropped(self):
+        from helicon.lib.curvelet import _blend_tile
+
+        output = np.zeros((4, 4, 4))
+        weights = np.zeros((4, 4, 4))
+        tile = np.full((3, 3, 3), 2.0)
+        ones = np.ones((3, 3, 3))
+        _blend_tile(output, weights, tile, ones, slice(2, 5), slice(2, 5), slice(2, 5))
+        assert output[2, 2, 2] == 2.0
+        assert output[2, 2, 1] == 0.0
+        assert output.sum() == 8 * 2.0  # only the 2x2x2 part inside
+        assert weights.sum() == 8
+
+    def test_overlapping_tiles_are_averaged(self):
+        from helicon.lib.curvelet import _blend_tile
+
+        output = np.zeros((2, 2, 2))
+        weights = np.zeros((2, 2, 2))
+        once = np.ones((2, 2, 2))
+        box = (slice(0, 2), slice(0, 2), slice(0, 2))
+        _blend_tile(output, weights, np.full((2, 2, 2), 1.0), once, *box)
+        _blend_tile(output, weights, np.full((2, 2, 2), 3.0), once, *box)
+        assert np.allclose(output / weights, 2.0)

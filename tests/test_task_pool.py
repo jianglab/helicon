@@ -18,16 +18,19 @@ class TestTaskPool:
 
     def test_a_stop_ends_tasks_that_are_running_and_drops_those_waiting(self):
         pool = pools.TaskPool(2)
-        futures = [pool.submit(time.sleep, 60) for _ in range(4)]
-        # wait until the two workers are running
+        # the pool never has more workers than the machine has CPUs (one on a small
+        # CI runner), so ask it how many it has instead of assuming two
+        n = pool._executor._max_workers
+        futures = [pool.submit(time.sleep, 60) for _ in range(n + 2)]
+        # wait until the workers are running
         deadline = time.time() + 60
         while time.time() < deadline:
             running = [p for p in (pool._executor._processes or {}).values()]
-            if len(running) == 2 and sum(f.running() for f in futures) >= 2:
+            if len(running) == n and sum(f.running() for f in futures) >= n:
                 break
             time.sleep(0.05)
         workers = list(pool._executor._processes.values())
-        assert len(workers) == 2 and all(w.is_alive() for w in workers)
+        assert len(workers) == n and all(w.is_alive() for w in workers)
         t0 = time.time()
         pool.stop()
         for w in workers:
@@ -38,9 +41,9 @@ class TestTaskPool:
         # the pool settles the tasks that were waiting a moment later, in a thread of its
         # own (so how soon depends on how busy the machine is): wait for it
         deadline = time.time() + 30
-        while time.time() < deadline and not all(f.done() for f in futures[2:]):
+        while time.time() < deadline and not all(f.done() for f in futures[n:]):
             time.sleep(0.05)
-        assert all(f.cancelled() or f.done() for f in futures[2:])
+        assert all(f.cancelled() or f.done() for f in futures[n:])
 
     def test_the_workers_are_limited_to_their_share_of_the_threads(self):
         import os
@@ -81,3 +84,12 @@ class TestDenovo3dStop:
 
         src = Path(denovo3d_pipeline.__file__).read_text(encoding="utf-8")
         assert "cpu = min(helicon.available_cpu(), max(1, int(n_cpu)))" in src
+
+
+class TestMemoryCap:
+    def test_workers_fit_in_the_free_memory(self):
+        pool = pools.TaskPool(10_000, gb_per_worker=1.0)
+        try:
+            assert 1 <= pool._executor._max_workers < 10_000
+        finally:
+            pool.shutdown()

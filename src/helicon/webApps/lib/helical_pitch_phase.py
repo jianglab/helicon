@@ -950,7 +950,12 @@ def calibrate_period(
             tasks.append(dict(labels=lab, periods=grid, length_scale=length_scale))
     est = _estimate_periods(pairs, tasks)
     slope, intercept = np.polyfit(truth, est, 1)
-    period = (period_raw - intercept) / slope if slope > 0 else period_raw
+    # the estimate follows the truth, so the line is about the diagonal; on data without a repeat it
+    # is nearly flat, and inverting it would send the period to an absurd value (a slope of 1e-15
+    # gave one of 1e17 A and an array of that many periods to scan)
+    if not (np.isfinite(slope) and np.isfinite(intercept) and 0.5 <= slope <= 2.0):
+        slope, intercept = 1.0, 0.0
+    period = (period_raw - intercept) / slope
     return dict(
         period=float(period),
         slope=float(slope),

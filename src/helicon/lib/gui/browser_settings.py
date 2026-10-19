@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from functools import partial
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -76,6 +78,49 @@ def _save_bookmarks(paths: list[str]) -> None:
     QSettings("helicon", "display").setValue("bookmarks", list(paths))
 
 
+def _get_bookmark_names() -> dict[str, str]:
+    """The names that the bookmarks were given: ``{folder: name}``, only for those that have one
+    (a bookmark is called by the name of its folder unless it was renamed)."""
+    raw = QSettings("helicon", "display").value("bookmark_names", "", type=str)
+    try:
+        names = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(names, dict):
+        return {}
+    return {str(k): str(v) for k, v in names.items() if str(v).strip()}
+
+
+def _bookmark_default_name(path: str) -> str:
+    return Path(path).name or str(path)
+
+
+def _bookmark_name(path: str) -> str:
+    """The name a bookmark is shown by: the one it was given, or the name of the folder."""
+    return _get_bookmark_names().get(path) or _bookmark_default_name(path)
+
+
+def _bookmark_text(path: str) -> str:
+    """A bookmark for a menu or a list: the folder, and the name when it has one of its own."""
+    custom = _get_bookmark_names().get(path)
+    return f"{custom}  ({path})" if custom else path
+
+
+def _rename_bookmark(path: str, name: str) -> None:
+    """Give the bookmark of ``path`` a name; an empty name, or that of the folder, takes the
+    name away."""
+    key = _bookmark_key(path)
+    if key not in _get_bookmarks():
+        return
+    names = _get_bookmark_names()
+    name = name.strip()
+    if name and name != _bookmark_default_name(key):
+        names[key] = name
+    else:
+        names.pop(key, None)
+    QSettings("helicon", "display").setValue("bookmark_names", json.dumps(names))
+
+
 def _is_bookmarked(path: str) -> bool:
     return _bookmark_key(path) in _get_bookmarks()
 
@@ -93,6 +138,7 @@ def _remove_bookmark(path: str) -> None:
     key = _bookmark_key(path)
     marks = _get_bookmarks()
     if key in marks:
+        _rename_bookmark(key, "")  # its name goes with it
         _save_bookmarks([p for p in marks if p != key])
 
 
@@ -109,8 +155,9 @@ def _move_bookmark(path: str, offset: int) -> None:
 
 
 def _clear_bookmarks() -> None:
-    """Remove every bookmark."""
+    """Remove every bookmark (and the names they were given)."""
     _save_bookmarks([])
+    QSettings("helicon", "display").setValue("bookmark_names", "")
 
 
 def _confirm_clear_bookmarks(parent) -> bool:
@@ -137,12 +184,17 @@ class _BookmarksDialog(QDialog):
         self.setWindowTitle("Manage Bookmarks")
         self.resize(560, 360)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Drag the bookmarks to put them in order."))
+        layout.addWidget(
+            QLabel(
+                "Drag the bookmarks to put them in order; Rename gives one a name of its own."
+            )
+        )
         self._list = QListWidget()
         self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._list.model().rowsMoved.connect(self._save_order)
         self._list.itemSelectionChanged.connect(self._update_buttons)
+        self._list.itemDoubleClicked.connect(lambda _item: self.rename_selected())
         layout.addWidget(self._list)
 
         buttons = QHBoxLayout()
@@ -150,13 +202,15 @@ class _BookmarksDialog(QDialog):
         self._up.clicked.connect(partial(self.move_selected, -1))
         self._down = QPushButton("Move Down")
         self._down.clicked.connect(partial(self.move_selected, 1))
+        self._rename = QPushButton("Rename…")
+        self._rename.clicked.connect(self.rename_selected)
         self._remove = QPushButton("Remove")
         self._remove.clicked.connect(self.remove_selected)
         self._clear = QPushButton("Clear All")
         self._clear.clicked.connect(self.clear_all)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
-        for b in (self._up, self._down, self._remove, self._clear):
+        for b in (self._up, self._down, self._rename, self._remove, self._clear):
             buttons.addWidget(b)
         buttons.addStretch(1)
         buttons.addWidget(close)
@@ -174,7 +228,9 @@ class _BookmarksDialog(QDialog):
         self._list.blockSignals(True)
         self._list.clear()
         for path in _get_bookmarks():
-            label = path if Path(path).is_dir() else f"{path}  (not available)"
+            label = _bookmark_text(path)
+            if not Path(path).is_dir():
+                label += "  (not available)"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, path)
             self._list.addItem(item)
@@ -192,6 +248,7 @@ class _BookmarksDialog(QDialog):
         n = self._list.count()
         self._up.setEnabled(row > 0)
         self._down.setEnabled(0 <= row < n - 1)
+        self._rename.setEnabled(row >= 0)
         self._remove.setEnabled(row >= 0)
         self._clear.setEnabled(n > 0)
 
@@ -204,6 +261,23 @@ class _BookmarksDialog(QDialog):
         if path is not None:
             _move_bookmark(path, offset)
             self._reload(select=path)
+
+    def rename_selected(self, name: str | None = None) -> None:
+        """Give the selected bookmark a name (asked for, unless it is given)."""
+        path = self._selected()
+        if path is None:
+            return
+        if not isinstance(name, str):
+            name, ok = QInputDialog.getText(
+                self,
+                "Rename Bookmark",
+                "Name (empty for the name of the folder):",
+                text=_bookmark_name(path),
+            )
+            if not ok:
+                return
+        _rename_bookmark(path, name)
+        self._reload(select=path)
 
     def remove_selected(self) -> None:
         path = self._selected()

@@ -113,6 +113,21 @@ def _box_text(shape):
     return f"{nx}\u00b3" if nx == ny == nz else f"{nx} \u00d7 {ny} \u00d7 {nz}"
 
 
+def _counterpart_key(class_numbers, ids, images):
+    """What a counterpart-pair computation is cached on.
+
+    The pairs come from the images, not from the class numbers alone: a second
+    dataset can show the same class numbers, and a cache keyed on those alone
+    hands back the first dataset's pairs. The image sum is the cheap
+    fingerprint of the data the pairs depend on.
+    """
+    return (
+        tuple(sorted(class_numbers)),
+        tuple(int(c) for c in ids),
+        float(sum(np.sum(image) for image in images)),
+    )
+
+
 @module.server
 def abinitio3d_tab_server(input, output, session):
     # the Class2D parameters as read, and as used: with tube ids that hold
@@ -417,6 +432,19 @@ def abinitio3d_tab_server(input, output, session):
             images = [images[i] for i in included]
         else:
             included = display_seq_all
+
+        if not images:
+            ui.modal_show(
+                ui.modal(
+                    "Every class average is blank, or the file has none: "
+                    "there is nothing to show with the blank ones ignored.",
+                    title="No classes to show",
+                    easy_close=True,
+                    footer=None,
+                )
+            )
+            return
+
         image_labels = [f"{i+1}: {abundance()[i]:,d}" for i in included]
         displayed_class_ids.set(included)
         displayed_class_images.set(images)
@@ -567,7 +595,7 @@ def abinitio3d_tab_server(input, output, session):
         ``ids`` and ``images`` are the displayed class ids and images, read by
         the caller: this runs in a worker thread, which cannot read them.
         """
-        key = tuple(sorted(class_numbers))
+        key = _counterpart_key(class_numbers, ids, images)
         if key not in counterpart_cache:
             position = {int(c): i for i, c in enumerate(ids)}
             at = [position[int(c) - 1] for c in class_numbers if int(c) - 1 in position]

@@ -30,6 +30,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "Defaults: sigma=3.0, numScales=3, wedgesPerDir=3, gpu=false, transform=mct"
         "tileSize=0 auto-detects from available memory. "
         "Requires curvelets package. disabled by default",
+        action="append",
         default=None,
     )
 

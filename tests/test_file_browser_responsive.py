@@ -156,6 +156,13 @@ class TestSelection:
             stale, dict(path="x", modes=["slice"], slice_text="x", chimerax=True)
         )
         browser.wait_for_selection()
+        # the answer of the thread arrives as an event: let it be delivered, then look
+        _pump(
+            QApplication.instance(),
+            5,
+            lambda: bool(browser._current_path)
+            and browser._current_path.endswith("t.txt"),
+        )
         assert browser._current_path.endswith("t.txt")
 
     def test_selecting_a_folder_hides_the_buttons_at_once(self, browser, tmp_path):

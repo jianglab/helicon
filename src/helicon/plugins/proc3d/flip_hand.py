@@ -23,6 +23,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="<param>=<val>:...",
         help="flip_hand parameter",
+        action="append",
         default=None,
     )
 

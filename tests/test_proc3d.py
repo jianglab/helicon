@@ -29,6 +29,17 @@ class TestProc3dArgs(object):
         }
         assert expected.issubset(actions)
 
+    def test_repeated_options_keep_each_occurrence_value(self):
+        # Repeated options are a pipeline: each occurrence keeps its own
+        # value, argparse must not collapse them onto the last one.
+        parser = argparse.ArgumentParser()
+        proc3d.add_args(parser)
+        args = parser.parse_args(
+            ["in.mrc", "--flip_hand", "x", "--clip", "new_nx=6", "--flip_hand", "z"]
+        )
+        assert args.flip_hand == ["x", "z"]
+        assert args.clip == ["new_nx=6"]
+
     def test_check_args_sets_default_output_path(self):
         parser = argparse.ArgumentParser()
         proc3d.add_args(parser)
@@ -72,6 +83,16 @@ class TestProc3dArgs(object):
             assert opt in args.all_options
         for opt in ["cpu", "force", "inputMapFile", "outputMapFile", "verbose"]:
             assert opt not in args.all_options
+        # every proc3d plugin option is repeatable (a pipeline step)
+        assert set(args.append_options) == {
+            "apix",
+            "clip",
+            "denoiseCurvelet",
+            "fft_resample",
+            "flip_hand",
+            "helical_sym",
+            "z_moving_average",
+        }
 
 
 class TestProc3dHandlers(object):
@@ -393,7 +414,7 @@ class TestProc3dHandlers(object):
         args = parser.parse_args(
             ["input.mrc", "--denoiseCurvelet", "sigma=0.1:numScales=2"]
         )
-        assert args.denoiseCurvelet == "sigma=0.1:numScales=2"
+        assert args.denoiseCurvelet == ["sigma=0.1:numScales=2"]
 
     def test_denoise_curvelet3d_handler_mad(self):
         pytest.importorskip("curvelets")

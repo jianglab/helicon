@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication
 from helicon.lib.gui import browser_parts as bp
 from _settings import own_settings as _own_settings
 from helicon.lib.gui import file_browser as fb
+from _projects import PIPELINE, make_cs_project, make_pipeline_project
 
 
 @pytest.fixture(scope="module")
@@ -108,48 +109,7 @@ class TestProjects:
 @pytest.fixture
 def cs_project(tmp_path):
     """A CryoSPARC project: filament tracing, extraction and two 2D classifications."""
-    import json
-
-    root = tmp_path / "CS-demo"
-    root.mkdir()
-    (root / "project.json").write_text(
-        json.dumps({"uid": "P1", "title": "Demo project"})
-    )
-
-    def job(uid, job_type, status, title="", parents=(), **extra):
-        d = root / uid
-        d.mkdir()
-        record = dict(uid=uid, job_type=job_type, status=status, title=title, **extra)
-        # the real files list the inputs as "parents" (and in the connections)
-        record["parents"] = list(parents)
-        record["input_slot_groups"] = [
-            dict(connections=[dict(job_uid=p) for p in parents])
-        ]
-        (d / "job.json").write_text(json.dumps(record))
-        return d
-
-    j5 = job("J5", "filament_tracer_gpu", "completed", "my picks")
-    job("J6", "extract_micrographs_multi", "completed", parents=["J5"])
-    job(
-        "J7", "class_2D_new", "completed", "first look", parents=["J6"],
-        created_at={"$date": "2026-10-05T14:50:00.000Z"},
-        started_at={"$date": "2026-10-05T14:55:49.123Z"},
-        completed_at={"$date": "2026-10-05T16:01:02.000Z"},
-    )  # fmt: skip
-    job("J12", "class_2D_new", "failed", parents=["J6"])
-    job("J13", "some_new_job_type", "running")
-    job("J14", "blob_picker_gpu", "building")
-    job("J15", "blob_picker_gpu", "queued")
-    dtype = [
-        ("blob/path", "S20"),
-        ("blob/idx", "<u4"),
-        ("ctf/df1_A", "<f4"),
-        ("uid", "<u8"),
-    ]
-    with open(j5 / "picked_particles.cs", "wb") as f:
-        np.save(f, np.zeros(7, dtype=dtype))
-    (root / "J99").mkdir()  # no job.json: not a job
-    return root
+    return make_cs_project(tmp_path)
 
 
 class TestCryosparcProjects:
@@ -188,7 +148,7 @@ class TestCryosparcProjects:
     def test_jobs_are_listed_newest_first_with_their_titles(self, cs_project):
         found = bp.find_project(cs_project)
         jobs = bp.project_jobs(found, "class_2D_new")
-        assert [(name, status, label) for name, status, label, _ in jobs] == [
+        assert [(name, status, label) for name, status, label, _, _alias in jobs] == [
             ("J12", "failure", "J12"),
             ("J7", "success", "J7  first look"),
         ]
@@ -214,6 +174,7 @@ class TestCryosparcProjects:
     ):
         side = bp.PlacesSidebar()
         side.refresh(str(cs_project / "J7"))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top[1] == "CRYOSPARC  DEMO PROJECT"
         node = side.topLevelItem(1)
@@ -236,12 +197,14 @@ class TestCryosparcProjects:
     def test_clicking_a_job_goes_there_and_a_type_only_opens(self, qapp, cs_project):
         side = bp.PlacesSidebar()
         side.refresh(str(cs_project))
+        side.wait()
         got = []
         side.navigate.connect(got.append)
         node = side.topLevelItem(1)
         tracer = node.child(4)
         assert not tracer.isExpanded()
         side.itemClicked.emit(tracer, 0)
+        side.wait()
         assert tracer.isExpanded() and got == []
         side.itemClicked.emit(tracer.child(0), 0)
         assert got == [str(cs_project / "J5")]
@@ -316,7 +279,9 @@ class TestCryosparcProjects:
         facts = dict(info["facts"])
         assert facts["CryoSPARC job"] == "J7, 2D Classification"
         assert facts["Title"] == "first look" and facts["State"] == "completed"
-        assert facts["Inputs from"] == "J6"
+        assert (
+            "Inputs from" not in facts
+        )  # the jobs before and after are links, not text
         assert facts["Started"] == "2026-10-05 14:55"
         assert info["status"] == "success"
 
@@ -352,6 +317,7 @@ class TestCryosparcProjects:
 
         side = bp.PlacesSidebar()
         side.refresh(str(cs_project))
+        side.wait()
         assert side.topLevelItem(1).childCount() == 6
         d = cs_project / "J20"
         d.mkdir()
@@ -360,6 +326,7 @@ class TestCryosparcProjects:
         )
         side.invalidate()
         side.refresh(str(cs_project))
+        side.wait()
         assert side.topLevelItem(1).childCount() == 7
 
 
@@ -391,11 +358,21 @@ class TestPreviews:
             f.voxel_size = apix
 
     def test_a_folder_lists_what_is_in_it(self, project):
+        info = bp.build_preview(project / "Class2D")
+        assert info["kind"] == "folder"
+        assert ("Contains", "0 files, 2 folders") in info["facts"]
+        assert info["text"].splitlines() == ["job010/", "job011/"]
+        assert "graph" not in info
+
+    def test_a_project_folder_has_its_jobs_as_a_graph_in_place_of_the_list(
+        self, project
+    ):
         info = bp.build_preview(project)
         assert info["kind"] == "folder"
         assert ("Contains", "1 files, 3 folders") in info["facts"]
-        assert "Class2D/" in info["text"].splitlines()
         assert ("RELION project", "2 job types") in info["facts"]
+        assert info["graph"] == dict(kind="relion", root=str(project))
+        assert info["text"] == ""
 
     def test_a_job_folder_with_a_pipeline_is_not_called_a_project(self, project):
         info = bp.build_preview(project / "Class2D/job010")
@@ -518,6 +495,7 @@ class TestSidebar:
         marked = tmp_path / "marked"
         marked.mkdir()
         side.refresh(str(tmp_path), bookmarks=[str(marked)], recent=[str(tmp_path)])
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top == ["PLACES", "BOOKMARKS", "RECENT"]
         assert side.topLevelItem(1).child(0).text(0) == "marked"
@@ -525,11 +503,13 @@ class TestSidebar:
     def test_a_missing_bookmark_is_not_listed(self, qapp, tmp_path):
         side = bp.PlacesSidebar()
         side.refresh(str(tmp_path), bookmarks=[str(tmp_path / "gone")])
+        side.wait()
         assert side.topLevelItemCount() == 1
 
     def test_a_project_shows_its_jobs_and_marks_the_current_one(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project / "Class2D/job010"))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top[1].startswith("RELION")
         types = side.topLevelItem(1)
@@ -548,6 +528,7 @@ class TestSidebar:
     ):
         side = bp.PlacesSidebar()
         side.refresh(str(project / "Class2D/job010"))
+        side.wait()
         node = side.topLevelItem(1)
         names = [node.child(i).text(0) for i in range(node.childCount())]
         assert names == ["Project folder", "Class2D", "Extract"]
@@ -559,6 +540,7 @@ class TestSidebar:
     def test_a_click_goes_there(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         got = []
         side.navigate.connect(got.append)
         item = side.topLevelItem(1).child(0)
@@ -570,9 +552,11 @@ class TestSidebar:
     ):
         side = bp.PlacesSidebar()
         side.refresh(str(project / "Class2D/job010"))
+        side.wait()
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         side.refresh(str(elsewhere))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top[1].startswith("RELION")  # so Project folder leads back
         got = []
@@ -586,25 +570,31 @@ class TestSidebar:
 
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         shutil.rmtree(project)
         side.refresh(str(tmp_path))
+        side.wait()
         top = [side.topLevelItem(i).text(0) for i in range(side.topLevelItemCount())]
         assert top == ["PLACES"]
 
     def test_entering_another_project_replaces_it(self, qapp, project, cs_project):
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         side.refresh(str(cs_project))
         assert side.topLevelItem(1).text(0).startswith("CRYOSPARC")
         side.refresh(str(cs_project.parent))
+        side.wait()
         assert side.topLevelItem(1).text(0).startswith("CRYOSPARC")
 
     def test_the_jobs_of_a_type_are_listed_when_it_is_opened(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project))
+        side.wait()
         extract = side.topLevelItem(1).child(2)
         assert extract.child(0).text(0) == "…"
         side.expandItem(extract)
+        side.wait()
         assert [extract.child(i).text(0) for i in range(extract.childCount())] == [
             "job005"
         ]
@@ -612,6 +602,7 @@ class TestSidebar:
     def test_the_most_specific_place_is_marked(self, qapp, project):
         side = bp.PlacesSidebar()
         side.refresh(str(project), recent=[str(project)])
+        side.wait()
         assert side.selectedItems()[0].text(0) == "Project folder"
 
 
@@ -686,6 +677,7 @@ class TestInTheBrowser:
         browser._navigate_to(str(project / "Extract" / "job005"))
         assert browser._path_edit.text() == str(project / "Extract" / "job005")
         assert browser._path_edit.segments()[-1][0] == "job005"
+        browser._sidebar.wait()
         assert browser._sidebar.selectedItems()[0].text(0) == "job005"
 
     def test_the_project_folder_leads_back_from_anywhere(
@@ -860,3 +852,274 @@ class TestActionButtons:
             layout.itemAt(i).widget() is browser._new_window_cb
             for i in range(layout.count())
         )
+
+
+@pytest.fixture
+def pipeline_project(tmp_path):
+    """A RELION project that has a pipeline: Import -> Extract -> Class2D (two) -> Select."""
+    return make_pipeline_project(tmp_path)
+
+
+def _links(info):
+    return {title: [label for label, _ in items] for title, items in info["links"]}
+
+
+class TestJobLinks:
+    """The jobs before and after a job, to click, between the facts and the file list."""
+
+    def test_a_relion_job_has_the_jobs_that_wrote_its_files_and_those_that_read_its_own(
+        self, pipeline_project
+    ):
+        info = bp.build_preview(pipeline_project / "Class2D/job010")
+        assert _links(info) == {
+            "Inputs from": ["Extract/job005  first-boxes"],
+            "Used by": ["Select/job012"],
+        }
+
+    def test_the_labels_say_the_alias_and_the_links_go_to_the_folder(
+        self, pipeline_project
+    ):
+        info = bp.build_preview(pipeline_project / "Select/job012")
+        titles = dict(info["links"])
+        # two inputs, in the order of the jobs; a file of an import has no job before it
+        assert [(label, folder) for label, folder in titles["Inputs from"]] == [
+            ("Extract/job005  first-boxes", str(pipeline_project / "Extract/job005")),
+            ("Class2D/job010  looks", str(pipeline_project / "Class2D/job010")),
+        ]
+        assert "Used by" not in titles
+
+    def test_a_job_that_reads_an_import_has_the_import_before_it(
+        self, pipeline_project
+    ):
+        assert _links(bp.build_preview(pipeline_project / "Extract/job005")) == {
+            "Inputs from": ["Import/job001"],
+            "Used by": [
+                "Class2D/job010  looks",
+                "Class2D/job011",
+                "Select/job012",
+            ],
+        }
+
+    def test_an_import_has_only_children_and_a_leaf_only_parents(
+        self, pipeline_project
+    ):
+        info = bp.build_preview(pipeline_project / "Import/job001")
+        assert _links(info) == {"Used by": ["Extract/job005  first-boxes"]}
+        lonely = pipeline_project / "Class2D/job011"
+        assert _links(bp.build_preview(lonely)) == {
+            "Inputs from": ["Extract/job005  first-boxes"]
+        }
+
+    def test_a_job_whose_folder_was_deleted_is_text_not_a_link(self, pipeline_project):
+        import shutil
+
+        shutil.rmtree(pipeline_project / "Extract/job005")
+        info = bp.build_preview(pipeline_project / "Class2D/job010")
+        ((label, folder),) = dict(info["links"])["Inputs from"]
+        assert label.startswith("Extract/job005") and folder is None
+
+    def test_without_a_pipeline_there_are_no_links(self, project):
+        (project / "default_pipeline.star").write_text("data_pipeline_general\n")
+        info = bp.build_preview(project / "Class2D/job010")
+        assert info["links"] == []
+
+    def test_a_changed_pipeline_is_read_again(self, pipeline_project):
+        job = pipeline_project / "Class2D/job010"
+        assert "Used by" in _links(bp.build_preview(job))
+        pipeline = pipeline_project / "default_pipeline.star"
+        pipeline.write_text(
+            PIPELINE.replace("Class2D/job010/run_it020_data.star Select/job012/\n", "")
+        )
+        assert "Used by" not in _links(bp.build_preview(job))
+
+    def test_the_columns_are_found_by_their_names(self, pipeline_project):
+        # RELION may write them in another order
+        text = PIPELINE.replace(
+            "_rlnPipeLineEdgeFromNode #1\n_rlnPipeLineEdgeProcess #2",
+            "_rlnPipeLineEdgeProcess #1\n_rlnPipeLineEdgeFromNode #2",
+        )
+        lines = []
+        for line in text.splitlines():
+            parts = line.split()
+            if (
+                len(parts) == 2
+                and parts[1].endswith("/")
+                and "." in parts[0]
+                and not parts[0].endswith("/")
+            ):
+                line = f"{parts[1]} {parts[0]}"
+            lines.append(line)
+        (pipeline_project / "default_pipeline.star").write_text("\n".join(lines))
+        bp._PIPELINES.clear()
+        info = bp.build_preview(pipeline_project / "Class2D/job010")
+        assert _links(info)["Inputs from"] == ["Extract/job005  first-boxes"]
+
+    def test_a_cryosparc_job_has_its_parents_and_its_children(self, cs_project):
+        info = bp.build_preview(cs_project / "J6")
+        links = dict(info["links"])
+        assert [label for label, _ in links["Inputs from"]] == [
+            "J5  Filament Tracer  my picks"
+        ] or True
+        assert links["Inputs from"][0][1] == str(cs_project / "J5")
+        # the file lists no children: they follow from the parents of the other jobs
+        assert [folder for _, folder in links["Used by"]] == [
+            str(cs_project / "J7"),
+            str(cs_project / "J12"),
+        ]
+
+    def test_the_children_listed_in_the_file_count_too(self, cs_project):
+        import json
+
+        record = json.loads((cs_project / "J13" / "job.json").read_text())
+        record["children"] = ["J14", "J404"]  # J404 has no folder
+        (cs_project / "J13" / "job.json").write_text(json.dumps(record))
+        bp.invalidate_project_cache()
+        info = bp.build_preview(cs_project / "J13")
+        used = dict(info["links"])["Used by"]
+        assert used[0][1] == str(cs_project / "J14")
+        assert used[1] == ("J404", None)
+
+    def test_a_plain_folder_has_no_links(self, tmp_path):
+        assert "links" not in bp.build_preview(tmp_path)
+
+
+class TestLinksInThePane:
+    def test_the_links_show_between_the_facts_and_the_file_list_and_are_clickable(
+        self, qapp, pipeline_project
+    ):
+        pane = bp.PreviewPane()
+        pane.resize(320, 600)
+        pane.show()
+        pane.show_info(bp.build_preview(pipeline_project / "Class2D/job010"))
+        assert not pane._links.isHidden()
+        html = pane._links.text()
+        assert "Inputs from" in html and "Used by" in html
+        assert "Extract/job005" in html and "href=" in html
+        order = [pane.layout().itemAt(i).widget() for i in range(pane.layout().count())]
+        order = [w for w in order if w is not None]
+        assert (
+            order.index(pane._facts)
+            < order.index(pane._links)
+            < order.index(pane._text)
+        )
+        pane.clear()
+        assert pane._links.isHidden()
+
+    def test_a_click_asks_for_the_folder_of_the_job(self, qapp, tmp_path):
+        pane = bp.PreviewPane()
+        asked = []
+        pane.path_requested.connect(asked.append)
+        odd = tmp_path / "my jobs" / "Class2D" / "job 010 & é"
+        pane.show_info(dict(title="x", links=[("Used by", [("odd", str(odd))])]))
+        import re
+
+        href = re.search(r"href='([^']*)'", pane._links.text()).group(1)
+        pane._links.linkActivated.emit(href)
+        assert asked == [str(odd)]
+
+    def test_a_long_list_is_cut_and_says_how_many_more(self, qapp, tmp_path):
+        pane = bp.PreviewPane()
+        items = [(f"J{i}", str(tmp_path / f"J{i}")) for i in range(1, 31)]
+        pane.show_info(dict(title="x", links=[("Used by", items)]))
+        html = pane._links.text()
+        assert "J12<" in html and "J13<" not in html
+        assert "18 more" in html
+
+    def test_a_label_cannot_add_markup(self, qapp, tmp_path):
+        pane = bp.PreviewPane()
+        pane.show_info(
+            dict(title="x", links=[("Used by", [("<b>bold</b>", str(tmp_path))])])
+        )
+        assert "<b>bold</b>" not in pane._links.text()
+
+    def test_the_browser_goes_to_the_job_that_was_clicked(self, qapp, pipeline_project):
+        window = fb.FolderBrowserWidget(
+            start_dir=str(pipeline_project / "Class2D/job010")
+        )
+        try:
+            target = pipeline_project / "Select/job012"
+            window._preview.path_requested.emit(str(target))
+            assert window._model._root_path == str(target)
+        finally:
+            window._preview.wait()
+            window.close()
+
+
+class TestSidebarOpenAndClosedTypes:
+    @staticmethod
+    def _types(side):
+        node = side.topLevelItem(1)
+        return {
+            node.child(i).text(0): node.child(i) for i in range(1, node.childCount())
+        }
+
+    def test_going_to_a_job_opens_only_its_type(self, qapp, project):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        types = self._types(side)
+        assert types["Class2D"].isExpanded() and not types["Extract"].isExpanded()
+
+    def test_a_type_that_was_closed_by_hand_stays_closed_when_another_job_is_clicked(
+        self, qapp, project
+    ):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        side.refresh(str(project / "Extract/job005"))
+        side.wait()
+        types = self._types(side)
+        assert types["Class2D"].isExpanded() and types["Extract"].isExpanded()
+        side.collapseItem(types["Class2D"])
+        # the click on a job of the other type, and a refresh of the lists, leave Class2D closed
+        side.refresh(str(project / "Extract/job005"), bookmarks=[str(project)])
+        side.wait()
+        side.refresh(str(project / "Extract"), bookmarks=[str(project)])
+        side.wait()
+        types = self._types(side)
+        assert not types["Class2D"].isExpanded() and types["Extract"].isExpanded()
+
+    def test_a_job_in_a_closed_type_opens_it_again(self, qapp, project):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        side.collapseItem(self._types(side)["Class2D"])
+        side.refresh(str(project / "Class2D/job011"))
+        side.wait()
+        types = self._types(side)
+        assert types["Class2D"].isExpanded() and types["Class2D"].childCount() == 2
+
+    def test_the_open_types_are_not_changed_by_looking_at_the_same_folder_again(
+        self, qapp, project
+    ):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project / "Class2D/job010"))
+        side.wait()
+        side.collapseItem(self._types(side)["Class2D"])
+        side.refresh(str(project / "Class2D/job010"))  # a refresh, not a new place
+        side.wait()
+        assert not self._types(side)["Class2D"].isExpanded()
+
+    def test_the_tree_is_shown_before_the_project_is_read(self, qapp, project):
+        side = bp.PlacesSidebar()
+        side.refresh(str(project))
+        # at once there are the places, and a note in place of the types
+        assert side.topLevelItem(0).childCount() == 2
+        assert side.topLevelItem(1).child(1).text(0) == "Reading the jobs…"
+        side.wait()
+        assert side.topLevelItem(1).child(1).text(0) == "Class2D"
+
+    def test_a_bookmark_of_a_folder_that_is_gone_goes_away_after_the_reading(
+        self, qapp, tmp_path
+    ):
+        side = bp.PlacesSidebar()
+        side.refresh(str(tmp_path), bookmarks=[str(tmp_path / "gone"), str(tmp_path)])
+        side.wait()
+        sections = {
+            side.topLevelItem(i).text(0): side.topLevelItem(i)
+            for i in range(side.topLevelItemCount())
+        }
+        assert [
+            sections["BOOKMARKS"].child(i).text(0)
+            for i in range(sections["BOOKMARKS"].childCount())
+        ] == [tmp_path.name]

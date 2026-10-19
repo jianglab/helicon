@@ -351,6 +351,20 @@ class TestGetClass2dParamsFromFile(object):
             result = compute.get_class2d_params_from_file("test.star")
         assert isinstance(result, pd.DataFrame)
 
+    def test_reads_a_star_file_whose_particle_images_are_not_here(self, tmp_path):
+        # a star file of a public data set, or one given by its url, names stacks that
+        # are not on this computer; only its table is used
+        star = tmp_path / "run_it020_data.star"
+        star.write_text(
+            "data_optics\n\nloop_\n_rlnOpticsGroup\n_rlnImagePixelSize\n1 1.5\n\n"
+            "data_particles\n\nloop_\n_rlnImageName\n_rlnHelicalTubeID\n"
+            "_rlnHelicalTrackLengthAngst\n_rlnClassNumber\n_rlnCoordinateX\n_rlnCoordinateY\n"
+            "000001@Extract/job009/missing_stack.mrcs 1 0.0 3 50.0 100.0\n"
+            "000002@Extract/job009/missing_stack.mrcs 1 30.0 4 80.0 100.0\n"
+        )
+        result = compute.get_class2d_params_from_file(str(star))
+        assert list(result["rlnClassNumber"]) == [3, 4]
+
     def test_accepts_cs_file(self):
         with patch(
             "helicon.webApps.lib.whereismyclass_compute.cs_to_dataframe",
@@ -481,3 +495,143 @@ class TestPlotHistogram(object):
         )
         assert fig is existing_fig
         assert fig.layout.title.text == "Updated"
+
+
+class TestMicrographsFromAUrl:
+    """A star file at <project>/<JobType>/jobNNN/ on a web server has its micrographs below the project."""
+
+    STAR = "https://ftp.example.org/data/EMPIAR/Class2D/job010/run_it020_data.star"
+
+    def test_the_project_is_three_levels_up_as_for_a_local_file(self):
+        assert (
+            compute.get_project_root_url(self.STAR)
+            == "https://ftp.example.org/data/EMPIAR/"
+        )
+
+    def test_a_query_or_a_fragment_is_not_part_of_the_project(self):
+        assert (
+            compute.get_project_root_url(self.STAR + "?download=1#x")
+            == "https://ftp.example.org/data/EMPIAR/"
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "/local/proj/Class2D/job010/run_it020_data.star",  # not an address
+            "file:///proj/Class2D/job010/run_it020_data.star",
+            "https://host/proj/run_it020_data.star",  # not in a job folder
+            "https://host/proj/Class2D/notajob/run_it020_data.star",
+            "https://host/Class2D/job010/classes.mrcs",  # not a star file
+            "",
+        ],
+    )
+    def test_what_is_not_a_star_file_of_a_job_has_no_project(self, url):
+        assert compute.get_project_root_url(url) is None
+
+    def test_a_micrograph_is_below_the_project(self):
+        root = compute.get_project_root_url(self.STAR)
+        assert (
+            compute.micrograph_url(root, "MotionCorr/job003/Tiff/mic 1.mrc")
+            == root + "MotionCorr/job003/Tiff/mic%201.mrc"
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "../secret.mrc",
+            "a/../../secret.mrc",
+            "/etc/passwd",
+            "https://elsewhere.example.org/m.mrc",
+            "C:/m.mrc",
+            "a//b.mrc",
+            "",
+        ],
+    )
+    def test_a_name_that_leaves_the_project_is_refused(self, name):
+        # the names come from a star file, which may be someone else's
+        root = compute.get_project_root_url(self.STAR)
+        assert compute.micrograph_url(root, name) is None
+
+    def test_without_a_project_there_is_no_url(self):
+        assert compute.micrograph_url(None, "MotionCorr/job003/m.mrc") is None
+
+
+class TestDownloadingAMicrograph:
+    @pytest.fixture
+    def server(self, tmp_path):
+        """A web server of a folder, that counts what it was asked for."""
+        import functools
+        import http.server
+        import threading
+
+        (tmp_path / "web").mkdir()
+        asked = []
+
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                asked.append(self.path)
+                super().do_GET()
+
+            def log_message(self, *args):
+                pass
+
+        handler = functools.partial(Handler, directory=str(tmp_path / "web"))
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        yield dict(
+            folder=tmp_path / "web",
+            url=f"http://127.0.0.1:{httpd.server_address[1]}/",
+            asked=asked,
+        )
+        httpd.shutdown()
+
+    @staticmethod
+    def _write(path, size):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"m" * size)
+
+    def test_it_is_downloaded_once_and_kept(self, server, tmp_path):
+        self._write(server["folder"] / "MotionCorr" / "m1.mrc", 5000)
+        url = server["url"] + "MotionCorr/m1.mrc"
+        cache = tmp_path / "cache"
+        first = compute.download_micrograph(url, cache_folder=cache)
+        second = compute.download_micrograph(url, cache_folder=cache)
+        assert first == second and first.read_bytes() == b"m" * 5000
+        assert server["asked"] == ["/MotionCorr/m1.mrc"]
+
+    def test_a_micrograph_that_is_not_there_is_an_error_and_leaves_nothing(
+        self, server, tmp_path
+    ):
+        cache = tmp_path / "cache"
+        with pytest.raises(OSError):
+            compute.download_micrograph(
+                server["url"] + "no/such.mrc", cache_folder=cache
+            )
+        assert list(cache.iterdir()) == []
+
+    def test_the_least_recently_used_go_when_the_room_is_used(self, server, tmp_path):
+        import os
+        import time
+
+        cache = tmp_path / "cache"
+        paths = []
+        for i in range(3):
+            self._write(server["folder"] / f"m{i}.mrc", 4000)
+            paths.append(
+                compute.download_micrograph(
+                    server["url"] + f"m{i}.mrc", cache_folder=cache, max_bytes=9000
+                )
+            )
+            os.utime(paths[-1], (time.time() + i, time.time() + i))
+        # three of 4000 bytes do not fit in 9000: the oldest is gone, the new one is kept
+        assert not paths[0].exists() and paths[1].exists() and paths[2].exists()
+
+    def test_the_one_asked_for_is_kept_even_when_it_alone_is_too_big(
+        self, server, tmp_path
+    ):
+        self._write(server["folder"] / "big.mrc", 4000)
+        kept = compute.download_micrograph(
+            server["url"] + "big.mrc", cache_folder=tmp_path / "cache", max_bytes=10
+        )
+        assert kept.exists()

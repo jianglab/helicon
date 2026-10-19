@@ -24,7 +24,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         metavar="<Angstrom>",
         help="change the pixel size to this value. Adjust defocus and Cs accordingly. disabled by default",
-        default=0,
+        action="append",
+        default=None,
     )
 
 

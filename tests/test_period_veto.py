@@ -1,13 +1,9 @@
 """A class average that does not repeat at half a candidate repeat rules it out."""
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
-from joint_pixel import synthetic as syn  # noqa: E402
+import synthetic_pitch as syn
 
 from helicon.webApps.lib import helical_pitch_phase as ph  # noqa: E402
 

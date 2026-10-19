@@ -157,9 +157,6 @@ class TestHelicalSegmentConsistency(object):
                 )
         return pd.DataFrame(rows)
 
-    @patch("os.getcwd", return_value="/tmp/test_hom")
-    @patch("os.mkdir")
-    @patch("os.chdir")
     @patch("matplotlib.pyplot.figure")
     @patch("matplotlib.pyplot.hist")
     @patch("matplotlib.pyplot.scatter")
@@ -168,10 +165,8 @@ class TestHelicalSegmentConsistency(object):
     @patch("matplotlib.pyplot.close")
     @patch("matplotlib.pyplot.subplots")
     @patch("matplotlib.pyplot.tight_layout")
-    @patch("pathlib.Path.mkdir")
     def test_helical_segment_consistency_minimal_data(
         self,
-        mock_mkdir,
         mock_tight,
         mock_subplots,
         mock_close,
@@ -180,9 +175,8 @@ class TestHelicalSegmentConsistency(object):
         mock_scatter,
         mock_hist,
         mock_figure,
-        mock_chdir,
-        mock_mkdir_os,
-        mock_getcwd,
+        tmp_path,
+        monkeypatch,
     ):
         mock_subplots.side_effect = [
             (MagicMock(), MagicMock()),
@@ -191,13 +185,22 @@ class TestHelicalSegmentConsistency(object):
 
         df = self._make_minimal_dataframe(n_micrographs=2, segments_per_micrograph=30)
 
+        monkeypatch.chdir(tmp_path)
+        cwd = Path.cwd()
         result, stats = HOM_containerC.HelicalSegmentConsistency(
             df,
             verbose=0,
-            input_star_path="some_input_path.star",
+            input_star_path="some/dir/some_input_path.star",
             output_star_path="test_out.star",
         )
 
+        # the analysis must not leave its caller in its figures folder: a
+        # relative output path would then land in it
+        assert Path.cwd() == cwd
+        # and a STAR given with directories in its path still makes its folder
+        # name from the file name alone, beside the working directory (as a
+        # nested one could not be created)
+        assert (tmp_path / "Figs25_HOM_some_input_path").is_dir()
         assert isinstance(result, pd.DataFrame)
         assert isinstance(stats, dict)
         expected_cols = {

@@ -156,6 +156,31 @@ class TestPeriod:
         assert abs(cal - 600.0) < abs(raw - 600.0)
         assert cal == pytest.approx(600.0, rel=0.01)
 
+    def test_data_without_a_repeat_do_not_send_the_calibrated_period_far_away(
+        self, monkeypatch
+    ):
+        # estimates that do not follow the truth give a nearly flat line, whose inverse is absurd:
+        # the raw period stays (on some processors the junk of the CI gave a slope of 1e-15)
+        df = make_params(n_fil=60, period=300.0, seed=4)
+        pairs = ph.prepare_pairs(df)
+        flat = lambda pairs, tasks: [250.0 + 1e-12 * i for i in range(len(tasks))]
+        monkeypatch.setattr(ph, "_estimate_periods", flat)
+        cal = ph.calibrate_period(pairs, 300.0)
+        assert cal["period"] == pytest.approx(300.0)
+        assert cal["slope"] == 1.0 and cal["intercept"] == 0.0 and cal["bias"] == 0.0
+
+    def test_a_calibration_line_about_the_diagonal_is_used(self, monkeypatch):
+        df = make_params(n_fil=60, period=300.0, seed=4)
+        pairs = ph.prepare_pairs(df)
+        # the estimates are 2% low (est = 0.98 truth, the truths being 294 times the factors), so
+        # the raw estimate 294 means a true period of 300
+        factors = (0.95, 1.0, 1.05)
+        low = lambda pairs, tasks: [0.98 * 294.0 * f for f in factors for _ in range(2)]
+        monkeypatch.setattr(ph, "_estimate_periods", low)
+        cal = ph.calibrate_period(pairs, 294.0, factors=factors, seeds=2)
+        assert cal["slope"] == pytest.approx(0.98)
+        assert cal["period"] == pytest.approx(300.0)
+
     def test_filaments_shorter_than_half_the_period_are_flagged(self):
         # no pair is further apart than 290 A, so 600 A and 300 A fit alike
         df = make_params(n_fil=400, period=600.0, n_seg=30, step=10.0, seed=1)

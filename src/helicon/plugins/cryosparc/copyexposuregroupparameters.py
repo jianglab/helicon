@@ -27,7 +27,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="source_cs_file=<filename>|source_job_id=<Jxx>[:beam_tilt=<0|1>:trefoil=<0|1>:tetrafoil=<0|1>:cs=<0|1>:anisomag=<0|1>]",
         help="copy exposure group parameters (beam tilt, trefoil, tetrafoil, cs, anisotropic distortion, etc.). disabled by default",
-        default="",
+        action="append",
+        default=None,
     )
 
 

@@ -811,6 +811,7 @@ class Proc3dDialog(QDialog):
                 self._source_apix,
                 [name for name, _ in stack],
                 args,
+                [name for name, spec in self._specs.items() if spec["append"]],
             )
         except Exception as exc:
             self._set_status(f"Transform failed: {exc}", error=True)

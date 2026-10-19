@@ -174,6 +174,8 @@ from helicon.lib.gui.viewer import (  # noqa: E402
     _position_default,
     _render_qimage_vector,
     _reset_view,
+    _place_dock_by_default,
+    _restore_dock_geometry_now,
     _restore_geometry,
     _save_geometry,
     _save_qimage,
@@ -1548,6 +1550,10 @@ def main(args: argparse.Namespace) -> None:
     widget.display_requested.connect(_on_display_requested)
     widget.setWindowFlags(Qt.WindowType.Window)
     widget.setWindowTitle("Helicon - Files")
+    # put it where it was (or in the middle of the screen) before it is shown: shown first and moved
+    # after, it appears small and black and then jumps to its size and place
+    if not _restore_dock_geometry_now(widget):
+        _place_dock_by_default(widget)
     widget.show()
     # keep the window answering: launching a web app (an HTTP request, a new process) runs
     # in a thread, and napari, which takes seconds to import, is imported in the background

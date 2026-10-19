@@ -21,6 +21,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         metavar="<param>=<val>:...",
         help="apix parameter",
+        action="append",
         default=None,
     )
 

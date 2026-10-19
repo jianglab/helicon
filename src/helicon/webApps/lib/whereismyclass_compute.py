@@ -27,6 +27,129 @@ def get_project_root_dir(param_file):
         return None
 
 
+def get_project_root_url(star_url):
+    """The url of the RELION project folder that a star file given by its url is in.
+
+    A RELION star file is ``<project>/<JobType>/jobNNN/<name>.star``, so the project is three
+    levels up, as for a local file (:func:`get_project_root_dir`). The micrographs of the project
+    are then at ``<project>/<rlnMicrographName>``, as in the deposition of EMPIAR-10940.
+
+    Parameters
+    ----------
+    star_url : str
+        The url of the star file.
+
+    Returns
+    -------
+    str or None
+        The url of the project folder, with a ``/`` at the end; None when ``star_url`` is not an
+        http(s) or ftp address of a star file in a job folder.
+    """
+    import re
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(str(star_url).strip())
+    if parsed.scheme not in ("http", "https", "ftp") or not parsed.netloc:
+        return None
+    parts = parsed.path.split("/")
+    if len(parts) < 4 or not parts[-1].endswith(".star"):
+        return None
+    if not re.fullmatch(r"job\d+", parts[-2]) or not parts[-3]:
+        return None
+    root = "/".join(parts[:-3]) + "/"
+    return urlunparse(parsed._replace(path=root, params="", query="", fragment=""))
+
+
+def micrograph_url(project_url, micrograph_name):
+    """The url of a micrograph of a project given by its url, or None if the name is not safe.
+
+    The name comes from the star file, which is not ours: only a plain relative path inside the
+    project is used (no ``..``, no address of its own, no drive), so that a star file cannot make the
+    app fetch from another place.
+    """
+    from urllib.parse import quote
+
+    if not project_url:
+        return None
+    name = str(micrograph_name).strip().replace("\\", "/")
+    parts = name.split("/")
+    if not name or name.startswith("/") or "://" in name or ":" in parts[0]:
+        return None
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return project_url + "/".join(quote(part) for part in parts)
+
+
+# the micrographs fetched from a url are kept for the next visit, and the oldest go when they
+# take more than this much room (a micrograph of a K3 or Falcon camera is 30 to 300 MB)
+MICROGRAPH_CACHE_BYTES = 2 * 1024**3
+
+
+def download_micrograph(url, cache_folder=None, max_bytes=MICROGRAPH_CACHE_BYTES):
+    """The micrograph at ``url`` as a local file, downloaded the first time it is asked for.
+
+    Parameters
+    ----------
+    url : str
+        The address of the micrograph (:func:`micrograph_url`).
+    cache_folder : path-like, optional
+        Where the downloaded micrographs are kept; the cache folder of Helicon by default.
+    max_bytes : int, optional
+        The room the kept micrographs may take; the ones least recently used are deleted to
+        stay under it (the one asked for is always kept).
+
+    Returns
+    -------
+    pathlib.Path
+        The local file.
+
+    Raises
+    ------
+    OSError
+        If the download fails.
+    """
+    import hashlib
+    import os
+    import time
+
+    folder = pathlib.Path(
+        cache_folder
+        or pathlib.Path(helicon.cache_dir) / "whereIsMyClass" / "micrographs"
+    )
+    folder.mkdir(parents=True, exist_ok=True)
+    suffix = ".mrcs" if url.lower().endswith(".mrcs") else ".mrc"
+    target = folder / (hashlib.sha1(url.encode()).hexdigest()[:24] + suffix)
+    if target.exists() and target.stat().st_size > 0:
+        os.utime(target)  # used now: the last to be deleted
+    else:
+        helicon.download_file_from_url(url, target_file_name=str(target))
+    _prune_downloads(folder, keep=target, max_bytes=max_bytes)
+    return target
+
+
+def _prune_downloads(folder, keep, max_bytes):
+    """Delete the least recently used files of ``folder`` until they take at most ``max_bytes``."""
+    files = []
+    for f in folder.iterdir():
+        try:
+            if f.is_file() and not f.name.startswith("."):
+                info = f.stat()
+                files.append((info.st_mtime, info.st_size, f))
+        except OSError:
+            continue
+    total = sum(size for _, size, _ in files)
+    for _, size, f in sorted(files, key=lambda x: x[0]):
+        if total <= max_bytes:
+            break
+        if f == keep:
+            continue
+        try:
+            f.unlink()
+            total -= size
+        except OSError:
+            pass
+
+
 def get_micrograph(filename, target_apix, low_pass_angstrom, high_pass_angstrom):
     from skimage.transform import resize_local_mean
 
@@ -230,7 +353,9 @@ def get_class_file_stem(param_file):
 
 def get_class2d_params_from_file(params_file):
     if params_file.endswith(".star"):
-        params = _star_to_dataframe(params_file)
+        # only the table is used here: the particle images need not be on this computer
+        # (a star file of a public data set, given by its url, never has them)
+        params = _star_to_dataframe(params_file, ignore_bad_particle_path=2)
     elif params_file.endswith(".cs"):
         params = cs_to_dataframe(params_file)
     else:

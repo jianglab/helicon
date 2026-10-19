@@ -38,15 +38,18 @@ class _WimcServer:
 
 
 @pytest.fixture(scope="module")
-def wimc_app():
+def wimc_app(tmp_path_factory):
     """Serve the unified Helicon app the same way the CLI does.
 
     Mirrors ``launch_shiny_app`` (src/helicon/lib/shiny.py): spawns
     ``shiny run --no-dev-mode --host 127.0.0.1 --port 0 helicon.webApps.app:app``
     and parses the random port from the server output.
     """
+    cache_folder = tmp_path_factory.mktemp("wimc_cache")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    # the micrographs that the app downloads are kept in its cache folder: not the one of the person
+    env["HELICON_CACHE_DIR"] = str(cache_folder)
 
     proc = subprocess.Popen(
         [
@@ -242,3 +245,103 @@ def test_select_helix_renders_micrograph_and_class_choices(
 
     plot = page.locator("#where_is_my_class-wimc_display_micrograph .js-plotly-plot")
     expect(plot).to_have_count(1, timeout=30000)
+
+
+@pytest.fixture(scope="module")
+def wimc_web(wimc_data):
+    """The synthetic project on a web server (the layout of a deposition: <project>/Class2D/job123/...)."""
+    import functools
+    import http.server
+
+    asked = []
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            asked.append(self.path)
+            super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    root = Path(wimc_data["star"]).parents[2]
+    handler = functools.partial(Handler, directory=str(root))
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield dict(url=f"http://127.0.0.1:{httpd.server_address[1]}", asked=asked)
+    httpd.shutdown()
+
+
+def _open_wimc_url(page, server, star_url):
+    query = "tab=WhereIsMyClass&input_mode=url&url_star=" + urllib.parse.quote(
+        star_url, safe=""
+    )
+    page.goto(server.base_url + "?" + query, timeout=60000)
+    controller.InputRadioButtons(
+        page, "where_is_my_class-wimc_input_mode"
+    ).expect_selected("url", timeout=30000)
+    controller.InputText(page, "where_is_my_class-wimc_url_star").expect_value(
+        star_url, timeout=30000
+    )
+
+
+def _select_first_helix(table):
+    row = table.loc_body.locator("tr[data-index='0']")
+    checkbox = row.locator("input[type='checkbox']")
+    if checkbox.count():
+        checkbox.check()
+    else:
+        row.click()
+
+
+def test_a_star_file_given_by_url_has_its_micrograph_downloaded(
+    page: Page, wimc_app, wimc_web
+):
+    star_url = wimc_web["url"] + "/Class2D/job123/run_it020_data.star"
+    _open_wimc_url(page, wimc_app, star_url)
+    controller.InputTaskButton(page, "where_is_my_class-wimc_run").click(timeout=30000)
+    table = controller.OutputDataFrame(page, "where_is_my_class-wimc_helices_dataframe")
+    table.expect_nrow(2, timeout=60000)
+
+    _select_first_helix(table)
+
+    # the micrograph is fetched from <project>/<its name in the star file>, and drawn
+    plot = page.locator("#where_is_my_class-wimc_display_micrograph .js-plotly-plot")
+    expect(plot).to_have_count(1, timeout=60000)
+    assert "/Micrographs/mic.mrc" in wimc_web["asked"]
+    # titled by its name in the star file, not by the name of the file that holds the download
+    expect(plot.locator(".gtitle")).to_have_text("mic.mrc")
+    # and the classes of the helix are offered, as for a local file
+    classes = controller.InputCheckboxGroup(
+        page, "where_is_my_class-wimc_marked_helices_classes"
+    )
+    classes.expect_choices(["1", "2"], timeout=30000)
+
+
+def test_with_the_download_off_the_micrograph_is_not_fetched(
+    page: Page, wimc_app, wimc_web
+):
+    star_url = wimc_web["url"] + "/Class2D/job123/run_it020_data.star"
+    _open_wimc_url(page, wimc_app, star_url)
+    controller.InputTaskButton(page, "where_is_my_class-wimc_run").click(timeout=30000)
+    table = controller.OutputDataFrame(page, "where_is_my_class-wimc_helices_dataframe")
+    table.expect_nrow(2, timeout=60000)
+    page.get_by_role("tab", name="Parameters").click()
+    controller.InputCheckbox(page, "where_is_my_class-wimc_download_micrographs").set(
+        False
+    )
+    before = wimc_web["asked"].count("/Micrographs/mic.mrc")
+
+    _select_first_helix(table)
+
+    classes = controller.InputCheckboxGroup(
+        page, "where_is_my_class-wimc_marked_helices_classes"
+    )
+    classes.expect_choices(["1", "2"], timeout=30000)
+    page.wait_for_timeout(3000)
+    assert wimc_web["asked"].count("/Micrographs/mic.mrc") == before
+    assert (
+        page.locator(
+            "#where_is_my_class-wimc_display_micrograph .js-plotly-plot"
+        ).count()
+        == 0
+    )

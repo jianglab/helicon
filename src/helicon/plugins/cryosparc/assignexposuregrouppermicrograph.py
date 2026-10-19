@@ -25,7 +25,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         type=bool,
         metavar="<0|1>",
         help="assign images to exposure groups, one group per micrograph. disabled by default",
-        default=0,
+        action="append",
+        default=None,
     )
 
 

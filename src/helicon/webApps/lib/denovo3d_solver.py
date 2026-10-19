@@ -1652,7 +1652,9 @@ def build_A_data_matrix(
                 b_pid_tmp[:row_count_tmp],
             )
 
-    hsym_max = max(1, int(np.ceil(reconstruct_length_3d_pixel + nz) / 2 / rise_pixel))
+    hsym_max = max(
+        1, int(np.ceil((reconstruct_length_3d_pixel + nz) / (2 * rise_pixel)))
+    )
     hsyms = range(-hsym_max, hsym_max + 1)
     csyms = range(csym)
     from itertools import product, combinations

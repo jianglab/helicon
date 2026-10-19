@@ -99,7 +99,7 @@ def install_kind() -> str:
 def update_checkout(tag: str) -> str:
     """Bring the git checkout to the release ``tag``; returns what was done."""
     root = Path(__file__).resolve().parents[3]
-    if _run(["git", "status", "--porcelain", "--untracked-files=no"], root).strip():
+    if _run(["git", "status", "--porcelain", "--untracked-files=all"], root).strip():
         raise HeliconError(
             f"{root} has uncommitted changes; commit or stash them, then update"
         )

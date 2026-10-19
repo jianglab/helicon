@@ -11,6 +11,7 @@ BOOKMARK_DEFAULTS = {
     "server_star": ("wimc_server_star", ""),
     "ignore_blank": ("wimc_ignore_blank", True),
     "sort_abundance": ("wimc_sort_abundance", True),
+    "download_micrographs": ("wimc_download_micrographs", True),
     "rise": ("wimc_rise", 4.75),
     "target_apix": ("wimc_target_apix", 5),
     "low_pass": ("wimc_low_pass_angstrom", 20),

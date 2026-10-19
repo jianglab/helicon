@@ -1,0 +1,17 @@
+name: Ask for a feature
+description: Something that Helicon could do and does not
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: The task or the question, not only the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+    validations:
+      required: false
