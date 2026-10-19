@@ -987,6 +987,33 @@ def _find_micrograph(name: str, star: Path) -> Path | None:
     return None
 
 
+def micrograph_of_table(mic: str, star: str | Path, max_size: int = MICROGRAPH_PIXELS):
+    """The picture of a micrograph named in a star file and the step it is binned by, as
+    :func:`_micrograph_picture`; None if it is not found or cannot be read."""
+    path = _find_micrograph(mic, Path(star))
+    if path is None:
+        return None
+    try:
+        return _micrograph_picture(path, max_size)
+    except Exception:
+        logger.debug("cannot read the micrograph %s", path, exc_info=True)
+        return None
+
+
+def plain_ground(filaments, max_size: int = MICROGRAPH_PIXELS):
+    """A plain grey picture as large as the positions reach, for when the micrograph is not
+    found, and the step it is binned by, as :func:`_micrograph_picture`."""
+    import numpy as np
+
+    width = max((float(np.max(x)) for x, _y in filaments if len(x)), default=1.0)
+    height = max((float(np.max(y)) for _x, y in filaments if len(y)), default=1.0)
+    reach = max(width, height, 1.0) * 1.05
+    step = max(1, int(np.ceil(reach / max_size)))
+    w = int(width * 1.05 / step) + 1
+    h = int(height * 1.05 / step) + 1
+    return np.full((h, w), 70, np.uint8), step
+
+
 def busiest_micrograph(star: str | Path) -> dict | None:
     """The micrograph of a table of helical segments with the most filaments, with the segments of the
     table on it, and how many of its filaments are fragmented (have segments missing).
@@ -1032,21 +1059,10 @@ def busiest_micrograph(star: str | Path) -> dict | None:
     columns = [np.array(by_tube[t], dtype=float) for t in order]
     filaments = [(c[:, 0], c[:, 1]) for c in columns]
 
-    path = _find_micrograph(mic, star)
-    picture = None
-    if path is not None:
-        try:
-            picture = _micrograph_picture(path)
-        except Exception:
-            logger.debug("cannot read the micrograph %s", path, exc_info=True)
+    picture = micrograph_of_table(mic, star)
     note = ""
     if picture is None:
-        # the positions alone, on a plain ground as large as they reach
-        reach = max(max(float(x.max()), float(y.max())) for x, y in filaments) * 1.05
-        step = max(1, int(np.ceil(reach / MICROGRAPH_PIXELS)))
-        w = int(max(float(x.max()) for x, _y in filaments) * 1.05 / step) + 1
-        h = int(max(float(y.max()) for _x, y in filaments) * 1.05 / step) + 1
-        picture = (np.full((h, w), 70, np.uint8), step)
+        picture = plain_ground(filaments)
         note = " (micrograph not found: the positions alone)"
     image = _draw_segments(picture[0], filaments, picture[1])
 
@@ -1070,6 +1086,86 @@ def busiest_micrograph(star: str | Path) -> dict | None:
         panels=[_panel("Micrograph with the most filaments", image, caption)],
         facts=[("Filaments", f"{total:,} in {n_mics:,} micrographs")],
     )
+
+
+# ── the particles of each micrograph of a table of particles ────────────────
+
+# the columns a table of particles needs for its particles to be shown on the micrographs
+COORDINATE_COLUMNS = ("rlnMicrographName", "rlnCoordinateX", "rlnCoordinateY")
+
+
+def has_particle_coordinates(path: str | Path) -> bool:
+    """If the particle table of a RELION star file has the micrograph and the position of each
+    particle (any table of particles: of an extraction, a selection, a classification...)."""
+    names = _particle_header(Path(path))
+    return all(name in names for name in COORDINATE_COLUMNS)
+
+
+def particles_by_micrograph(star: str | Path) -> dict[str, dict]:
+    """The positions of the particles of a RELION star file, by micrograph.
+
+    It reads all of the table once, so it is meant to run in a thread.
+
+    Returns
+    -------
+    dict
+        ``{micrograph: {"x": array, "y": array, "tube": array or None}}`` in the order the
+        micrographs come in the table: the coordinates in pixels of the micrograph and, for
+        helical segments (``rlnHelicalTubeID``), a number for the filament of each segment.
+        Empty if the table has no positions.
+    """
+    from array import array
+
+    import numpy as np
+
+    star = Path(star)
+    names = _particle_header(star)
+    if not all(name in names for name in COORDINATE_COLUMNS):
+        return {}
+    helical = "rlnHelicalTubeID" in names
+    wanted = list(COORDINATE_COLUMNS) + (["rlnHelicalTubeID"] if helical else [])
+    found: dict[str, tuple] = {}
+    codes: dict[str, int] = {}  # a number for each filament id: compact, and any text will do
+    for row in _particle_rows(star, wanted):
+        try:
+            x, y = float(row[1]), float(row[2])
+        except ValueError:
+            continue
+        columns = found.get(row[0])
+        if columns is None:
+            found[row[0]] = columns = (array("d"), array("d"), array("l"))
+        columns[0].append(x)
+        columns[1].append(y)
+        if helical:
+            code = codes.get(row[3])
+            if code is None:
+                codes[row[3]] = code = len(codes)
+            columns[2].append(code)
+    return {
+        mic: dict(
+            x=np.array(xs, dtype=float),
+            y=np.array(ys, dtype=float),
+            tube=np.array(tubes, dtype=int) if helical else None,
+        )
+        for mic, (xs, ys, tubes) in found.items()
+    }
+
+
+def particle_groups(particles: dict) -> list[tuple]:
+    """The positions of the particles of a micrograph (an entry of :func:`particles_by_micrograph`)
+    as ``[(x, y), ...]``: one group for each filament, or one group of all the particles."""
+    import numpy as np
+
+    x, y, tube = particles["x"], particles["y"], particles.get("tube")
+    if tube is None:
+        return [(x, y)] if len(x) else []
+    return [(x[tube == t], y[tube == t]) for t in np.unique(tube)]
+
+
+def draw_particles(picture, step: int, particles: dict):
+    """A picture of a micrograph (binned by ``step``) in colour with a dot at each particle, one
+    colour to each filament of helical segments."""
+    return _draw_segments(picture, particle_groups(particles), step)
 
 
 # ── RELION ───────────────────────────────────────────────────────────────────

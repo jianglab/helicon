@@ -1893,6 +1893,102 @@ class TestTheMicrographWithTheMostFilaments:
         assert "4 in 2 micrographs" in pane._facts.text()
 
 
+def _single_particle_table(path):
+    """A table of particles of an extraction: mic_a has three particles, mic_b one."""
+    rows = [
+        ["MotionCorr/job002/mic_a.mrc", 50, 40, "000001@Extract/job005/a.mrcs"],
+        ["MotionCorr/job002/mic_a.mrc", 150, 100, "000002@Extract/job005/a.mrcs"],
+        ["MotionCorr/job002/mic_a.mrc", 250, 160, "000003@Extract/job005/a.mrcs"],
+        ["MotionCorr/job002/mic_b.mrc", 60, 60, "000001@Extract/job005/b.mrcs"],
+    ]
+    columns = ["rlnMicrographName", "rlnCoordinateX", "rlnCoordinateY", "rlnImageName"]
+    _star_file(
+        path,
+        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n" + _loop("particles", columns, rows),
+    )
+
+
+class TestTheParticlesOfEachMicrograph:
+    def test_any_table_with_positions_has_them(self, relion):
+        _single_particle_table(relion / "Extract/job005/particles.star")
+        assert jo.has_particle_coordinates(relion / "Extract/job005/particles.star")
+        job = relion / "Refine3D" / "job014"
+        job.mkdir(parents=True)
+        _make_refine(job)
+        assert not jo.has_particle_coordinates(job / "run_model.star")
+
+    def test_the_particles_by_micrograph(self, relion):
+        star = relion / "Extract/job005/particles.star"
+        _single_particle_table(star)
+        found = jo.particles_by_micrograph(star)
+        assert list(found) == ["MotionCorr/job002/mic_a.mrc", "MotionCorr/job002/mic_b.mrc"]
+        mic_a = found["MotionCorr/job002/mic_a.mrc"]
+        assert mic_a["x"].tolist() == [50, 150, 250]
+        assert mic_a["y"].tolist() == [40, 100, 160]
+        assert mic_a["tube"] is None
+        assert len(jo.particle_groups(mic_a)) == 1
+
+    def test_the_segments_by_filament(self, relion):
+        job = relion / "Class2D" / "job010"
+        _helical_table(job)
+        found = jo.particles_by_micrograph(job / "run_it025_data.star")
+        mic_a = found["MotionCorr/job002/mic_a.mrc"]
+        assert len(mic_a["x"]) == 17
+        groups = jo.particle_groups(mic_a)
+        assert [len(x) for x, _y in groups] == [8, 5, 4]
+
+    def test_the_particles_are_drawn_on_the_micrograph(self, relion):
+        star = relion / "Extract/job005/particles.star"
+        _single_particle_table(star)
+        _mrc(relion / "MotionCorr/job002/mic_a.mrc", np.zeros((200, 300)))
+        picture = jo.micrograph_of_table("MotionCorr/job002/mic_a.mrc", star)
+        assert picture is not None and picture[1] == 1
+        mic_a = jo.particles_by_micrograph(star)["MotionCorr/job002/mic_a.mrc"]
+        image = jo.draw_particles(*picture, mic_a)
+        assert image.shape == (200, 300, 3)
+        assert len(set(image[40, 50])) > 1
+        assert len(set(image[5, 5])) == 1
+        assert jo.micrograph_of_table("MotionCorr/job002/mic_b.mrc", star) is None
+
+    def test_the_preview_has_a_button_for_the_micrographs(self, qapp, relion):
+        star = relion / "Extract/job005/particles.star"
+        _single_particle_table(star)
+        info = bp.build_preview(star)
+        assert info["micrographs"] == str(star)
+        pane = bp.PreviewPane()
+        pane.show()
+        pane.show_info(info)
+        assert pane._micrographs.isVisible()
+        pane.show_info(bp.build_preview(relion / "Extract/job005"))
+        assert not pane._micrographs.isVisible()
+
+    def test_the_window_lists_the_micrographs_and_shows_one(self, qapp, relion):
+        from helicon.lib.gui.micrograph_viewer import MicrographViewer
+
+        star = relion / "Extract/job005/particles.star"
+        _single_particle_table(star)
+        _mrc(relion / "MotionCorr/job002/mic_a.mrc", np.zeros((200, 300)))
+        window = MicrographViewer(star)
+        window.show()
+        for _ in range(3):
+            window.wait()
+            qapp.processEvents()
+        assert window.micrographs() == [
+            "MotionCorr/job002/mic_a.mrc",
+            "MotionCorr/job002/mic_b.mrc",
+        ]
+        assert "4 particles in 2 micrographs" in window._summary.text()
+        assert window._picture._pixmap is not None
+        assert window._caption.text() == "3 particles"
+        window.select("MotionCorr/job002/mic_b.mrc")
+        for _ in range(3):
+            window.wait()
+            qapp.processEvents()
+        assert window._caption.text().startswith("1 particle\n")
+        assert "Micrograph not found" in window._caption.text()
+        window.close()
+
+
 class TestCountsOnly:
     def test_a_job_with_numbers_but_no_pictures_shows_the_facts_and_no_picture_area(
         self, qapp, relion

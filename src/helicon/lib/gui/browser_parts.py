@@ -966,6 +966,11 @@ def _preview_star(path: Path, out: dict) -> None:
     if pixel:
         out["facts"].append(("Pixel size", pixel))
     out["text"] = _star_header(path)
+    from .job_outcome import has_particle_coordinates
+
+    if has_particle_coordinates(path):
+        # a button opens the micrographs of the table, each with its particles on it
+        out["micrographs"] = str(path)
     if path.name.endswith("_data.star"):
         from .job_outcome import busiest_micrograph, is_particle_table
 
@@ -1781,6 +1786,15 @@ class PreviewPane(QWidget):
         self._links.setObjectName("previewLinks")
         self._links.setOpenExternalLinks(False)
         self._links.linkActivated.connect(self._on_link)
+        # a table of particles: the micrographs, each with its particles on it, in a window
+        self._micrographs = QToolButton()
+        self._micrographs.setText("View particles on micrographs…")
+        self._micrographs.setToolTip(
+            "List the micrographs of this table and show the particles on the one selected"
+        )
+        self._micrographs.clicked.connect(self.open_micrographs_window)
+        self._micrographs_star: str | None = None
+        self._micrograph_windows: dict = {}
         # the graph of the jobs of a project, made when a project folder is shown
         self._graph_box: QWidget | None = None
         self._graph_view = None
@@ -1800,10 +1814,12 @@ class PreviewPane(QWidget):
             self._title,
             self._picture,
             self._facts,
+            self._micrographs,
             self._links,
             self._note,
         ):
             layout.addWidget(widget)
+        layout.setAlignment(self._micrographs, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self._text, 1)
         # the room left when there is no text goes to the bottom, not between the parts
         layout.addStretch(0)
@@ -1822,6 +1838,8 @@ class PreviewPane(QWidget):
         self._accent = colors.get("accent", self._accent)
         self._theme_colors = dict(colors)
         self._apply_graph_theme()
+        for window in self._micrograph_windows.values():
+            window.set_theme(colors)
         self._note.setStyleSheet(f"color: {colors['muted']};")
         self._picture.setStyleSheet(f"background: {colors['alt']}; border-radius: 4px;")
         self._text.setStyleSheet(
@@ -1835,6 +1853,8 @@ class PreviewPane(QWidget):
         self._facts.setText("")
         self._links.setText("")
         self._links.hide()
+        self._micrographs_star = None
+        self._micrographs.hide()
         if self._graph_box is not None:
             self._graph_box.hide()
         if self._outcome_scroll is not None:
@@ -1904,6 +1924,8 @@ class PreviewPane(QWidget):
         self._title.setText(info.get("title", ""))
         self._set_facts(info.get("facts", []))
         self._show_links(info.get("links", []))
+        self._micrographs_star = info.get("micrographs")
+        self._micrographs.setVisible(self._micrographs_star is not None)
         self._show_graph(info.get("graph"))
         self._show_outcome(info.get("outcome"))
         image = info.get("image")
@@ -2102,6 +2124,27 @@ class PreviewPane(QWidget):
             window.view.set_graph(graph)
         else:
             window.view.load(self._graph_info["kind"], self._graph_info["root"])
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def open_micrographs_window(self) -> None:
+        """Show the micrographs of the table of particles in the preview, in a window of its own:
+        one window for each table, brought to the front when it is open."""
+        star = self._micrographs_star
+        if star is None:
+            return
+        from .micrograph_viewer import MicrographViewer
+
+        window = self._micrograph_windows.get(star)
+        if window is None:
+            window = MicrographViewer(star, self.window())
+            window.destroyed.connect(
+                lambda _=None, s=star: self._micrograph_windows.pop(s, None)
+            )
+            if self._theme_colors:
+                window.set_theme(self._theme_colors)
+            self._micrograph_windows[star] = window
         window.show()
         window.raise_()
         window.activateWindow()
