@@ -966,6 +966,17 @@ def _preview_star(path: Path, out: dict) -> None:
     if pixel:
         out["facts"].append(("Pixel size", pixel))
     out["text"] = _star_header(path)
+    if path.name.endswith("_data.star"):
+        from .job_outcome import busiest_micrograph, is_particle_table
+
+        if is_particle_table(path):
+            # the micrograph with the most filaments comes later: it needs all of the table
+            out["outcome"] = dict(
+                title="Filaments",
+                panels=[],
+                facts=[],
+                refine=lambda: busiest_micrograph(path),
+            )
 
 
 # ── widgets ───────────────────────────────────────────────────────────────────
@@ -1882,6 +1893,11 @@ class PreviewPane(QWidget):
         if serial != self._serial or not outcome:
             return  # another path was chosen meanwhile, or it could not be counted
         self._set_facts(self._base_facts + list(outcome.get("facts", [])))
+        if outcome.get("panels") and (
+            self._outcome_scroll is None or self._outcome_scroll.isHidden()
+        ):
+            # pictures that only the second, slow reading makes (a table of particles)
+            self._show_outcome(outcome)
 
     def show_info(self, info: dict) -> None:
         """Show a preview made by :func:`build_preview`."""

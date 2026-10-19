@@ -1803,6 +1803,96 @@ class TestInThePreview:
         subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def _helical_table(job, name="run_it025_data.star", track=True):
+    """A Class2D table of segments: mic_a has three filaments (the second with two segments
+    missing), mic_b has one; the segments are 30 Å apart, 10 pixels on the micrograph."""
+    rows = []
+
+    def filament(mic, tube, y, steps):
+        for i in steps:
+            row = [mic, tube, 50 + 10 * i, y, f"{i:06d}@Extract/job005/x.mrcs"]
+            rows.append(row + ([f"{30.0 * i:.6f}"] if track else []))
+
+    filament("MotionCorr/job002/mic_a.mrc", 1, 40, range(8))
+    filament("MotionCorr/job002/mic_a.mrc", 2, 100, [0, 1, 2, 5, 6])
+    filament("MotionCorr/job002/mic_a.mrc", 3, 160, range(4))
+    filament("MotionCorr/job002/mic_b.mrc", 1, 40, range(12))
+    columns = [
+        "rlnMicrographName",
+        "rlnHelicalTubeID",
+        "rlnCoordinateX",
+        "rlnCoordinateY",
+        "rlnImageName",
+    ] + (["rlnHelicalTrackLengthAngst"] if track else [])
+    _star_file(
+        job / name,
+        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n" + _loop("particles", columns, rows),
+    )
+
+
+class TestTheMicrographWithTheMostFilaments:
+    def test_the_tables_of_classifications_and_refinements(self, tmp_path):
+        assert jo.is_particle_table(tmp_path / "Class2D/job010/run_it025_data.star")
+        assert jo.is_particle_table(tmp_path / "Class3D/job011/run_ct5_it025_data.star")
+        assert jo.is_particle_table(tmp_path / "Refine3D/job012/run_data.star")
+        assert not jo.is_particle_table(tmp_path / "Class2D/job010/run_it025_model.star")
+        assert not jo.is_particle_table(tmp_path / "Extract/job005/run_data.star")
+
+    def test_fragmentation_counts_the_filaments_with_gaps(self):
+        fragmented, n, spacing, missing = jo.filament_fragmentation(
+            [[0, 30, 60, 90], [0, 30, 120, 150], [60], [0, 60, 30]]
+        )
+        assert (fragmented, n, spacing, missing) == (1, 4, 30.0, 2)
+        assert jo.filament_fragmentation([[5.0], [7.0]])[2] is None
+
+    def test_the_micrograph_is_shown_with_its_segments(self, relion):
+        job = relion / "Class2D" / "job010"
+        _helical_table(job)
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        _mrc(relion / "MotionCorr/job002/mic_a.mrc", np.zeros((200, 300)))
+        outcome = jo.busiest_micrograph(job / "run_it025_data.star")
+        panel = outcome["panels"][0]
+        assert panel["title"] == "Micrograph with the most filaments"
+        assert panel["image"].shape == (200, 300, 3)
+        # a coloured dot at a segment, the grey micrograph elsewhere
+        assert len(set(panel["image"][40, 50])) > 1
+        assert len(set(panel["image"][5, 5])) == 1
+        first, second = panel["caption"].split("\n")
+        assert first == "mic_a.mrc: 3 filaments, 17 segments"
+        assert second.startswith("Fragmented: 1 of 3 filaments (33%) have gaps, 2")
+        assert ("Filaments", "4 in 2 micrographs") in outcome["facts"]
+
+    def test_without_the_micrograph_the_positions_alone(self, relion):
+        job = relion / "Refine3D" / "job012"
+        _helical_table(job, "run_data.star", track=False)
+        outcome = jo.busiest_micrograph(job / "run_data.star")
+        caption = outcome["panels"][0]["caption"]
+        assert "micrograph not found" in caption
+        assert caption.endswith("Fragmentation unknown: no rlnHelicalTrackLengthAngst")
+
+    def test_a_table_without_filaments_has_none(self, relion):
+        job = relion / "Refine3D" / "job014"
+        job.mkdir(parents=True)
+        _make_refine(job)
+        assert jo.busiest_micrograph(job / "run_data.star") is None
+
+    def test_the_preview_of_the_table_shows_it_after_the_second_reading(
+        self, qapp, relion
+    ):
+        job = relion / "Class2D" / "job010"
+        _helical_table(job)
+        info = bp.build_preview(job / "run_it025_data.star")
+        assert info["text"]  # the columns of the table, at once
+        pane = bp.PreviewPane()
+        pane.show()
+        pane.show_info(info)
+        assert pane._outcome_scroll is None or pane._outcome_scroll.isHidden()
+        pane._on_refined(pane._serial, info["outcome"]["refine"]())
+        assert not pane._outcome_scroll.isHidden()
+        assert len(pane._outcome_panels) == 1
+        assert "4 in 2 micrographs" in pane._facts.text()
+
+
 class TestCountsOnly:
     def test_a_job_with_numbers_but_no_pictures_shows_the_facts_and_no_picture_area(
         self, qapp, relion

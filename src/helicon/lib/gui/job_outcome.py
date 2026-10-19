@@ -772,6 +772,306 @@ def _particle_angles(path: Path, cap: int = VIEW_PARTICLES):
     )
 
 
+# ── the micrograph with the most filaments of a table of particles ───────────
+
+# the particle tables whose preview shows the micrograph with the most filaments, with the segments on it
+PARTICLE_TABLE = re.compile(r"run(?:_ct\d+)?(?:_it\d+)?_data\.star")
+PARTICLE_JOBS = ("Class2D", "Class3D", "Refine3D")
+# the longest side of the picture of the micrograph
+MICROGRAPH_PIXELS = 512
+# two segments of a filament further apart than this many times the spacing of the segments have
+# segments missing between them: the filament is fragmented
+GAP = 1.5
+_FILAMENT_COLORS = [
+    (255, 99, 71),
+    (65, 200, 255),
+    (255, 215, 0),
+    (120, 230, 120),
+    (238, 130, 238),
+    (255, 160, 40),
+    (0, 240, 200),
+    (255, 105, 180),
+]
+
+
+def is_particle_table(path: str | Path) -> bool:
+    """If ``path`` is the table of particles of a RELION Class2D, Class3D or Refine3D job
+    (``Class2D/job010/run_it025_data.star``, ``Refine3D/job012/run_data.star``)."""
+    path = Path(path)
+    return (
+        PARTICLE_TABLE.fullmatch(path.name) is not None
+        and path.parent.parent.name in PARTICLE_JOBS
+    )
+
+
+def _particle_header(path: Path) -> list[str]:
+    """The column names of the particle table of a RELION star file; ``[]`` if there is none."""
+    names: list[str] = []
+    in_particles = False
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                text = line.strip()
+                if text.startswith("data_"):
+                    in_particles = text in ("data_particles", "data_images", "data_")
+                    names = []
+                elif in_particles and text.startswith("_"):
+                    names.append(text.split()[0].lstrip("_"))
+                elif in_particles and names and text and not text.startswith("#"):
+                    return names
+    except OSError:
+        pass
+    return []
+
+
+def _particle_rows(path: Path, wanted: list[str], contains: str | None = None):
+    """The rows of the particle table of a RELION star file, each a tuple of the text of the
+    columns ``wanted``; nothing if the table or a column is not there.
+
+    With ``contains``, the lines without that text are passed over before they are split: to pick
+    the rows of one micrograph out of a large table quickly.
+    """
+    names = _particle_header(path)
+    if not names or any(name not in names for name in wanted):
+        return
+    index = [names.index(name) for name in wanted]
+    in_particles, in_rows = False, False
+    with open(path, errors="replace", buffering=1 << 20) as f:
+        for line in f:
+            if in_rows:
+                if contains is not None and contains not in line:
+                    if line.lstrip().startswith("data_"):
+                        return
+                    continue
+                parts = line.split()
+                if not parts or parts[0].startswith("#"):
+                    continue
+                if parts[0].startswith("data_"):
+                    return
+                try:
+                    yield tuple(parts[i] for i in index)
+                except IndexError:
+                    continue
+                continue
+            text = line.strip()
+            if text.startswith("data_"):
+                in_particles = text in ("data_particles", "data_images", "data_")
+            elif in_particles and text and not text.startswith(("_", "#", "loop_")):
+                in_rows = True
+                parts = text.split()
+                if (contains is None or contains in line) and len(parts) > max(index):
+                    yield tuple(parts[i] for i in index)
+
+
+def _filaments_per_micrograph(path: Path):
+    """``(micrograph, its filaments, its segments, micrographs, filaments)``: the micrograph with
+    the most filaments (the most segments of those that tie), and the totals of the table; None if
+    the table has no filaments."""
+    tubes: dict[str, set] = {}
+    segments: dict[str, int] = {}
+    for mic, tube in _particle_rows(path, ["rlnMicrographName", "rlnHelicalTubeID"]):
+        found = tubes.get(mic)
+        if found is None:
+            tubes[mic] = found = set()
+            segments[mic] = 0
+        found.add(tube)
+        segments[mic] += 1
+    if not tubes:
+        return None
+    best = max(tubes, key=lambda m: (len(tubes[m]), segments[m]))
+    total = sum(len(t) for t in tubes.values())
+    return best, len(tubes[best]), segments[best], len(tubes), total
+
+
+def filament_fragmentation(track_lengths) -> tuple[int, int, float | None, int]:
+    """How many filaments have segments missing between their first and their last one.
+
+    Parameters
+    ----------
+    track_lengths : list of array-like
+        For each filament, the ``rlnHelicalTrackLengthAngst`` of its segments.
+
+    Returns
+    -------
+    tuple
+        ``(fragmented, filaments, spacing, missing)``: the filaments with a gap wider than
+        :data:`GAP` times the spacing of the segments (the smallest distance between two
+        neighbours, Å; None when no filament has two segments), and the segments missing in the
+        gaps. A filament of one segment is not counted as fragmented: what it lost is not known.
+    """
+    import numpy as np
+
+    steps = [np.diff(np.sort(np.asarray(t, dtype=float))) for t in track_lengths]
+    positive = [s[s > 1e-3] for s in steps]
+    found = np.concatenate(positive) if positive else np.empty(0)
+    if not found.size:
+        return 0, len(steps), None, 0
+    spacing = float(found.min())
+    fragmented, missing = 0, 0
+    for s in positive:
+        gaps = s[s > GAP * spacing]
+        if gaps.size:
+            fragmented += 1
+            missing += int(np.sum(np.round(gaps / spacing) - 1))
+    return fragmented, len(steps), spacing, missing
+
+
+def _micrograph_picture(path: Path, max_size: int = MICROGRAPH_PIXELS):
+    """A micrograph binned by whole steps (the mean of each block, not one pixel of it: a filament is
+    seen in that, not in a pixel of noise) to at most ``max_size`` pixels a side, as grey levels, and
+    the step; None if it cannot be read."""
+    import mrcfile
+    import numpy as np
+
+    from .browser_parts import thumbnail_array
+
+    with mrcfile.mmap(path, mode="r", permissive=True) as mrc:
+        data = mrc.data
+        if data is None:
+            return None
+        if data.ndim == 3:
+            data = data[0]
+        ny, nx = data.shape
+        step = max(1, int(np.ceil(max(nx, ny) / max_size)))
+        h, w = ny // step, nx // step
+        if h < 1 or w < 1:
+            return None
+        binned = np.empty((h, w), dtype=np.float32)
+        chunk = max(1, 256 // step)  # rows of the binned picture read at a time
+        for y in range(0, h, chunk):
+            stop = min(y + chunk, h)
+            block = np.asarray(data[y * step : stop * step, : w * step], np.float32)
+            binned[y:stop] = block.reshape(stop - y, step, w, step).mean(axis=(1, 3))
+    return thumbnail_array(binned, max_size), step
+
+
+def _draw_segments(picture, filaments, step: int):
+    """The picture in colour with a dot at each segment, one colour to each filament.
+
+    ``filaments`` is ``[(x, y), ...]``, the coordinates of the segments of each filament in pixels
+    of the micrograph."""
+    import numpy as np
+
+    rgb = np.repeat(picture[:, :, None], 3, axis=2)
+    h, w = picture.shape
+    radius = max(2, round(max(h, w) / 170))
+    dy, dx = np.mgrid[-radius : radius + 1, -radius : radius + 1]
+    disk = dy**2 + dx**2 <= radius**2
+    ring = disk & (dy**2 + dx**2 > (radius - 1.2) ** 2)
+    for i, (xs, ys) in enumerate(filaments):
+        color = np.array(_FILAMENT_COLORS[i % len(_FILAMENT_COLORS)], np.uint8)
+        for x, y in zip(np.asarray(xs) / step, np.asarray(ys) / step):
+            cx, cy = int(round(x)), int(round(y))
+            y0, y1 = max(cy - radius, 0), min(cy + radius + 1, h)
+            x0, x1 = max(cx - radius, 0), min(cx + radius + 1, w)
+            if y0 >= y1 or x0 >= x1:
+                continue
+            sy = slice(y0 - cy + radius, y1 - cy + radius)
+            sx = slice(x0 - cx + radius, x1 - cx + radius)
+            patch = rgb[y0:y1, x0:x1]
+            patch[ring[sy, sx]] = 0  # a dark rim: a dot is seen on a light area too
+            patch[disk[sy, sx] & ~ring[sy, sx]] = color
+    return rgb
+
+
+def _find_micrograph(name: str, star: Path) -> Path | None:
+    """The file of a micrograph named in a star file: from the project folder, or the folder of the job."""
+    from .browser_parts import find_project_root
+
+    if Path(name).is_absolute():
+        return Path(name) if Path(name).is_file() else None
+    roots = [find_project_root(star), star.parent.parent.parent, star.parent]
+    for root in roots:
+        if root is not None and (root / name).is_file():
+            return root / name
+    return None
+
+
+def busiest_micrograph(star: str | Path) -> dict | None:
+    """The micrograph of a table of helical segments with the most filaments, with the segments of the
+    table on it, and how many of its filaments are fragmented (have segments missing).
+
+    It reads all of the table twice (the filaments of each micrograph, then the rows of one), so it
+    is meant to run in a thread. None when the table has no filaments (``rlnHelicalTubeID``).
+
+    Returns
+    -------
+    dict or None
+        ``title``, ``panels`` (one picture) and ``facts``, as :func:`build_outcome`.
+    """
+    import numpy as np
+
+    star = Path(star)
+    try:
+        found = _filaments_per_micrograph(star)
+        if found is None:
+            return None
+        mic, n_filaments, n_segments, n_mics, total = found
+        wanted = [
+            "rlnMicrographName",
+            "rlnHelicalTubeID",
+            "rlnCoordinateX",
+            "rlnCoordinateY",
+        ]
+        has_track = "rlnHelicalTrackLengthAngst" in _particle_header(star)
+        if has_track:
+            wanted.append("rlnHelicalTrackLengthAngst")
+        by_tube: dict[str, list] = {}
+        for row in _particle_rows(star, wanted, contains=mic):
+            if row[0] == mic:
+                by_tube.setdefault(row[1], []).append(row[2:])
+    except (OSError, ValueError):
+        logger.debug("cannot read the filaments of %s", star, exc_info=True)
+        return None
+    if not by_tube:
+        return None
+    try:
+        order = sorted(by_tube, key=lambda t: int(float(t)))
+    except ValueError:
+        order = sorted(by_tube)
+    columns = [np.array(by_tube[t], dtype=float) for t in order]
+    filaments = [(c[:, 0], c[:, 1]) for c in columns]
+
+    path = _find_micrograph(mic, star)
+    picture = None
+    if path is not None:
+        try:
+            picture = _micrograph_picture(path)
+        except Exception:
+            logger.debug("cannot read the micrograph %s", path, exc_info=True)
+    note = ""
+    if picture is None:
+        # the positions alone, on a plain ground as large as they reach
+        reach = max(max(float(x.max()), float(y.max())) for x, y in filaments) * 1.05
+        step = max(1, int(np.ceil(reach / MICROGRAPH_PIXELS)))
+        w = int(max(float(x.max()) for x, _y in filaments) * 1.05 / step) + 1
+        h = int(max(float(y.max()) for _x, y in filaments) * 1.05 / step) + 1
+        picture = (np.full((h, w), 70, np.uint8), step)
+        note = " (micrograph not found: the positions alone)"
+    image = _draw_segments(picture[0], filaments, picture[1])
+
+    caption = f"{Path(mic).name}: {n_filaments} filaments, {n_segments:,} segments{note}"
+    if has_track:
+        fragmented, counted, spacing, missing = filament_fragmentation(
+            [c[:, 2] for c in columns]
+        )
+        if spacing is None:
+            caption += "\nFragmentation unknown: no filament has two segments"
+        else:
+            caption += (
+                f"\nFragmented: {fragmented} of {counted} filaments "
+                f"({fragmented / counted:.0%}) have gaps, {missing:,} segments missing "
+                f"(spacing {spacing:.1f} Å)"
+            )
+    else:
+        caption += "\nFragmentation unknown: no rlnHelicalTrackLengthAngst"
+    return dict(
+        title="Filaments",
+        panels=[_panel("Micrograph with the most filaments", image, caption)],
+        facts=[("Filaments", f"{total:,} in {n_mics:,} micrographs")],
+    )
+
+
 # ── RELION ───────────────────────────────────────────────────────────────────
 
 
