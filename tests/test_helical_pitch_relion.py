@@ -97,13 +97,14 @@ class _FakeRun:
     """Stands in for subprocess.run: records commands, writes the map."""
 
     def __init__(self, fail_mpi=False):
-        self.commands, self.fail_mpi = [], fail_mpi
+        self.commands, self.cwds, self.fail_mpi = [], [], fail_mpi
 
     def __call__(self, command, **kw):
         import mrcfile
         from types import SimpleNamespace
 
         self.commands.append(command)
+        self.cwds.append(kw.get("cwd"))
         if self.fail_mpi and "-n" in command:
             return SimpleNamespace(returncode=1, stdout="", stderr="mpi broke")
         out = command[command.index("--o") + 1]
@@ -513,3 +514,39 @@ class TestFusedReconstruct:
         out = relion.reconstruct(seg, str(tmp_path))
         (command,) = fake.commands
         assert "--fused_extract" not in command and out["fused"] is False
+
+
+class TestVirtualParticles:
+    """A modified RELION cuts the images from the micrographs, by their own paths."""
+
+    def _run(self, tmp_path, monkeypatch, work_dir):
+        import starfile
+
+        fake = _FakeRun()
+        monkeypatch.setattr(relion.subprocess, "run", fake)
+        monkeypatch.setattr(relion, "find_relion_reconstruct", lambda: "/r/rr")
+        monkeypatch.setattr(relion, "find_relion_reconstruct_mpi", lambda: None)
+        seg = _segments(tmp_path)
+        seg["rlnMicrographName"] = "MotionCorr/m1.mrc"
+        relion.reconstruct(seg, str(tmp_path), work_dir=work_dir)
+        written = starfile.read(str(Path(work_dir) / "segments.star"))["particles"]
+        return fake, written
+
+    def test_the_micrograph_paths_start_from_the_project_directory(
+        self, tmp_path, monkeypatch
+    ):
+        fake, written = self._run(tmp_path, monkeypatch, tmp_path / "w")
+        assert written["rlnMicrographName"].iloc[0] == str(
+            tmp_path / "MotionCorr/m1.mrc"
+        )
+
+    def test_relion_runs_in_the_project_directory(self, tmp_path, monkeypatch):
+        fake, _ = self._run(tmp_path, monkeypatch, tmp_path / "w")
+        assert fake.cwds == [str(tmp_path)]
+
+    def test_a_relative_work_dir_is_still_found_from_there(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake, _ = self._run(tmp_path, monkeypatch, "w")
+        (command,) = fake.commands
+        assert Path(command[command.index("--i") + 1]).is_absolute()
+        assert Path(command[command.index("--o") + 1]).is_absolute()

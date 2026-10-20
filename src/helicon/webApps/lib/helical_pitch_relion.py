@@ -302,7 +302,8 @@ def reconstruct(
         and the optics table in ``attrs["optics"]`` -- what
         ``helical_pitch_phase.select_segments`` returns.
     project_dir : str
-        The directory the image paths in ``rlnImageName`` start from.
+        The directory the image paths in ``rlnImageName`` (and the micrograph
+        paths in ``rlnMicrographName``) start from. RELION is run in it.
     cpu : int, optional
         CPUs to use: MPI processes (and threads in each) for
         ``relion_reconstruct_mpi``, threads for ``relion_reconstruct``.
@@ -383,16 +384,25 @@ def reconstruct(
             settings,
         )
         parts = turn_to_horizontal(parts)
-    elif not first.exists():
-        raise FileNotFoundError(
-            f"{first} does not exist: set the RELION project directory to the one "
-            "the image paths in the star file start from"
-        )
+    else:
+        if not first.exists():
+            raise FileNotFoundError(
+                f"{first} does not exist: set the RELION project directory to the one "
+                "the image paths in the star file start from"
+            )
+        # virtual particles (a modified RELION) are cut from their micrographs
+        if "rlnMicrographName" in parts:
+            root = Path(project_dir).expanduser()
+            parts["rlnMicrographName"] = [
+                str(m if Path(m).is_absolute() else root / m)
+                for m in parts["rlnMicrographName"]
+            ]
     # only RELION's own columns; the helicon ones would only draw warnings
     parts = parts[[c for c in parts.columns if c.startswith("rln")]]
     optics = segments.attrs.get("optics")
     own_folder = not work_dir
-    folder = Path(work_dir or tempfile.mkdtemp(prefix="helicon_relion_"))
+    # absolute: RELION is run in the project directory
+    folder = Path(work_dir or tempfile.mkdtemp(prefix="helicon_relion_")).resolve()
     try:
         return _reconstruct_in(
             folder,
@@ -405,6 +415,7 @@ def reconstruct(
             extra_args,
             own_folder,
             fused,
+            project_dir,
         )
     finally:
         if own_folder:  # a temporary folder of ours: nothing is read from it later
@@ -412,9 +423,23 @@ def reconstruct(
 
 
 def _reconstruct_in(
-    folder, parts, segments, optics, exe, cpu, csym, extra_args, own_folder, fused=None
+    folder,
+    parts,
+    segments,
+    optics,
+    exe,
+    cpu,
+    csym,
+    extra_args,
+    own_folder,
+    fused=None,
+    project_dir=None,
 ):
-    """The body of :func:`reconstruct`, writing into ``folder``."""
+    """The body of :func:`reconstruct`, writing into ``folder``.
+
+    RELION is run in ``project_dir``, so that the relative paths it reads itself
+    (the micrographs of virtual particles) start from there.
+    """
     import mrcfile
     import starfile
 
@@ -457,14 +482,16 @@ def _reconstruct_in(
                 + ["--j", str(threads)]
             )
             mpi = ranks
-    run = subprocess.run(command, capture_output=True, text=True)
+    cwd = Path(project_dir).expanduser() if project_dir else None
+    cwd = str(cwd) if cwd is not None and cwd.is_dir() else None
+    run = subprocess.run(command, capture_output=True, text=True, cwd=cwd)
     if mpi and (run.returncode or not out.exists()):
         logger.warning(
             "relion_reconstruct_mpi failed, using relion_reconstruct: %s",
             (run.stdout + run.stderr)[-1000:],
         )
         command, mpi = threaded(), 0
-        run = subprocess.run(command, capture_output=True, text=True)
+        run = subprocess.run(command, capture_output=True, text=True, cwd=cwd)
     if run.returncode or not out.exists():
         raise RuntimeError(
             f"{Path(command[0]).name} failed:\n"
