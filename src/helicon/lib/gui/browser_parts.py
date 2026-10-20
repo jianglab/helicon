@@ -995,7 +995,17 @@ def _preview_star(path: Path, out: dict) -> None:
         out["facts"].append(("Pixel size", pixel))
     out["text"] = _star_header(path)
     _add_micrographs(path, out)
-    if path.name.endswith("_data.star"):
+    from .job_outcome import example_micrograph, is_micrograph_table
+
+    if is_micrograph_table(path):
+        # reading the micrograph takes a while: the table is shown first
+        out["outcome"] = dict(
+            title="Micrographs",
+            panels=[],
+            facts=[],
+            refine=lambda: example_micrograph(path),
+        )
+    elif path.name.endswith("_data.star"):
         from .job_outcome import busiest_micrograph, is_particle_table
 
         if is_particle_table(path):

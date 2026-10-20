@@ -2000,6 +2000,91 @@ class TestTheParticlesOfEachMicrograph:
         window.close()
 
 
+def _micrograph_table(path):
+    """A table of micrographs of a CTF estimation: mic_a, then mic_b."""
+    columns = [
+        "rlnMicrographName",
+        "rlnOpticsGroup",
+        "rlnDefocusU",
+        "rlnDefocusV",
+        "rlnCtfMaxResolution",
+    ]
+    rows = [
+        ["MotionCorr/job002/mic_a.mrc", 1, 15000, 17000, 3.456],
+        ["MotionCorr/job002/mic_b.mrc", 1, 20000, 20000, 4.0],
+    ]
+    _star_file(
+        path,
+        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n_rlnMicrographPixelSize #2\n1 1.0\n"
+        + _loop("micrographs", columns, rows),
+    )
+
+
+class TestAnExampleMicrograph:
+    def test_the_tables_of_micrographs(self, relion):
+        star = relion / "CtfFind/job003/micrographs_ctf.star"
+        _micrograph_table(star)
+        assert jo.is_micrograph_table(star)
+        # a table of particles names the micrograph of each particle: not a table of micrographs
+        _single_particle_table(relion / "Extract/job005/particles.star")
+        assert not jo.is_micrograph_table(relion / "Extract/job005/particles.star")
+        # a listing of a picking job names micrographs in another block
+        _pick_job(relion)
+        assert not jo.is_micrograph_table(relion / "ManualPick/job004/manualpick.star")
+
+    def test_a_table_of_one_block_without_a_name(self, tmp_path):
+        star = tmp_path / "mics.star"
+        _star_file(star, _loop("", ["rlnMicrographName"], [["mic_a.mrc"]]))
+        _mrc(tmp_path / "mic_a.mrc", np.zeros((100, 150)))
+        assert jo.is_micrograph_table(star)
+        outcome = jo.example_micrograph(star)
+        assert outcome["panels"][0]["image"].shape == (100, 150)
+        assert outcome["panels"][0]["caption"] == "mic_a.mrc"
+
+    def test_the_first_micrograph_is_shown_with_its_ctf(self, relion):
+        star = relion / "CtfFind/job003/micrographs_ctf.star"
+        _micrograph_table(star)
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        _mrc(relion / "MotionCorr/job002/mic_a.mrc", np.zeros((1200, 900)))
+        outcome = jo.example_micrograph(star)
+        panel = outcome["panels"][0]
+        assert panel["title"] == "Example micrograph"
+        # binned by whole steps to no more than 512 pixels a side
+        assert panel["image"].shape == (400, 300)
+        assert panel["caption"] == (
+            "mic_a.mrc, defocus 1.60 µm, CTF fit to 3.46 Å, binned by 3"
+        )
+
+    def test_a_micrograph_not_found_is_said_in_the_facts(self, relion):
+        star = relion / "CtfFind/job003/micrographs_ctf.star"
+        _micrograph_table(star)
+        outcome = jo.example_micrograph(star)
+        assert outcome["panels"] == []
+        assert outcome["facts"] == [("Example micrograph", "mic_a.mrc not found")]
+
+    def test_the_preview_of_the_table_shows_it_after_the_second_reading(
+        self, qapp, relion
+    ):
+        star = relion / "CtfFind/job003/micrographs_ctf.star"
+        _micrograph_table(star)
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        _mrc(relion / "MotionCorr/job002/mic_a.mrc", np.zeros((200, 300)))
+        info = bp.build_preview(star)
+        assert info["text"]  # the columns of the table, at once
+        pane = bp.PreviewPane()
+        pane.show()
+        pane.show_info(info)
+        assert pane._outcome_scroll is None or pane._outcome_scroll.isHidden()
+        pane._on_refined(pane._serial, info["outcome"]["refine"]())
+        assert not pane._outcome_scroll.isHidden()
+        assert len(pane._outcome_panels) == 1
+
+    def test_a_table_of_particles_has_no_example_micrograph(self, relion):
+        star = relion / "Extract/job005/particles.star"
+        _single_particle_table(star)
+        assert "outcome" not in bp.build_preview(star)
+
+
 def _pick_job(relion, kind="ManualPick", options="", general="", tube=False):
     """A picking job: mic_a has four picks (two filaments, by their start and end, in start-end
     mode), mic_b has none; the coordinate files are under Movies/ of the job, as RELION writes them.

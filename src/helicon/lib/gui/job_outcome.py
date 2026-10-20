@@ -1395,6 +1395,98 @@ def micrograph_pixel_size(mic: str, star: str | Path) -> float | None:
     return apix if apix > 0 else None
 
 
+# ── an example micrograph of a table of micrographs ──────────────────────────
+
+# the data blocks that may hold a table of micrographs, the first found
+MICROGRAPH_BLOCKS = ("micrographs", "")
+
+
+def _first_row(path: Path, block: str) -> dict[str, str]:
+    """The first row of the loop of a data block of a star file, by column name; ``{}`` if none."""
+    names: list[str] = []
+    inside = False
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                text = line.strip()
+                if text.startswith("data_"):
+                    if inside:
+                        break
+                    inside = text == f"data_{block}"
+                elif inside and text.startswith("_"):
+                    names.append(text.split()[0].lstrip("_"))
+                elif inside and names and text and not text.startswith("#"):
+                    return dict(zip(names, text.split()))
+    except OSError:
+        pass
+    return {}
+
+
+def is_micrograph_table(path: str | Path) -> bool:
+    """If a star file lists micrographs, one to a row, as ``micrographs.star`` of an import,
+    ``corrected_micrographs.star`` of a motion correction or ``micrographs_ctf.star`` of a CTF
+    estimation do; a table of particles, which names the micrograph of each, is not one.
+    """
+    for block in MICROGRAPH_BLOCKS:
+        names = _loop_columns(Path(path), block)
+        if names:
+            return (
+                "rlnMicrographName" in names
+                and "rlnImageName" not in names
+                and "rlnCoordinateX" not in names
+            )
+    return False
+
+
+def example_micrograph(star: str | Path) -> dict | None:
+    """The first micrograph of a table of micrographs, as a picture, with its defocus and the
+    resolution of its CTF fit when the table has them.
+
+    It reads the micrograph (binned as :func:`_micrograph_picture`), so it is meant to run in a
+    thread. None when the table has no micrographs.
+
+    Returns
+    -------
+    dict or None
+        ``title``, ``panels`` (one picture, none if the micrograph is not found or cannot be
+        read) and ``facts``, as :func:`build_outcome`.
+    """
+    star = Path(star)
+    row: dict[str, str] = {}
+    for block in MICROGRAPH_BLOCKS:
+        row = _first_row(star, block)
+        if row:
+            break
+    mic = row.get("rlnMicrographName")
+    if not mic:
+        return None
+    picture = micrograph_of_table(mic, star)
+    if picture is None:
+        return dict(
+            title="Micrographs",
+            panels=[],
+            facts=[("Example micrograph", f"{Path(mic).name} not found")],
+        )
+    lines = [Path(mic).name]
+    try:
+        if "rlnDefocusU" in row:
+            u = float(row["rlnDefocusU"])
+            v = float(row.get("rlnDefocusV", u))
+            lines.append(f"defocus {(u + v) / 2 / 1e4:.2f} µm")
+        if "rlnCtfMaxResolution" in row:
+            lines.append(f"CTF fit to {float(row['rlnCtfMaxResolution']):.2f} Å")
+    except ValueError:
+        pass
+    image, step = picture
+    if step > 1:
+        lines.append(f"binned by {step}")
+    return dict(
+        title="Micrographs",
+        panels=[_panel("Example micrograph", image, ", ".join(lines))],
+        facts=[],
+    )
+
+
 def _draw_rings(rgb, xs, ys, radius: float, color) -> None:
     """Circles of ``radius`` (pixels of the picture) at the positions, with a dark rim inside."""
     import numpy as np
