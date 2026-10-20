@@ -1805,7 +1805,8 @@ class TestInThePreview:
 
 def _helical_table(job, name="run_it025_data.star", track=True):
     """A Class2D table of segments: mic_a has three filaments (the second with two segments
-    missing), mic_b has one; the segments are 30 Å apart, 10 pixels on the micrograph."""
+    missing), mic_b has one; the segments are 30 Å apart, 10 pixels on the micrograph.
+    """
     rows = []
 
     def filament(mic, tube, y, steps):
@@ -1826,7 +1827,8 @@ def _helical_table(job, name="run_it025_data.star", track=True):
     ] + (["rlnHelicalTrackLengthAngst"] if track else [])
     _star_file(
         job / name,
-        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n" + _loop("particles", columns, rows),
+        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n"
+        + _loop("particles", columns, rows),
     )
 
 
@@ -1835,7 +1837,9 @@ class TestTheMicrographWithTheMostFilaments:
         assert jo.is_particle_table(tmp_path / "Class2D/job010/run_it025_data.star")
         assert jo.is_particle_table(tmp_path / "Class3D/job011/run_ct5_it025_data.star")
         assert jo.is_particle_table(tmp_path / "Refine3D/job012/run_data.star")
-        assert not jo.is_particle_table(tmp_path / "Class2D/job010/run_it025_model.star")
+        assert not jo.is_particle_table(
+            tmp_path / "Class2D/job010/run_it025_model.star"
+        )
         assert not jo.is_particle_table(tmp_path / "Extract/job005/run_data.star")
 
     def test_fragmentation_counts_the_filaments_with_gaps(self):
@@ -1904,7 +1908,8 @@ def _single_particle_table(path):
     columns = ["rlnMicrographName", "rlnCoordinateX", "rlnCoordinateY", "rlnImageName"]
     _star_file(
         path,
-        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n" + _loop("particles", columns, rows),
+        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n"
+        + _loop("particles", columns, rows),
     )
 
 
@@ -1921,7 +1926,10 @@ class TestTheParticlesOfEachMicrograph:
         star = relion / "Extract/job005/particles.star"
         _single_particle_table(star)
         found = jo.particles_by_micrograph(star)
-        assert list(found) == ["MotionCorr/job002/mic_a.mrc", "MotionCorr/job002/mic_b.mrc"]
+        assert list(found) == [
+            "MotionCorr/job002/mic_a.mrc",
+            "MotionCorr/job002/mic_b.mrc",
+        ]
         mic_a = found["MotionCorr/job002/mic_a.mrc"]
         assert mic_a["x"].tolist() == [50, 150, 250]
         assert mic_a["y"].tolist() == [40, 100, 160]
@@ -1994,7 +2002,8 @@ class TestTheParticlesOfEachMicrograph:
 
 def _pick_job(relion, kind="ManualPick", options="", general="", tube=False):
     """A picking job: mic_a has four picks (two filaments, by their start and end, in start-end
-    mode), mic_b has none; the coordinate files are under Movies/ of the job, as RELION writes them."""
+    mode), mic_b has none; the coordinate files are under Movies/ of the job, as RELION writes them.
+    """
     job = relion / kind / "job004"
     suffix = kind.lower()
     picks = [(50, 40), (250, 40), (60, 150), (260, 150)]
@@ -2013,7 +2022,9 @@ def _pick_job(relion, kind="ManualPick", options="", general="", tube=False):
         job / f"{suffix}.star",
         head
         + _loop(
-            "coordinate_files", ["rlnMicrographName", "rlnMicrographCoordinates"], listing
+            "coordinate_files",
+            ["rlnMicrographName", "rlnMicrographCoordinates"],
+            listing,
         ),
     )
     if options:
@@ -2027,7 +2038,9 @@ class TestThePicksOfAPickingJob:
         assert jo.pick_mode(_pick_job(relion)) == "particles"
         listing = _pick_job(relion, options="do_startend Yes\n")
         assert jo.pick_mode(listing) == "startend"
-        listing = _pick_job(relion, "AutoPick", options="do_pick_helical_segments Yes\n")
+        listing = _pick_job(
+            relion, "AutoPick", options="do_pick_helical_segments Yes\n"
+        )
         assert jo.pick_mode(listing) == "segments"
         assert jo.pick_mode(_pick_job(relion, "AutoPick", tube=True)) == "segments"
 
@@ -2041,7 +2054,10 @@ class TestThePicksOfAPickingJob:
         found = jo.coordinates_by_micrograph(listing)
         assert found["mode"] == "particles" and found["diameter"] == 120
         mics = found["micrographs"]
-        assert list(mics) == ["MotionCorr/job002/mic_a.mrc", "MotionCorr/job002/mic_b.mrc"]
+        assert list(mics) == [
+            "MotionCorr/job002/mic_a.mrc",
+            "MotionCorr/job002/mic_b.mrc",
+        ]
         assert len(mics["MotionCorr/job002/mic_a.mrc"]["x"]) == 4
         assert len(mics["MotionCorr/job002/mic_b.mrc"]["x"]) == 0
 
@@ -2057,7 +2073,9 @@ class TestThePicksOfAPickingJob:
 
     def test_each_mode_is_drawn_in_its_style(self, relion):
         listing = _pick_job(relion, options="do_startend Yes\n")
-        mic_a = jo.picks_by_micrograph(listing)["micrographs"]["MotionCorr/job002/mic_a.mrc"]
+        mic_a = jo.picks_by_micrograph(listing)["micrographs"][
+            "MotionCorr/job002/mic_a.mrc"
+        ]
         grey = np.full((200, 300), 128, np.uint8)
         # a filament: its middle is coloured; a single particle: a ring, its centre is not
         band = jo.draw_coordinates(grey, 1, mic_a, "startend", radius=10)
@@ -2080,7 +2098,9 @@ class TestThePicksOfAPickingJob:
         listing = _pick_job(relion)
         (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
         assert bp.build_preview(listing)["micrographs"] == str(listing)
-        coords = bp.build_preview(relion / "ManualPick/job004/Movies/mic_a_manualpick.star")
+        coords = bp.build_preview(
+            relion / "ManualPick/job004/Movies/mic_a_manualpick.star"
+        )
         assert coords["micrographs"] == str(listing.resolve())
         assert coords["micrograph"] == "MotionCorr/job002/mic_a.mrc"
         assert bp.build_preview(listing.parent)["micrographs"] == str(listing)

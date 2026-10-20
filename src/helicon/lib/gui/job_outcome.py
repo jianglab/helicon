@@ -1070,7 +1070,9 @@ def busiest_micrograph(star: str | Path) -> dict | None:
         note = " (micrograph not found: the positions alone)"
     image = _draw_segments(picture[0], filaments, picture[1])
 
-    caption = f"{Path(mic).name}: {n_filaments} filaments, {n_segments:,} segments{note}"
+    caption = (
+        f"{Path(mic).name}: {n_filaments} filaments, {n_segments:,} segments{note}"
+    )
     if has_track:
         fragmented, counted, spacing, missing = filament_fragmentation(
             [c[:, 2] for c in columns]
@@ -1100,7 +1102,8 @@ COORDINATE_COLUMNS = ("rlnMicrographName", "rlnCoordinateX", "rlnCoordinateY")
 
 def has_particle_coordinates(path: str | Path) -> bool:
     """If the particle table of a RELION star file has the micrograph and the position of each
-    particle (any table of particles: of an extraction, a selection, a classification...)."""
+    particle (any table of particles: of an extraction, a selection, a classification...).
+    """
     names = _particle_header(Path(path))
     return all(name in names for name in COORDINATE_COLUMNS)
 
@@ -1129,7 +1132,8 @@ def particles_by_micrograph(star: str | Path) -> dict[str, dict]:
     helical = "rlnHelicalTubeID" in names
     wanted = list(COORDINATE_COLUMNS) + (["rlnHelicalTubeID"] if helical else [])
     found: dict[str, tuple] = {}
-    codes: dict[str, int] = {}  # a number for each filament id: compact, and any text will do
+    # a number for each filament id: compact, and any text will do
+    codes: dict[str, int] = {}
     for row in _particle_rows(star, wanted):
         try:
             x, y = float(row[1]), float(row[2])
@@ -1157,7 +1161,8 @@ def particles_by_micrograph(star: str | Path) -> dict[str, dict]:
 
 def particle_groups(particles: dict) -> list[tuple]:
     """The positions of the particles of a micrograph (an entry of :func:`particles_by_micrograph`)
-    as ``[(x, y), ...]``: one group for each filament, or one group of all the particles."""
+    as ``[(x, y), ...]``: one group for each filament, or one group of all the particles.
+    """
     import numpy as np
 
     x, y, tube = particles["x"], particles["y"], particles.get("tube")
@@ -1429,7 +1434,11 @@ def _draw_band(rgb, start, end, half_width: float, color, alpha: float) -> None:
     py, px = np.mgrid[y0:y1, x0:x1]
     vx, vy = bx - ax, by - ay
     length2 = vx * vx + vy * vy
-    t = np.zeros(px.shape) if length2 == 0 else ((px - ax) * vx + (py - ay) * vy) / length2
+    t = (
+        np.zeros(px.shape)
+        if length2 == 0
+        else ((px - ax) * vx + (py - ay) * vy) / length2
+    )
     t = np.clip(t, 0, 1)
     distance = np.hypot(px - (ax + t * vx), py - (ay + t * vy))
     inside = distance <= half_width
