@@ -30,7 +30,6 @@ denoised/
 *.so
 helicon.plugins.*.denoisecurvelet*
 .omo/
-AGENTS.md
 tests/output/
 .agents/
 .freebuff/
