@@ -749,6 +749,11 @@ class FolderBrowserWidget(QMainWindow):
         # manually when the cursor is over the (disabled) button.
         self.installEventFilter(self)
 
+        # a minimum size of our own: otherwise Qt sets it from what the preview shows, a new one
+        # at each click, and over X11 (ssh -X) each is sent to the window manager, which
+        # lays a maximized window out again: the window jitters
+        self.setMinimumSize(640, 400)
+
         self._refresh_sidebar()
         self._update_preview()
 

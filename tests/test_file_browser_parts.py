@@ -760,6 +760,20 @@ class TestInTheBrowser:
         qapp.processEvents()
         assert browser._preview.isAncestorOf(bar) and bar.isVisible()
 
+    def test_the_smallest_size_of_the_window_does_not_follow_the_selection(
+        self, browser, qapp
+    ):
+        # over X11 each new smallest size goes to the window manager: a maximized window jitters
+        browser.show()
+        smallest = browser.minimumSize()
+        for row in range(browser._model.rowCount()):
+            browser._tree.setCurrentIndex(browser._model.index(row, 0))
+            browser.wait_for_selection()
+            browser._preview.wait()
+            for _ in range(20):
+                qapp.processEvents()
+            assert browser.minimumSize() == smallest
+
     def test_the_choice_of_panes_is_remembered(self, qapp, project):
         w = fb.FolderBrowserWidget(start_dir=str(project))
         w._preview_action.setChecked(False)
