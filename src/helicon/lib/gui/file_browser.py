@@ -291,6 +291,7 @@ class FolderBrowserWidget(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        self._main_layout = layout
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
@@ -632,7 +633,8 @@ class FolderBrowserWidget(QMainWindow):
         layout.addWidget(self._splitter, 1)
         self._restore_panes()
 
-        # Bottom bar: contextual display-mode buttons + "new window" toggle.
+        # Contextual display-mode buttons + "new window" toggle, in the preview pane
+        # below the facts (at the bottom of the window when the pane is hidden).
         # Hidden unless exactly one file (not a directory) is selected.
         self._action_bar = QWidget()
         self._action_bar.setObjectName("actionBar")
@@ -729,7 +731,7 @@ class FolderBrowserWidget(QMainWindow):
             btn = getattr(self, attr)
             btn.clicked.connect(partial(self._emit_display, mode))
 
-        layout.addWidget(self._action_bar)
+        self._place_action_bar()
 
         # the buttons of the selected file are worked out in a thread (_ModesWorker)
         self._modes_worker: _ModesWorker | None = None
@@ -785,8 +787,30 @@ class FolderBrowserWidget(QMainWindow):
 
     def _on_preview_toggled(self, shown: bool) -> None:
         self._preview.setVisible(shown)
+        self._place_action_bar()
         if shown:
             self._update_preview()
+
+    def _place_action_bar(self) -> None:
+        """Put the buttons of the selected file in the preview pane, below the facts of
+        the file, or at the bottom of the window when the pane is hidden."""
+        bar = getattr(self, "_action_bar", None)
+        if bar is None:
+            return  # the panes are restored before the buttons are made
+        hidden = bar.isHidden()
+        in_preview = self._preview_action.isChecked()
+        if in_preview:
+            self._main_layout.removeWidget(bar)
+            self._preview.set_actions(bar)
+            bar.layout().setContentsMargins(0, 2, 0, 2)
+        else:
+            self._preview.set_actions(None)
+            self._main_layout.addWidget(bar)
+            bar.layout().setContentsMargins(8, 8, 8, 8)
+        bar.setProperty("place", "preview" if in_preview else "bottom")
+        bar.style().unpolish(bar)
+        bar.style().polish(bar)
+        bar.setHidden(hidden)
 
     def _refresh_sidebar(self) -> None:
         self._sidebar.refresh(

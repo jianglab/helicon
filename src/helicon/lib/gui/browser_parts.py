@@ -1813,6 +1813,8 @@ class PreviewPane(QWidget):
         self._facts.setTextFormat(Qt.TextFormat.RichText)
         self._facts.setWordWrap(True)
         self._facts.setObjectName("previewFacts")
+        # the buttons of the selected file (of the browser), below the facts: set_actions
+        self._actions: QWidget | None = None
         # the jobs before and after a job: links to click, between the facts and the file list
         self._links = QLabel("")
         self._links.setTextFormat(Qt.TextFormat.RichText)
@@ -1980,6 +1982,21 @@ class PreviewPane(QWidget):
         note = info.get("note", "")
         self._note.setText(note)
         self._note.setVisible(bool(note))
+
+    def set_actions(self, bar: QWidget | None) -> None:
+        """Show a bar of buttons below the facts, or take the one shown out (``None``).
+
+        Parameters
+        ----------
+        bar : QWidget or None
+            The buttons of the selected file. Whether it is shown is up to the caller.
+        """
+        layout = self.layout()
+        if self._actions is not None:
+            layout.removeWidget(self._actions)
+        self._actions = bar
+        if bar is not None:
+            layout.insertWidget(layout.indexOf(self._facts) + 1, bar)
 
     def _set_facts(self, facts: list) -> None:
         rows = "".join(

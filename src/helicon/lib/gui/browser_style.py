@@ -307,6 +307,10 @@ def _browser_stylesheet(colors: dict[str, str]) -> str:
             background-color: {colors["window"]};
             border-top: 1px solid {colors["header_border"]};
         }}
+        #actionBar[place="preview"] {{
+            background-color: transparent;
+            border: none;
+        }}
         QToolButton {{
             background-color: transparent;
             color: {colors["text"]};

@@ -731,6 +731,35 @@ class TestInTheBrowser:
         browser._sidebar_action.setChecked(True)
         assert not browser._sidebar.isHidden()
 
+    def test_the_buttons_are_below_the_facts_of_the_preview(self, browser, qapp):
+        browser.resize(1200, 700)
+        browser.show()
+        bar, preview = browser._action_bar, browser._preview
+        bar.show()
+        qapp.processEvents()
+        assert preview.isAncestorOf(bar)
+        facts = preview._facts.mapTo(browser, preview._facts.rect().bottomLeft())
+        assert bar.mapTo(browser, bar.rect().topLeft()).y() >= facts.y()
+        assert bar.mapTo(browser, bar.rect().topLeft()).x() >= preview.x()
+
+    def test_the_buttons_go_to_the_bottom_when_the_preview_is_hidden(
+        self, browser, qapp
+    ):
+        browser.resize(1200, 700)
+        browser.show()
+        bar = browser._action_bar
+        bar.show()
+        browser._preview_action.setChecked(False)
+        qapp.processEvents()
+        assert not browser._preview.isAncestorOf(bar) and bar.isVisible()
+        # under the list of files
+        assert bar.mapTo(browser, bar.rect().topLeft()).y() >= (
+            browser._splitter.mapTo(browser, browser._splitter.rect().bottomLeft()).y()
+        )
+        browser._preview_action.setChecked(True)
+        qapp.processEvents()
+        assert browser._preview.isAncestorOf(bar) and bar.isVisible()
+
     def test_the_choice_of_panes_is_remembered(self, qapp, project):
         w = fb.FolderBrowserWidget(start_dir=str(project))
         w._preview_action.setChecked(False)
