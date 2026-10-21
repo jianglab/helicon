@@ -624,6 +624,36 @@ class TestPreviewPane:
         assert "Size" in pane._facts.text()
         assert pane._text.isHidden()
 
+    def test_a_tall_picture_fits_in_the_pane(self, qapp):
+        # the central slice of a long, thin map (43 × 123): scaled to the width of the
+        # pane it was 1030 pixels tall and covered the facts and the buttons
+        pane = bp.PreviewPane()
+        pane.resize(500, 800)
+        pane.show()
+        image = (np.arange(123 * 43).reshape(123, 43) % 255).astype(np.uint8)
+        pane.show_info(
+            dict(title="long.map", facts=[("Size", "1 KB")], image=image, text="")
+        )
+        qapp.processEvents()
+        shown = pane._picture.pixmap()
+        assert shown.height() <= pane._PICTURE_BOX
+        assert abs(shown.width() / shown.height() - 43 / 123) < 0.02
+        assert pane.minimumSizeHint().height() < 800
+        assert pane._facts.geometry().top() >= pane._picture.geometry().bottom()
+
+    def test_a_small_picture_is_enlarged_with_sharp_pixels(self, qapp):
+        pane = bp.PreviewPane()
+        pane.resize(500, 800)
+        pane.show()
+        image = np.zeros((10, 10), dtype=np.uint8)
+        image[:, 5:] = 255
+        pane.show_info(dict(title="small.map", facts=[], image=image, text=""))
+        shown = pane._picture.pixmap().toImage()
+        assert shown.width() == pane._PICTURE_BOX
+        # no grey ramp between the black and the white halves
+        row = [shown.pixelColor(x, 5).value() for x in range(shown.width())]
+        assert set(row) == {0, 255}
+
     def test_a_note_replaces_the_picture(self, qapp):
         pane = bp.PreviewPane()
         pane.show()

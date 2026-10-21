@@ -2256,12 +2256,27 @@ class PreviewPane(QWidget):
 
             _save_qimage(image, self, default_name=name)
 
+    # the picture fits in a box this many pixels a side, or the width of the pane if narrower
+    _PICTURE_BOX = 360
+
     def _fit_picture(self) -> None:
+        """Scale the picture into a box, so that a tall one (a slice of a long map) does not
+        push the facts and the buttons out of the pane; one enlarged much keeps sharp pixels.
+        """
         if self._pixmap is None:
             return
-        width = max(self.width() - 24, 100)
-        shown = self._pixmap.scaledToWidth(
-            min(width, 360), Qt.TransformationMode.SmoothTransformation
+        width = min(max(self.width() - 24, 100), self._PICTURE_BOX)
+        height = self._PICTURE_BOX
+        scale = min(width / self._pixmap.width(), height / self._pixmap.height())
+        shown = self._pixmap.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            (
+                Qt.TransformationMode.FastTransformation
+                if scale >= 2
+                else Qt.TransformationMode.SmoothTransformation
+            ),
         )
         self._picture.setPixmap(shown)
         self._picture.setFixedHeight(shown.height() + 8)
