@@ -643,6 +643,81 @@ class TestPreviewPane:
         assert pane._title.text() == "n.txt"
         assert "hello" in pane._text.toPlainText()
 
+    @staticmethod
+    def _right_click_save(pane, label, out, monkeypatch):
+        """Right-click a picture, choose to save it and save it as ``out``; the menu's texts."""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QFileDialog
+
+        offered = {}
+
+        def run_menu(menu, _pos):
+            offered["items"] = [a.text() for a in menu.actions()]
+            return menu.actions()[0]
+
+        def select_file(_dialog, name):
+            offered["name"] = name
+
+        monkeypatch.setattr(pane, "_run_menu", run_menu)
+        monkeypatch.setattr(QFileDialog, "selectFile", select_file)
+        monkeypatch.setattr(QFileDialog, "exec", lambda _d: QFileDialog.Accepted)
+        monkeypatch.setattr(QFileDialog, "selectedFiles", lambda _d: [str(out)])
+        label.customContextMenuRequested.emit(QPoint(5, 5))
+        return offered
+
+    def test_a_right_click_saves_the_picture(self, qapp, tmp_path, monkeypatch):
+        from PySide6.QtGui import QImage
+
+        pane = bp.PreviewPane()
+        pane.resize(300, 500)
+        pane.show()
+        image = (np.arange(1200).reshape(30, 40) % 255).astype(np.uint8)
+        pane.show_info(dict(title="a.mrc", facts=[], image=image, text=""))
+        out = tmp_path / "a.png"
+        offered = self._right_click_save(pane, pane._picture, out, monkeypatch)
+        assert offered["items"] == ["Save image as…"]
+        assert offered["name"] == "a.png"
+        saved = QImage(str(out))
+        # the picture itself, not as it is scaled to fit the pane
+        assert (saved.width(), saved.height()) == (40, 30)
+
+    def test_no_menu_without_a_picture(self, qapp, monkeypatch):
+        from PySide6.QtCore import QPoint
+
+        pane = bp.PreviewPane()
+        pane.show_info(dict(title="x", facts=[], image=None, text=""))
+        shown = []
+        monkeypatch.setattr(pane, "_run_menu", lambda m, p: shown.append(m))
+        pane._picture.customContextMenuRequested.emit(QPoint(5, 5))
+        assert shown == []
+
+    def test_a_picture_of_a_job_is_saved_whole(self, qapp, tmp_path, monkeypatch):
+        from PySide6.QtGui import QImage
+
+        pane = bp.PreviewPane()
+        pane.resize(200, 600)
+        pane.show()
+        rgb = np.zeros((300, 600, 3), dtype=np.uint8)
+        rgb[..., 0] = 255
+        pane.show_info(
+            dict(
+                title="job010",
+                facts=[],
+                outcome=dict(
+                    panels=[dict(title="FSC 0.143", image=rgb, caption="")],
+                    facts=[],
+                ),
+            )
+        )
+        label = pane._outcome_panels[0][0]
+        assert label.pixmap().width() < 600  # shown smaller than it is
+        out = tmp_path / "fsc.png"
+        offered = self._right_click_save(pane, label, out, monkeypatch)
+        assert offered["name"] == "job010_FSC_0_143.png"
+        saved = QImage(str(out))
+        assert (saved.width(), saved.height()) == (600, 300)
+        assert saved.pixelColor(10, 10).red() == 255
+
     def test_an_answer_for_an_earlier_path_is_dropped(self, qapp):
         pane = bp.PreviewPane()
         pane.show()

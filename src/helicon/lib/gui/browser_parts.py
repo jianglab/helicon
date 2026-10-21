@@ -1725,8 +1725,8 @@ class PlacesSidebar(QTreeWidget):
             self.bookmark_renamed.emit(path, text.strip())
 
 
-def _pixmap_of(array, width: int) -> QPixmap:
-    """A picture (``(h, w)`` grey or ``(h, w, 3)`` colour, uint8) as a pixmap ``width`` wide."""
+def _qimage_of(array) -> QImage:
+    """A picture (``(h, w)`` grey or ``(h, w, 3)`` colour, uint8) as an image of its own pixels."""
     import numpy as np
 
     array = np.ascontiguousarray(array, dtype=np.uint8)
@@ -1735,7 +1735,12 @@ def _pixmap_of(array, width: int) -> QPixmap:
         image = QImage(array.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
     else:
         image = QImage(array.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(image).scaledToWidth(
+    return image.copy()  # the bytes above are gone when this returns
+
+
+def _pixmap_of(array, width: int) -> QPixmap:
+    """A picture (``(h, w)`` grey or ``(h, w, 3)`` colour, uint8) as a pixmap ``width`` wide."""
+    return QPixmap.fromImage(_qimage_of(array)).scaledToWidth(
         width, Qt.TransformationMode.SmoothTransformation
     )
 
@@ -1809,6 +1814,9 @@ class PreviewPane(QWidget):
         self._picture.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
+        # a right click saves the picture as an image file, as do those of a job below
+        self._picture.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._picture.customContextMenuRequested.connect(self._picture_menu)
         self._facts = QLabel("")
         self._facts.setTextFormat(Qt.TextFormat.RichText)
         self._facts.setWordWrap(True)
@@ -2079,6 +2087,12 @@ class PreviewPane(QWidget):
             column.insertWidget(column.count() - 1, heading)
             picture = QLabel()
             picture.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            picture.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            picture.customContextMenuRequested.connect(
+                lambda pos, p=picture, a=panel["image"], t=panel["title"]: (
+                    self._save_menu(p, pos, _qimage_of(a), self._file_name(t))
+                )
+            )
             column.insertWidget(column.count() - 1, picture)
             self._outcome_panels.append((picture, panel["image"]))
             if panel.get("caption"):
@@ -2215,6 +2229,32 @@ class PreviewPane(QWidget):
         from urllib.parse import unquote
 
         self.path_requested.emit(unquote(href))
+
+    def _file_name(self, panel: str = "") -> str:
+        """The name offered to save a picture of the preview: the shown file, then the panel."""
+        name = Path(self._title.text()).stem or "preview"
+        if panel:
+            name += "_" + (re.sub(r"[^\w-]+", "_", panel).strip("_") or "picture")
+        return name + ".png"
+
+    def _picture_menu(self, pos) -> None:
+        if self._pixmap is not None:
+            self._save_menu(
+                self._picture, pos, self._pixmap.toImage(), self._file_name()
+            )
+
+    def _run_menu(self, menu: QMenu, global_pos):
+        """Show a menu where the pointer is; the action that was chosen, or None."""
+        return menu.exec(global_pos)
+
+    def _save_menu(self, label: QLabel, pos, image: QImage, name: str) -> None:
+        """The menu of a picture of the preview: save it, at its own size, as an image file."""
+        menu = QMenu(self)
+        save = menu.addAction("Save image as…")
+        if self._run_menu(menu, label.mapToGlobal(pos)) is save:
+            from .viewer import _save_qimage
+
+            _save_qimage(image, self, default_name=name)
 
     def _fit_picture(self) -> None:
         if self._pixmap is None:
