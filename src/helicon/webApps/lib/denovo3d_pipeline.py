@@ -12,6 +12,7 @@ from .image_loader import (
     get_images_from_url,
     get_images_from_emdb,
     get_images_from_file,
+    is_map,
 )
 
 from .denovo3d_solver import lsq_reconstruct

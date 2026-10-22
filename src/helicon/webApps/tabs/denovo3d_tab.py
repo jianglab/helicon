@@ -1850,7 +1850,9 @@ def denovo3d_tab_server(input, output, session):
                     )
                     return
                 emdb_id = helicon.get_emdb_id(fileinfo[0]["name"])
-                is_3d = emdb_id or helicon.is_3d(data)
+                is_3d = emdb_id or denovo3d_pipeline.is_map(
+                    image_file, data, fileinfo[0]["name"]
+                )
                 is_amyloid = helicon.is_amyloid(emdb_id)
         else:
             try:
@@ -1867,7 +1869,9 @@ def denovo3d_tab_server(input, output, session):
                 )
                 return
             emdb_id = helicon.get_emdb_id(fileinfo[0]["name"])
-            is_3d = emdb_id or helicon.is_3d(data)
+            is_3d = emdb_id or denovo3d_pipeline.is_map(
+                image_file, data, fileinfo[0]["name"]
+            )
             is_amyloid = helicon.is_amyloid(emdb_id)
 
         d = helicon.DotDict(
@@ -1910,7 +1914,7 @@ def denovo3d_tab_server(input, output, session):
             )
             return
         emdb_id = helicon.get_emdb_id(url)
-        is_3d = emdb_id or helicon.is_3d(data)
+        is_3d = emdb_id or denovo3d_pipeline.is_map(url, data)
         is_amyloid = helicon.is_amyloid(emdb_id)
         d = helicon.DotDict(
             data=data, apix=apix, emdb_id=emdb_id, is_3d=is_3d, is_amyloid=is_amyloid

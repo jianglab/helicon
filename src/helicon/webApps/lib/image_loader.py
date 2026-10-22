@@ -81,6 +81,41 @@ def get_images_from_emdb(emdb_id: str) -> tuple:
     return data, round(apix, 4)
 
 
+def is_map(source: str, data, name: str | None = None) -> bool:
+    """Whether images just read are a 3D map and not a stack of 2D images.
+
+    ``helicon.is_3d`` takes any stack with more images than its width for a map that is longer
+    than wide, so the 150 classes of 128 x 128 pixels of a 2D classification looked like a map
+    and the app showed the panels of a map. A stack says what it is: ``.mrcs`` by its name, and
+    any MRC file by space group 0 in its header (checked for a file here; not for a url).
+
+    Parameters
+    ----------
+    source : str
+        The path or the url the images were read from.
+    data : numpy.ndarray
+        The images.
+    name : str, optional
+        The name the file had before it was uploaded (``source`` is a temporary file then).
+
+    Returns
+    -------
+    bool
+    """
+    if (name or str(source)).lower().endswith(".mrcs"):
+        return False
+    if data.ndim == 3 and not data.shape[0] == data.shape[1] == data.shape[2]:
+        try:
+            import mrcfile
+
+            with mrcfile.open(source, header_only=True, permissive=True) as mrc:
+                if int(mrc.header.ispg) == 0:
+                    return False
+        except Exception:  # a url, or a gzip file that has no header-only reading
+            pass
+    return helicon.is_3d(data)
+
+
 def get_images_from_file(image_file: str) -> tuple:
     """Read an MRC/MRCS file and return the image data and pixel size.
 
