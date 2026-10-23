@@ -55,6 +55,36 @@ class Helix:
         return gy.T @ gx
 
 
+class DihedralHelix(Helix):
+    """The helix and its image under a 180-degree turn about an axis perpendicular to the helical
+    axis (``zeta, theta -> -zeta, -theta``): a filament with a two-fold perpendicular to its axis.
+    """
+
+    def points(self, zeta_center, half_length=150.0):
+        z, r, t = Helix.points(self, zeta_center, half_length)
+        z2, r2, t2 = Helix.points(self, -zeta_center, half_length)
+        return (
+            np.concatenate([z, -z2]),
+            np.concatenate([r, r2]),
+            np.concatenate([t, -t2]),
+        )
+
+
+class Screw21Helix(Helix):
+    """The helix that also has the 2-1 screw (180 + twist/2 degrees, rise/2): ``u * u`` is the
+    helical operation, and in projection ``u`` is a half-turn about the axis."""
+
+    def points(self, zeta_center, half_length=150.0):
+        z, r, t = Helix.points(self, zeta_center, half_length)
+        z2, r2, t2 = Helix.points(self, zeta_center - self.rise / 2, half_length)
+        turn = np.deg2rad(180.0 + self.twist / 2)
+        return (
+            np.concatenate([z, z2 + self.rise / 2]),
+            np.concatenate([r, r2]),
+            np.concatenate([t, t2 + turn]),
+        )
+
+
 def _wrap(a, period=360.0):
     return (a + period / 2) % period - period / 2
 
@@ -75,6 +105,7 @@ def simulate(
     class_dy_sd=0.0,
     turned_offset_sd=0.0,
     ydir=1.0,
+    dyad=False,
     seed=0,
 ):
     """Class2D parameters plus the truth, per segment.
@@ -93,6 +124,12 @@ def simulate(
     ``ydir`` is the sign of the micrograph y axis in the psi convention (-1 for
     RELION, whose y runs down while psi runs counterclockwise).
 
+    ``dyad`` gives the helix a two-fold axis perpendicular to its own, through the origin of
+    azimuth: a filament has no polarity, because the view of a segment turned by 180 degrees
+    in plane is the plain view at azimuth ``180 - rot`` (verified on a map in
+    ``tests/test_dihedral.py``). So there are only the ``n_views`` plain classes, and no
+    segment is turned: ``rlnAnglePsi`` stays at the prior whichever end it was picked from.
+
     ``bend`` is the total change of direction along a filament, in degrees.
     Returns ``(params, repeat, class_info)``, ``class_info`` giving the azimuth
     and turn of every class for rendering class averages.
@@ -102,9 +139,9 @@ def simulate(
     P = helix.pitch / helix.fold
     az_plain = (np.arange(n_views) + 0.5) * per / n_views
     az_turned = az_plain + rng.normal(0, turned_offset_sd, n_views)
-    class_az = np.concatenate([az_plain, az_turned])
-    class_turned = np.arange(2 * n_views) >= n_views
-    class_dy = rng.normal(0, class_dy_sd, 2 * n_views)
+    class_az = az_plain if dyad else np.concatenate([az_plain, az_turned])
+    class_turned = np.arange(len(class_az)) >= n_views
+    class_dy = rng.normal(0, class_dy_sd, len(class_az))
     rows = []
     for f in range(n_fil):
         s = rng.choice([-1.0, 1.0])
@@ -135,20 +172,38 @@ def simulate(
             flip = rng.random() < flip_rate
             if flip:
                 polar_right = not polar_right
-            pool = np.flatnonzero(class_turned == (not polar_right))
-            c = pool[np.argmin(np.abs(_wrap(class_az[pool] - rot, per)))]
+            # with a dyad a filament picked against the polar axis of its own object shows the
+            # plain view at azimuth 180 - rot, and that runs forward along the picked direction
+            # like rot does for the other one: the per-segment ``flip`` has no meaning
+            azimuth = 180.0 - rot if (dyad and s < 0) else rot
+            along = 1.0 if dyad else s
+            pool = (
+                np.arange(len(class_az))
+                if dyad
+                else np.flatnonzero(class_turned == (not polar_right))
+            )
+            c = pool[np.argmin(np.abs(_wrap(class_az[pool] - azimuth, per)))]
             if rng.random() < misclass:
                 # a neighbouring view, in the same or the other polarity set
-                same = pool[np.argsort(np.abs(_wrap(class_az[pool] - rot, per)))[:4]]
+                same = pool[
+                    np.argsort(np.abs(_wrap(class_az[pool] - azimuth, per)))[:4]
+                ]
                 c = int(rng.choice(same))
-            dz = _wrap(class_az[c] - rot, per) * helix.pitch / 360.0
+            dz = _wrap(class_az[c] - azimuth, per) * helix.pitch / 360.0
             est = (
-                true_center + s * dz * u + class_dy[c] * v + rng.normal(0, shift_err, 2)
+                true_center
+                + along * dz * u
+                + class_dy[c] * v
+                + rng.normal(0, shift_err, 2)
             )
-            rot_est = rot + 360.0 * dz / helix.pitch
+            rot_est = rot + 360.0 * (s if dyad else 1.0) * dz / helix.pitch
             origin = coord - est
             psi_true = alpha + (180.0 if s < 0 else 0.0)
-            psi_2d = alpha + (180.0 if flip else 0.0) + rng.normal(0, psi_sd)
+            psi_2d = (
+                alpha
+                + (0.0 if dyad else (180.0 if flip else 0.0))
+                + rng.normal(0, psi_sd)
+            )
             rows.append(
                 dict(
                     rlnMicrographName=f"mic{f // 10:03d}.mrc",
@@ -171,7 +226,7 @@ def simulate(
                     est_center_y=est[1],
                     _sign=s,
                     _flip=flip,
-                    _turned=bool(class_turned[c]),
+                    _turned=bool(class_turned[c]) and not dyad,
                 )
             )
     info = dict(azimuth=class_az, turned=class_turned, dy=class_dy)

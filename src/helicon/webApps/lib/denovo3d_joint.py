@@ -70,6 +70,14 @@ SHRINK = 0.25
 # which is why the median is reported alongside it.
 TWO_FOLD_FLIP_TOLERANCE = 40.0
 TWO_FOLD_MIN_FLIPPED = 2
+# ...but half-turn flips alone are not the two-fold. A structure with a two-fold axis
+# perpendicular to the helical axis (dihedral) also puts every view at two equally good
+# placements, and its flips made the detector fire on 3 of 8 runs of such data, which
+# narrowed the search to half of what it needed and lowered the fit (0.86-0.88 against
+# 0.90-0.91 without). What a two-fold about the axis does to the model is that its side
+# projection repeats at half a period: 0.83-0.94 for a 2-1 screw, against 0.10-0.18 for
+# a plain or a dihedral helix and 0.42-0.46 for a cyclic C2 (tests/test_dihedral.py).
+TWO_FOLD_MIN_SIMILARITY = 0.7
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -251,8 +259,10 @@ def joint_refine(
     from .denovo3d_align import (
         _rotate,
         align_to_model,
+        half_period_similarity,
         long_side_projection,
         model_length_pixel,
+        period_pixel,
     )
     from .denovo3d_jointsolve import joint_reconstruct
 
@@ -339,7 +349,14 @@ def joint_refine(
             flipped = np.abs(swing - 180.0) < TWO_FOLD_FLIP_TOLERANCE
             settled = swing < TWO_FOLD_FLIP_TOLERANCE
             middle = ~flipped & ~settled
-            if flipped.sum() >= TWO_FOLD_MIN_FLIPPED and not middle.any():
+            if (
+                flipped.sum() >= TWO_FOLD_MIN_FLIPPED
+                and not middle.any()
+                and half_period_similarity(
+                    model, period_pixel(twist, rise, apix2d, csym)
+                )
+                >= TWO_FOLD_MIN_SIMILARITY
+            ):
                 two_fold = True
                 detect_two_fold = False
                 length = model_length_pixel(twist, rise, apix2d, csym, width, two_fold)

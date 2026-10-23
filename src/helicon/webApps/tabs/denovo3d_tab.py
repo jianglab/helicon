@@ -3221,6 +3221,14 @@ def denovo3d_tab_server(input, output, session):
                     if best is not None
                     else None
                 )
+                if found and found.get("two_fold"):
+                    ui.notification_show(
+                        "A two-fold about the helical axis (a 2\u2081 screw) was "
+                        "found: the model repeats at half a period, so the "
+                        "placements were searched over half of it.",
+                        type="message",
+                        duration=15,
+                    )
                 if found and found.get("placed") is not None:
                     try:
                         autostitch_transforms.set(

@@ -16,7 +16,10 @@ class's phase at once -- angular synchronisation. The top eigenvalue scores P.
 
 What is measured is the repeat of the *projection*, which is the pitch divided
 by the number of copies the projection cannot tell apart: the cyclic symmetry,
-times two for a two-fold perpendicular to the axis or a 2-1 screw. It is the
+times two for a two-fold about the axis or a 2-1 screw. A two-fold perpendicular
+to the axis (dihedral) does not change the repeat: it only makes a view turned by
+180 degrees the plain view at another azimuth, so a filament has no polarity and
+the classes are half as many (``tests/test_dihedral.py``). It is the
 same quantity the pair-distance histogram measures, and the rise is not needed
 to measure it. Converting it to a twist needs the rise and that factor.
 
@@ -211,6 +214,62 @@ def _class_axis(delta, seg_class, n_classes):
         np.bincount(seg_class, weights=np.sin(2 * delta), minlength=n_classes)
     )
     return 0.5 * np.angle(z)
+
+
+def looks_apolar(params, min_segments=500, min_filaments=20, max_turned=0.02):
+    """Whether no segment is turned relative to the direction its filament was picked in.
+
+    A polar filament picked from both ends has about half of its segments aligned to the
+    class averages turned by 180 degrees (``rlnAnglePsi`` against ``rlnAnglePsiPrior``). With
+    a two-fold axis perpendicular to the helical axis (dihedral symmetry) the filament has no
+    polarity: the view turned by 180 degrees is the plain view at another azimuth, so no
+    segment is turned, however the filaments were picked (``tests/test_dihedral.py``). It is
+    a hint, not a proof: the same is seen when all filaments were picked from their one end,
+    or when the classification was not allowed to turn the segments.
+
+    Parameters
+    ----------
+    params : pandas.DataFrame
+        The Class2D table, with ``rlnAnglePsi`` and ``rlnAnglePsiPrior``.
+    min_segments, min_filaments : int, optional
+        Fewer segments or filaments than these say nothing.
+    max_turned : float, optional
+        The largest share of turned segments that still counts as none.
+
+    Returns
+    -------
+    bool
+        False when there is too little data or the angles are missing.
+    """
+    if params is None or not {"rlnAnglePsi", "rlnAnglePsiPrior"} <= set(params.columns):
+        return False
+    if len(params) < min_segments:
+        return False
+    keys = [c for c in ("rlnMicrographName", "rlnHelicalTubeID") if c in params.columns]
+    if keys and len(params.drop_duplicates(keys)) < min_filaments:
+        return False
+    delta = (params.rlnAnglePsi - params.rlnAnglePsiPrior + 180.0) % 360.0 - 180.0
+    return bool((delta.abs() > 90.0).mean() <= max_turned)
+
+
+def apolar_warning(params):
+    """The note for the user when :func:`looks_apolar` is true, as ``(title, text)``, else None."""
+    if not looks_apolar(params):
+        return None
+    return (
+        "No segment is turned by 180\u00b0",
+        "Whichever end a filament was picked from, its segments were "
+        "aligned to the class averages as picked. Filaments of a polar "
+        "helix picked from both ends give about half turned segments. "
+        "So either all filaments were picked from their one end (or the "
+        "classification could not turn them), or the filaments have no "
+        "polarity: a two-fold axis perpendicular to the helical axis "
+        "(dihedral symmetry) makes the turned view of a class another "
+        "class of the same ring. In that case the ring is complete with "
+        "half the classes you might expect, the repeat is still the "
+        "pitch divided by the cyclic symmetry, and the map is not yet "
+        "symmetrized by the two-fold.",
+    )
 
 
 def class_polarity(delta, seg_class, seg_filament, n_classes, details=False):

@@ -604,6 +604,30 @@ def abinitio3d_tab_ui():
                         "Show class labels on the azimuthal-angle ring",
                         value=False,
                     ),
+                    ui.input_checkbox(
+                        "dihedral",
+                        ui.span(
+                            "Dihedral symmetry check",
+                            _info(
+                                "Dihedral (Dn) symmetry adds two-fold axes perpendicular to the "
+                                "helical axis: the filament looks the same turned "
+                                "upside down, so it has no polarity. If there is "
+                                "such an axis, the view of a class is the mirror "
+                                "image, along the filament, of the view at the "
+                                "mirrored azimuth (the axis need not be centred "
+                                "in any class). The plot scans the azimuth of the "
+                                "axis and shows how well every class matches its "
+                                "mirrored partner. How to read it: a sharp peak "
+                                "close to 1, well above the rest of the curve, "
+                                "means a two-fold axis at that azimuth; a flat "
+                                "curve (peak below about 0.75) means plain helical "
+                                "symmetry. Needs classes spread evenly over the "
+                                "azimuths. The result only informs: it changes "
+                                "nothing in the reconstruction."
+                            ),
+                        ),
+                        value=False,
+                    ),
                     ui.input_numeric(
                         "rise",
                         "Helical rise (\u00c5)",
@@ -981,6 +1005,7 @@ def abinitio3d_tab_ui():
                             col_widths=(7, 5),
                             fill=False,
                         ),
+                        ui.output_ui("dihedral_plot"),
                         ui.layout_columns(
                             # the histogram, and below it the two ranges that
                             # select filaments from it, one under the other

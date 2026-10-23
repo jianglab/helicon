@@ -170,6 +170,34 @@ def period_pixel(twist, rise, apix, csym=1, two_fold=False):
     return period / 2.0 if two_fold else period
 
 
+def half_period_similarity(model, period):
+    """Correlation of a side projection with itself moved by half a period.
+
+    High when the structure has a two-fold about the helical axis (a 2-1 screw as much as a
+    true C2): ``M(y, z) = M(y, z + period/2)``, as in :func:`period_pixel`.
+
+    Parameters
+    ----------
+    model : numpy.ndarray
+        The projection, with the helical axis along the columns, longer than half a period.
+    period : float
+        The period of the projection, in pixels (:func:`period_pixel`).
+
+    Returns
+    -------
+    float
+        The correlation, -1 to 1; 0 when the overlap is flat or empty.
+    """
+    shift = int(round(period / 2))
+    width = model.shape[1] - shift
+    if width < 2:
+        return 0.0
+    a = model[:, :width] - model[:, :width].mean()
+    b = model[:, shift : shift + width] - model[:, shift : shift + width].mean()
+    norm = np.sqrt((a * a).sum() * (b * b).sum())
+    return float((a * b).sum() / norm) if norm > 0 else 0.0
+
+
 def dx_to_phi(dx_pixel, twist, rise, apix):
     """Azimuth (degrees) of an image sitting ``dx_pixel`` along the model.
 

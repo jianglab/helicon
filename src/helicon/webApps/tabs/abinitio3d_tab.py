@@ -2311,6 +2311,9 @@ def abinitio3d_tab_server(input, output, session):
                     "Selected classes gallery; press Remove picked to drop them.",
                 )
             )
+        apolar = phase.apolar_warning(r.params_used)
+        if apolar:
+            warnings.append(apolar)
         if r.vetoed_period is not None:
             warnings.append(
                 (
@@ -2475,6 +2478,52 @@ def abinitio3d_tab_server(input, output, session):
             margin=dict(t=40, b=50, l=50, r=20),
         )
         return _fig_to_html(fig)
+
+    @render.ui
+    def dihedral_plot():
+        r = phase_result()
+        req(r is not None)
+        if not input.dihedral():
+            return None
+        import plotly.graph_objects as go
+        from ..lib import helical_pitch_dihedral as dihedral
+
+        apix = float(data_all()[1])
+        images = displayed_class_images()
+        at = _class_positions(r.class_ids, displayed_class_ids())
+        csym = helicon.shiny.clamp_number(input.rot_fold(), 1, 1, 12)
+        prepared = maps.straighten_classes(
+            [images[i] for i in at],
+            r.class_zdir,
+            target_apix=max(5.0, apix),
+            apix=apix,
+        )
+        # the ring turns 360 degrees per repeat, the azimuth 360 / csym
+        res = dihedral.dihedral_scan(
+            prepared, np.rad2deg(r.phases) / csym, period=360.0 / csym
+        )
+        fig = go.Figure(
+            go.Scatter(x=res["alpha"], y=res["score"], mode="lines", showlegend=False)
+        )
+        if res["best_alpha"] is None:
+            title = "Dihedral test: too few classes to pair"
+        else:
+            title = (
+                f"Dihedral test: best {res['best_score']:.2f} at "
+                f"{res['best_alpha']:.1f}\u00b0, peak above the median "
+                f"{res['contrast']:.2f}"
+            )
+        fig.update_layout(
+            template="plotly_white",
+            title_text=title,
+            title_x=0.5,
+            title_font=dict(size=12),
+            xaxis_title="Two-fold axis azimuth (\u00b0)",
+            yaxis_title="Mirror correlation",
+            yaxis_range=[0, 1],
+            margin=dict(t=40, b=50, l=50, r=20),
+        )
+        return ui.div(_fig_to_html(fig), style=_PLOT_BOX, class_="ab-plot-box ab-wait")
 
     @render.ui
     def phase_circle_plot():
