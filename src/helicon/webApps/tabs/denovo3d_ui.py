@@ -268,6 +268,11 @@ def denovo3d_tab_ui():
                         ),
                         ui.input_checkbox("dn_plot_scores", "Plot scores", value=True),
                         ui.input_checkbox(
+                            "dn_show_center_line",
+                            "Show the central dashed line in the images",
+                            value=True,
+                        ),
+                        ui.input_checkbox(
                             "dn_show_download_buttons",
                             "Show download buttons",
                             value=False,
@@ -281,7 +286,7 @@ def denovo3d_tab_ui():
                             "Generate a cubic map that can be used directly as a RELION initial reference. Disable to download the smaller, compact map.",
                         ),
                         col_widths=6,
-                        style="align-items: flex-end;",
+                        style="align-items: flex-start;",
                     ),
                     ui.layout_columns(
                         ui.tooltip(

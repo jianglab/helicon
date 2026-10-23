@@ -20,6 +20,7 @@ BOOKMARK_DEFAULTS = {
     "ignore_blank": ("dn_ignore_blank", True),
     "auto_method": ("dn_auto_method", "threshold"),
     "plot_scores": ("dn_plot_scores", True),
+    "center_line": ("dn_show_center_line", True),
     "show_download": ("dn_show_download_buttons", False),
     "match_input_box": ("dn_match_input_box", True),
     "display_size": ("dn_selected_image_display_size", 128),

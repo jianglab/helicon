@@ -1205,7 +1205,7 @@ def denovo3d_tab_server(input, output, session):
             enable_selection=True,
             allow_multiple_selection=False,
             initial_selected_indices=reactive.value([0]),
-            display_dashed_line=True,
+            display_dashed_line=input.dn_show_center_line(),
         )
 
     @render.ui
@@ -1361,7 +1361,7 @@ def denovo3d_tab_server(input, output, session):
             image_links=transformed_images_links,
             image_size=reactive.value(256),
             justification="left",
-            display_dashed_line=True,
+            display_dashed_line=input.dn_show_center_line(),
             enable_selection=False,
         )
 
@@ -1386,7 +1386,7 @@ def denovo3d_tab_server(input, output, session):
             image_labels=stitched_image_labels,
             image_links=stitched_image_links,
             image_size=reactive.value(128),
-            display_dashed_line=True,
+            display_dashed_line=input.dn_show_center_line(),
             justification="left",
             enable_selection=False,
         )
@@ -1414,7 +1414,7 @@ def denovo3d_tab_server(input, output, session):
             enable_selection=multi,
             allow_multiple_selection=False,
             initial_selected_indices=reactive.value([0] if multi else []),
-            display_dashed_line=True,
+            display_dashed_line=input.dn_show_center_line(),
         )
 
     @render.ui
