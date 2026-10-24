@@ -51,7 +51,7 @@ segment knows its filament and its position along it.
 ## Controls that help
 
 - **Sliders:** click the thumb of a slider, then use the left and right arrow keys (or `A` and
-  `D`) to move it one step at a time.
+  `D`) to move it one step at a time. Double click on a value to type in a new value.
 - **Plots:** hover to read values; the toolbar of a plot zooms, moves and saves it.
 - **Parameters tab:** most apps have one, with the settings that rarely need a change.
 - **Bookmarks:** the address in the browser records the tab and every setting that differs from

@@ -21,7 +21,7 @@ found.
    *Threshold*, *Vertical crop size* and *Vertical shift* by hand. **Reset Transform** undoes it.
 3. On **Input 3D Maps**, choose where the maps to compare with come from: *upload*, *url*, the
    *amyloid_atlas*, the helical structures of the EMDB (*EMDB-helical*), or all of the *EMDB*. For the
-   last three a table lists the entries.
+   last three a table lists the entries. Hold shift and click in the table to batch select multiple entries.
 4. Click **Compare projections**.
 
 ## Settings
