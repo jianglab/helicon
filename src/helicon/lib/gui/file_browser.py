@@ -1192,6 +1192,11 @@ class FolderBrowserWidget(QMainWindow):
         path, self._modes_pending = self._modes_pending, None
         if path is None:
             return
+        previous = self._modes_worker
+        if previous is not None:
+            # it has sent "finished", which Qt does just before the thread ends: dropped
+            # now, it would be destroyed while it still runs, and that aborts the program
+            previous.wait()
         worker = _ModesWorker(self._modes_serial, path, self)
         worker.ready.connect(self._on_modes_ready)
         worker.finished.connect(self._on_modes_finished)

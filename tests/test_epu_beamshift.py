@@ -84,6 +84,12 @@ class TestIsEpuXmlFolder:
         assert is_epu_xml_folder(session / "Images-Disc1")
         assert is_epu_xml_folder(session / "Images-Disc1" / "GridSquare_1" / "Data")
 
+    def test_epu_session_file(self, tmp_path):
+        # the top folder of a session, before EPU has written an exposure, or on a disk
+        # the XML files were not copied to: the plot says there is nothing to show
+        (tmp_path / "EpuSession.dm").write_text("<EpuSessionXml/>")
+        assert is_epu_xml_folder(tmp_path)
+
     def test_survey_xml_files_only(self, session):
         assert not is_epu_xml_folder(
             session / "Images-Disc1" / "GridSquare_1" / "FoilHoles"
@@ -99,19 +105,44 @@ class TestIsEpuXmlFolder:
         _write(tmp_path / "movie_0001.xml")
         assert is_epu_xml_folder(tmp_path)
 
-    def test_too_deep_is_not_looked_for(self, tmp_path):
-        _write(tmp_path / "a" / "b" / "c" / "d" / _data_xml(0))
+    def test_other_folders_below_are_not_looked_into(self, tmp_path):
+        # a project with a folder of XML files somewhere in it: only that folder has
+        # the button, so that opening the project reads no more than its own listing
+        _write(tmp_path / "xml" / _data_xml(0))
+        _write(tmp_path / "a" / "Data" / _data_xml(1))
         assert not is_epu_xml_folder(tmp_path)
-        assert is_epu_xml_folder(tmp_path, max_depth=4)
+        assert is_epu_xml_folder(tmp_path / "xml")
 
-    def test_folders_of_a_session_first(self, tmp_path):
-        # many other folders do not use up the folders to look in before the data
-        for n in range(30):
-            (tmp_path / f"Class2D_{n:02d}").mkdir()
-        _write(tmp_path / "zz" / "xml" / _data_xml(0))
-        assert not is_epu_xml_folder(tmp_path, max_folders=10)
-        _write(tmp_path / "xml" / _data_xml(1))
-        assert is_epu_xml_folder(tmp_path, max_folders=10)
+    def test_only_the_first_grid_squares(self, tmp_path):
+        disc = tmp_path / "Images-Disc1"
+        for g in range(1, 4):
+            (disc / f"GridSquare_{g}" / "Data").mkdir(parents=True)
+        _write(disc / "GridSquare_4" / "Data" / _data_xml(0))
+        assert not is_epu_xml_folder(tmp_path, n_squares=3)
+        assert is_epu_xml_folder(tmp_path, n_squares=4)
+
+    def test_reads_few_folders(self, session, monkeypatch):
+        # what is read for a session, however many grid squares and survey folders it has
+        from helicon.lib import epu
+
+        for g in range(3, 200):
+            (session / "Images-Disc1" / f"GridSquare_{g}" / "FoilHoles").mkdir(
+                parents=True
+            )
+        read = []
+        listing = epu._visible_entries
+        monkeypatch.setattr(
+            epu, "_visible_entries", lambda f: read.append(f) or listing(f)
+        )
+        assert is_epu_xml_folder(session)
+        assert len(read) == 1  # its EpuSession.dm says it all
+        read.clear()
+        (session / "EpuSession.dm").unlink()
+        assert is_epu_xml_folder(session)
+        assert len(read) == 4  # the session, Images-Disc1, GridSquare_1 and its Data
+        read.clear()
+        assert not is_epu_xml_folder(session / "Images-Disc1" / "GridSquare_150")
+        assert len(read) <= 2
 
     def test_hidden_folders_are_skipped(self, tmp_path):
         _write(tmp_path / ".snapshot" / _data_xml(0))
@@ -210,6 +241,35 @@ class TestBeamShiftButton:
         assert widget._display_modes_for(str(session / "Images-Disc1")) == [
             "epuBeamShift"
         ]
+
+    def test_going_through_folders_quickly(self, qapp, tmp_path, monkeypatch):
+        # a folder's buttons are worked out in a thread: going on to the next folder while
+        # it ends must not destroy the thread while it still runs (that aborted helicon)
+        import time
+
+        from helicon.lib.gui.file_browser import FolderBrowserWidget
+
+        # as slow as a folder of a network disk
+        modes_for = FolderBrowserWidget._display_modes_for
+        monkeypatch.setattr(
+            FolderBrowserWidget,
+            "_display_modes_for",
+            lambda self, path: time.sleep(0.002) or modes_for(self, path),
+        )
+
+        folders = []
+        for i in range(4):
+            (tmp_path / f"f{i}").mkdir()
+            folders.append(tmp_path / f"f{i}")
+        _write(folders[0] / _data_xml(0))
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        for n in range(500):
+            widget._navigate_to(str(folders[n % 4]))
+            for _ in range(n % 4):
+                qapp.processEvents()
+        widget._navigate_to(str(folders[0]))
+        widget.wait_for_selection()
+        assert not widget._btn_beamshift.isHidden()
 
 
 class TestBeamShiftPlot:

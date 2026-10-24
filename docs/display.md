@@ -208,7 +208,10 @@ window of its own instead of the one already open. A file that Helicon cannot re
   shift. It is a check before grouping the exposures by beam shift
   (`--assignOpticGroupByBeamShiftXY` of [`helicon images2star`](commands/images2star.md)).
 
-  The name of the folder does not count: it is the files that do. The XML files of the survey images
+  The name of the folder does not count: it is the files that do. The top folder of a session is known
+  by the `EpuSession.dm` that EPU leaves in it. Below a folder, only the folders of a session
+  (`Images-Disc*`, the first grid squares, `Data`) are looked into, so that the check stays quick on a
+  network disk: in a project with an `xml` folder somewhere inside, open that folder. The XML files of the survey images
   (`GridSquare_*.xml`, and `FoilHole_*.xml` without `_Data_`) are left out; XML files renamed by hand are
   taken if they are EPU `MicroscopeImage` records.
 
