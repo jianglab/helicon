@@ -197,6 +197,21 @@ window of its own instead of the one already open. A file that Helicon cannot re
 : For the `model.star` of a RELION refinement: computes the **True FSC curve** from its two half maps
   (see [`helicon trueFSC`](commands/trueFSC.md)).
 
+### A folder of EPU XML files
+
+**Beam Shift**
+: Shown, with nothing selected, for a folder that holds the XML files EPU writes for its exposures
+  (`FoilHole_*_Data_*.xml`), in it or in a folder below it: a copy of them all in one folder (often called
+  `xml`), or an EPU session with its `Images-Disc1/GridSquare_*/Data` folders. It plots the **beam shift** of
+  every exposure in the folder and all the folders below it, as a scatter plot: each hole of the pattern
+  collected around a stage position is a cluster of points. Hover over a point for its file and beam
+  shift. It is a check before grouping the exposures by beam shift
+  (`--assignOpticGroupByBeamShiftXY` of [`helicon images2star`](commands/images2star.md)).
+
+  The name of the folder does not count: it is the files that do. The XML files of the survey images
+  (`GridSquare_*.xml`, and `FoilHole_*.xml` without `_Data_`) are left out; XML files renamed by hand are
+  taken if they are EPU `MicroscopeImage` records.
+
 ### Opening a web app
 
 These buttons open one of the [Web apps](apps/index.md) in your browser, with the file already loaded. They

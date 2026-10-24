@@ -1501,6 +1501,19 @@ def main(args: argparse.Namespace) -> None:
                 parent=widget,
             )
             return
+        if mode == "epuBeamShift":
+            from helicon.lib.gui.epu_beamshift import (
+                _open_beamshift_plot,
+                read_folder_beamshifts,
+            )
+
+            # a session has thousands of XML files, on a network disk too
+            reuse = None if new_window else _plot.active()
+            _run_in_thread(
+                lambda: read_folder_beamshifts(path),
+                lambda result: _open_beamshift_plot(result, reuse_window=reuse),
+            )
+            return
         tracker = _TRACKER_FOR.get(mode)
         if tracker is None:
             return

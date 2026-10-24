@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,6 +17,10 @@ __all__ = [
     "EPU_micrograph_path_2_movie_xml_path",
     "EPU_xml_2_beamshift",
     "assign_beamshift_groups",
+    "find_epu_xml_files",
+    "is_epu_data_xml",
+    "is_epu_xml_folder",
+    "read_epu_beamshifts",
     "check_foilhole_xml_files",
     "extract_beamshift",
     "extract_data_collection_time",
@@ -350,3 +356,181 @@ def EPU_xml_2_beamshift(xml_file: str | Path) -> tuple[float, float]:
     except (KeyError, TypeError, ValueError) as e:
         raise HeliconIOError(f"no BeamShift in {xml_file}") from e
     return beamshift
+
+
+# the XML file EPU writes beside each exposure, with the beam shift of the exposure in it:
+# FoilHole_<hole>_Data_<template>_<n>_<date>_<time>.xml, e.g.
+# FoilHole_28788144_Data_28764755_46_20240328_192116.xml. The XML files of the grid
+# squares and foil holes (GridSquare_*.xml, FoilHole_<hole>_<date>_<time>.xml) are of
+# the survey images, not of the exposures.
+_EPU_DATA_XML = re.compile(r"^FoilHole_\d+_Data_\d+_\d+_\d{8}_\d{6}\.xml$", re.I)
+# the names EPU gives the XML files of its survey images: MicroscopeImage records too
+_EPU_SURVEY_XML = re.compile(r"^(FoilHole|GridSquare|Atlas)_", re.I)
+# the folders of an EPU session that lead to the exposures, looked into first
+_EPU_FOLDER = re.compile(r"^(data|xmls?|images-disc\d*|gridsquare_\d+)$", re.I)
+
+
+def is_epu_data_xml(name: str) -> bool:
+    """Whether a file name is that of the XML file EPU writes for an exposure.
+
+    Parameters
+    ----------
+    name : str
+        The name of the file (a path is taken by its last part).
+
+    Returns
+    -------
+    bool
+        True for ``FoilHole_<hole>_Data_<template>_<n>_<date>_<time>.xml``.
+    """
+    return _EPU_DATA_XML.match(Path(name).name) is not None
+
+
+def _is_microscope_image_xml(path: str | Path, n_bytes: int = 1024) -> bool:
+    """Whether an XML file is an EPU ``MicroscopeImage`` that is not named as a survey
+    image is: an exposure XML file under another name."""
+    if _EPU_SURVEY_XML.match(Path(path).name):
+        return False
+    try:
+        with open(path, "rb") as f:
+            return b"<MicroscopeImage" in f.read(n_bytes)
+    except OSError:
+        return False
+
+
+def _visible_entries(folder: str | Path) -> list[tuple[str, bool]]:
+    """The ``(name, is folder)`` of the entries of a folder that are not hidden."""
+    try:
+        with os.scandir(folder) as listing:
+            return [(e.name, e.is_dir()) for e in listing if e.name[:1] != "."]
+    except OSError:
+        return []
+
+
+def is_epu_xml_folder(
+    folder: str | Path, max_depth: int = 3, max_folders: int = 100
+) -> bool:
+    """Whether a folder holds the XML files EPU writes for its exposures, in it or below it.
+
+    The name of the folder says little (it is often ``xml``, but anything else is as
+    common), so it is the files that are looked for: ``FoilHole_*_Data_*.xml`` (see
+    :func:`is_epu_data_xml`), or, in the folder itself, XML files that are EPU
+    ``MicroscopeImage`` records under another name. That holds for a folder of the XML
+    files copied together as for an EPU session (``Images-Disc1/GridSquare_*/Data``).
+
+    The folders below are looked into depth first, the ones of an EPU session (``Data``,
+    ``xml``, ``Images-Disc1``, ``GridSquare_*``) first, and the search stops at the first
+    file found: deciding whether to show a button must not read a large tree through.
+
+    Parameters
+    ----------
+    folder : str or Path
+        The folder to look in.
+    max_depth : int, optional
+        How many levels of folders below ``folder`` are looked into.
+    max_folders : int, optional
+        How many folders are looked into at most, ``folder`` included.
+
+    Returns
+    -------
+    bool
+        True if an EPU exposure XML file was found.
+    """
+    entries = _visible_entries(folder)
+    if any(not is_dir and is_epu_data_xml(name) for name, is_dir in entries):
+        return True
+    # XML files that are not named the EPU way: are they EPU records?
+    xmls = [
+        n
+        for n, is_dir in entries
+        if not is_dir and n.lower().endswith(".xml") and not _EPU_SURVEY_XML.match(n)
+    ]
+    if any(_is_microscope_image_xml(Path(folder) / n) for n in sorted(xmls)[:3]):
+        return True
+
+    def subfolders(path: Path, names: list[tuple[str, bool]]) -> list[Path]:
+        names = sorted(n for n, is_dir in names if is_dir)
+        names.sort(key=lambda n: _EPU_FOLDER.match(n) is None)
+        return [path / n for n in names]
+
+    seen = 1
+    stack = [(sub, 1) for sub in reversed(subfolders(Path(folder), entries))]
+    while stack and seen < max_folders:
+        path, depth = stack.pop()
+        seen += 1
+        entries = _visible_entries(path)
+        if any(not is_dir and is_epu_data_xml(name) for name, is_dir in entries):
+            return True
+        if depth < max_depth:
+            stack.extend(
+                (sub, depth + 1) for sub in reversed(subfolders(path, entries))
+            )
+    return False
+
+
+def find_epu_xml_files(folder: str | Path) -> list[Path]:
+    """The EPU exposure XML files in a folder and in all the folders below it.
+
+    Parameters
+    ----------
+    folder : str or Path
+        The folder to look in.
+
+    Returns
+    -------
+    list of Path
+        The ``FoilHole_*_Data_*.xml`` files, sorted. Where there are none, the XML files
+        that are EPU ``MicroscopeImage`` records under other names.
+    """
+    found, others = [], []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if d[:1] != "."]
+        for name in files:
+            if is_epu_data_xml(name):
+                found.append(Path(root) / name)
+            elif not found and name.lower().endswith(".xml"):
+                others.append(Path(root) / name)
+    if not found:
+        found = [p for p in others if _is_microscope_image_xml(p)]
+    return sorted(found)
+
+
+def read_epu_beamshifts(
+    xml_files: list[str | Path], n_threads: int = 8
+) -> tuple[list[Path], np.ndarray, list[Path]]:
+    """The beam shifts of EPU exposure XML files, read in threads.
+
+    Parameters
+    ----------
+    xml_files : list of str or Path
+        The XML files (see :func:`find_epu_xml_files`).
+    n_threads : int, optional
+        How many files are read at a time: on a network file system the time is in the
+        waiting for each file.
+
+    Returns
+    -------
+    files : list of Path
+        The files that have a beam shift, in the order given.
+    beamshifts : np.ndarray
+        Their beam shifts, ``(len(files), 2)``: x and y.
+    failed : list of Path
+        The files that could not be read or have no beam shift.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    def read(path):
+        try:
+            return EPU_xml_2_beamshift(path)
+        except (OSError, ET.ParseError, HeliconIOError):
+            return None
+
+    paths = [Path(p) for p in xml_files]
+    with ThreadPoolExecutor(max_workers=max(1, n_threads)) as pool:
+        values = list(pool.map(read, paths))
+    files = [p for p, v in zip(paths, values) if v is not None]
+    failed = [p for p, v in zip(paths, values) if v is None]
+    beamshifts = np.array([v for v in values if v is not None], dtype=float)
+    return files, beamshifts.reshape(-1, 2), failed

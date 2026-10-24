@@ -225,6 +225,7 @@ _ACTION_STYLE = {
     "proc3d": ("fa5s.sliders-h", "app"),
     "trueFSC": ("fa5s.chart-line", "app"),
     "images2star": ("fa5s.exchange-alt", "app"),
+    "epuBeamShift": ("fa5s.braille", "viewer"),
 }
 
 
@@ -279,6 +280,7 @@ class FolderBrowserWidget(QMainWindow):
         ("_btn_hi3d", "hi3d"),
         ("_btn_truefsc", "trueFSC"),
         ("_btn_images2star", "images2star"),
+        ("_btn_beamshift", "epuBeamShift"),
     ]
 
     def __init__(self, start_dir: str | Path | None = None, parent=None):
@@ -635,7 +637,8 @@ class FolderBrowserWidget(QMainWindow):
 
         # Contextual display-mode buttons + "new window" toggle, in the preview pane
         # below the facts (at the bottom of the window when the pane is hidden).
-        # Hidden unless exactly one file (not a directory) is selected.
+        # Shown for the one file selected, or for the folder shown when nothing is (an EPU
+        # folder of XML files has a button); hidden when there is nothing to do with it.
         self._action_bar = QWidget()
         self._action_bar.setObjectName("actionBar")
         # the buttons wrap to a second row when the window is narrow
@@ -710,6 +713,11 @@ class FolderBrowserWidget(QMainWindow):
             "Open the Images2Star tools panel to preview and transform "
             "this dataset, then save a new RELION STAR/CryoSPARC file"
         )
+        self._btn_beamshift = QPushButton("Beam Shift")
+        self._btn_beamshift.setToolTip(
+            "Plot the beam shifts of the EPU exposures (the FoilHole_*_Data_*.xml "
+            "files in this folder and the folders below it) as a scatter plot"
+        )
         self._new_window_cb = QCheckBox("New window")
         self._new_window_cb.setToolTip(
             "<div style='white-space: normal; width: 200px;'>Create a new display window instead of reusing the current one. Most recently clicked/focused display window will be used as the display target if there are two or more display windows</div>"
@@ -756,6 +764,7 @@ class FolderBrowserWidget(QMainWindow):
 
         self._refresh_sidebar()
         self._update_preview()
+        self._update_actions()
 
         # Fill Dimension / Images / Pixel Size for the initial directory in
         # the background so the browser opens instantly (these columns start
@@ -925,15 +934,21 @@ class FolderBrowserWidget(QMainWindow):
                 self._navigate_to(path)
 
     def _display_modes_for(self, path: str) -> list[str]:
-        """Return the applicable display modes for a single file.
+        """Return the applicable display modes for a single file or folder.
 
-        Detection order mirrors _get_file_type_label:
+        A folder of EPU exposure XML files (in it or below it) has
+        ``epuBeamShift``; any other folder has none. For a file, the
+        detection order mirrors _get_file_type_label:
         1. Known file types by suffix
         2. Pure-text fallback via UTF-8 decode -> ["general"]
         3. Unknown binary -> []
         """
         from pathlib import Path
 
+        if Path(path).is_dir():
+            from helicon.lib.epu import is_epu_xml_folder
+
+            return ["epuBeamShift"] if is_epu_xml_folder(path) else []
         try:
             if Path(path).stat().st_size == 0:
                 return []
@@ -1144,19 +1159,25 @@ class FolderBrowserWidget(QMainWindow):
 
     def _on_selection_changed(self, selected, deselected) -> None:
         self._update_preview()
+        self._update_actions()
+
+    def _update_actions(self) -> None:
+        """Show the buttons of the selected file or folder, or else of the folder shown."""
         indexes = self._tree.selectionModel().selectedIndexes()
         # selectedIndexes() returns one index per column; collapse to rows.
         rows = sorted({idx.row() for idx in indexes})
         self._current_path = None
         # what is being worked out for an earlier file is dropped
         self._modes_serial += 1
-        if len(rows) != 1:
+        if len(rows) > 1:
             self._action_bar.hide()
             self._modes_applied = self._modes_serial
             return
-        index = self._model.index(rows[0], 0)
-        path = self._model.file_path(index)
-        if not path or self._model.is_dir(index):
+        if rows:
+            path = self._model.file_path(self._model.index(rows[0], 0))
+        else:
+            path = self._model._root_path
+        if not path:
             self._action_bar.hide()
             self._modes_applied = self._modes_serial
             return
@@ -1298,6 +1319,7 @@ class FolderBrowserWidget(QMainWindow):
         self._refresh_recent_menu()
         self._refresh_sidebar()
         self._update_preview()
+        self._update_actions()
         # (the columns that need reading a file are filled when the model says that
         # the folder is all there: load_finished)
 
@@ -1706,6 +1728,7 @@ class FolderBrowserWidget(QMainWindow):
         self._sidebar.invalidate()
         self._refresh_sidebar()
         self._model.refresh()
+        self._update_actions()
 
     def _populate_file_info_async(self) -> None:
         """Fill Dimension / Images / Pixel Size and folder counts in the background.
