@@ -839,6 +839,8 @@ class TestInTheBrowser:
     def test_the_buttons_are_below_the_facts_of_the_preview(self, browser, qapp):
         browser.resize(1200, 700)
         browser.show()
+        # the buttons of the first selection arrive later and may hide the bar
+        browser.wait_for_selection()
         bar, preview = browser._action_bar, browser._preview
         bar.show()
         qapp.processEvents()
@@ -852,6 +854,7 @@ class TestInTheBrowser:
     ):
         browser.resize(1200, 700)
         browser.show()
+        browser.wait_for_selection()
         bar = browser._action_bar
         bar.show()
         browser._preview_action.setChecked(False)
