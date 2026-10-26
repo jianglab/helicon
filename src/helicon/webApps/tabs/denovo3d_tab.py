@@ -3147,6 +3147,14 @@ def denovo3d_tab_server(input, output, session):
                 log.info(
                     f"{n_discarded}/{len(tasks)} results are None and thus discarded"
                 )
+            if not results and not stopped:
+                ui.notification_show(
+                    f"All {len(tasks)} calculations failed, so there is nothing to"
+                    f" show. See helicon.denovo3D.log under {helicon.cache_dir / 'logs'}"
+                    " for the reason.",
+                    type="error",
+                    duration=15,
+                )
 
             async def _rank_final(results, log=None):
                 """Rank, by whichever joint method the route asks for.
