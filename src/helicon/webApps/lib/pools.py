@@ -47,7 +47,9 @@ def _limit_threads(threads):
     n = str(max(1, int(threads)))
     for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ[name] = n
-    os.environ.setdefault("NUMBA_NUM_THREADS", n)
+    # NUMBA_NUM_THREADS is left alone: numba reads it when it is imported (the fork
+    # server preloads it), and a different value in the environment when the first
+    # function is compiled makes every task fail. set_num_threads below limits it.
     try:
         from threadpoolctl import threadpool_limits
 

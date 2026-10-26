@@ -57,6 +57,19 @@ class TestTaskPool:
         finally:
             pool.shutdown()
 
+    def test_a_worker_does_not_change_the_numba_thread_setting(self):
+        # numba fails to compile once NUMBA_NUM_THREADS differs from what it read at
+        # import, which made every task of a search fail
+        import os
+
+        pool = pools.TaskPool(1, threads=3)
+        try:
+            assert pool.submit(os.getenv, "NUMBA_NUM_THREADS").result(
+                timeout=120
+            ) == os.getenv("NUMBA_NUM_THREADS")
+        finally:
+            pool.shutdown()
+
 
 class TestDenovo3dStop:
     @staticmethod
