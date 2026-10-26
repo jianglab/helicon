@@ -10,6 +10,7 @@ Gallery Types
 - ``Class3dGallery``: Class3D optimiser/model.star → XYZ slices + abundance.
 - ``Refine3dGallery``: Refine3D optimiser/model.star → XYZ slices.
 - ``Class2dGallery``: Class2D optimiser/model.star → class averages + sort.
+- ``ProjectionGallery``: a 3D map → its projections along Z, Y and X.
 """
 
 from __future__ import annotations
@@ -262,6 +263,106 @@ class OrthogonalGallery:
         _install_window_shortcuts(window)
         window.show()
         return window
+
+
+def volume_projections(
+    mrc_path: str, slab: int = 64
+) -> tuple[list[np.ndarray], float] | None:
+    """Project a 3D map along Z, Y and X.
+
+    The map is read memory-mapped, ``slab`` Z sections at a time, so a large
+    map is never held whole in memory.
+
+    Parameters
+    ----------
+    mrc_path : str
+        Path to a 3D MRC/MAP file.
+    slab : int, optional
+        Number of Z sections read at a time.
+
+    Returns
+    -------
+    tuple of (list of numpy.ndarray, float) or None
+        The projections along Z (shape ``(ny, nx)``), Y (``(nz, nx)``) and
+        X (``(nz, ny)``), as float32, and the pixel size in Å; ``None`` when
+        the file is not a 3D map.
+    """
+    with _open_mrc(mrc_path) as mrc:
+        data = mrc.data
+        if data is None or data.ndim != 3 or data.shape[0] < 2:
+            return None
+        apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
+        nz, ny, nx = data.shape
+        proj_z = np.zeros((ny, nx), dtype=np.float64)
+        proj_y = np.empty((nz, nx), dtype=np.float32)
+        proj_x = np.empty((nz, ny), dtype=np.float32)
+        for z0 in range(0, nz, slab):
+            block = np.asarray(data[z0 : z0 + slab], dtype=np.float32)
+            proj_z += block.sum(axis=0, dtype=np.float64)
+            proj_y[z0 : z0 + len(block)] = block.sum(axis=1)
+            proj_x[z0 : z0 + len(block)] = block.sum(axis=2)
+    return [proj_z.astype(np.float32), proj_y, proj_x], apix
+
+
+def _pad_to_shape(image: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Centre ``image`` in an array of ``shape``, filled with its border median.
+
+    The gallery draws every tile at one size: the projections of a map that
+    is not a cube are padded rather than stretched to it.
+    """
+    h, w = image.shape
+    if (h, w) == tuple(shape):
+        return image
+    border = np.concatenate([image[0], image[-1], image[:, 0], image[:, -1]])
+    out = np.full(shape, np.median(border), dtype=image.dtype)
+    y0 = (shape[0] - h) // 2
+    x0 = (shape[1] - w) // 2
+    out[y0 : y0 + h, x0 : x0 + w] = image
+    return out
+
+
+class ProjectionGallery(BaseGallery):
+    """Gallery of the projections of a 3D map along Z, Y and X.
+
+    Parameters
+    ----------
+    mrc_path : str
+        Path to a 3D MRC/MAP file.
+    projections : list of numpy.ndarray, optional
+        The projections along Z, Y and X, as ``volume_projections`` returns
+        them; computed from the file when not given.
+    apix : float, optional
+        Pixel size in Å of ``projections``.
+    """
+
+    _AXES = ("Z", "Y", "X")
+
+    def __init__(
+        self,
+        mrc_path: str,
+        projections: list[np.ndarray] | None = None,
+        apix: float = 1.0,
+    ) -> None:
+        super().__init__(mrc_path)
+        self._frames: list[np.ndarray] = []
+        if projections is not None:
+            self._set_projections(projections, apix)
+
+    def _parse(self) -> None:
+        result = volume_projections(self.star_path)
+        if result is not None:
+            self._set_projections(*result)
+        self._parsed = True
+
+    def _set_projections(self, projections: list[np.ndarray], apix: float) -> None:
+        size = max(max(p.shape) for p in projections)
+        self._frames = [_pad_to_shape(p, (size, size)) for p in projections]
+        self._n = len(self._frames)
+        self._img_h = self._img_w = size
+        self._apix = apix
+        self._labels = [f"{axis} projection" for axis in self._AXES]
+        self._read_fn = self._frames.__getitem__
+        self._parsed = True
 
 
 class StackGallery(BaseGallery):

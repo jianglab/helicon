@@ -688,6 +688,30 @@ def _open_orthogonal_viewer(
     return gallery.open(reuse_window=reuse_window, tracker=tracker)
 
 
+def _open_projection_gallery(
+    mrc_path: str, reuse_window=None, tracker=None, background: bool = False
+) -> None:
+    """Show the projections of a 3D map along Z, Y and X in a gallery window.
+
+    With ``background``, the projections, which read the whole map, are
+    computed in a thread and the window is shown when they are done.
+    """
+    from helicon.lib.gui.gallery_backends import ProjectionGallery, volume_projections
+
+    def _show(result):
+        if result is None:
+            return
+        projections, apix = result
+        ProjectionGallery(mrc_path, projections, apix).open(
+            reuse_window=reuse_window, tracker=tracker
+        )
+
+    if background:
+        _run_in_thread(lambda: volume_projections(mrc_path), _show)
+    else:
+        _show(volume_projections(mrc_path))
+
+
 def _open_2d_classes_gallery(
     star_path: str, reuse_window=None, tracker=None
 ) -> "QMainWindow | None":
@@ -956,6 +980,12 @@ def _open_file(
         from helicon.lib.gui.gallery_backends import CryosparcClass2dGallery
 
         CryosparcClass2dGallery(path).open(reuse_window=reuse_gallery, tracker=_gallery)
+        return
+
+    if ext in _MRC_EXTENSIONS and mode == "projection":
+        _open_projection_gallery(
+            path, reuse_window=reuse_gallery, tracker=_gallery, background=background
+        )
         return
 
     if ext == ".cs" and mode in ("slice", "gallery"):

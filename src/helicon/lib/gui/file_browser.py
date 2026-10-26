@@ -213,6 +213,7 @@ _ACTION_STYLE = {
     "optimiser": ("fa5s.layer-group", "viewer"),
     "2dclasses": ("fa5s.th-large", "viewer"),
     "orthogonal": ("fa5s.cubes", "viewer"),
+    "projection": ("fa5s.compress-arrows-alt", "viewer"),
     "fsc": ("fa5s.chart-line", "viewer"),
     "html": ("fa5s.globe", "viewer"),
     "denovo3D": ("fa5s.dna", "app"),
@@ -268,6 +269,7 @@ class FolderBrowserWidget(QMainWindow):
         ("_btn_optimiser", "optimiser"),
         ("_btn_2dclasses", "2dclasses"),
         ("_btn_orthogonal", "orthogonal"),
+        ("_btn_projection", "projection"),
         ("_btn_proc3d", "proc3d"),
         ("_btn_fsc", "fsc"),
         ("_btn_html", "html"),
@@ -663,6 +665,10 @@ class FolderBrowserWidget(QMainWindow):
         self._btn_2dclasses.setToolTip("Show 2D class averages sorted by abundance")
         self._btn_orthogonal = QPushButton("Ortho Slice")
         self._btn_orthogonal.setToolTip("Interactive XYZ slice viewer for 3D volumes")
+        self._btn_projection = QPushButton("Projection")
+        self._btn_projection.setToolTip(
+            "Show the projections of this 3D map along Z, Y and X"
+        )
         self._btn_proc3d = QPushButton("Proc3D")
         self._btn_proc3d.setToolTip(
             "Open the Proc3D tools panel to preview and transform "
@@ -1028,6 +1034,7 @@ class FolderBrowserWidget(QMainWindow):
                     "gallery",
                     "chimerax",
                     "orthogonal",
+                    "projection",
                     "proc3d",
                 ]
             else:

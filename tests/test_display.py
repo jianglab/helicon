@@ -4277,6 +4277,92 @@ class TestPanelToggle:
             viewer.close()
 
 
+class TestProjectionGallery:
+    @staticmethod
+    def _write_map(path, vol, apix=2.0):
+        import mrcfile as _real_mrcfile
+
+        with _real_mrcfile.new(str(path), overwrite=True) as mrc:
+            mrc.set_data(vol)
+            mrc.voxel_size = (apix, apix, apix)
+
+    def test_projections_are_the_sums_along_each_axis(self, tmp_path):
+        from helicon.lib.gui.gallery_backends import volume_projections
+
+        vol = np.random.default_rng(0).random((5, 6, 7)).astype(np.float32)
+        self._write_map(tmp_path / "map.mrc", vol, apix=1.5)
+        # a slab smaller than nz: the Z sections are summed a few at a time
+        projections, apix = volume_projections(str(tmp_path / "map.mrc"), slab=2)
+        assert apix == pytest.approx(1.5)
+        for proj, axis in zip(projections, (0, 1, 2)):
+            assert proj.dtype == np.float32
+            np.testing.assert_allclose(proj, vol.sum(axis=axis), rtol=1e-5)
+
+    def test_a_single_section_is_not_a_map(self, tmp_path):
+        from helicon.lib.gui.gallery_backends import volume_projections
+
+        self._write_map(tmp_path / "image.mrc", np.zeros((1, 8, 8), np.float32))
+        assert volume_projections(str(tmp_path / "image.mrc")) is None
+
+    def test_gallery_shows_three_labelled_tiles_of_one_size(self, tmp_path):
+        from helicon.lib.gui.gallery_backends import ProjectionGallery
+
+        # a map that is not a cube: the Y and X projections are taller than wide
+        projections = [
+            np.ones((4, 6), np.float32),
+            np.ones((10, 6), np.float32),
+            np.ones((10, 4), np.float32),
+        ]
+        projections[1][3:7, 2:4] = 5.0
+        gallery = ProjectionGallery("map.mrc", projections, apix=2.0)
+        assert gallery._n == 3
+        assert (gallery._img_h, gallery._img_w) == (10, 10)
+        assert gallery._labels == ["Z projection", "Y projection", "X projection"]
+        frames = [gallery._read_fn(i) for i in range(3)]
+        assert all(f.shape == (10, 10) for f in frames)
+        # padded with the background, the projection kept in the middle
+        y = frames[1]
+        assert y[0, 0] == 1.0 and y[:, 2:8].sum() == projections[1].sum()
+
+    def test_display_modes_volume_includes_projection(self, tmp_path, qapp):
+        from helicon.lib.gui.file_browser import FolderBrowserWidget
+
+        self._write_map(tmp_path / "map.mrc", np.zeros((4, 8, 8), np.float32))
+        self._write_map(tmp_path / "image.mrc", np.zeros((1, 8, 8), np.float32))
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert "projection" in widget._display_modes_for(str(tmp_path / "map.mrc"))
+        assert "projection" not in widget._display_modes_for(
+            str(tmp_path / "image.mrc")
+        )
+
+    def test_projection_button_requests_projection_mode(self, tmp_path, qapp):
+        from helicon.lib.gui.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        assert widget._btn_projection.text() == "Projection"
+        widget._current_path = str(tmp_path / "map.mrc")
+        requests = []
+        widget.display_requested.connect(lambda *a: requests.append(a))
+        widget._btn_projection.click()
+        assert requests == [(str(tmp_path / "map.mrc"), "projection", False)]
+
+    def test_open_file_projection_mode_opens_gallery_window(self, tmp_path, qapp):
+        from helicon.lib.gui.trackers import _TRACKER_FOR, _gallery
+
+        assert _TRACKER_FOR["projection"] is _gallery
+        vol = np.random.default_rng(1).random((4, 8, 6)).astype(np.float32)
+        self._write_map(tmp_path / "map.mrc", vol)
+        mock_viewer = MagicMock()
+        display._open_file(mock_viewer, str(tmp_path / "map.mrc"), mode="projection")
+        mock_viewer.add_image.assert_not_called()
+        window = _gallery.active()
+        try:
+            assert window is not None
+            assert window.windowTitle() == "Helicon - map.mrc"
+        finally:
+            window.close()
+
+
 class TestOrthogonalViewer:
 
     def test_display_modes_mrc_with_nz_gt1_includes_orthogonal(self, tmp_path, qapp):
@@ -4317,6 +4403,7 @@ class TestOrthogonalViewer:
             "gallery",
             "chimerax",
             "orthogonal",
+            "projection",
             "proc3d",
         ]
 

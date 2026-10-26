@@ -94,7 +94,7 @@ _images2star = _DisplayTracker(_is_alive_widget)
 _proc3d = _DisplayTracker(_is_alive_widget)
 
 _NAPARI_MODES = {"slice", "volume", "3dplot", "stats", "html"}
-_GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal"}
+_GALLERY_MODES = {"gallery", "optimiser", "2dclasses", "orthogonal", "projection"}
 _TEXT_MODES = {"text"}
 _PLOT_MODES = {"fsc"}
 _IMAGES2STAR_MODES = {"images2star"}
