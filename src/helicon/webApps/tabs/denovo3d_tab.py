@@ -289,6 +289,7 @@ def denovo3d_tab_server(input, output, session):
     new_initial_image = reactive.value(True)
     pre_rotation_rv = reactive.value(0)
     threshold_rv = reactive.value(0.0)
+    skip_auto_transform = reactive.value(False)
     apix_rv = reactive.value(1.0)
     shift_y_rv = reactive.value(0)
     vertical_crop_size_rv = reactive.value(32)
@@ -2394,6 +2395,9 @@ def denovo3d_tab_server(input, output, session):
     @reactive.effect
     @reactive.event(input.dn_auto_transform, threshold_rv)
     def _auto_transform():
+        if skip_auto_transform():
+            skip_auto_transform.set(False)
+            return
         req(all_images())
         req(len(selected_images_thresholded()))
         images = selected_images_thresholded()
@@ -2467,7 +2471,18 @@ def denovo3d_tab_server(input, output, session):
         ny = int(np.max([img.shape[0] for img in images]))
         nx = int(np.max([img.shape[1] for img in images]))
         per_image_transforms.set([])
+        # no threshold at all: the lowest value of the images
+        originals = initial_image()
+        if _input_or("dn_img_negate", img_negate_rv()):
+            originals = [-img for img in originals]
+        threshold = round(float(np.min([np.min(img) for img in originals])), 3)
+        if threshold_rv() != threshold:
+            # the new threshold would start an auto transform that undoes this reset
+            skip_auto_transform.set(True)
+        threshold_rv.set(threshold)
+        ui.update_numeric("dn_threshold", value=threshold)
         for i in range(len(images)):
+            ui.update_numeric(_pi_id("threshold", i), value=threshold)
             ui.update_numeric(_pi_id("rot", i), value=0.0)
             ui.update_numeric(_pi_id("dy", i), value=0.0)
             ui.update_numeric(_pi_id("vcrop", i), value=ny // 2 * 2)
