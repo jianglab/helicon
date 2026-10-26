@@ -1,8 +1,9 @@
 """What a RELION or CryoSPARC job made, as pictures: the result that you would look at first.
 
 The preview of a job folder shows the outcome of the job, not a list of its files (they are in the
-list of the window): for a 2D classification the class averages of the last iteration, for a refinement
-the central section of the map, its FSC curve and the distribution of the views, for a post-processing
+list of the window): for a 2D classification the class averages of the last iteration, for a 3D classification
+the central sections of the classes and the tilt angles of the particles, for a refinement the central
+section of the map, its FSC curve, the distribution of the views and of the tilt angles, for a post-processing
 the sharpened map and the corrected FSC with the resolution, for a CTF estimation the histograms of the
 defocus and of the resolution of the fits, for a CTF refinement the change of the defocus and the fitted
 aberrations, for a motion correction the histogram of the total motion and the trajectories of a few
@@ -45,6 +46,9 @@ CTF_RESOLUTION_RANGE = (0.05, 10.0)
 EXACT_BYTES = 1 << 30
 # the days that the outcome of a job is kept in the cache
 OUTCOME_DAYS = 30
+# part of the key of the outcomes in the cache: raised when what an outcome shows changes, so
+# that the outcomes kept before are made again
+OUTCOME_VERSION = 2
 # the most trajectory files of a CryoSPARC motion correction that are read
 MAX_TRAJECTORIES = 600
 BLOCK_ROWS = 50_000
@@ -363,11 +367,12 @@ def _plot_histogram(
     title: str,
     mark: float | None = None,
     upper: tuple[float, float] | None = None,
+    limits: tuple[float, float, float] | None = None,
 ) -> "np.ndarray":  # noqa: F821
     """Draw the histogram of ``values``; ``mark`` is a value (the median) with a vertical line.
 
     The axis has whole numbers or halves as ticks, over the range of :func:`_histogram_limits`
-    (``upper`` as there).
+    (``upper`` as there), or over ``limits``, ``(low, high, step)``, when they are given.
     """
     import numpy as np
     from PySide6.QtCore import QPointF, QRectF, Qt
@@ -378,7 +383,7 @@ def _plot_histogram(
     values = values[np.isfinite(values)]
     if not len(values):
         raise ValueError("nothing to draw")
-    low, high, step = _histogram_limits(values, upper)
+    low, high, step = limits or _histogram_limits(values, upper)
     inside = values[(values >= low) & (values <= high)]
     # bins that end at the ticks: a few to each interval between them
     intervals = max(1, round((high - low) / step))
@@ -1698,6 +1703,54 @@ def _views_caption(shown: int, total: int | None = None) -> str:
     return f"{shown:,} particles"
 
 
+def _tilt_limits(tilt) -> tuple[float, float, float]:
+    """The range of the histogram of the tilt angles and the step of its ticks: ``(low, high,
+    step)``.
+
+    The range of :func:`_histogram_limits` when it is inside 0 to 180°, so that the tilts of a
+    helical refinement, all near 90°, are spread over the plot; otherwise the whole of 0 to 180°
+    with a tick every 30°.
+    """
+    low, high, step = _histogram_limits(tilt)
+    if low < 0.0 or high > 180.0:
+        return 0.0, 180.0, 30.0
+    return low, high, step
+
+
+def _tilt_panel(tilt, total: int | None = None) -> dict | None:
+    """The histogram of the tilt angles of the particles, with their median; None when there are
+    none or it cannot be drawn."""
+    import numpy as np
+
+    tilt = np.asarray(tilt, dtype=float)
+    tilt = tilt[np.isfinite(tilt)]
+    if not len(tilt):
+        return None
+    median = float(np.median(tilt))
+    return _plot_panel(
+        "Tilt angles",
+        lambda: _plot_histogram(
+            tilt, "tilt (°)", "Tilt angles", median, limits=_tilt_limits(tilt)
+        ),
+        f"{_views_caption(len(tilt), total)}; the dashed line is the median, {median:.1f}°",
+    )
+
+
+def _relion_class3d(folder: Path) -> dict | None:
+    """The central sections of the classes of a 3D classification, and the tilt angles of the
+    particles of the last iteration."""
+    outcome = _relion_classes_3d(folder, "3D classes")
+    if outcome is None:
+        return None
+    data = _last_numbered(folder, r"run_it(\d+)_data\.star")
+    columns = _particle_columns(data, ["rlnAngleTilt"]) if data is not None else None
+    if columns is not None:
+        panel = _tilt_panel(columns["rlnAngleTilt"].astype(float))
+        if panel:
+            outcome["panels"].append(panel)
+    return outcome
+
+
 def _relion_refine3d(folder: Path) -> dict | None:
     panels, facts = [], []
     final = folder / "run_class001.mrc"
@@ -1747,6 +1800,9 @@ def _relion_refine3d(folder: Path) -> dict | None:
             lambda: view_distribution_image(*angles),
             _views_caption(len(angles[0])),
         )
+        if panel:
+            panels.append(panel)
+        panel = _tilt_panel(angles[1])
         if panel:
             panels.append(panel)
     if not panels:
@@ -2645,7 +2701,7 @@ def _relion_mask(folder: Path) -> dict | None:
 
 _RELION = {
     "Class2D": _relion_class2d,
-    "Class3D": lambda folder: _relion_classes_3d(folder, "3D classes"),
+    "Class3D": _relion_class3d,
     "InitialModel": _relion_initial_model,
     "Refine3D": _relion_refine3d,
     "PostProcess": _relion_postprocess,
@@ -3436,7 +3492,7 @@ def build_outcome(
     if not use_cache:
         outcome = _build(str(folder), kind, job_type, exact)
     else:
-        signature = _signature(folder)
+        signature = (OUTCOME_VERSION, _signature(folder))
         keeper = _keeper()
         # the exact answer, when it was made before, is better than an estimate
         if not exact and keeper.is_cached(str(folder), kind, job_type, True, signature):

@@ -162,6 +162,23 @@ class TestPlots:
         assert image.dtype == np.uint8 and image.ndim == 3 and image.shape[2] == 3
         assert len({tuple(p) for p in image.reshape(-1, 3)}) > 20
 
+    def test_the_tilts_of_a_helical_refinement_are_spread_over_the_plot(self):
+        tilt = np.random.default_rng(0).normal(90, 4, 4000)
+        low, high, step = jo._tilt_limits(tilt)
+        assert 70 <= low < 85 and 95 < high <= 110 and step == 5
+
+    def test_tilts_all_round_take_the_whole_range(self):
+        tilt = np.degrees(np.arccos(np.random.default_rng(0).uniform(-1, 1, 4000)))
+        assert jo._tilt_limits(tilt) == (0.0, 180.0, 30.0)
+
+    def test_the_tilts_are_a_histogram(self, qapp):
+        tilt = np.random.default_rng(0).normal(90, 4, 4000)
+        panel = jo._tilt_panel(tilt, 10_000)
+        assert panel["title"] == "Tilt angles"
+        assert panel["image"].shape[2] == 3 and panel["image"].std() > 10
+        assert panel["caption"].startswith("the first 4,000 of 10,000 particles; ")
+        assert jo._tilt_panel([np.nan]) is None
+
     def test_the_fsc_is_a_picture(self, qapp):
         x = np.linspace(0, 0.4, 50)
         image = jo._plot_fsc([("a", x, np.clip(1 - 4 * x, 0, 1))], (0.143, 0.5))
@@ -208,7 +225,7 @@ def _make_refine(job, data=True, model=True, mapfile=True):
 
 
 class TestRelionJobs:
-    def test_a_refinement_gives_the_map_the_fsc_and_the_views(self, relion):
+    def test_a_refinement_gives_the_map_the_fsc_the_views_and_the_tilts(self, relion):
         job = relion / "Refine3D" / "job014"
         job.mkdir(parents=True)
         _make_refine(job)
@@ -217,8 +234,13 @@ class TestRelionJobs:
             "Map, central section",
             "FSC",
             "Views",
+            "Tilt angles",
         ]
         assert all(p["image"].dtype == np.uint8 for p in outcome["panels"])
+        # the tilts of _make_refine are about 90°
+        tilts = outcome["panels"][3]["caption"]
+        assert tilts.startswith("500 particles; the dashed line is the median, ")
+        assert float(tilts.split("median, ")[1].rstrip("°")) == pytest.approx(90, abs=1)
         resolution = dict(outcome["facts"])["Resolution"]
         assert resolution.endswith("Å (FSC 0.143)")
         # the curve falls below 0.143 at about 1 - (x/0.2)^2 = 0.143: x = 0.1854, 5.39 Å
@@ -336,6 +358,46 @@ class TestRelionJobs:
         outcome = jo.build_outcome(job, "relion")
         assert outcome["title"] == "3D classes, iteration 3"
         assert "1 (50.0%), 2 (30.0%), 3 (20.0%)" in outcome["panels"][0]["caption"]
+        # no table of the particles: no tilts
+        assert [p["title"] for p in outcome["panels"]] == [
+            "Central sections of the classes"
+        ]
+
+    def test_3d_classes_give_the_tilts_of_the_particles_of_the_last_iteration(
+        self, relion
+    ):
+        job = relion / "Class3D" / "job021"
+        job.mkdir(parents=True)
+        for k in (1, 2):
+            _mrc(job / f"run_it002_class{k:03d}.mrc", _volume(seed=k))
+        for it, tilt in ((1, 30.0), (2, 120.0)):
+            (job / f"run_it{it:03d}_data.star").write_text(
+                "data_optics\n\nloop_\n_rlnOpticsGroup #1\n1\n\n"
+                + _loop(
+                    "particles",
+                    ["rlnAngleRot", "rlnAngleTilt", "rlnClassNumber"],
+                    [(0.0, tilt + i % 5, 1 + i % 2) for i in range(40)],
+                )
+            )
+        outcome = jo.build_outcome(job, "relion")
+        assert [p["title"] for p in outcome["panels"]] == [
+            "Central sections of the classes",
+            "Tilt angles",
+        ]
+        assert outcome["panels"][1]["image"].dtype == np.uint8
+        assert outcome["panels"][1]["caption"] == (
+            "40 particles; the dashed line is the median, 122.0°"
+        )
+
+    def test_an_initial_model_shows_no_tilts(self, relion):
+        job = relion / "InitialModel" / "job006"
+        job.mkdir(parents=True)
+        _mrc(job / "run_it010_class001.mrc", _volume())
+        (job / "run_it010_data.star").write_text(
+            _loop("particles", ["rlnAngleTilt"], [(90.0,), (91.0,)])
+        )
+        outcome = jo.build_outcome(job, "relion")
+        assert "Tilt angles" not in [p["title"] for p in outcome["panels"]]
 
     def test_an_initial_model_and_a_mask(self, relion):
         job = relion / "InitialModel" / "job005"
@@ -1433,6 +1495,20 @@ class TestCountingSlowlyAndKeepingTheAnswer:
         assert jo.build_outcome(job, "relion") is None
         assert jo.build_outcome(job, "relion") is None
 
+    def test_an_outcome_kept_by_an_earlier_version_is_made_again(
+        self, relion, monkeypatch
+    ):
+        job = relion / "Import" / "job001"
+        job.mkdir(parents=True)
+        made = []
+        monkeypatch.setattr(jo, "_build", lambda *args: made.append(args))
+        jo.build_outcome(job, "relion")
+        jo.build_outcome(job, "relion")
+        assert len(made) == 1
+        monkeypatch.setattr(jo, "OUTCOME_VERSION", jo.OUTCOME_VERSION + 1)
+        jo.build_outcome(job, "relion")
+        assert len(made) == 2
+
     def test_the_signature_is_the_names_sizes_and_times_of_the_folder(self, tmp_path):
         (tmp_path / "a.txt").write_text("a")
         first = jo._signature(tmp_path)
@@ -1763,7 +1839,7 @@ class TestInThePreview:
         pane.show_info(bp.build_preview(job))
         assert pane._outcome_scroll is not None and not pane._outcome_scroll.isHidden()
         assert pane._text.isHidden()  # no list of files
-        assert len(pane._outcome_panels) == 3
+        assert len(pane._outcome_panels) == 4
         shown = [label.pixmap() for label, _ in pane._outcome_panels]
         assert all(p is not None and not p.isNull() for p in shown)
         assert all(p.width() <= 340 for p in shown)
@@ -1772,7 +1848,7 @@ class TestInThePreview:
             for w in pane._outcome_scroll.widget().findChildren(type(pane._note))
             if w.text()
         ]
-        assert "Map, central section" in texts and "FSC" in texts and "Views" in texts
+        assert {"Map, central section", "FSC", "Views", "Tilt angles"} <= set(texts)
         # narrower: the pictures follow
         wide = shown[0].width()
         pane.resize(220, 800)
