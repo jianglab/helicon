@@ -4,7 +4,8 @@ The preview of a job folder shows the outcome of the job, not a list of its file
 list of the window): for a 2D classification the class averages of the last iteration, for a 3D classification
 the central sections of the classes and the tilt angles of the particles, for a refinement the central
 section of the map, its FSC curve, the distribution of the views and of the tilt angles, for a post-processing
-the sharpened map and the corrected FSC with the resolution, for a CTF estimation the histograms of the
+the sharpened map and the corrected FSC with the resolution, for a mask the mask and the map it was
+made from multiplied by it, for a CTF estimation the histograms of the
 defocus and of the resolution of the fits, for a CTF refinement the change of the defocus and the fitted
 aberrations, for a motion correction the histogram of the total motion and the trajectories of a few
 micrographs, for a polishing the contribution of each movie frame at some resolutions, and for the jobs
@@ -26,7 +27,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_outcome", "fsc_resolution", "view_distribution_image"]
+__all__ = [
+    "build_outcome",
+    "fsc_resolution",
+    "masked_map_file",
+    "view_distribution_image",
+]
 
 # the number of particles read for the distribution of the views: the first ones are enough
 VIEW_PARTICLES = 300_000
@@ -48,7 +54,7 @@ EXACT_BYTES = 1 << 30
 OUTCOME_DAYS = 30
 # part of the key of the outcomes in the cache: raised when what an outcome shows changes, so
 # that the outcomes kept before are made again
-OUTCOME_VERSION = 2
+OUTCOME_VERSION = 3
 # the most trajectory files of a CryoSPARC motion correction that are read
 MAX_TRAJECTORIES = 600
 BLOCK_ROWS = 50_000
@@ -2684,19 +2690,136 @@ def _relion_modelangelo(folder: Path) -> dict | None:
     )
 
 
+def _mask_input(folder: Path) -> Path | None:
+    """The map a RELION MaskCreate job made its mask from (``fn_in`` of its ``job.star``), or
+    None when it is not known or not there any more."""
+    name = (_job_option(folder, "fn_in") or "").strip('"')
+    if not name:
+        return None
+    path = Path(name)
+    if not path.is_absolute():
+        # the paths of a RELION job are relative to its project
+        path = folder.parent.parent / path
+    return path if path.is_file() else None
+
+
+def _masked_section(map_path: Path, mask_path: Path):
+    """The central section of a map multiplied by its mask, reading no more than that section of
+    each; None when the two have not the same size."""
+    import mrcfile
+    import numpy as np
+
+    with (
+        mrcfile.mmap(map_path, mode="r", permissive=True) as density,
+        mrcfile.mmap(mask_path, mode="r", permissive=True) as mask,
+    ):
+        if (
+            density.data is None
+            or mask.data is None
+            or density.data.ndim != 3
+            or density.data.shape != mask.data.shape
+        ):
+            return None
+        middle = density.data.shape[0] // 2
+        return np.asarray(density.data[middle], dtype=np.float32) * np.asarray(
+            mask.data[middle], dtype=np.float32
+        )
+
+
 def _relion_mask(folder: Path) -> dict | None:
+    """The central section of the mask and, when the map it was made from is there, of that map
+    multiplied by the mask (``"masked_map"``: the two files, to write the masked map from).
+    """
     mask = folder / "mask.mrc"
     if not mask.is_file():
         return None
     section, apix = _central_slice(mask)
     if section is None:
         return None
-    return dict(
+    outcome = dict(
         title="Mask",
         panels=[
             _panel("Mask, central section", _image(section), f"{apix:.2f} Å/pixel")
         ],
     )
+    density = _mask_input(folder)
+    masked = _masked_section(density, mask) if density is not None else None
+    if masked is not None:
+        outcome["panels"].append(
+            _panel(
+                "Masked map, central section",
+                _image(masked),
+                f"{density.name} multiplied by the mask",
+            )
+        )
+        outcome["masked_map"] = dict(map=str(density), mask=str(mask))
+    return outcome
+
+
+def masked_map_file(map_path: str | Path, mask_path: str | Path) -> Path:
+    """Write a map multiplied by its mask to a file in the cache of Helicon, to open in a viewer.
+
+    The file is named after the job of the mask (``MaskCreate_job012_masked.mrc``) and written
+    again only when the map or the mask is newer than it.
+
+    Parameters
+    ----------
+    map_path : str or pathlib.Path
+        The map.
+    mask_path : str or pathlib.Path
+        The mask, of the same size as the map.
+
+    Returns
+    -------
+    pathlib.Path
+        The masked map, with the voxel size and the origin of the map.
+
+    Raises
+    ------
+    ValueError
+        When the map and the mask have not the same size.
+    """
+    import hashlib
+
+    import mrcfile
+    import numpy as np
+
+    from ..cache import setup_cache_dir
+
+    map_path, mask_path = Path(map_path), Path(mask_path)
+    key = hashlib.sha1(
+        f"{map_path.resolve()}|{mask_path.resolve()}".encode()
+    ).hexdigest()[:12]
+    name = f"{mask_path.parent.parent.name}_{mask_path.parent.name}_masked.mrc"
+    out = setup_cache_dir() / "masked_map" / key / name
+    if out.is_file() and out.stat().st_mtime_ns >= max(
+        map_path.stat().st_mtime_ns, mask_path.stat().st_mtime_ns
+    ):
+        return out
+    with (
+        mrcfile.mmap(map_path, mode="r", permissive=True) as density,
+        mrcfile.mmap(mask_path, mode="r", permissive=True) as mask,
+    ):
+        if density.data is None or mask.data is None:
+            raise ValueError(f"{map_path} or {mask_path} has no data")
+        if density.data.shape != mask.data.shape:
+            raise ValueError(
+                f"the map {map_path.name} {density.data.shape} and the mask "
+                f"{mask_path.name} {mask.data.shape} are not of the same size"
+            )
+        data = np.asarray(density.data, dtype=np.float32) * np.asarray(
+            mask.data, dtype=np.float32
+        )
+        voxel_size, origin = density.voxel_size.copy(), density.header.origin.copy()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # written beside and renamed: a viewer never reads half a file
+    partial = out.with_suffix(".partial")
+    with mrcfile.new(partial, overwrite=True) as f:
+        f.set_data(data)
+        f.voxel_size = voxel_size
+        f.header.origin = origin
+    partial.replace(out)
+    return out
 
 
 _RELION = {

@@ -625,6 +625,8 @@ class FolderBrowserWidget(QMainWindow):
         self._sidebar.alias_requested.connect(self._on_alias_requested)
         self._preview = PreviewPane()
         self._preview.path_requested.connect(self._navigate_to)
+        # a file the preview made (the masked map of a mask job) opens as with a double click
+        self._preview.file_requested.connect(self.file_selected)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.addWidget(self._sidebar)

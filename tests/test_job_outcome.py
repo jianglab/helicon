@@ -1879,6 +1879,141 @@ class TestInThePreview:
         subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def _mask_job(relion, fn_in="Refine3D/job014/run_class001.mrc", n=24):
+    """A MaskCreate job made from the map of a refinement (``fn_in`` of its job.star)."""
+    _mrc(relion / "Refine3D/job014/run_class001.mrc", _volume(n), apix=1.2)
+    job = relion / "MaskCreate" / "job015"
+    _mrc(job / "mask.mrc", (_volume() > 0.3).astype(np.float32), apix=1.2)
+    (job / "job.star").write_text(
+        "data_joboptions_values\n\nloop_\n_rlnJobOptionVariable #1\n"
+        f"_rlnJobOptionValue #2\nfn_in {fn_in}\nlowpass 15\n"
+    )
+    return job
+
+
+class TestTheMaskedMap:
+    def test_the_map_multiplied_by_the_mask_is_shown_after_the_mask(self, relion):
+        job = _mask_job(relion)
+        outcome = jo.build_outcome(job, "relion")
+        assert [p["title"] for p in outcome["panels"]] == [
+            "Mask, central section",
+            "Masked map, central section",
+        ]
+        assert "run_class001.mrc" in outcome["panels"][1]["caption"]
+        assert outcome["masked_map"] == dict(
+            map=str(relion / "Refine3D/job014/run_class001.mrc"),
+            mask=str(job / "mask.mrc"),
+        )
+
+    def test_the_section_is_that_of_the_map_times_the_mask(self, relion):
+        job = _mask_job(relion)
+        section = jo._masked_section(
+            relion / "Refine3D/job014/run_class001.mrc", job / "mask.mrc"
+        )
+        mask = (_volume() > 0.3).astype(np.float32)
+        assert np.allclose(section, _volume()[12] * mask[12])
+
+    @pytest.mark.parametrize(
+        "fn_in", ["", "Refine3D/job099/gone.mrc", '"Refine3D/job099/gone.mrc"']
+    )
+    def test_without_the_map_only_the_mask_is_shown(self, relion, fn_in):
+        outcome = jo.build_outcome(_mask_job(relion, fn_in=fn_in), "relion")
+        assert [p["title"] for p in outcome["panels"]] == ["Mask, central section"]
+        assert "masked_map" not in outcome
+
+    def test_a_map_of_another_size_is_not_multiplied(self, relion):
+        outcome = jo.build_outcome(_mask_job(relion, n=20), "relion")
+        assert len(outcome["panels"]) == 1 and "masked_map" not in outcome
+
+    def test_an_absolute_path_is_read_as_it_is(self, relion, tmp_path):
+        elsewhere = tmp_path / "elsewhere" / "map.mrc"
+        _mrc(elsewhere, _volume())
+        outcome = jo.build_outcome(_mask_job(relion, fn_in=str(elsewhere)), "relion")
+        assert outcome["masked_map"]["map"] == str(elsewhere)
+
+    def test_the_file_is_the_product_with_the_voxel_size_of_the_map(
+        self, relion, tmp_path
+    ):
+        import mrcfile
+
+        job = _mask_job(relion)
+        density = relion / "Refine3D/job014/run_class001.mrc"
+        path = jo.masked_map_file(density, job / "mask.mrc")
+        assert path.name == "MaskCreate_job015_masked.mrc"
+        assert path.is_relative_to(tmp_path / "cache")
+        with mrcfile.open(path) as f:
+            assert np.allclose(f.data, _volume() * (_volume() > 0.3).astype(np.float32))
+            assert f.voxel_size.x == pytest.approx(1.2)
+        assert not list(path.parent.glob("*.partial"))
+
+    def test_the_file_is_written_again_only_when_the_mask_is_newer(self, relion):
+        import os
+
+        job = _mask_job(relion)
+        density = relion / "Refine3D/job014/run_class001.mrc"
+        path = jo.masked_map_file(density, job / "mask.mrc")
+        written = path.stat().st_mtime_ns
+        assert jo.masked_map_file(density, job / "mask.mrc").stat().st_mtime_ns == (
+            written
+        )
+        _mrc(job / "mask.mrc", np.ones((24, 24, 24)), apix=1.2)
+        later = written + 10**9
+        os.utime(job / "mask.mrc", ns=(later, later))
+        import mrcfile
+
+        jo.masked_map_file(density, job / "mask.mrc")
+        with mrcfile.open(path) as f:
+            assert np.allclose(f.data, _volume())
+
+    def test_a_map_of_another_size_cannot_be_written(self, relion):
+        job = _mask_job(relion, n=20)
+        with pytest.raises(ValueError, match="not of the same size"):
+            jo.masked_map_file(
+                relion / "Refine3D/job014/run_class001.mrc", job / "mask.mrc"
+            )
+
+    def test_the_button_writes_the_map_and_asks_for_it_to_be_opened(self, qapp, relion):
+        import time
+
+        job = _mask_job(relion)
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        pane = bp.PreviewPane()
+        pane.show()
+        pane.show_info(bp.build_preview(job))
+        button = pane._masked_button
+        assert button is not None and not button.isHidden()
+        assert button.text() == "Open masked map"
+        requested = []
+        pane.file_requested.connect(requested.append)
+        button.click()
+        deadline = time.monotonic() + 20
+        while not requested and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert requested and requested[0].endswith("MaskCreate_job015_masked.mrc")
+        assert button.isEnabled() and button.text() == "Open masked map"
+
+    def test_a_mask_without_its_map_has_no_button(self, qapp, relion):
+        job = _mask_job(relion, fn_in="")
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        pane = bp.PreviewPane()
+        pane.show()
+        pane.show_info(bp.build_preview(job))
+        assert pane._masked_button is None
+
+    def test_the_browser_opens_the_file_the_preview_asks_for(self, qapp, tmp_path):
+        from helicon.lib.gui.file_browser import FolderBrowserWidget
+
+        widget = FolderBrowserWidget(start_dir=str(tmp_path))
+        try:
+            opened = []
+            widget.file_selected.connect(opened.append)
+            widget._preview.file_requested.emit(str(tmp_path / "masked.mrc"))
+            assert opened == [str(tmp_path / "masked.mrc")]
+        finally:
+            widget.close()
+
+
 def _helical_table(job, name="run_it025_data.star", track=True):
     """A Class2D table of segments: mic_a has three filaments (the second with two segments
     missing), mic_b has one; the segments are 30 Å apart, 10 pixels on the micrograph.

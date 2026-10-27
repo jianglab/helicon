@@ -10,6 +10,7 @@ imported where they are used, so opening the browser stays quick.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -1782,6 +1783,30 @@ class _RefineWorker(QThread):
         self.done.emit(self._serial, outcome)
 
 
+class _MaskedMapWorker(QThread):
+    """Writes the map of a mask job multiplied by the mask (:func:`job_outcome.masked_map_file`);
+    ``done(path)`` at the end, ``""`` if it failed."""
+
+    done = Signal(str)
+
+    def __init__(self, map_path: str, mask_path: str):
+        super().__init__()
+        self._map_path = map_path
+        self._mask_path = mask_path
+
+    def run(self) -> None:
+        from .job_outcome import masked_map_file
+
+        try:
+            path = str(masked_map_file(self._map_path, self._mask_path))
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "cannot write the masked map of %s", self._mask_path, exc_info=True
+            )
+            path = ""
+        self.done.emit(path)
+
+
 class PreviewPane(QWidget):
     """A picture, the facts, the links (the jobs before and after a job) and the first lines of
     the selected file or folder.
@@ -1790,9 +1815,13 @@ class PreviewPane(QWidget):
     -------
     path_requested(str)
         A link to another job was clicked; the value is the folder of the job.
+    file_requested(str)
+        A file to open in its viewer, as with a double click in the list of files (the masked map
+        of a mask job); the value is the path of the file.
     """
 
     path_requested = Signal(str)
+    file_requested = Signal(str)
 
     _EMPTY = "Select a file to see a preview"
 
@@ -1848,6 +1877,8 @@ class PreviewPane(QWidget):
         # what a job made: pictures with captions, in a scroll area
         self._outcome_scroll = None
         self._outcome_panels: list[tuple[QLabel, "np.ndarray"]] = []  # noqa: F821
+        # the button of a mask job that opens its map multiplied by the mask
+        self._masked_button: QToolButton | None = None
         self._text = QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFrameShape(QFrame.Shape.NoFrame)
@@ -2079,6 +2110,7 @@ class PreviewPane(QWidget):
             if item.widget() is not None:
                 item.widget().deleteLater()
         self._outcome_panels = []
+        self._masked_button = None
         for panel in outcome["panels"]:
             heading = QLabel(panel["title"])
             font = heading.font()
@@ -2100,6 +2132,19 @@ class PreviewPane(QWidget):
                 caption.setWordWrap(True)
                 caption.setStyleSheet(f"color: {self._muted};")
                 column.insertWidget(column.count() - 1, caption)
+        if outcome.get("masked_map"):
+            button = QToolButton()
+            button.setText("Open masked map")
+            button.setToolTip(
+                "Write the map multiplied by the mask to the cache of Helicon and open it"
+            )
+            button.clicked.connect(
+                lambda _=False, m=outcome["masked_map"]: self.open_masked_map(m)
+            )
+            column.insertWidget(
+                column.count() - 1, button, 0, Qt.AlignmentFlag.AlignLeft
+            )
+            self._masked_button = button
         self._fit_outcome()
         self._outcome_scroll.show()
         self._outcome_scroll.verticalScrollBar().setValue(0)
@@ -2217,6 +2262,32 @@ class PreviewPane(QWidget):
         window.show()
         window.raise_()
         window.activateWindow()
+
+    def open_masked_map(self, files: dict) -> None:
+        """Write the map of a mask job multiplied by the mask, in a thread (a map can be large),
+        and ask for it to be opened (``file_requested``) when it is written.
+
+        Parameters
+        ----------
+        files : dict
+            ``{"map": path, "mask": path}``, the ``"masked_map"`` of the outcome of the job.
+        """
+        worker = _MaskedMapWorker(files["map"], files["mask"])
+        _REFINING.add(worker)
+        button = self._masked_button
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("Writing the masked map…")
+        worker.done.connect(lambda path, b=button: self._on_masked_map(path, b))
+        worker.finished.connect(lambda w=worker: _REFINING.discard(w))
+        worker.start()
+
+    def _on_masked_map(self, path: str, button) -> None:
+        if button is not None and button is self._masked_button:
+            button.setEnabled(True)
+            button.setText("Open masked map" if path else "Cannot write the masked map")
+        if path:
+            self.file_requested.emit(path)
 
     def set_current(self, folder: str | None) -> None:
         """Mark the job of the folder the browser is in on the graphs, in the preview and in the window."""
