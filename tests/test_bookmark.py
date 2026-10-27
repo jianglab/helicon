@@ -114,6 +114,10 @@ class TestParse:
         _, inputs = bookmark.parse("tab=HelicalProjection&proj_xyz=x,z", tabs)
         assert inputs == {"helical_projection-map_projection_xyz_choices": ["x", "z"]}
 
+    def test_the_hill_image_selection(self, tabs):
+        _, inputs = bookmark.parse("tab=HILL&selected=2,7,9", tabs)
+        assert list(inputs.values()) == [[2, 7, 9]]
+
     def test_the_denovo3d_image_selection(self, tabs):
         _, inputs = bookmark.parse("tab=Denovo3D&selected=3,5,11", tabs)
         assert list(inputs.values()) == [[3, 5, 11]]

@@ -128,6 +128,41 @@ def _as_csym(value) -> int:
     return max(1, int(round(float(value))))
 
 
+# the pose of the image; the mask radius can be clamped by its slider
+_CONTROL_KEYS = ("angle", "dx", "dy")
+
+
+def _controls_lag(current, pushed) -> bool:
+    """Whether the transform controls still show values older than the last ones
+    the server gave them.
+
+    The server sets the sliders and then sees them report back, a round trip
+    later. Read in between, they still hold what they held before, and saving that
+    as the new image's values keeps the previous image's rotation for it. Values
+    the user typed are never one the server gave earlier, so they do not count.
+
+    Parameters
+    ----------
+    current : dict
+        What the controls report now (``angle``, ``dx`` and ``dy``, at least).
+    pushed : list of dict
+        What the server gave the controls, oldest first.
+
+    Returns
+    -------
+    bool
+    """
+
+    def same(a, b):
+        return all(abs(float(a[k]) - float(b[k])) < 1e-2 for k in _CONTROL_KEYS)
+
+    return (
+        bool(pushed)
+        and not same(current, pushed[-1])
+        and any(same(current, old) for old in pushed[:-1])
+    )
+
+
 def _progress_bar(done: int, total: int):
     """A Bootstrap progress bar for a search that has done ``done`` of ``total``
     steps; an animated full-width one while the number of steps is not known yet.
@@ -292,11 +327,23 @@ def hill_tab_server(input, output, session):
     _last_ps_pd_selection = [None]
     _previous_input_mode = [None]
     prev_data_from = reactive.value("main")
+    # the labels of the images the shown (only) image was stitched from, or None
+    stitched_labels = reactive.value(None)
     avg_ps_pd_df = reactive.value({})
     avg_ps_pd_main_in_df = reactive.value({})
     # The image (its index in data_all_2d) that the transform controls hold the
     # values of; None when they hold no image's values (new data, new estimates).
     _active_orig = [None]
+    # What the server last gave the transform controls, oldest first (see
+    # _controls_lag).
+    _pushed_params = []
+
+    def _note_push(angle, dx, dy, mask_radius, mask_len):
+        _pushed_params.append(
+            dict(angle=angle, dx=dx, dy=dy, mask_radius=mask_radius, mask_len=mask_len)
+        )
+        del _pushed_params[:-8]
+
     straightened_filaments_for_avg = reactive.value([])
 
     # Error display state
@@ -1297,6 +1344,22 @@ def hill_tab_server(input, output, session):
         if input.hill_is_3d():
             return None
         if len(data_all_2d()) > 0:
+            # The selection of a bookmark, used once: the gallery is not a Shiny
+            # input that restores itself, so ask for it here. It names the images
+            # by the numbers the gallery labels them with (their place in the
+            # input, from 1), which stay the same when blank images are left out.
+            from shiny.bookmark import restore_input
+            from shiny.module import resolve_id
+
+            numbers = _image_numbers()
+            saved = restore_input(resolve_id("hill_select_image_ids"), None)
+            if saved is not None and numbers is not None:
+                position = {n: i for i, n in enumerate(numbers)}
+                saved = [
+                    position[int(n)] for n in np.atleast_1d(saved) if int(n) in position
+                ]
+                if saved:
+                    initial_selected_image_indices.set(saved)
             return helicon.shiny.image_gallery(
                 id=session.ns("hill_select_image"),
                 label=reactive.value("Select image(s):"),
@@ -1304,10 +1367,17 @@ def hill_tab_server(input, output, session):
                 image_labels=data_all_2d_labels,
                 image_size=image_display_size,
                 initial_selected_indices=initial_selected_image_indices,
+                image_ids=numbers,
                 enable_selection=True,
                 allow_multiple_selection=True,
             )
         return ui.div("No images available")
+
+    def _image_numbers():
+        """The images' numbers in the input, as their labels give them; None when
+        the images are not numbered (a simulation or a projection)."""
+        labels = [str(label) for label in data_all_2d_labels()]
+        return [int(x) for x in labels] if all(x.isdigit() for x in labels) else None
 
     @render.text
     def hill_image_params_title():
@@ -1510,6 +1580,7 @@ def hill_tab_server(input, output, session):
                     ui.update_slider("hill_dy", value=dy_val)
                     ui.update_slider("hill_mask_radius", value=mr)
                     ui.update_slider("hill_mask_len", value=ml)
+                    _note_push(angle, dx_val, dy_val, mr, ml)
                     img0 = _transformed(
                         img0,
                         dict(
@@ -1652,13 +1723,17 @@ def hill_tab_server(input, output, session):
             return
         if not input.hill_apix() > 0:
             return
-        avg_ps_pd_main_in_df.set({**avg_ps_pd_main_in_df(), orig: _current_params()})
+        current = _current_params()
+        if _controls_lag(current, _pushed_params):
+            return  # they have not caught up yet: these are another image's values
+        avg_ps_pd_main_in_df.set({**avg_ps_pd_main_in_df(), orig: current})
 
     @reactive.effect
     @reactive.event(input.hill_select_image, input.hill_auto_method)
     def _update_selected_images():
         sel = input.hill_select_image()
         if sel is None or len(sel) == 0:
+            stitched_labels.set(None)
             _active_orig[0] = None
             selected_images.set([])
             selected_image_labels.set([])
@@ -1668,6 +1743,7 @@ def hill_tab_server(input, output, session):
         all_labels = data_all_2d_labels()
         # The first selected image is the one the gallery shows as active, and
         # the one whose parameters are loaded below.
+        stitched_labels.set(None)
         _stash_active_params()
         _active_orig[0] = indices[0] if indices[0] < len(all_imgs) else None
         chosen = [all_imgs[i] for i in indices if i < len(all_imgs)]
@@ -1730,6 +1806,7 @@ def hill_tab_server(input, output, session):
 
                             ui.update_slider("hill_mask_len", value=ml)
 
+                        _note_push(angle, dx_val, dy_val, mr, ml)
                         # apply transform with local params
                         data_2d_transformed.set(
                             _transformed(
@@ -1827,6 +1904,13 @@ def hill_tab_server(input, output, session):
         ui.update_slider("hill_mask_radius", value=record["mask_radius"])
         ui.update_slider("hill_mask_len", value=record["mask_len"])
         ui.update_checkbox("hill_negate", value=record["negate"])
+        _note_push(
+            record["angle"],
+            record["dx"],
+            record["dy"],
+            record["mask_radius"],
+            record["mask_len"],
+        )
         # Shown now rather than when the controls echo the new values, which
         # they do not when the two images happen to have the same ones.
         _show_transformed(data_all_2d()[new], record)
@@ -1920,6 +2004,135 @@ def hill_tab_server(input, output, session):
             )
         )
         prev_data_from.set("avg_ps_pd")
+
+    # ── Auto-stitch the selected images into one ────────────────
+    stitch_status = reactive.value(None)  # (done, total, seconds left or None)
+    _stitch_labels = [None]  # the images of the stitch that is running
+    # Written by the thread the stitch runs in, read by _poll_stitch_progress.
+    _stitch_steps = {"done": 0, "total": 0, "start": 0.0}
+
+    @reactive.extended_task
+    async def _stitch_task(images):
+        import asyncio
+        import time
+
+        from helicon.lib import stitch
+
+        def progress(label):
+            _stitch_steps["done"] += 1
+
+        # Every pair is registered twice and every image once per refinement
+        # round, so the bar knows how many steps there are.
+        _stitch_steps.update(
+            done=0, total=stitch.n_registration_jobs(len(images)), start=time.time()
+        )
+        # in a thread, so that the page answers; the registration spreads
+        # itself over processes
+        return await asyncio.to_thread(
+            stitch.stitch_images, images, axis="y", extend=True, progress=progress
+        )
+
+    @reactive.effect
+    def _poll_stitch_progress():
+        """Follow the stitch while it runs: the steps it reports, 3 times a second."""
+        if _stitch_task.status() != "running":
+            stitch_status.set(None)
+            return
+        reactive.invalidate_later(0.3)
+        import time
+
+        done, total = _stitch_steps["done"], _stitch_steps["total"]
+        left = None
+        if done:
+            left = (time.time() - _stitch_steps["start"]) * (total - done) / done
+        stitch_status.set((done, total, left))
+
+    @render.ui
+    def hill_stitch_status():
+        status = stitch_status()
+        req(status)
+        done, total, left = status
+        text = f"Registering images: {done}/{total}"
+        if left is not None:
+            text += f", about {max(1, round(left))} s left"
+        return ui.div(
+            _progress_bar(done, total),
+            ui.p(text, style="font-size: 0.85em; text-align: center; margin: 0.3em 0;"),
+        )
+
+    @reactive.effect
+    @reactive.event(input.hill_run_auto_stitch)
+    def _start_auto_stitch():
+        if _stitch_task.status() == "running":
+            ui.notification_show("A stitch is running. Wait for it.", duration=5)
+            return
+        req(len(selected_images()) > 1)
+        req(input.hill_apix() > 0)
+        if input.hill_is_3d() or input.hill_input_type() != "Image":
+            ui.notification_show("Stitching needs 2D images.", duration=5)
+            return
+        _stash_active_params()  # the image being edited has not been left yet
+        valid = _selected_indices()
+        all_imgs = data_all_2d()
+        if len({all_imgs[i].shape for i in valid}) > 1:
+            ui.notification_show(
+                "The selected images differ in size; select images of one size.",
+                duration=8,
+            )
+            return
+        apix = input.hill_apix()
+        saved = avg_ps_pd_main_in_df()
+        # upright, as the auto-transform made them, but not masked
+        straight = [
+            _transformed(
+                all_imgs[i], {"apix": apix, **saved.get(i, {}), "mask_radius": 0}
+            )
+            for i in valid
+        ]
+        labels = [data_all_2d_labels()[i] for i in valid]
+        _stitch_labels[0] = labels
+        _stitch_task(straight)
+
+    @reactive.effect
+    def _stitch_finished():
+        status = _stitch_task.status()
+        if status == "success":
+            with reactive.isolate():
+                _show_stitched(_stitch_task.result().image, _stitch_labels[0])
+        elif status == "error":
+            logger.warning("auto-stitch failed: %s", _stitch_task.error())
+            ui.notification_show(
+                f"Could not stitch the images: {_stitch_task.error()}", type="warning"
+            )
+
+    def _show_stitched(img, labels):
+        """Make ``img``, stitched from the images labelled ``labels``, the
+        image the rest of the tab works on."""
+        apix = input.hill_apix()
+        # The stitched image takes the place of the selection, and is straight:
+        # the controls restart from zero, the mask as it was.
+        selected_images.set([img])
+        selected_image_labels.set(["Stitched"])
+        _active_orig[0] = None
+        stitched_labels.set(labels)
+        params = {**_current_params(), "angle": 0.0, "dx": 0.0, "dy": 0.0}
+        for name in ("angle", "dx"):
+            ui.update_slider(f"hill_{name}", value=0.0)
+        # the stitched image is longer: so is the range of the shift along it
+        reach = round(img.shape[0] * apix, 1)
+        ui.update_slider("hill_dy", value=0.0, min=-reach, max=reach)
+        _note_push(0.0, 0.0, 0.0, params["mask_radius"], params["mask_len"])
+        temp = _transformed(img, params)
+        _last_transform_key[0] = None
+        hill.update_image_figure(
+            fig_transformed_img,
+            source_transformed_img,
+            temp,
+            apix,
+            title=f"Stitched image ({img.shape[1]}x{img.shape[0]})",
+        )
+        prev_data_from.set("main")
+        data_2d_transformed.set(temp)
 
     # ── Straightened-filament pooled averaging ───────────────────
     @reactive.effect
@@ -2203,7 +2416,7 @@ def hill_tab_server(input, output, session):
             source_transformed_img,
             temp,
             input.hill_apix(),
-            title=f"Transformed Image ({nx_curr_img()}x{ny_curr_img()})",
+            title=f"Transformed Image ({temp.shape[1]}x{temp.shape[0]})",
         )
         data_2d_transformed.set(temp)
 
@@ -2263,12 +2476,13 @@ def hill_tab_server(input, output, session):
                 "The search needs 2D images, not power spectra or maps."
             )
             return
+        stitched = stitched_labels() is not None
         valid = _selected_indices()
         if not valid:
             symmetry_message.set("Select one or more images first.")
             return
         apix = input.hill_apix()
-        if len(valid) == 1:
+        if stitched or len(valid) == 1:
             # the transform of the image shown is the one in the controls
             records = [
                 dict(
@@ -2282,8 +2496,9 @@ def hill_tab_server(input, output, session):
         else:
             _stash_active_params()  # the image being edited has not been left yet
             records = [avg_ps_pd_main_in_df().get(i) for i in valid]
+        sources = selected_images() if stitched else [data_all_2d()[i] for i in valid]
         images = hill.images_for_indexing(
-            [data_all_2d()[i] for i in valid], records, apix, input.hill_auto_method()
+            sources, records, apix, input.hill_auto_method()
         )
         if len({im.shape for im in images}) > 1:
             symmetry_message.set(
@@ -2567,9 +2782,8 @@ def hill_tab_server(input, output, session):
         fig_transformed_img.y_range.start = (h // 2 - 1) * dy
         fig_transformed_img.y_range.end = -h // 2 * dy
         fig_transformed_img.aspect_ratio = aspect_ratio
-        fig_transformed_img.title.text = (
-            f"Transformed Image ({nx_curr_img()}x{ny_curr_img()})"
-        )
+        what = "Stitched image" if stitched_labels() else "Transformed Image"
+        fig_transformed_img.title.text = f"{what} ({w}x{h})"
         source_transformed_img.data = {
             **source_transformed_img.data,
             "image": [curr_img],
@@ -2923,7 +3137,20 @@ def hill_tab_server(input, output, session):
                     "Average PS & PD",
                     class_="btn-primary",
                 ),
-                style="text-align: center; margin-top: 8px;",
+                ui.input_action_button(
+                    "hill_run_auto_stitch",
+                    "Auto-stitch",
+                    class_="btn-primary",
+                ),
+                style="text-align: center; margin-top: 8px; display: flex; "
+                "gap: 0.5em; justify-content: center; flex-wrap: wrap;",
+            )
+        labels = stitched_labels()
+        if labels:
+            return ui.p(
+                f"Stitched from {len(labels)} images ({', '.join(labels)}). "
+                "Change the selection to go back to the images.",
+                style="font-size: 0.85em; text-align: center; margin-top: 8px;",
             )
         return None
 

@@ -18,6 +18,7 @@ BOOKMARK_DEFAULTS = {
     "input_mode": ("hill_input_mode_params", "2"),
     "url": ("hill_img_file_url", "https://tinyurl.com/y5tq9fqa"),
     "server_image": ("hill_img_file_server", ""),
+    "selected": ("hill_select_image_ids", [1]),
     "is_3d": ("hill_is_3d", False),
     "twist": ("hill_twist", 29.40),
     "rise": ("hill_rise", 21.92),

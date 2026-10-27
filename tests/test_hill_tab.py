@@ -17,6 +17,27 @@ from helicon.webApps.tabs import hill_tab
 from _source import contains, tab_source
 
 
+class TestControlsLag:
+    """The sliders report back a round trip after the server sets them."""
+
+    first = dict(angle=121.33, dx=2.94, dy=0.0)
+    second = dict(angle=27.19, dx=-0.64, dy=0.0)
+
+    def test_still_showing_the_first_images_values_after_the_second_was_set(self):
+        assert hill_tab._controls_lag(self.first, [self.first, self.second])
+
+    def test_having_caught_up(self):
+        assert not hill_tab._controls_lag(self.second, [self.first, self.second])
+
+    def test_values_the_user_typed_are_kept(self):
+        typed = dict(angle=40.0, dx=1.0, dy=0.0)
+        assert not hill_tab._controls_lag(typed, [self.first, self.second])
+
+    def test_nothing_was_set_yet(self):
+        assert not hill_tab._controls_lag(self.first, [])
+        assert not hill_tab._controls_lag(self.first, [self.first])
+
+
 def test_resolution_limits_follow_pixel_size():
     assert hill_tab._resolution_limits_from_apix(1.25) == (3.75, 2.5)
     assert hill_tab._resolution_limits_from_apix(2.3438) == (7.0314, 4.6876)
@@ -183,6 +204,9 @@ class _Effects:
             _last_ps_pd_selection=[None],
             _last_transform_key=[None],
             _active_orig=[None],
+            _pushed_params=[],
+            stitched_labels=reactive.Value(None),
+            _controls_lag=hill_tab._controls_lag,
             csym_controls=ColumnDataSource(data=dict(value=[6], revision=[0])),
             spinner_csym=Spinner(low=1, mode="int", value=6),
             slider_twist=Slider(start=-180, end=180, value=29.4, step=0.01),
@@ -220,6 +244,7 @@ class _Effects:
             "_active_position",
             "_current_params",
             "_stash_active_params",
+            "_note_push",
             "_selected_indices",
             "_csym",
             "_model_follows_inputs",
@@ -237,7 +262,11 @@ class _Effects:
             )
             exec(
                 compile(
-                    ast.Module(body=[node], type_ignores=[]), hill_tab.__file__, "exec"
+                    # not the real file: line numbers are those of the slice, and
+                    # shiny's source lookup would read the wrong lines of the file
+                    ast.Module(body=[node], type_ignores=[]),
+                    "<hill_tab>",
+                    "exec",
                 ),
                 self.ns,
             )
@@ -798,6 +827,24 @@ class TestActiveImageGallery:
                 await reactive.flush()
                 assert self._saved_of(h, 0)["angle"] == 33.0
                 assert (33.0, 0.0, 0.0, False, 1.0) in h.transforms
+            finally:
+                h.close()
+
+        asyncio.run(run())
+
+    def test_the_stitched_image_replaces_the_selection(self):
+        async def run():
+            h = self._harness()
+            h.add("_show_stitched")
+            long = np.ones((20, 8))
+            try:
+                await reactive.flush()
+                h.ns["selected_images"].set(list(h.images))
+                with reactive.isolate():
+                    h.ns["_show_stitched"](long, ["1", "2"])
+                    assert h.ns["selected_images"]() == [long]
+                    assert h.ns["stitched_labels"]() == ["1", "2"]
+                    assert h.ns["data_2d_transformed"]().shape == long.shape
             finally:
                 h.close()
 

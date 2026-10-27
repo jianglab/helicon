@@ -114,6 +114,8 @@ def hill_tab_ui():
                             ui.output_ui("hill_active_image_gallery"),
                             style="max-height: 300px; overflow-y: auto;",
                         ),
+                        ui.output_ui("hill_get_avg_ps_ui"),
+                        ui.output_ui("hill_stitch_status"),
                         ui.accordion(
                             ui.accordion_panel(
                                 ui.output_text("hill_image_params_title", inline=True),
@@ -176,7 +178,6 @@ def hill_tab_ui():
                             style="align-items: flex-end;",
                         ),
                         output_widget("hill_plot_acf", width="auto", height="auto"),
-                        ui.output_ui("hill_get_avg_ps_ui"),
                         ui.div(
                             ui.div(
                                 ui.tooltip(
