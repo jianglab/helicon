@@ -523,6 +523,7 @@ def image_gallery(
     enable_selection=False,
     allow_multiple_selection=False,
     initial_selected_indices=None,
+    image_ids=None,
     style="",
 ):
     """Render a gallery of images as a flexbox grid.
@@ -559,6 +560,10 @@ def image_gallery(
         If True, allows selecting multiple images. Defaults to False.
     initial_selected_indices : reactive.value, callable or value, optional
         Indices of pre-selected images.
+    image_ids : reactive.value, callable or list, optional
+        What each image is called outside the gallery (for example its number
+        in the input stack, when some images are not shown). When given, the
+        selection is also reported, in these terms, as the input ``<id>_ids``.
     style : str, optional
         Additional CSS inline styles.
 
@@ -573,6 +578,7 @@ def image_gallery(
     image_links = _getter(image_links, [])
     image_size = _getter(image_size, 128)
     initial_selected_indices = _getter(initial_selected_indices, [])
+    image_ids = _getter(image_ids, None)
     if images() is None or len(images()) == 0:
         return None
 
@@ -614,6 +620,20 @@ def image_gallery(
     assert image_size() >= 32
 
     bids = [f"{id}_image_{i+1}" for i in range(len(images_final))]
+
+    import json
+
+    # the selection, also in the caller's terms (see ``image_ids``)
+    ids_final = image_ids() if image_ids() is not None else None
+    if ids_final is not None:
+        assert len(ids_final) == len(images_final)
+        id_script = (
+            f"var ids = {json.dumps([int(i) for i in ids_final])};"
+            f" Shiny.setInputValue('{id}_ids', selected_new.map(i => ids[i]),"
+            " {priority: 'deferred'});"
+        )
+    else:
+        id_script = ""
 
     def create_image_button(
         i, image, label, link, bid, enable_selection=True, allow_multiple_selection=True
@@ -731,6 +751,7 @@ def image_gallery(
                     this.parentElement.setAttribute('selected', selected_new);
 
                     Shiny.setInputValue('{id}', selected_new, {{priority: 'deferred'}});
+                    {id_script}
                 """
                 if enable_selection
                 else None

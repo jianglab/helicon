@@ -24,7 +24,7 @@ import threading
 import numpy as np
 import pandas as pd
 
-from . import denovo3d_register as R
+from helicon.lib import stitch as R
 from . import helical_pitch_phase as ph
 
 
@@ -45,7 +45,7 @@ def class_similarity(
     filament, the shift along it and the four orientations (a class of the same
     structure may sit turned by 180 degrees), and the correlation at the best
     placement is kept. It is normalised over the columns the two averages overlap
-    in, never less than 35% of the width (:data:`denovo3d_register.MIN_OVERLAP`).
+    in, never less than 35% of the width (:data:`helicon.lib.stitch.MIN_OVERLAP`).
 
     Measured on EMPIAR-10230 (28 classes of a known type, 231 same-type and 147
     different-type pairs):

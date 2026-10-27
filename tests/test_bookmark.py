@@ -114,6 +114,10 @@ class TestParse:
         _, inputs = bookmark.parse("tab=HelicalProjection&proj_xyz=x,z", tabs)
         assert inputs == {"helical_projection-map_projection_xyz_choices": ["x", "z"]}
 
+    def test_the_denovo3d_image_selection(self, tabs):
+        _, inputs = bookmark.parse("tab=Denovo3D&selected=3,5,11", tabs)
+        assert list(inputs.values()) == [[3, 5, 11]]
+
 
 class TestTheTables:
     """The declared tables are the only source; check them against the tabs."""
@@ -138,11 +142,17 @@ class TestTheTables:
             )
             src = file_source(path)
             declared = set(
-                re.findall(
+                x
+                for found in re.findall(
                     r"(?:ui\.input_\w+|helicon\.shiny\.(?:range_)?slider)"
-                    r'\(\s*"(\w+)"',
+                    r'\(\s*"(\w+)"'
+                    # an image gallery's selection, reported in the images' own
+                    # numbers as "<id>_ids"
+                    r'|id=session\.ns\("(\w+)"\)',
                     src,
                 )
+                for x in (f"{found[0]}", f"{found[1]}_ids")
+                if x not in ("", "_ids")
             )
             for key, entry in bookmark.tab_entries(module).items():
                 assert entry.input_id in declared, (name, key, entry.input_id)

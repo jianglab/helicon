@@ -233,7 +233,7 @@ def joint_refine(
     every image is placed against the model rather than against its neighbours.
 
     Measured on 33 tab-prepared EMPIAR-10940 classes at twist 1.20, against the
-    independent pairwise stitcher in ``denovo3d_register``, which works by
+    independent pairwise stitcher in ``helicon.lib.stitch``, which works by
     correlation alone and never uses the twist:
 
         joint_refine    17 s   33/33 placed   converged to 0.03 deg
@@ -248,7 +248,7 @@ def joint_refine(
     helix an image came from. And this one is conditional on the twist it was
     run at, where the pairwise stitcher is not -- so it is sound as an output
     but must never be fed back as independent evidence for the twist, which is
-    the circularity ``denovo3d_register`` deliberately avoids.
+    the circularity ``helicon.lib.stitch`` deliberately avoids.
 
     Returns a dict with the ``volume``, the per-image ``phis`` and ``flips``,
     the fit ``info``, and a ``history`` of what each round moved -- ``moved``
@@ -564,11 +564,11 @@ def placement_composite(
     rather than on a canvas that starts at the leftmost image, so the composite
     and that projection line up column for column and can be shown together.
 
-    Returns ``(image, coverage)`` as ``denovo3d_register.composite`` does, or
+    Returns ``(image, coverage)`` as ``helicon.lib.stitch.composite`` does, or
     ``(None, None)`` if nothing could be placed.
     """
     from .denovo3d_align import period_pixel, phi_to_dx
-    from .denovo3d_register import composite
+    from helicon.lib.stitch import composite
 
     period = period_pixel(twist, rise, apix2d, 1, two_fold)
     dx = np.mod(

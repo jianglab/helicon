@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import helicon
-from helicon.webApps.lib import denovo3d_register as R
+from helicon.lib import stitch as R
 
 
 def _long_filament(nx=1200, ny=40, seed=3):
@@ -477,3 +477,137 @@ class TestRegisterMany:
         assert (other["psi"], other["corr"]) != (first["psi"], first["corr"]) or abs(
             first["psi"]
         ) <= 2.0
+
+
+# ── extending the stitch by whole periods ───────────────────────────────
+
+PERIOD = 180.5
+
+
+def _periodic_window(x0, width=200, ny=40, seed=0):
+    """A window of a filament that repeats every ``PERIOD`` columns (no noise but a little)."""
+    x = np.arange(width) + x0
+    t = 2 * np.pi * x / PERIOD
+    axial = 1 + 0.6 * np.cos(t + 0.3) + 0.4 * np.cos(2 * t + 1.1) + 0.3 * np.cos(3 * t)
+    axial = axial + 0.3 * np.cos(2 * np.pi * x / 9.0)
+    y = np.arange(ny) - ny // 2
+    img = np.exp(-0.5 * (y[:, None] / 6.0) ** 2) * axial[None, :]
+    rng = np.random.default_rng(seed)
+    return (img + rng.normal(0, 0.01, img.shape)).astype(np.float32)
+
+
+class TestGrowingAStitch:
+    def _tiles(self, offsets, width=128):
+        return [
+            _periodic_window(x0, width=width, seed=n) for n, x0 in enumerate(offsets)
+        ]
+
+    def test_images_are_placed_end_to_end_into_the_long_filament(self):
+        # six windows of a filament, in an order the growth has to find itself
+        offsets = [0, 60, 120, 180, 240, 300]
+        imgs = self._tiles([offsets[i] for i in (2, 5, 0, 3, 1, 4)])
+        placed = R.grow_stitch(imgs, first=0, min_corr=0.9)
+        assert len(placed) == 6
+        long_img, _ = R.composite(
+            [imgs[k] for k in placed],
+            [dict(psi=0.0, dy=0.0, dx=dx) for dx in placed.values()],
+            match_intensity=False,
+        )
+        assert long_img.shape[1] > 300
+        width = long_img.shape[1]
+        truth = _periodic_window(0, width=width + int(PERIOD), seed=9)
+        best = max(
+            np.corrcoef(long_img.ravel(), truth[:, s : s + width].ravel())[0, 1]
+            for s in range(int(PERIOD))
+        )
+        assert best > 0.97
+
+    def test_every_image_extends_the_stitch_by_a_fair_part_of_its_width(self):
+        imgs = self._tiles([0, 20, 40, 60, 80, 100])
+        placed = R.grow_stitch(imgs, first=0, min_corr=0.9)
+        dxs = sorted(placed.values())
+        assert all(b - a >= 0 for a, b in zip(dxs, dxs[1:]))
+        # images only 20 apart cannot each add 32 columns: some are left out
+        assert len(placed) < 6
+
+    def test_images_that_fit_nowhere_are_left_out(self):
+        imgs = self._tiles([0, 40])
+        rng = np.random.default_rng(3)
+        imgs.append(rng.normal(0, 1, imgs[0].shape).astype(np.float32))
+        placed = R.grow_stitch(imgs, first=0, min_corr=0.9)
+        assert set(placed) == {0, 1}
+
+
+class TestRefiningOneImage:
+    def test_an_image_at_the_end_keeps_its_rotation_and_its_repeat(self):
+        offsets = [0, 60, 120]
+        imgs = [_periodic_window(x0, width=128, seed=n) for n, x0 in enumerate(offsets)]
+        true = [
+            dict(
+                psi=0.0,
+                dy=0.0,
+                dx=float(x0),
+                flip_x=False,
+                flip_y=False,
+                connected=True,
+            )
+            for x0 in offsets
+        ]
+        guess = [dict(t) for t in true]
+        guess[2].update(psi=0.3, dx=121.0)
+        out = R._refine_one(imgs, guess, 2, dict(try_flips=False, rot_range=1.0))
+        assert abs(out["psi"]) < 0.5
+        assert abs(out["dx"] - 120.0) < R.REFINE_DX_WINDOW
+
+
+class TestStitchImages:
+    def _tiles(self):
+        return [
+            _periodic_window(x0, width=128, seed=n) for n, x0 in enumerate([0, 50, 100])
+        ]
+
+    def test_stitches_images_with_the_helix_along_x(self):
+        res = R.stitch_images(self._tiles(), axis="x", rot_range=1.0, dy_range=1.0)
+        assert res.image.shape[0] == 40 and res.image.shape[1] > 128
+        assert len(res.composed) == 3 and res.diagnostics["n_connected"] == 3
+
+    def test_the_helix_along_y_gives_the_same_stitch_turned(self):
+        tiles = self._tiles()
+        along_x = R.stitch_images(tiles, axis="x", rot_range=1.0, dy_range=1.0)
+        along_y = R.stitch_images(
+            [t.T for t in tiles], axis="y", rot_range=1.0, dy_range=1.0
+        )
+        assert along_y.image.shape == along_x.image.T.shape
+        assert np.allclose(along_y.image, along_x.image.T, atol=1e-4)
+
+    def test_extending_is_reported_and_never_shortens(self):
+        tiles = self._tiles()
+        plain = R.stitch_images(tiles, rot_range=1.0, dy_range=1.0)
+        longer = R.stitch_images(tiles, extend=True, rot_range=1.0, dy_range=1.0)
+        assert longer.image.shape[1] >= plain.image.shape[1]
+        assert longer.extension["grown_of"] == 3
+        assert plain.extension == {}
+
+    def test_a_wrong_axis_is_refused(self):
+        with pytest.raises(ValueError):
+            R.stitch_images(self._tiles(), axis="z")
+
+    def test_the_auto_transform_of_a_helix_along_y_is_folded_in(self):
+        import helicon
+
+        straight = [t.T.copy() for t in self._tiles()]
+        auto = [(2.0, 1.5), (-1.5, -1.0), (1.0, 2.0)]
+        # what the auto-transform undoes: each image tilted and off-centre
+        tilted = [
+            helicon.transform_image(im, rotation=-r, post_translation=(0, -sy))
+            for im, (r, sy) in zip(straight, auto)
+        ]
+        restored = [
+            helicon.transform_image(im, rotation=r, post_translation=(0, sy))
+            for im, (r, sy) in zip(tilted, auto)
+        ]
+        kw = dict(axis="y", rot_range=1.0, dy_range=1.0)
+        res = R.stitch_images(restored, originals=tilted, auto=auto, **kw)
+        ref = R.stitch_images(straight, **kw)
+        assert res.image.shape == ref.image.shape
+        assert np.corrcoef(res.image.ravel(), ref.image.ravel())[0, 1] > 0.95

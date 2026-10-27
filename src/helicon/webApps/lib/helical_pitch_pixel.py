@@ -25,7 +25,7 @@ What each says that the other cannot:
   two averages that overlap little or look alike.
 
 Registration is twist-independent: offsets are axial, as in
-:mod:`denovo3d_register`, so nothing here assumes the twist or the rise.
+:mod:`helicon.lib.stitch`, so nothing here assumes the twist or the rise.
 
 This module is a prototype of the integration. The two terms are normalised
 separately (each by the degrees of the classes in it, so that its largest
@@ -79,7 +79,7 @@ def pair_weight(corr, prominence, min_corr=0.3, min_prominence=0.0):
 
     A pair that overlaps little still has a best offset and a correlation that
     can look respectable; what gives it away is a profile with no distinct peak
-    (a low ``prominence``), see :func:`denovo3d_register._dx_profile`.
+    (a low ``prominence``), see :func:`helicon.lib.stitch._dx_profile`.
     """
     corr = np.asarray(corr, dtype=float)
     prominence = np.asarray(prominence, dtype=float)
@@ -131,7 +131,7 @@ def class_pixel_offsets(
     -------
     PixelOffsets
     """
-    from . import denovo3d_register as R
+    from helicon.lib import stitch as R
 
     classes = [int(c) for c in classes]
     K = len(classes)

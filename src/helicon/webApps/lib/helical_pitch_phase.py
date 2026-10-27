@@ -1988,7 +1988,7 @@ _POOL_IMAGES_LOCK = threading.Lock()
 
 
 def _register_chunk(args):
-    from . import denovo3d_register as R
+    from helicon.lib import stitch as R
 
     pairs, turn, refine, coarse = args
     coarse = coarse or [None] * len(pairs)
@@ -2005,7 +2005,7 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
 
     The results are in the order of ``todo``.
     """
-    from . import denovo3d_register as R
+    from helicon.lib import stitch as R
 
     coarse = None
     if todo and len({np.shape(im) for im in prepared.values()}) == 1:
@@ -2121,7 +2121,7 @@ def pair_counterparts(images, indices, min_corr=0.85, max_width=128, progress=No
         axis from ``a``). Each class is in at most one pair, the best ones
         first; a class that looks the same both ways pairs with nothing.
     """
-    from . import denovo3d_register as R
+    from helicon.lib import stitch as R
 
     indices = [int(i) for i in indices]
     if len(indices) < 2:

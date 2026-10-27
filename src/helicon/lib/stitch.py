@@ -152,6 +152,7 @@ from __future__ import annotations
 import itertools
 import logging
 import threading
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -235,7 +236,7 @@ def _match_height(b, ny):
     return out
 
 
-def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
+def _dx_profile(a, b, min_overlap=MIN_OVERLAP, dx_range=None):
     """Best axial offset of ``b`` relative to ``a``, and its correlation.
 
     Normalised over the overlapping columns only, so an offset that leaves the
@@ -247,7 +248,12 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
     ``a`` and ``b`` may differ in size; the refinement pass registers each
     image against the whole composite, which is several images wide.
 
-    Returns (dx, corr); shifting ``b`` by ``dx`` aligns it with ``a``.
+    ``dx_range=(lo, hi)`` leaves out offsets outside it: a helix repeats, so
+    ``b`` fits equally well a whole repeat away, and a caller that knows roughly
+    where ``b`` belongs must be able to keep it from jumping there.
+
+    Returns (dx, corr, prominence); shifting ``b`` by ``dx`` aligns it with
+    ``a``.
     """
     a = np.asarray(a, dtype=np.float64)
     b = _match_height(np.asarray(b, dtype=np.float64), a.shape[0])
@@ -270,7 +276,7 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
     min_cols = max(4, int(round(min_overlap * min(na, nb))))
     k = np.arange(-(nb - min_cols), na - min_cols + 1)
     if k.size == 0:
-        return 0, -2.0
+        return 0, -2.0, 0.0
     lo_a = np.maximum(0, k)
     hi_a = np.minimum(na, nb + k)
     lo_b = np.maximum(0, -k)
@@ -282,6 +288,8 @@ def _dx_profile(a, b, min_overlap=MIN_OVERLAP):
     with np.errstate(divide="ignore", invalid="ignore"):
         corr = np.where(denom > 0, num[k % n] / denom, -2.0)
     corr[cols < min_cols] = -2.0
+    if dx_range is not None:
+        corr[(k < dx_range[0]) | (k > dx_range[1])] = -2.0
     best = int(np.argmax(corr))
     valid = corr[corr > -2.0]
     # Sub-pixel peak by fitting a parabola to the three samples around the
@@ -323,6 +331,7 @@ def register_pair(
     try_flips=True,
     flips=None,
     coarse=None,
+    dx_range=None,
 ):
     """Register ``b`` onto ``a`` over flip, in-plane rotation, dy and dx.
 
@@ -350,7 +359,9 @@ def register_pair(
         best = (-2.0, psi0, dy0, 0.0, 0.0)
         for psi in np.arange(psi0 - half_psi, psi0 + half_psi + step / 2, step):
             for dy in np.arange(dy0 - half_dy, dy0 + half_dy + step / 2, step):
-                dx, c, prom = _dx_profile(a, _apply(src, psi, dy), min_overlap)
+                dx, c, prom = _dx_profile(
+                    a, _apply(src, psi, dy), min_overlap, dx_range
+                )
                 if c > best[0]:
                     best = (c, float(psi), float(dy), float(dx), prom)
         return best
@@ -394,11 +405,79 @@ def n_registration_jobs(n_images, refine_against_composite=2):
     """How many pair registrations ``auto_stitch`` will run, for a progress bar.
 
     Two passes over every pair -- one to settle polarity, one to measure the
-    rotation and shifts with polarity fixed -- plus one registration per image
-    against the composite for each refinement round.
+    rotation and shifts with polarity fixed -- each a bulk search and a
+    refinement of the pair, plus one registration per image against the
+    composite for each refinement round.
     """
     pairs = n_images * (n_images - 1) // 2
-    return 2 * pairs + max(0, refine_against_composite) * n_images
+    return 4 * pairs + max(0, refine_against_composite) * n_images
+
+
+def _warm_up():
+    """Do the first-call work of resampling (imports, compiling) before processes
+    are forked, so that each of them does not repeat it."""
+    _apply(np.zeros((8, 8), dtype=np.float32), 0.1, 0.1, 0.1)
+
+
+def _refine_one_pair(i, j, coarse, kw):
+    """:func:`register_pair` of image ``j`` onto ``i`` from its coarse result, for
+    a worker process (the images are inherited through ``_CORR_IMAGES``)."""
+    return register_pair(_CORR_IMAGES[i], _CORR_IMAGES[j], coarse=coarse, **kw)
+
+
+MIN_PAIRS_PER_CPU = 2
+
+
+def _refine_pairs(images, pair_ij, coarse, kw, tick=None):
+    """Refine the coarse registration of every pair, in several processes.
+
+    Each pair is independent, and refining all of them one after another took
+    longer than the bulk coarse search that precedes it. As many processes as
+    there are CPUs free; a few pairs are not worth starting them for. ``tick``
+    is called with ``(i, j)`` as each pair is done.
+    """
+
+    def done(out, i, j):
+        if tick is not None:
+            tick(i, j)
+        return out
+
+    workers = 1
+    if all(m is not None for m in coarse):
+        import helicon
+
+        # a process costs a few hundredths of a second to start and a pair takes
+        # a tenth or more, so each gets at least MIN_PAIRS_PER_CPU of them
+        workers = min(int(helicon.available_cpu()), len(pair_ij) // MIN_PAIRS_PER_CPU)
+    if workers <= 1:
+        return [
+            done(register_pair(images[i], images[j], coarse=m, **kw), i, j)
+            for (i, j), m in zip(pair_ij, coarse)
+        ]
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+
+    from threadpoolctl import threadpool_limits
+
+    _warm_up()
+    with _CORR_LOCK:
+        _CORR_IMAGES[:] = [np.asarray(im, dtype=np.float32) for im in images]
+        try:
+            with (
+                threadpool_limits(1),
+                ProcessPoolExecutor(workers, mp_context=mp.get_context("fork")) as pool,
+            ):
+                out = pool.map(
+                    _refine_one_pair,
+                    [i for i, _ in pair_ij],
+                    [j for _, j in pair_ij],
+                    coarse,
+                    [kw] * len(pair_ij),
+                    chunksize=max(1, len(pair_ij) // (4 * workers)),
+                )
+                return [done(m, i, j) for (i, j), m in zip(pair_ij, out)]
+        finally:
+            _CORR_IMAGES[:] = []
 
 
 def register_graph(
@@ -409,13 +488,46 @@ def register_graph(
     All pairs rather than a spanning chain: the redundancy is what makes the
     global solve robust to a few bad registrations, and it is what lets the
     closure error act as a check that the answer means anything.
+
+    The coarse search of every pair is done in bulk, in as many processes as
+    there are CPUs free (:func:`register_many`); each pair is then refined as
+    :func:`register_pair` does. The images must all have one shape for that;
+    otherwise the pairs are registered one by one.
     """
     n = len(images)
+    pair_ij = list(itertools.combinations(range(n), 2))
+    coarse = [None] * len(pair_ij)
+    if len({np.shape(im) for im in images}) == 1:
+        flips = kw.get("flips")
+        if flips is None:
+            flips = FLIPS if kw.get("try_flips", True) else [(False, False)]
+        coarse = register_many(
+            images,
+            pair_ij,
+            flips=flips,
+            rot_range=kw.get("rot_range", 6.0),
+            dy_range=kw.get("dy_range", 5.0),
+            step=kw.get("coarse_step", 1.0),
+            min_overlap=kw.get("min_overlap", MIN_OVERLAP),
+            tick=(
+                None
+                if progress is None
+                else lambda n: [progress("searching the pairs") for _ in range(n)]
+            ),
+        )
+    refined = _refine_pairs(
+        images,
+        pair_ij,
+        coarse,
+        kw,
+        tick=(
+            None
+            if progress is None
+            else lambda i, j: progress(f"registering images {i + 1} and {j + 1}")
+        ),
+    )
     pairs = []
-    for i, j in itertools.combinations(range(n), 2):
-        if progress is not None:
-            progress(f"registering images {i + 1} and {j + 1}")
-        m = register_pair(images[i], images[j], **kw)
+    for (i, j), m in zip(pair_ij, refined):
         m.update(i=i, j=j)
         if m["corr"] >= min_corr and m["prominence"] >= min_prominence:
             pairs.append(m)
@@ -787,6 +899,165 @@ def composite(images, transforms, feather=8, match_intensity=True):
     return out, (wsum > 1e-9).sum(axis=0)
 
 
+# Each image added to an end of the stitch has to extend it by at least this
+# fraction of its width, or the stitch would grow by one-column steps that are
+# mostly the same pixels again.
+GROW_MIN_STEP = 0.25
+
+
+def _end_window(images, placed, side, width):
+    """The last ``width`` columns at one end of the stitch, and where they are.
+
+    Only the images that reach into that window are composited, so growing a
+    long stitch does not cost a composite of all of it for every image added.
+
+    Returns (window, left): the window and the absolute column of its first
+    column.
+    """
+    if side == "right":
+        edge = max(dx + images[k].shape[1] for k, dx in placed.items())
+        lo, hi = edge - width, edge
+    else:
+        edge = min(placed.values())
+        lo, hi = edge, edge + width
+    near = [
+        (images[k], dx)
+        for k, dx in placed.items()
+        if dx + images[k].shape[1] > lo and dx < hi
+    ]
+    x0 = int(np.floor(min(dx for _, dx in near)))
+    canvas, _ = composite(
+        [im for im, _ in near],
+        [dict(psi=0.0, dy=0.0, dx=dx) for _, dx in near],
+        match_intensity=False,
+    )
+    start = int(round(lo - x0))
+    start = max(0, min(start, canvas.shape[1] - 1))
+    return canvas[:, start : start + width], x0 + start
+
+
+def grow_stitch(images, first, min_corr=MIN_CORR, min_overlap=MIN_OVERLAP):
+    """Place images end to end for as long as the content allows.
+
+    Starting from image ``first``, repeatedly take the unused image that fits
+    best (highest correlation over the overlap) onto either end of the stitch
+    so far, at a position that extends it, and put it there. Each image is used
+    once. It stops when no unused image fits an end with a correlation of
+    ``min_corr`` or more, so the length is what the images can support: nothing
+    is asked for in advance.
+
+    A helix repeats, so an image fits its neighbours at one place per repeat;
+    the end it is placed against decides which, and no repeat length is ever
+    estimated, so there is no error in one to add up along a long stitch.
+
+    Only the axial offset is searched. The images must already be oriented
+    (flip, rotation and cross-axis shift applied), as the registration made
+    them.
+
+    Parameters
+    ----------
+    images : list of ndarray
+        The oriented images, of one height.
+    first : int
+        The image to start from, placed at 0.
+    min_corr : float
+        The lowest correlation at which an image is accepted.
+    min_overlap : float
+        The lowest overlap, as a fraction of the image width, to register on.
+
+    Returns
+    -------
+    dict
+        Image index -> axial offset (pixels), for the images placed.
+    """
+    placed = {first: 0.0}
+    unused = set(range(len(images))) - {first}
+    while unused:
+        best = None
+        for side in ("right", "left"):
+            for k in unused:
+                nb = images[k].shape[1]
+                window, left = _end_window(images, placed, side, nb)
+                na = window.shape[1]
+                step = GROW_MIN_STEP * nb
+                min_cols = max(4, int(round(min_overlap * min(na, nb))))
+                if side == "right":
+                    span = (na + step - nb, na - min_cols)
+                else:
+                    span = (min_cols - nb, -step)
+                dx, corr, _prom = _dx_profile(window, images[k], min_overlap, span)
+                if corr >= min_corr and (best is None or corr > best[0]):
+                    best = (corr, k, left + dx)
+        if best is None:
+            break
+        placed[best[1]] = best[2]
+        unused.discard(best[1])
+    return placed
+
+
+# How far, in pixels, refining an image may move it along the axis. The global
+# solve has placed it to within its tolerance (TOLERANCE["dx"]); this only polishes
+# that, and must stay well under a repeat so the image cannot jump to another one.
+REFINE_DX_WINDOW = 4.0
+
+
+def _refine_one(images, transforms, k, kw):
+    """Polish image ``k``'s transform against the composite of all the others.
+
+    The other images, not the whole composite: that contains ``k`` itself, so
+    where ``k`` is alone at an end of the stitch it would be matched with
+    itself and its own placement confirmed whatever it was. And only locally
+    (small psi and dy steps, dx within ``REFINE_DX_WINDOW``): the global solve
+    has used every pair to place it, which one image against a composite cannot
+    improve on by searching afresh, and a free search let an end image rotate by
+    2 degrees or move a whole repeat on the evidence of the one image it overlaps.
+
+    Returns the new transform, or ``k``'s unchanged one when it no longer
+    overlaps the others enough to be measured.
+    """
+    t = transforms[k]
+    others = [
+        (im, o)
+        for j, (im, o) in enumerate(zip(images, transforms))
+        if j != k and o["connected"]
+    ]
+    if not others:
+        return t
+    rest, _ = composite(
+        [im for im, _ in others], [o for _, o in others], match_intensity=False
+    )
+    x0 = int(np.floor(min(o["dx"] for _, o in others)))
+    here = t["dx"] - x0
+    start = dict(
+        corr=0.0,
+        psi=t["psi"],
+        dy=t["dy"],
+        dx=here,
+        prominence=0.0,
+        # the image is flipped below, before it gets here
+        flip_x=False,
+        flip_y=False,
+    )
+    m = register_pair(
+        rest,
+        _flip(images[k], t["flip_x"], t["flip_y"]),
+        coarse=start,
+        dx_range=(here - REFINE_DX_WINDOW, here + REFINE_DX_WINDOW),
+        **kw,
+    )
+    if m["corr"] <= -1.0:
+        return t
+    return dict(
+        psi=m["psi"],
+        dy=m["dy"],
+        dx=float(m["dx"]) + x0,
+        flip_x=t["flip_x"],
+        flip_y=t["flip_y"],
+        connected=True,
+        corr=m["corr"],
+    )
+
+
 def auto_stitch(
     images, refine_against_composite=2, image_width=None, progress=None, **kw
 ):
@@ -854,19 +1125,8 @@ def auto_stitch(
                 updated.append(t)
                 continue
             if progress is not None:
-                progress(f"refining image {k + 1} against the composite")
-            m = register_pair(stitched, _flip(im, t["flip_x"], t["flip_y"]), **kw2)
-            updated.append(
-                dict(
-                    psi=m["psi"],
-                    dy=m["dy"],
-                    dx=float(m["dx"]),
-                    flip_x=t["flip_x"],
-                    flip_y=t["flip_y"],
-                    connected=True,
-                    corr=m["corr"],
-                )
-            )
+                progress(f"refining image {k + 1} against the others")
+            updated.append(_refine_one(images, transforms, k, kw2))
         transforms = updated
         stitched, coverage = composite(images, transforms, match_intensity=False)
 
@@ -966,6 +1226,155 @@ def apply_composed(img, t):
             post_translation=(float(t.get("shift_y", 0.0)), 0),
         )
     return out
+
+
+@dataclass
+class StitchResult:
+    """What :func:`stitch_images` returns.
+
+    Attributes
+    ----------
+    image : ndarray or None
+        The stitched image, with the helix along ``axis`` as the input had it;
+        None if no image could be placed.
+    transforms : list of dict
+        The registration of each image (``psi``, ``dy``, ``dx``, ``flip_x``,
+        ``flip_y``, ``connected``), before the auto-transform is folded in.
+    composed : list of dict
+        Each image's whole transform, applied once to its original: ``mirror_x``,
+        ``rot180``, ``rotation``, ``shift_y``, ``dx`` (its position along the
+        helix) and ``connected``.
+    diagnostics : dict
+        How trustworthy the registration was (see :func:`auto_stitch`).
+    extension : dict
+        Empty unless ``extend`` was asked for; then ``grown_of`` (images that
+        could be placed), ``grown_used`` (those the extension placed, 0 when it
+        was no longer than the plain stitch) and ``grown_px`` (its length).
+    """
+
+    image: object
+    transforms: list
+    composed: list
+    diagnostics: dict
+    extension: dict = field(default_factory=dict)
+
+
+def stitch_images(
+    images,
+    axis="x",
+    originals=None,
+    auto=None,
+    extend=False,
+    rot_range=2.0,
+    dy_range=3.0,
+    coarse_step=0.5,
+    progress=None,
+):
+    """Register several images of one filament and combine them into one.
+
+    Registers every pair, reconciles them (:func:`auto_stitch`), and composites
+    the images once, resampled from ``originals`` so that nothing registration
+    needed (a threshold, say) is left in the result. With ``extend`` the images
+    are then placed end to end instead (:func:`grow_stitch`), for as long as
+    their content allows.
+
+    Parameters
+    ----------
+    images : list of ndarray
+        The images to register: the filament along ``axis`` and roughly centred,
+        so that only a small residual rotation and shift remains to be found.
+    axis : {"x", "y"}
+        The direction the helix runs in the images: ``"x"`` (along the rows, as
+        in the Denovo3D tab) or ``"y"`` (along the columns, as in HILL). Images
+        and result keep the orientation they have; ``dx`` and ``extra`` offsets
+        ``dx`` in the results is the position along the helix whichever it is, and
+        the angles are those of the images turned to run along x.
+    originals : list of ndarray, optional
+        What to composite, one per image, in the same orientation as ``images``;
+        ``images`` themselves by default.
+    auto : list of (float, float), optional
+        The rotation (degrees) and cross-axis shift (pixels) already applied
+        to each original to get its image, so that they are composed with the
+        registration and the original resampled once. As
+        ``helicon.transform_image(original, rotation=r, post_translation=(sy, 0))``
+        applies them for ``axis="x"``, and with ``post_translation=(0, sy)`` for
+        ``axis="y"``, where the shift across the helix is along x.
+    extend : bool
+        Place the images end to end as far as they go instead of averaging
+        them over what they have in common.
+    rot_range, dy_range, coarse_step : float
+        The registration search: rotation and cross-axis shift each side of
+        zero, and the rotation step (degrees).
+    progress : callable, optional
+        Called with a short text after each registration; see
+        :func:`n_registration_jobs` for how many calls to expect.
+
+    Returns
+    -------
+    StitchResult
+
+    Raises
+    ------
+    ValueError
+        If ``axis`` is not "x" or "y".
+    """
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', not {axis!r}")
+    along_y = axis == "y"
+    turn = (lambda im: np.asarray(im).T) if along_y else np.asarray
+    images = [turn(im) for im in images]
+    originals = images if originals is None else [turn(im) for im in originals]
+    auto = [(0.0, 0.0)] * len(images) if auto is None else auto
+    if along_y:
+        # Turning the image over its diagonal reverses the sense of a rotation
+        # and carries a shift across the helix (along x) to one along y, which
+        # is where it is measured for a helix along x.
+        auto = [(-r, sy) for r, sy in auto]
+
+    _stitched, transforms, diagnostics = auto_stitch(
+        images,
+        rot_range=rot_range,
+        dy_range=dy_range,
+        coarse_step=coarse_step,
+        progress=progress,
+    )
+
+    # Compose with the auto-transform and resample the originals once.
+    composed = []
+    for (r, sy), t in zip(auto, transforms):
+        c = compose_transforms(r, sy, t)
+        c["connected"] = t.get("connected", True)
+        c["dx"] = t["dx"] + c.pop("extra_dx", 0.0)
+        composed.append(c)
+    placed = [
+        dict(psi=0.0, dy=0.0, dx=c["dx"], connected=c["connected"]) for c in composed
+    ]
+    oriented = [apply_composed(im, c) for im, c in zip(originals, composed)]
+    image, _coverage = composite(oriented, placed)
+    extension = {}
+    if image is not None and extend:
+        used = [i for i, t in enumerate(placed) if t["connected"]]
+        corrs = [transforms[i].get("corr", 1.0) for i in used]
+        # an image has to fit about as well as the registration fitted them
+        min_corr = max(MIN_CORR, 0.9 * float(np.median(corrs)))
+        first = max(range(len(used)), key=lambda n: corrs[n])
+        grown = grow_stitch([oriented[i] for i in used], first, min_corr=min_corr)
+        long_image, _coverage = composite(
+            [oriented[used[n]] for n in grown],
+            [dict(psi=0.0, dy=0.0, dx=dx) for dx in grown.values()],
+        )
+        if long_image is not None and long_image.shape[1] > image.shape[1]:
+            image = long_image
+            extension = dict(
+                grown_used=len(grown),
+                grown_of=len(used),
+                grown_px=int(image.shape[1]),
+            )
+        else:
+            extension = dict(grown_used=0, grown_of=len(used))
+    if image is not None and along_y:
+        image = np.ascontiguousarray(image.T)
+    return StitchResult(image, transforms, composed, diagnostics, extension)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1234,6 +1643,7 @@ def register_many(
     step=1.0,
     min_overlap=MIN_OVERLAP,
     workers=None,
+    tick=None,
 ):
     """:func:`register_pair` (without refinement) for many pairs at once.
 
@@ -1243,7 +1653,8 @@ def register_many(
     of :func:`register_pair`: ``corr``, ``dx``, ``prominence``, ``psi``, ``dy``,
     ``flip_x`` and ``flip_y``, in the order of ``pairs``. The images must all have
     one shape. Several processes are used when there is enough work for them (as
-    many as the CPUs free and the memory allow).
+    many as the CPUs free and the memory allow). ``tick``, if given, is called
+    with the number of pairs finished each time some are.
     """
     global _PAIR_CACHE
     from collections import OrderedDict
@@ -1271,6 +1682,8 @@ def register_many(
             if key in _PAIR_CACHE:
                 results[x] = dict(_PAIR_CACHE[key])
                 _PAIR_CACHE.move_to_end(key)
+    if tick is not None and any(r is not None for r in results):
+        tick(sum(r is not None for r in results))  # found in the cache
     by_j = {}
     for x, (i, j) in enumerate(pairs):
         if results[x] is None:
@@ -1282,9 +1695,9 @@ def register_many(
         import helicon
 
         need = corr_memory_gb(images[0].shape, len(combos))
-        # a process pays for itself with a few thousand candidate images
-        # (about 0.4 s of work)
-        busy = sum(len(v) for v in by_j.values()) * len(combos) // 5000
+        # a process pays for itself with about a thousand candidate images
+        # (a few tenths of a second of work for images of 256 x 256 pixels)
+        busy = sum(len(v) for v in by_j.values()) * len(combos) // 1000
         workers = min(int(helicon.available_cpu(mem_gb_per_cpu=need)), busy)
     workers = max(1, min(workers, len(columns)))
     with _CORR_LOCK:
@@ -1300,8 +1713,13 @@ def register_many(
                 # the products are small: many threads only get in each
                 # other's way (4x slower than one)
                 with threadpool_limits(1):
-                    found = [_register_column(*a) for a in args]
+                    found = []
+                    for a in args:
+                        found.append(_register_column(*a))
+                        if tick is not None:
+                            tick(len(a[1]))
             else:
+                _warm_up()
                 import multiprocessing as mp
                 from concurrent.futures import ProcessPoolExecutor
 
@@ -1313,7 +1731,11 @@ def register_many(
                         workers, mp_context=mp.get_context("fork")
                     ) as pool,
                 ):
-                    found = list(pool.map(_register_column, *zip(*args)))
+                    found = []
+                    for a, column in zip(args, pool.map(_register_column, *zip(*args))):
+                        found.append(column)
+                        if tick is not None:
+                            tick(len(a[1]))
         finally:
             _CORR_IMAGES[:] = []
     for j, column in zip(columns, found):

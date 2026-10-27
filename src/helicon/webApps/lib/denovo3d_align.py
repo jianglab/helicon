@@ -1,6 +1,6 @@
 """Align a 2D image against a side projection of the current 3D model.
 
-Where the pairwise registration in ``denovo3d_register`` relates images to each
+Where the pairwise registration in ``helicon.lib.stitch`` relates images to each
 other, this relates an image to the reconstruction. The difference is not
 cosmetic: a model projection can be made as long as the search needs and is
 complete everywhere, so every offset is scored on a full overlap. The minimum
@@ -78,12 +78,12 @@ this code, not against this code's own output:
 
 Prominence is the wrong statistic here
 --------------------------------------
-``denovo3d_register`` screens pairs on peak prominence, the peak measured
+``helicon.lib.stitch`` screens pairs on peak prominence, the peak measured
 against the whole correlation profile. That works there because a profile over
 many offsets is mostly flat. Over exactly one period the profile is a single
 broad hump -- measured width at half height 60-70 px for a 128 px image on a
 288 px period -- so prominence reads about 2.0 even for a placement that is
-exactly right, which is also ``denovo3d_register``'s rejection threshold. What
+exactly right, which is also ``helicon.lib.stitch``'s rejection threshold. What
 threatens a placement is a *second* hump, so the rival peak outside the first
 one's shoulders is reported instead, and it is the number to judge a placement
 by. On noiseless synthetic data the rival sits at 0.87 against a peak of 1.00:

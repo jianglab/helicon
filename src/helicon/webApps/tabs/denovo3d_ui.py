@@ -260,6 +260,30 @@ def denovo3d_tab_ui():
                     ),
                     ui.layout_columns(
                         # ui.input_checkbox("dn_show_emdb_input_mode", "Show EMDB input mode", value=False),
+                        ui.tooltip(
+                            ui.input_checkbox(
+                                "dn_stitch_extend",
+                                "Extend the auto-stitched image as far as it goes",
+                                value=True,
+                            ),
+                            "Instead of averaging all the images over the stretch they"
+                            " have in common, place them end to end: starting from the"
+                            " best-matching image, add the unused image that fits best"
+                            " at either end, until none fits. The stitched image is"
+                            " then as long as the images allow, and each image is used"
+                            " once, so it is less averaged. For illustrating long"
+                            " filaments or computing a Fourier transform with finer"
+                            " layer lines; the search for the twist does not need it.",
+                            placement="right",
+                        ),
+                        ui.tooltip(
+                            ui.input_checkbox(
+                                "dn_match_input_box",
+                                "Match input box and pixel size for downloaded map",
+                                value=True,
+                            ),
+                            "Generate a cubic map that can be used directly as a RELION initial reference. Disable to download the smaller, compact map.",
+                        ),
                         ui.input_checkbox(
                             "dn_is_3d", "The input is a 3D map", value=False
                         ),
@@ -276,14 +300,6 @@ def denovo3d_tab_ui():
                             "dn_show_download_buttons",
                             "Show download buttons",
                             value=False,
-                        ),
-                        ui.tooltip(
-                            ui.input_checkbox(
-                                "dn_match_input_box",
-                                "Match input box and pixel size for downloaded map",
-                                value=True,
-                            ),
-                            "Generate a cubic map that can be used directly as a RELION initial reference. Disable to download the smaller, compact map.",
                         ),
                         col_widths=6,
                         style="align-items: flex-start;",

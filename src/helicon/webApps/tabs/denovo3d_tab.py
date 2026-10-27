@@ -28,7 +28,8 @@ from shiny.types import SilentException
 
 from .. import deployment, map_viewers
 
-from ..lib import denovo3d_joint, denovo3d_pipeline, denovo3d_register, pools
+from helicon.lib import stitch
+from ..lib import denovo3d_joint, denovo3d_pipeline, pools
 from ..lib import helix_transform
 from ..lib.helix_transform import (
     estimate_helix_rotation_center_diameter as _estimate_helix_rotation_center_diameter,
@@ -334,6 +335,14 @@ def denovo3d_tab_server(input, output, session):
     projmatch_composites = reactive.value({})
 
     @reactive.calc
+    def selected_gallery_title():
+        """Heading of the selected images, with how many when there are many."""
+        n = len(selected_images_original())
+        if n > 4:
+            return f"Selected images ({n}):"
+        return selected_images_title()
+
+    @reactive.calc
     def transformed_gallery_title():
         """Heading for the main gallery, which shows whatever the pipeline holds.
 
@@ -343,7 +352,7 @@ def denovo3d_tab_server(input, output, session):
         """
         if len(stitched_image_displayed()):
             return "Stitched, transformed image:"
-        return selected_images_title()
+        return selected_gallery_title()
 
     @reactive.calc
     def transformed_image_labels():
@@ -1013,6 +1022,21 @@ def denovo3d_tab_server(input, output, session):
         imgs = displayed_images()
         if not imgs or len(imgs) == 0:
             return ui.div()
+        # a bookmark's selection, used once: the gallery is not a Shiny input
+        # that restores itself, so ask for it here. It names the images by the
+        # numbers the gallery labels them with (their place in the input stack,
+        # from 1), which stay the same when "Ignore blank images" hides some.
+        from shiny.bookmark import restore_input
+        from shiny.module import resolve_id
+
+        saved = restore_input(resolve_id("dn_select_image_ids"), None)
+        if saved is not None:
+            position = {n + 1: i for i, n in enumerate(displayed_image_ids())}
+            saved = [
+                position[int(n)] for n in np.atleast_1d(saved) if int(n) in position
+            ]
+            if saved:
+                initial_selected_image_indices.set(saved)
         return helicon.shiny.image_gallery(
             id=session.ns("dn_select_image"),
             label=displayed_image_title,
@@ -1020,6 +1044,7 @@ def denovo3d_tab_server(input, output, session):
             image_labels=displayed_image_labels,
             image_size=reactive.value(128),
             initial_selected_indices=initial_selected_image_indices,
+            image_ids=[n + 1 for n in displayed_image_ids()],
             enable_selection=True,
             allow_multiple_selection=True,
         )
@@ -1196,7 +1221,7 @@ def denovo3d_tab_server(input, output, session):
             return ui.div()
         return helicon.shiny.image_gallery(
             id=session.ns("dn_stitch_active_image"),
-            label=selected_images_title,
+            label=selected_gallery_title,
             images=selected_images_rotated_shifted,
             image_labels=selected_images_labels,
             image_size=reactive.value(128),
@@ -1488,6 +1513,13 @@ def denovo3d_tab_server(input, output, session):
                 f"Combined length {rep['span_gain']:.2f}x a single image"
                 f" ({rep['span_px']:.0f} px)."
             )
+            if rep.get("grown_used"):
+                span_note += (
+                    f" Extended end to end to {rep['grown_px']} px with"
+                    f" {rep['grown_used']} of {rep['grown_of']} images."
+                )
+            elif rep.get("grown_of"):
+                span_note += " The images could not be extended any further."
             detail = (
                 f"{rep['n_pairs']} of {rep['n_possible']} image pairs registered"
                 f" ({rep['n_rejected']} rejected as inconsistent),"
@@ -1524,11 +1556,18 @@ def denovo3d_tab_server(input, output, session):
             # is what anyone unhappy with the result actually needs.
             return ui.div(
                 *rows,
-                ui.input_action_button(
-                    "dn_undo_stitch",
-                    label="Undo stitch",
-                    class_="btn-primary",
-                    style="max-width: 200px; margin-top: 6px;",
+                ui.div(
+                    ui.input_action_button(
+                        "dn_undo_stitch",
+                        label="Undo stitch",
+                        class_="btn-primary",
+                    ),
+                    ui.download_button(
+                        "dn_download_stitched",
+                        label="Save stitched image (mrc)",
+                        class_="btn-primary",
+                    ),
+                    style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;",
                 ),
                 ui.div(
                     "Undoing brings back the individual images so you can adjust"
@@ -1714,6 +1753,19 @@ def denovo3d_tab_server(input, output, session):
         with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
             with mrcfile.new(temp.name, overwrite=True) as mrc:
                 mrc.set_data(rec3d_map)
+                mrc.voxel_size = apix
+            with open(temp.name, "rb") as file:
+                yield file.read()
+
+    @render.download(filename="helicon_denovo3d_stitched_image.mrc")
+    def dn_download_stitched():
+        images = stitched_image_displayed()
+        req(len(images))
+        # the images the stitch was made from were binned by this much
+        apix = _input_or("dn_apix", apix_rv()) * max(1, _input_or("dn_binning", 1))
+        with tempfile.NamedTemporaryFile(suffix=".mrc") as temp:
+            with mrcfile.new(temp.name, overwrite=True) as mrc:
+                mrc.set_data(np.asarray(images[0], dtype=np.float32))
                 mrc.voxel_size = apix
             with open(temp.name, "rb") as file:
                 yield file.read()
@@ -2586,7 +2638,7 @@ def denovo3d_tab_server(input, output, session):
         # Every pair is registered twice (polarity, then rotation and shifts)
         # and every image once per refinement round, so the count is knowable
         # up front and the bar can be honest about how far along it is.
-        n_jobs = denovo3d_register.n_registration_jobs(len(images))
+        n_jobs = stitch.n_registration_jobs(len(images))
         done = [0]
 
         def _tick(label):
@@ -2599,39 +2651,18 @@ def denovo3d_tab_server(input, output, session):
             )
 
         progress.set(0, message=f"Registering: 0/{n_jobs}", detail="starting ...")
-        _stitched, transforms, diagnostics = denovo3d_register.auto_stitch(
+        res = stitch.stitch_images(
             images,
-            rot_range=2.0,
-            dy_range=3.0,
-            coarse_step=0.5,
+            axis="x",
+            originals=originals,
+            auto=auto,
+            extend=job["extend"],
             progress=_tick,
         )
-
-        # Compose with the auto-transform and resample the originals once.
-        composed = []
-        for (r, sy), t in zip(auto, transforms):
-            c = denovo3d_register.compose_transforms(r, sy, t)
-            c["connected"] = t.get("connected", True)
-            c["dx"] = t["dx"] + c.pop("extra_dx", 0.0)
-            composed.append(c)
-        placed = [
-            dict(
-                psi=0.0,
-                dy=0.0,
-                dx=c["dx"],
-                connected=c["connected"],
-                flip_x=False,
-                flip_y=False,
-            )
-            for c in composed
-        ]
-        oriented = [
-            denovo3d_register.apply_composed(im, c)
-            for im, c in zip(originals, composed)
-        ]
-        stitched, _coverage = denovo3d_register.composite(oriented, placed)
-        if stitched is None:
+        if res.image is None:
             return None
+        stitched, composed, transforms = res.image, res.composed, res.transforms
+        diagnostics, extension = res.diagnostics, res.extension
 
         # Convert into what the manual sliders mean. Their x value is a
         # correction from an end-to-end tiled layout, not an absolute position,
@@ -2652,6 +2683,7 @@ def denovo3d_tab_server(input, output, session):
                 )
             )
         report = dict(diagnostics)
+        report.update(extension)
         report.update(
             n_images=len(images),
             n_possible=len(images) * (len(images) - 1) // 2,
@@ -2746,7 +2778,12 @@ def denovo3d_tab_server(input, output, session):
             for i in range(len(images))
         ]
         auto_stitch_task.invoke(
-            dict(images=list(images), originals=originals, auto=auto)
+            dict(
+                images=list(images),
+                originals=originals,
+                auto=auto,
+                extend=bool(_input_or("dn_stitch_extend", True)),
+            )
         )
 
     @reactive.effect
@@ -2779,7 +2816,7 @@ def denovo3d_tab_server(input, output, session):
             )
             for x in x_positions
         ]
-        result, _coverage = denovo3d_register.composite(images, placed)
+        result, _coverage = stitch.composite(images, placed)
         if result is None:
             logger.warning("manual stitching produced no image")
             return
