@@ -4789,6 +4789,69 @@ class TestTrueFscPanel(object):
         dialog.close()
         qapp.processEvents()
 
+    def test_the_central_z_and_force_options_reach_the_computation(self, qapp):
+        from helicon.commands import display
+
+        dialog = display._launch_truefsc_maps(parent=None)
+        qapp.processEvents()
+        opts = dialog._get_options()
+        assert opts["mask_z_len"] == -1 and opts["mask_z_fraction"] == 1
+        assert opts["force"] is False
+        dialog._z_fraction_edit.setText("0.3")
+        dialog._force_check.setChecked(True)
+        opts = dialog._get_options()
+        assert opts["mask_z_fraction"] == 0.3 and opts["force"] is True
+        # a mask given is used as it is: no central Z cut either
+        dialog._mask_edit.setText("/tmp/user_mask.mrc")
+        qapp.processEvents()
+        assert not dialog._z_fraction_edit.isEnabled()
+        dialog.close()
+        qapp.processEvents()
+
+    def test_a_helical_refinement_gets_the_central_30_percent(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        import mrcfile
+        import numpy as np
+        from PySide6.QtCore import QThread
+
+        from helicon.commands import display
+
+        helical, plain = tmp_path / "helical", tmp_path / "plain"
+        for folder in (helical, plain):
+            folder.mkdir()
+            for half in (1, 2):
+                with mrcfile.new(str(folder / f"h{half}.mrc"), overwrite=True) as m:
+                    m.set_data(np.zeros((4, 4, 4), dtype=np.float32))
+        (helical / "run_model.star").write_text("data_model_general\n\n_rlnIsHelix 1\n")
+        monkeypatch.setattr(QThread, "start", lambda self: None)
+        dialog = display._launch_truefsc_maps(
+            map1=helical / "h1.mrc", map2=helical / "h2.mrc", parent=None
+        )
+        qapp.processEvents()
+        assert dialog._get_options()["mask_z_fraction"] == 0.3
+        # other maps, not helical: back to all sections
+        dialog._map1_edit.setText(str(plain / "h1.mrc"))
+        dialog._map2_edit.setText(str(plain / "h2.mrc"))
+        dialog._on_inputs_changed()
+        assert dialog._get_options()["mask_z_fraction"] == 1
+        # a value typed is kept
+        dialog._z_fraction_edit.setText("0.5")
+        dialog._z_fraction_edit.textEdited.emit("0.5")
+        dialog._map1_edit.setText(str(helical / "h1.mrc"))
+        dialog._on_inputs_changed()
+        assert dialog._get_options()["mask_z_fraction"] == 0.5
+        dialog.close()
+        qapp.processEvents()
+
+    def test_a_cryosparc_helical_job_is_recognised(self, tmp_path):
+        from helicon.lib.gui.truefsc_panel import _is_helical_job
+
+        (tmp_path / "job.json").write_text('{"job_type": "helix_refine"}')
+        assert _is_helical_job(tmp_path)
+        (tmp_path / "job.json").write_text('{"job_type": "homo_refine_new"}')
+        assert not _is_helical_job(tmp_path)
+
     def test_options_lay_out_in_shared_rows(self, qapp):
         from helicon.commands import display
 

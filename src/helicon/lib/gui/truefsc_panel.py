@@ -55,6 +55,27 @@ def _launch_truefsc(path: str, parent=None) -> None:
     _launch_truefsc_maps(map1=map1, map2=map2, parent=parent)
 
 
+# the central fraction of the Z sections a helical map is scored on, as RELION's
+# MaskCreate keeps by default
+HELICAL_Z_FRACTION = 0.3
+
+
+def _is_helical_job(folder) -> bool:
+    """Whether ``folder`` holds a helical refinement: a RELION job whose model
+    says so, or a cryoSPARC helical job."""
+    import json
+
+    from helicon.lib.gui.browser_files import _folder_is_helical
+
+    if _folder_is_helical(str(folder)):
+        return True
+    try:
+        job = json.loads((Path(folder) / "job.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return "helix" in str(job.get("job_type", "")).lower()
+
+
 def _launch_truefsc_maps(
     map1=None,
     map2=None,
@@ -68,6 +89,8 @@ def _launch_truefsc_maps(
     mask_mass=0,
     mask_soft=-1,
     refine_mask=1,
+    mask_z_len=-1,
+    mask_z_fraction=1,
 ) -> None:
     """Open the trueFSC panel with Map 1 / Map 2 selectors and options.
 
@@ -259,6 +282,8 @@ def _launch_truefsc_maps(
                 "mask_mass": mask_mass,
                 "mask_soft": mask_soft,
                 "refine_mask": refine_mask,
+                "mask_z_len": mask_z_len,
+                "mask_z_fraction": mask_z_fraction,
             }
 
             root = QVBoxLayout(self)
@@ -413,9 +438,10 @@ def _launch_truefsc_maps(
             # two checkboxes have room to render their full labels and
             # absorb the spare width (no clipped trailing letter).
             self._mask_soft_edit.setMaximumWidth(110)
-            self._refine_check = QCheckBox("Refine slope")
+            self._refine_check = QCheckBox("Optimize mask")
             self._refine_check.setToolTip(
-                "Refine the mask slope at the end of the computation"
+                "Optimize the mask's slope width, and its threshold when that is "
+                "automatic, for the best separation of signal from noise"
             )
             self._refine_check.setChecked(bool(self._seed["refine_mask"]))
             self._one_mask_check = QCheckBox("Common mask")
@@ -429,7 +455,37 @@ def _launch_truefsc_maps(
             slope_row.addWidget(self._mask_soft_edit)
             slope_row.addWidget(self._refine_check, 1)
             slope_row.addWidget(self._one_mask_check, 1)
+            self._force_check = QCheckBox("Force recompute")
+            self._force_check.setToolTip(
+                "Delete the cached mask searches and search again instead of "
+                "reusing the result kept for these maps and options"
+            )
+            slope_row.addWidget(self._force_check, 1)
             box.addLayout(slope_row)
+
+            # Central Z sections, for helical maps whose box ends are poorer.
+            self._z_len_edit, self._z_fraction_edit = self._build_options_pair_row(
+                box,
+                "Central Z (A)",
+                "Keep only the central Z sections of this length (Angstrom) in "
+                "the automatic mask, for helical maps. Empty keeps all",
+                str(self._seed["mask_z_len"]) if self._seed["mask_z_len"] > 0 else "",
+                "Z fraction",
+                "Keep only this central fraction (0-1) of the Z sections in the "
+                "automatic mask, for helical maps. Empty keeps all",
+                (
+                    str(self._seed["mask_z_fraction"])
+                    if 0 < self._seed["mask_z_fraction"] < 1
+                    else ""
+                ),
+            )
+            # helical maps get HELICAL_Z_FRACTION until a Z value is typed
+            self._z_auto = self._seed["mask_z_len"] <= 0 and not (
+                0 < self._seed["mask_z_fraction"] < 1
+            )
+            for edit in (self._z_len_edit, self._z_fraction_edit):
+                edit.setPlaceholderText("all")
+                edit.textEdited.connect(self._on_z_edited)
 
             # Optional mask map, grouped with the mask threshold options. When a
             # mask file is provided the mask slope below is grayed out.
@@ -460,9 +516,12 @@ def _launch_truefsc_maps(
                 self._mask_value_edit,
                 self._mask_edit,
                 self._mask_soft_edit,
+                self._z_len_edit,
+                self._z_fraction_edit,
                 self._mask_mode_combo,
                 self._refine_check,
                 self._one_mask_check,
+                self._force_check,
             ):
                 signal = getattr(widget, "editingFinished", None)
                 if signal is not None:
@@ -701,6 +760,18 @@ def _launch_truefsc_maps(
             else:
                 self._mask_value_edit.setPlaceholderText("Value")
 
+        def _on_z_edited(self) -> None:
+            """A Z value typed is kept, whatever maps are chosen next."""
+            self._z_auto = False
+
+        def _apply_helical_default(self) -> None:
+            """Set the Z fraction for a helical refinement, unless one was typed."""
+            if not self._z_auto or not self._map1:
+                return
+            helical = _is_helical_job(Path(self._map1).parent)
+            self._z_len_edit.clear()
+            self._z_fraction_edit.setText(str(HELICAL_Z_FRACTION) if helical else "")
+
         def _on_mask_changed(self) -> None:
             """Gray out the mask slope when a mask map is provided."""
             has_mask = bool(self._mask_edit.text().strip())
@@ -712,6 +783,9 @@ def _launch_truefsc_maps(
             )
             self._mask_soft_edit.setToolTip(tooltip)
             self._refine_check.setEnabled(not has_mask)
+            # a mask given is used as it is: no central Z cut either
+            self._z_len_edit.setEnabled(not has_mask)
+            self._z_fraction_edit.setEnabled(not has_mask)
 
         def _get_options(self) -> dict:
             """Return the trueFSC options dict parsed from the Options tab."""
@@ -763,6 +837,9 @@ def _launch_truefsc_maps(
                 "mask_mass": mask_mass,
                 "mask_soft": mask_soft,
                 "refine_mask": refine_mask,
+                "mask_z_len": _float(self._z_len_edit.text(), -1),
+                "mask_z_fraction": _float(self._z_fraction_edit.text(), 1),
+                "force": self._force_check.isChecked(),
             }
             return options
 
@@ -829,6 +906,7 @@ def _launch_truefsc_maps(
             self._map1 = self._map1_edit.text().strip()
             self._map2 = self._map2_edit.text().strip()
             self._mask = self._mask_edit.text().strip()
+            self._apply_helical_default()
             self._seq += 1
             seq = self._seq
             self.text_edit.clear()
@@ -961,6 +1039,26 @@ def _launch_truefsc_maps(
                 self.text_edit.append(f"True FSC resolution (0.143): {res:.2f} A")
             else:
                 self.text_edit.append("True FSC completed")
+            area = result.get("fsc_area")
+            if area:
+                # the whole curve, not one noisy shell: users tend to read only
+                # the 0.143 crossing
+                self.text_edit.append(
+                    f"Area under the True FSC: {area:.4f} 1/A "
+                    f"(= 1/{result['resolution_area']:.2f} A)"
+                )
+                self._fsc_plot.setTitle(
+                    f"True FSC: {res:.2f} Å at 0.143, area under the curve "
+                    f"= 1/{result['resolution_area']:.2f} Å",
+                    color=self._fsc_plot_colors["foreground"],
+                )
+            choice = result.get("mask")
+            if choice:
+                self.text_edit.append(
+                    f"Optimized mask: threshold {choice['thresh']:.4g}, slope "
+                    f"{choice['width']:.1f} pixels, keeps "
+                    f"{100 * choice['kept']:.1f}% of the density"
+                )
 
             if self._fsc_curve_items:
                 self._tabs.setCurrentIndex(self._fsc_tab_index)

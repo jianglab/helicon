@@ -30,6 +30,9 @@ SPECS = {
     "accuracy": ("min", 0.05),
     "ari": ("min", 0.05),
     "ll_per_segment": ("min", 0.05),
+    "res_bias": ("max", 0.1),
+    "res_true": ("max", 0.1),
+    "signal_kept": ("min", 0.005),
 }
 
 
@@ -177,10 +180,42 @@ def context_typing() -> dict[str, float]:
     return out
 
 
+def true_fsc() -> dict[str, float]:
+    """trueFSC's automatic mask on half maps of known signal and noise: how far the
+    reported resolution is from the real one of the mask chosen, that real one
+    (both as 1/area under the curve, which a small numerical difference does not
+    move by a whole shell as it does the 0.143 crossing), and how much of the
+    signal the mask keeps."""
+    import tempfile
+
+    import _truefsc_synthetic as syn
+
+    from helicon.commands import trueFSC
+
+    out = {}
+    search = getattr(trueFSC._optimal_mask, "__wrapped__", trueFSC._optimal_mask)
+    real, trueFSC._optimal_mask = trueFSC._optimal_mask, search  # no cached answer
+    try:
+        for label, maps, options in (
+            ("particle", syn.particle(), {}),
+            ("helix_central", syn.helix(), {"mask_z_fraction": 0.5}),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                r = syn.run(Path(tmp), maps, **options)
+            key = f"truefsc.{label}"
+            out[f"{key}.res_bias"] = round(abs(r["measured"] - r["truth"]), 4)
+            out[f"{key}.res_true"] = round(r["truth"], 4)
+            out[f"{key}.signal_kept"] = round(r["signal_kept"], 4)
+    finally:
+        trueFSC._optimal_mask = real
+    return out
+
+
 SCENARIOS = {
     "ring_period": ring_period,
     "two_types": two_types,
     "context_typing": context_typing,
+    "true_fsc": true_fsc,
 }
 
 

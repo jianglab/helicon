@@ -64,6 +64,9 @@ class TestTheMethodsKeepTheirAccuracy:
 
 
 def _group(scenario):
-    return {"ring_period": "ring", "two_types": "types", "context_typing": "context"}[
-        scenario
-    ]
+    return {
+        "ring_period": "ring",
+        "two_types": "types",
+        "context_typing": "context",
+        "true_fsc": "truefsc",
+    }[scenario]

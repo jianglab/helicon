@@ -656,7 +656,11 @@ def generate_tapering_filter(
 
 
 def randomize_phases_lowpass(
-    data: np.ndarray, apix: float, cutoff_res: float, return_fft: bool = False
+    data: np.ndarray,
+    apix: float,
+    cutoff_res: float,
+    return_fft: bool = False,
+    seed=None,
 ):
     """Randomize Fourier phases below a resolution cutoff (low-pass).
 
@@ -678,6 +682,9 @@ def randomize_phases_lowpass(
         If True, return the rfftn result instead of the real-space map.
         Useful for computing FSC directly without ifft+fft round-trip.
         Defaults to False.
+    seed : int, optional
+        Seed of the random phases, for the same result every time; None
+        draws them from NumPy's global random state.
 
     Returns
     -------
@@ -698,7 +705,8 @@ def randomize_phases_lowpass(
     kr2 = kr * kr
     mask = (k2[:, None, None] + k2[None, :, None] + kr2[None, None, :]) >= cutoff_freq2
 
-    random_phases = np.exp(1j * np.random.uniform(0, 2 * np.pi, size=phase.shape))
+    uniform = np.random.uniform if seed is None else np.random.default_rng(seed).uniform
+    random_phases = np.exp(1j * uniform(0, 2 * np.pi, size=phase.shape))
     phase[mask] = np.angle(random_phases[mask])
 
     F_randomized = amp * np.exp(1j * phase)

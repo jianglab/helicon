@@ -12,6 +12,14 @@ from helicon.lib.exceptions import HeliconError
 
 logger = logging.getLogger(__name__)
 
+# how the threshold of the adaptive mask was set, for the log
+_HOW = {
+    "auto": "Otsu's method",
+    "fraction": "fraction of the maximum",
+    "pixel": "pixel value given",
+    "mass": "mass given",
+}
+
 
 def main(args):
     """Compute True FSC from two independently refined half-map reconstructions.
@@ -58,6 +66,9 @@ def main(args):
         mask_mass=args.maskMass,
         mask_soft=args.maskSoft,
         refine_mask=args.refineMask,
+        mask_z_len=args.maskZlen,
+        mask_z_fraction=args.maskZfraction,
+        force=bool(args.force),
     )
 
     if result["plot_file"]:
@@ -80,6 +91,9 @@ def compute_truefsc(
     mask_mass=0,
     mask_soft=-1,
     refine_mask=1,
+    mask_z_len=-1,
+    mask_z_fraction=1,
+    force=False,
 ):
     """Compute True FSC curve with optimal mask and phase randomization.
 
@@ -108,12 +122,23 @@ def compute_truefsc(
     mask_soft : float, optional
         Mask slope width in Angstrom. Default: auto.
     refine_mask : int, optional
-        Refine mask slope (0 or 1).
+        Optimize the mask (0 or 1): its edge width, and its threshold when that
+        is automatic and one mask serves both maps.
+    mask_z_len : float, optional
+        Keep only the central sections of this length along z (Angstrom), for
+        helical maps; -1 keeps all.
+    mask_z_fraction : float, optional
+        Keep only this central fraction of the sections along z; 1 keeps all.
+    force : bool, optional
+        Delete the cached results of the mask search and search again.
 
     Returns
     -------
     dict
-        Result dictionary with keys: resolution, resolution_fit, plot_file, etc.
+        Result dictionary with keys: resolution, resolution_fit, fsc_area and
+        resolution_area (the area under the true FSC and its inverse), mask (the
+        optimized threshold, edge width, density kept and score, or None),
+        plot_file, etc.
     """
     import mrcfile
 
@@ -172,15 +197,7 @@ def compute_truefsc(
     ).astype(np.int32)
     np.clip(_shell, 0, n // 2, out=_shell)
     _shell_flat = _shell.ravel()
-    # Full symmetric-grid shell labels for calc_fsc_per_shell (used during
-    # mask-slope optimisation). n is constant across calls, so precompute once
-    # to avoid rebuilding the 3-cube meshgrid on every FSC evaluation.
-    _shell_full = np.round(
-        np.sqrt(_k2[:, None, None] + _k2[None, :, None] + _k2[None, None, :]) * n
-    ).astype(np.int32)
-    np.clip(_shell_full, 0, n // 2, out=_shell_full)
-    _shell_flat_full = _shell_full.ravel()
-    del _shell_full, _k2, _kr2
+    del _shell, _k2, _kr2
 
     # Compute FSC of original, unmasked maps
     logger.info("Calculating FSC of original maps")
@@ -214,8 +231,15 @@ def compute_truefsc(
     from helicon.lib.filters import randomize_phases_lowpass
 
     logger.info("Randomizing phases below %.2f Angstrom", cutoff_res_val)
-    F1r = randomize_phases_lowpass(map1, pix_size, cutoff_res_val, return_fft=True)
-    F2r = randomize_phases_lowpass(map2, pix_size, cutoff_res_val, return_fft=True)
+    # fixed seeds (one per map, so that their phases are independent): the same
+    # maps give the same answer every time, and the cached mask search and the
+    # final FSC see the same noise
+    F1r = randomize_phases_lowpass(
+        map1, pix_size, cutoff_res_val, return_fft=True, seed=PHASE_SEEDS[0]
+    )
+    F2r = randomize_phases_lowpass(
+        map2, pix_size, cutoff_res_val, return_fft=True, seed=PHASE_SEEDS[1]
+    )
 
     cutoff_res_i = int(map1.shape[0] * pix_size / cutoff_res_val)
 
@@ -239,6 +263,7 @@ def compute_truefsc(
     # Generate masks
     mask_file = mask_file or []
     user_mask = len(mask_file) > 0
+    mask_choice = None
     if user_mask:
         if len(mask_file) == 2:
             logger.info("Reading mask files: %s", " ".join(mask_file))
@@ -254,66 +279,72 @@ def compute_truefsc(
             with mrcfile.open(mask_file[0]) as mrc:
                 mask1 = mrc.data.astype(np.float64)
             mask2 = mask1
-        logger.info("Using user-provided mask(s), skipping mask slope optimization")
+        logger.info("Using user-provided mask(s), skipping mask optimization")
     else:
-        if one_mask:
-            map_avg = (map1 + map2) / 2
+        z_pixels = _z_pixels(n, pix_size, mask_z_len, mask_z_fraction)
+        if z_pixels > 0:
             logger.info(
-                "Map average: mask threshold automatically set using Otsu method"
+                "Masking the central %.0f z sections (%.1f Angstrom)",
+                z_pixels,
+                z_pixels * pix_size,
             )
-            logger.info("Map average: generating adaptive mask")
-            mask1 = _generate_adaptive_mask(
-                map_avg,
-                pix_size,
-                cutoff_res_val,
-                mask_fraction_thresh,
-                mask_thresh,
-                mask_mass,
+        # with separate masks, map 2 takes the second of two pixel thresholds
+        thresh2 = (
+            mask_thresh[1:] if mask_thresh and len(mask_thresh) > 1 else mask_thresh
+        )
+        sources = [(map1 + map2) / 2] if one_mask else [map1, map2]
+        volumes_lp, masks = [], []
+        for i, (volume, mt) in enumerate(zip(sources, (mask_thresh, thresh2))):
+            name = "Map average" if one_mask else f"Map {i + 1}"
+            volume_lp = _mask_volume(volume, pix_size, cutoff_res_val, mt)
+            thresh, how = _mask_threshold(
+                volume_lp, pix_size, mask_fraction_thresh, mt, mask_mass
             )
-            mask2 = mask1
-        else:
-            mask1 = _generate_adaptive_mask(
-                map1,
-                pix_size,
-                cutoff_res_val,
-                mask_fraction_thresh,
-                mask_thresh,
-                mask_mass,
-            )
-            mask2 = _generate_adaptive_mask(
-                map2,
-                pix_size,
-                cutoff_res_val,
-                mask_fraction_thresh,
-                mask_thresh,
-                mask_mass,
-            )
+            logger.info("%s: mask threshold %.7g (%s)", name, thresh, _HOW[how])
+            volumes_lp.append((volume_lp, thresh, how))
+            masks.append(_seeded_mask(volume_lp, thresh, z_pixels))
+        mask1 = masks[0]
+        mask2 = masks[-1]
 
     # Apply soft mask edge (skip when user provides mask)
     map1r = None
     map2r = None
     if not user_mask:
-        mask_soft_val = mask_soft
         if mask_soft > 0:
-            mask_soft_px = mask_soft_val / pix_size
+            mask_soft_px = mask_soft / pix_size
             logger.info(
                 "User provided mask slope width: %.1f Angstrom (%.1f pixels)",
-                mask_soft_val,
+                mask_soft,
                 mask_soft_px,
             )
         elif refine_mask:
             from scipy.fft import irfftn
 
-            logger.info("Searching for optimal mask slope width")
-            map1r = irfftn(F1r, workers=-1)
-            map2r = irfftn(F2r, workers=-1)
-
+            map1r = irfftn(F1r, s=map1.shape, workers=-1)
+            map2r = irfftn(F2r, s=map2.shape, workers=-1)
+            volume_lp, thresh, how = volumes_lp[0]
+            # the threshold is searched only when it is automatic and one mask
+            # serves both maps; a threshold the user gave is kept
+            search_threshold = how == "auto" and one_mask
+            thresholds = (
+                tuple(float(thresh * f) for f in THRESHOLD_FACTORS)
+                if search_threshold
+                else (float(thresh),)
+            )
+            logger.info(
+                "Searching for the optimal mask %s",
+                "threshold and edge width" if search_threshold else "edge width",
+            )
+            shells = _score_shells(fsc_unmasked, _shell_flat, cutoff_res_i + 2)
             # the search is the slow part. It is cached by the identity of the
-            # input files and the parameters that determine mask1
-            input_files = [map1_file, map2_file]
-            mask_soft_px = _optimal_mask_slope(
-                [_file_identity(f) for f in input_files],
+            # input files and the parameters that determine the masks
+            if force and hasattr(_optimal_mask, "clear_cache"):
+                logger.info("Deleting the cached mask searches")
+                _optimal_mask.clear_cache()
+            mask_choice = _optimal_mask(
+                [_file_identity(f) for f in (map1_file, map2_file)],
                 (
+                    MASK_SEARCH_VERSION,
                     pix_size,
                     cutoff_res_val,
                     one_mask,
@@ -325,16 +356,37 @@ def compute_truefsc(
                 map2,
                 map1r,
                 map2r,
-                mask1,
+                volume_lp,
+                thresholds,
+                float(z_pixels),
                 pix_size,
-                cutoff_res_i + 2,
-                _shell_flat_full,
+                shells,
+                _shell_flat,
                 n,
             )
+            mask_soft_px = mask_choice["width"]
+            if search_threshold:
+                mask1 = mask2 = _seeded_mask(volume_lp, mask_choice["thresh"], z_pixels)
             logger.info(
-                "Optimal mask slope width: %.1f Angstrom (%.1f pixels)",
+                "Optimal mask: threshold %.7g (%.2f x Otsu's %.7g), edge width "
+                "%.1f Angstrom (%.1f pixels); it keeps %.1f%% of the density the "
+                "most generous mask tried keeps (at least %.0f%% required); score %.4f",
+                mask_choice["thresh"],
+                mask_choice["thresh"] / thresh if thresh else 1.0,
+                thresh,
                 mask_soft_px * pix_size,
                 mask_soft_px,
+                100 * mask_choice["kept"],
+                100 * MIN_DENSITY_KEPT,
+                mask_choice["score"],
+            )
+            logger.info(
+                "\tchosen as the mask with the highest corrected FSC and the lowest "
+                "noise FSC over shells %d-%d (%.1f-%.1f Angstrom)",
+                shells[0],
+                shells[1] - 1,
+                n * pix_size / max(shells[0], 1),
+                n * pix_size / max(shells[1] - 1, 1),
             )
         else:
             mask_soft_px = 3 * res_unmasked / pix_size
@@ -345,8 +397,9 @@ def compute_truefsc(
                 res_unmasked,
                 pix_size,
             )
+        same = mask2 is mask1
         mask1 = _soft_mask(mask1, mask_soft_px)
-        mask2 = _soft_mask(mask2, mask_soft_px)
+        mask2 = mask1 if same else _soft_mask(mask2, mask_soft_px)
 
     # Save masks (skip when user provides them)
     maskdir = str(Path(plot_file).parent) or "."
@@ -390,8 +443,8 @@ def compute_truefsc(
     if map1r is None:
         from scipy.fft import irfftn as _irfftn
 
-        map1r = _irfftn(F1r, workers=-1)
-        map2r = _irfftn(F2r, workers=-1)
+        map1r = _irfftn(F1r, s=map1.shape, workers=-1)
+        map2r = _irfftn(F2r, s=map2.shape, workers=-1)
     m1r = map1r * mask1
     m2r = map2r * mask2
 
@@ -431,7 +484,10 @@ def compute_truefsc(
     fsc_true[cutoff_res_i + 1 :] = (
         fsc_t[cutoff_res_i + 1 :] - fsc_n[cutoff_res_i + 1 :]
     ) / (1 - fsc_n[cutoff_res_i + 1 :])
-    fsc_true[np.isnan(fsc_true)] = 1.0
+    # where the correction is undefined (noise FSC of 1), the masked FSC is all
+    # there is; 1.0 there would claim a perfect shell
+    undefined = ~np.isfinite(fsc_true)
+    fsc_true[undefined] = fsc_t[undefined]
 
     fscfile = fsc_prefix + ".true.txt"
     np.savetxt(fscfile, np.column_stack([saxis_m[1:], fsc_true[1:]]))
@@ -445,6 +501,12 @@ def compute_truefsc(
         "Resolution at FSC=0.143 (true): %.2f Angstrom (fit: %.2f Angstrom)",
         res_true,
         res_true_fit,
+    )
+    area, res_area = _fsc_area(saxis_m, fsc_true)
+    logger.info(
+        "Area under the true FSC: %.4g 1/Angstrom, as a resolution: %.2f Angstrom",
+        area,
+        res_area,
     )
 
     # Save fitted curve
@@ -478,13 +540,22 @@ def compute_truefsc(
             ],
         ),
     ]
-    plot_fsc(fsc_curves, plot_file, volumes=volumes)
+    plot_fsc(
+        fsc_curves,
+        plot_file,
+        volumes=volumes,
+        title=f"True FSC: {res_true:.2f} Å at 0.143, area under the curve "
+        f"{area:.4f} Å⁻¹ = 1/{res_area:.2f} Å",
+    )
 
     return {
         "resolution": res_true,
         "resolution_fit": res_true_fit,
         "resolution_unmasked": res_unmasked,
         "resolution_masked": res_masked,
+        "fsc_area": area,
+        "resolution_area": res_area,
+        "mask": mask_choice,
         "plot_file": plot_file,
         "fsc_curves": fsc_curves,
         "volumes": {
@@ -515,6 +586,87 @@ def _file_identity(filename):
     return (str(path), st.st_size, st.st_mtime_ns)
 
 
+# The automatic threshold is searched over these multiples of Otsu's threshold.
+THRESHOLD_FACTORS = (0.5, 0.7, 0.85, 1.0, 1.2, 1.5)
+# A candidate mask must keep this fraction of the density that the most generous
+# candidate keeps: a tighter mask removes solvent noise and would otherwise
+# score well while cutting into the structure.
+MIN_DENSITY_KEPT = 0.99
+# Part of the cache key of the search: change it when the search changes, or the
+# cached results of the old search are returned.
+MASK_SEARCH_VERSION = 4
+# the seeds of the random phases of the two maps
+PHASE_SEEDS = (1, 2)
+
+
+def _score_shells(fsc_unmasked, shell_flat, cutoff_i):
+    """The shells the mask search scores, and their weights.
+
+    From just above the phase-randomization cutoff to where the unmasked half
+    maps no longer correlate significantly (FSC below 3 standard errors of a
+    shell of pure noise), with a margin of a quarter for what a mask gains:
+    beyond that every shell is noise and only makes the score noisier. Each
+    shell is weighted by its number of Fourier voxels, the inverse of the
+    variance of its FSC.
+
+    Returns
+    -------
+    tuple of (int, int, numpy.ndarray)
+        First shell, end (exclusive) and the weights of ``first:end``.
+    """
+    nshells = len(fsc_unmasked)
+    counts = np.bincount(shell_flat, minlength=nshells)[:nshells].astype(float)
+    noise = 3 / np.sqrt(np.maximum(counts, 1))
+    lo = min(cutoff_i, nshells - 2)
+    below = np.nonzero(fsc_unmasked[lo:] < noise[lo:])[0]
+    last = lo + (below[0] if len(below) else nshells - lo)
+    hi = int(min(nshells, max(lo + 3, round(last * 1.25))))
+    return lo, hi, counts[lo:hi]
+
+
+def _mask_score(fsc_t, fsc_n, weights):
+    """How well a mask separates signal from noise: lower is better.
+
+    The corrected (true) FSC should be high and the FSC of the phase-randomized
+    maps, which a mask's edge raises, low; both averaged over the scored
+    shells, weighted. Shells where the correction is undefined (noise FSC of
+    1) are left out rather than counted as perfect.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fsc_true = (fsc_t - fsc_n) / (1 - fsc_n)
+    w = np.where(np.isfinite(fsc_true), weights, 0.0)
+    if w.sum() <= 0:
+        return np.inf
+    fsc_true = np.nan_to_num(fsc_true)
+    return float(
+        np.sum(w * (1 - fsc_true)) / w.sum() + np.sum(w * np.abs(fsc_n)) / w.sum()
+    )
+
+
+def _density_above_background(volume_lp, loose_mask, volume):
+    """The low-pass map's density clearly above the background: what lies more
+    than 2 standard deviations above the median outside ``loose_mask`` (robust
+    estimates), 0 elsewhere.
+
+    Voxels where the reconstruction is flat (nearly constant over 3x3x3
+    voxels), as RELION makes it outside its spherical mask, are left out of
+    the estimates: they are not noise, and would shrink the standard deviation
+    until noise counts as density.
+    """
+    from scipy.ndimage import binary_dilation, uniform_filter
+
+    v = volume.astype(np.float64)
+    local_var = uniform_filter(v * v, 3) - uniform_filter(v, 3) ** 2
+    # grown by a voxel: at its border the window reaches the noise
+    flat = binary_dilation(local_var < 1e-6 * v.var(), np.ones((3, 3, 3), bool))
+    outside = volume_lp[(loose_mask == 0) & ~flat]
+    if outside.size < 100:
+        return np.maximum(volume_lp, 0)
+    med = np.median(outside)
+    sigma = 1.4826 * np.median(np.abs(outside - med))
+    return np.maximum(volume_lp - (med + 2 * sigma), 0)
+
+
 @helicon.cache(
     cache_dir=str(helicon.cache_dir / "trueFSC"),
     expires_after=None,
@@ -523,100 +675,115 @@ def _file_identity(filename):
         "map2",
         "map1r",
         "map2r",
-        "mask",
+        "volume_lp",
         "pix_size",
-        "cutoff_i",
+        "shells",
         "shell_flat",
         "n",
     ],
 )
-def _optimal_mask_slope(
+def _optimal_mask(
     input_files,
     params,
     map1,
     map2,
     map1r,
     map2r,
-    mask,
+    volume_lp,
+    thresholds,
+    z_pixels,
     pix_size,
-    cutoff_i,
+    shells,
     shell_flat,
     n,
 ):
-    """Find the mask slope width that best separates signal from noise.
+    """Find the threshold and soft-edge width of the mask that best separate
+    signal from noise.
+
+    Every threshold of ``thresholds`` with a grid of edge widths, then the width
+    refined around the best pair; candidates that keep less than
+    ``MIN_DENSITY_KEPT`` of the density are not taken.
 
     Parameters
     ----------
     input_files : list of tuple
-        :func:`_file_identity` of the half-maps; with ``params`` this is the
-        cache key (the arrays are not hashed).
+        :func:`_file_identity` of the half-maps; with ``params``, ``thresholds``
+        and ``z_pixels`` this is the cache key (the arrays are not hashed).
     params : tuple
-        The parameters that determine ``mask``.
-    map1, map2 : np.ndarray
-        The half-maps.
-    map1r, map2r : np.ndarray
-        The phase-randomized half-maps.
-    mask : np.ndarray
-        The binary mask.
+        The parameters that determine the masks, and ``MASK_SEARCH_VERSION``.
+    map1, map2, map1r, map2r : np.ndarray
+        The half-maps and their phase-randomized copies.
+    volume_lp : np.ndarray
+        The map the mask is thresholded on.
+    thresholds : tuple of float
+        The thresholds to try (one when it was given).
+    z_pixels : float
+        Central z sections kept (0: all).
     pix_size : float
         Pixel size (Angstrom).
-    cutoff_i : int
-        First Fourier shell used in the score.
+    shells : tuple
+        :func:`_score_shells`.
     shell_flat : np.ndarray
-        Flattened Fourier shell labels for :func:`helicon.calc_fsc_per_shell`.
+        Flattened rfft shell labels for :func:`helicon.calc_fsc`.
     n : int
         Box size.
 
     Returns
     -------
-    float
-        The mask slope width in pixels.
+    dict
+        ``thresh``, ``width`` (pixels), ``kept`` (fraction of the density) and
+        ``score``.
     """
     from scipy.optimize import minimize_scalar
 
-    def _fsc_score(x):
-        mask_e = _soft_mask(mask, x)
-        fsc_t = helicon.calc_fsc_per_shell(
-            map1 * mask_e, map2 * mask_e, pix_size, shell_flat=shell_flat, n=n
+    lo, hi, weights = shells
+    widths = [0.0] + list(np.geomspace(1.5, n / 3, 7))
+    binary = {t: _seeded_mask(volume_lp, t, z_pixels) for t in thresholds}
+    distance = {t: _edge_distance(m) for t, m in binary.items()}
+    loosest = binary[min(thresholds)]
+    density = _density_above_background(volume_lp, loosest, map1)
+    if z_pixels > 0:
+        # what lies beyond the central sections is not meant to be kept
+        density = density * _central_z(density.shape, z_pixels)
+    reference = _soft_mask(loosest, widths[-1], distance[min(thresholds)])
+    reference = max(float(np.sum(density * reference)), 1e-30)
+
+    def evaluate(t, width):
+        mask = _soft_mask(binary[t], width, distance[t])
+        kept = float(np.sum(density * mask)) / reference
+        if kept < MIN_DENSITY_KEPT:
+            return np.inf, kept
+        fsc_t = helicon.calc_fsc(
+            map1 * mask, map2 * mask, pix_size, shell_flat=shell_flat, n=n
+        )[:, 1]
+        fsc_n = helicon.calc_fsc(
+            map1r * mask, map2r * mask, pix_size, shell_flat=shell_flat, n=n
+        )[:, 1]
+        score = _mask_score(fsc_t[lo:hi], fsc_n[lo:hi], weights)
+        logger.debug(
+            "\tthreshold %.5g, edge width %.2f pixels: density kept %.4f, score %.5f",
+            t,
+            width,
+            kept,
+            score,
         )
-        fsc_n = helicon.calc_fsc_per_shell(
-            map1r * mask_e, map2r * mask_e, pix_size, shell_flat=shell_flat, n=n
+        return score, kept
+
+    trials = {(t, w): evaluate(t, w) for t in thresholds for w in widths}
+    (t_best, w_best), (score, kept) = min(trials.items(), key=lambda kv: kv[1][0])
+    i = widths.index(w_best)
+    bounds = (widths[max(0, i - 1)], widths[min(len(widths) - 1, i + 1)])
+    if bounds[1] > bounds[0]:
+        res = minimize_scalar(
+            lambda w: evaluate(t_best, w)[0],
+            bounds=bounds,
+            method="bounded",
+            options={"xatol": 0.5},
         )
-
-        fsc_t_arr = fsc_t[cutoff_i:]
-        fsc_n_arr = fsc_n[cutoff_i:]
-
-        fsc_true = (fsc_t_arr - fsc_n_arr) / (1 - fsc_n_arr)
-        fsc_true[np.isnan(fsc_true)] = 1.0
-
-        score = (
-            np.mean(1 - np.abs(fsc_true))
-            + np.mean(np.abs(fsc_n_arr))
-            + np.mean(np.abs(fsc_t_arr - fsc_true))
-            + np.mean(1 - np.abs(fsc_true - fsc_n_arr))
-        )
-
-        if logger.isEnabledFor(logging.DEBUG):
-            nshells = len(fsc_t)
-            saxis_shells = np.arange(nshells) / (map1.shape[0] * pix_size)
-            res = _find_resolution(saxis_shells[cutoff_i:], fsc_true, 0.143)
-            logger.debug(
-                "\tMask width: %.2f Angstrom (%.2f pixels)\t->\t%.2f Angstrom at FSC=0.143\tfval=%g",
-                x * pix_size,
-                x,
-                res,
-                score,
-            )
-
-        return score
-
-    res_opt = minimize_scalar(
-        _fsc_score,
-        bounds=(0, map1.shape[0] / 3),
-        method="bounded",
-        options={"xatol": 2},
-    )
-    return float(res_opt.x)
+        if res.fun < score:
+            w_best = float(res.x)
+            score, kept = evaluate(t_best, w_best)
+    return dict(thresh=float(t_best), width=float(w_best), kept=kept, score=score)
 
 
 def _show_plot(plot_file):
@@ -873,8 +1040,105 @@ def _otsu_threshold_eman(volume, n_bins=256, ignore_zero=True):
     return hmin + (max_bi + 1) * bin_width
 
 
+def _mask_volume(volume, apix, cutoff_res, mask_thresh=None):
+    """The map the adaptive mask is thresholded on.
+
+    Low-pass filtered to ``cutoff_res`` (as EMAN2's ``mask.auto3d`` with ``lp``),
+    except for a threshold given as a pixel value, which is applied to the map as
+    it is, as the original trueFSC did: that value is read off the map itself.
+
+    Returns
+    -------
+    np.ndarray
+    """
+    from scipy.ndimage import gaussian_filter
+
+    if (mask_thresh and mask_thresh[0] > 0) or cutoff_res <= 2 * apix:
+        return volume.copy()
+    return gaussian_filter(volume, sigma=cutoff_res / (3.81 * apix))
+
+
+def _mask_threshold(
+    volume_lp, apix, mask_fraction_thresh=-1, mask_thresh=None, mask_mass=0
+):
+    """The threshold of the adaptive mask, as the options ask, and how it was set.
+
+    Returns
+    -------
+    tuple of (float, str)
+        The threshold and ``"auto"`` when it is Otsu's (and may be searched).
+    """
+    if mask_fraction_thresh > 0:
+        return mask_fraction_thresh * np.max(volume_lp), "fraction"
+    if mask_thresh and mask_thresh[0] > 0:
+        return mask_thresh[0], "pixel"
+    if mask_mass > 0:
+        vol_voxels = mask_mass * 1e3 / (0.81 * apix**3)
+        sorted_vals = np.sort(volume_lp.ravel())[::-1]
+        return sorted_vals[min(int(vol_voxels), len(sorted_vals) - 1)], "mass"
+    return _otsu_threshold_eman(volume_lp), "auto"
+
+
+def _seeded_mask(volume_lp, thresh, z_pixels=0):
+    """The voxels above ``thresh`` connected to the 1000 brightest ones (as
+    EMAN2's ``mask.auto3d`` with ``nmaxseed``), cut to the central ``z_pixels``
+    sections when that is more than 0.
+
+    Returns
+    -------
+    np.ndarray
+        Binary mask, as float64.
+    """
+    from scipy.ndimage import label
+
+    nmaxseed = min(1000, volume_lp.size)
+    flat_idx = np.argpartition(volume_lp.ravel(), -nmaxseed)[-nmaxseed:]
+    above_thresh = volume_lp > thresh
+    labeled, _ = label(above_thresh, structure=np.ones((3, 3, 3), dtype=bool))
+    seed_labels = labeled.ravel()[flat_idx]
+    mask = np.isin(labeled, np.unique(seed_labels[seed_labels > 0]))
+    if not np.any(mask):
+        mask = above_thresh
+    mask = mask.astype(np.float64)
+    if z_pixels > 0:
+        mask *= _central_z(mask.shape, z_pixels)
+    return mask
+
+
+def _central_z(shape, z_pixels):
+    """1 in the central ``z_pixels`` sections along z (axis 0), 0 elsewhere.
+
+    For helical maps, whose ends are reconstructed worse than their middle.
+
+    Returns
+    -------
+    np.ndarray
+        Of shape ``(nz, 1, 1)``, to multiply a volume with.
+    """
+    nz = shape[0]
+    keep = np.zeros((nz, 1, 1))
+    keep[max(0, int((nz - z_pixels) / 2)) : nz // 2 + int(z_pixels / 2)] = 1
+    return keep
+
+
+def _z_pixels(nz, apix, mask_z_len=-1, mask_z_fraction=1):
+    """The number of central z sections a ``--maskZlen`` or ``--maskZfraction``
+    keeps, or 0 for all of them."""
+    if mask_z_len > 0:
+        return mask_z_len / apix
+    if 0 < mask_z_fraction < 1:
+        return nz * mask_z_fraction
+    return 0
+
+
 def _generate_adaptive_mask(
-    volume, apix, cutoff_res, mask_fraction_thresh=-1, mask_thresh=None, mask_mass=0
+    volume,
+    apix,
+    cutoff_res,
+    mask_fraction_thresh=-1,
+    mask_thresh=None,
+    mask_mass=0,
+    z_pixels=0,
 ):
     """Generate an adaptive mask using seed-and-grow (matching EMAN2 mask.auto3d).
 
@@ -889,72 +1153,40 @@ def _generate_adaptive_mask(
     mask_fraction_thresh : float, optional
         Mask threshold as fraction of max pixel value. Default: -1 (auto).
     mask_thresh : list of float, optional
-        Mask threshold pixel value(s).
+        Mask threshold pixel value(s); the first is used.
     mask_mass : float, optional
         Total mass of structure in kDa.
+    z_pixels : float, optional
+        Keep only this many central z sections (0: all).
 
     Returns
     -------
     np.ndarray
         Binary mask.
     """
-    from scipy.ndimage import gaussian_filter, label
-
-    # Low-pass filter the map (matching EMAN2 filter.fourier with targetres)
-    if cutoff_res > 2 * apix:
-        sigma = cutoff_res / (3.81 * apix)
-        volume_lp = gaussian_filter(volume, sigma=sigma)
-    else:
-        volume_lp = volume.copy()
-
-    # Determine threshold
-    if mask_fraction_thresh > 0:
-        thresh = mask_fraction_thresh * np.max(volume_lp)
-    elif mask_thresh and mask_thresh[0] > 0:
-        thresh = mask_thresh[0]
-    elif mask_mass > 0:
-        mass_kda = mask_mass
-        vol_voxels = mass_kda * 1e3 / (0.81 * apix**3)
-        sorted_vals = np.sort(volume_lp.ravel())[::-1]
-        thresh = sorted_vals[min(int(vol_voxels), len(sorted_vals) - 1)]
-    else:
-        thresh = _otsu_threshold_eman(volume_lp)
-
+    volume_lp = _mask_volume(volume, apix, cutoff_res, mask_thresh)
+    thresh, _ = _mask_threshold(
+        volume_lp, apix, mask_fraction_thresh, mask_thresh, mask_mass
+    )
     logger.info("Adaptive mask: threshold=%.7g", thresh)
-
-    # Seed with brightest voxels from the LOW-PASS filtered map
-    nmaxseed = 1000
-    flat_idx = np.argpartition(volume_lp.ravel(), -nmaxseed)[-nmaxseed:]
-    above_thresh = volume_lp > thresh
-    seeds = np.zeros(volume_lp.shape, dtype=bool)
-    seeds.ravel()[flat_idx] = True
-    seeds &= above_thresh
-
-    # Find connected components on the LP-filtered map
-    struct = np.ones((3, 3, 3), dtype=bool)
-    labeled, n_components = label(above_thresh, structure=struct)
-
-    # Keep components containing seeds
-    seed_labels = labeled.ravel()[flat_idx]
-    seed_labels = seed_labels[seed_labels > 0]
-    component_ids = np.unique(seed_labels)
-
-    mask = np.isin(labeled, component_ids)
-
-    if not np.any(mask):
-        mask = above_thresh.copy()
-
-    mask = mask.astype(np.float64)
+    mask = _seeded_mask(volume_lp, thresh, z_pixels)
     mass = np.count_nonzero(mask) * apix**3 * 0.81e-3
     logger.info("Adaptive mask: mass of masked region: %d kDa", int(round(mass)))
     return mask
 
 
-def _soft_mask(mask, soft_width):
-    """Apply a soft cosine edge to a binary mask (matching EMAN2 mask.distance).
+def _edge_distance(mask):
+    """The distance of every voxel outside ``mask`` from it (pixels; 0 inside).
 
-    Uses chamfer distance (iterative propagation) instead of exact EDT
-    for a ~5x speedup with sufficient accuracy for a smooth falloff.
+    Exact; computed once per binary mask, it serves every edge width.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    return distance_transform_edt(mask == 0)
+
+
+def _soft_mask(mask, soft_width, distance=None):
+    """Apply a soft cosine edge to a binary mask (matching EMAN2 mask.distance).
 
     Parameters
     ----------
@@ -962,6 +1194,8 @@ def _soft_mask(mask, soft_width):
         Binary mask (1 = inside, 0 = outside).
     soft_width : float
         Width of the cosine transition zone in pixels.
+    distance : np.ndarray, optional
+        :func:`_edge_distance` of ``mask``, when it is already known.
 
     Returns
     -------
@@ -970,34 +1204,34 @@ def _soft_mask(mask, soft_width):
     """
     if soft_width <= 0:
         return mask.astype(np.float64)
-    from scipy.ndimage import distance_transform_edt
-
-    # Exact EDT on a downsampled version, then upsample
-    # The cosine falloff is smooth so exact sub-pixel distances aren't critical
-    nz, ny, nx = mask.shape
-    step = max(1, int(soft_width / 4))
-    mask_ds = mask[::step, ::step, ::step].astype(bool)
-    dist_ds = distance_transform_edt(~mask_ds) * step
-    # Upsample to full resolution via linear interpolation
-    from scipy.ndimage import zoom
-
-    dist = zoom(
-        dist_ds,
-        (nz / dist_ds.shape[0], ny / dist_ds.shape[1], nx / dist_ds.shape[2]),
-        order=1,
-    )
-    dist = dist[:nz, :ny, :nx]
-
-    soft = np.ones(mask.shape, dtype=np.float64)
-    outside = ~mask.astype(bool)
-    near_edge = outside & (dist > 0) & (dist <= soft_width)
+    if distance is None:
+        distance = _edge_distance(mask)
     # falls smoothly from 1 at the mask edge to 0 at soft_width
-    soft[near_edge] = (np.cos(dist[near_edge] / soft_width * np.pi) + 1) / 2
-    soft[outside & (dist > soft_width)] = 0.0
+    soft = (np.cos(np.minimum(distance, soft_width) / soft_width * np.pi) + 1) / 2
+    soft[distance >= soft_width] = 0.0
     return soft
 
 
-def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
+def _fsc_area(saxis, fsc):
+    """The area under an FSC curve, from 0 to Nyquist, and its inverse.
+
+    The area is the spatial frequency to which a step-shaped curve (1, then
+    0) of the same area would reach, so its inverse reads as a resolution
+    (Angstrom). Unlike the 0.143 crossing it counts the whole curve, and it
+    is not decided by one noisy shell.
+
+    Returns
+    -------
+    tuple of (float, float)
+        The area (1/Angstrom) and its inverse (Angstrom; inf for no area).
+    """
+    fsc, saxis = np.asarray(fsc), np.asarray(saxis)
+    # the trapezoid rule (np.trapezoid needs numpy 2)
+    area = float(np.sum((fsc[1:] + fsc[:-1]) / 2 * np.diff(saxis)))
+    return area, (1 / area if area > 0 else np.inf)
+
+
+def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False, title=None):
     """Plot FSC curves and central sections to a multi-page PDF.
 
     Parameters
@@ -1011,6 +1245,8 @@ def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
         Each group becomes one page with a row of central sections.
     showPlot : bool, optional
         If True, display the plot interactively. Defaults to False.
+    title : str, optional
+        The title of the FSC curves page.
     """
     # plain Figures (not pyplot) so that saving the plot does not depend on, or
     # change, the matplotlib backend of the process
@@ -1040,6 +1276,8 @@ def plot_fsc(fsccurves, fscfile, volumes=None, showPlot=False):
 
     l = Line2D([0, xmax], [0.143, 0.143], linestyle="--", color="r")
     ax.add_line(l)
+    if title:
+        ax.set_title(title)
 
     ax.set_xlim([0, xmax])
     xstep = round(xmax / 5 / 2, 2) * 2
@@ -1237,6 +1475,24 @@ def add_args(parser):
         default=0,
     )
 
+    group_z = parser.add_mutually_exclusive_group()
+    group_z.add_argument(
+        "--maskZlen",
+        metavar="<Angstrom>",
+        type=float,
+        help="keep only the central Z sections of this length (Angstrom) in the "
+        "automatic mask, for helical maps whose ends are poorer. Default: all",
+        default=-1,
+    )
+    group_z.add_argument(
+        "--maskZfraction",
+        metavar="<0-1>",
+        type=float,
+        help="keep only this central fraction of the Z sections in the automatic "
+        "mask, for helical maps. Default: 1 (all)",
+        default=1,
+    )
+
     group2 = parser.add_mutually_exclusive_group()
     group2.add_argument(
         "--maskSoft",
@@ -1249,10 +1505,18 @@ def add_args(parser):
         "--refineMask",
         metavar="<0|1>",
         type=int,
-        help="refine mask slope (0 or 1). Default: 1 (ignored if --maskSoft is set)",
+        help="optimize the mask (0 or 1): its edge width, and its threshold when "
+        "that is automatic. Default: 1 (ignored if --maskSoft is set)",
         default=1,
     )
 
+    parser.add_argument(
+        "--force",
+        metavar="<0|1>",
+        type=int,
+        default=0,
+        help="delete the cached mask searches and search again (1). Default: 0",
+    )
     parser.add_argument(
         "--verbose",
         metavar="<0-2>",

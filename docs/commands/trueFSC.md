@@ -16,7 +16,8 @@ helicon trueFSC half_map_1.mrc half_map_2.mrc fsc.pdf [options]
 usage: helicon trueFSC [-h] [--apix <Angstrom/pixel>] [--cutoffRes <Angstrom>]
                        [--oneMask <0|1>] [--showPlot <0|1>] [--maskFile [<filename> ...] |
                        --maskFractionThresh <0-1> | --maskThresh [<pixel value> ...] |
-                       --maskMass <kDa>] [--maskSoft <Angstrom> | --refineMask <0|1>]
+                       --maskMass <kDa>] [--maskZlen <Angstrom> | --maskZfraction <0-1>]
+                       [--maskSoft <Angstrom> | --refineMask <0|1>] [--force <0|1>]
                        [--verbose <0-2>]
                        <map 1> <map 2> [<plot file>]
 
@@ -43,8 +44,16 @@ options:
   --maskThresh [<pixel value> ...]
                         mask threshold pixel value
   --maskMass <kDa>      total mass of structure in kDa
+  --maskZlen <Angstrom>
+                        keep only the central Z sections of this length (Angstrom) in the
+                        automatic mask, for helical maps whose ends are poorer. Default: all
+  --maskZfraction <0-1>
+                        keep only this central fraction of the Z sections in the automatic
+                        mask, for helical maps. Default: 1 (all)
   --maskSoft <Angstrom>
                         mask slope width in Angstrom. Default: auto
-  --refineMask <0|1>    refine mask slope (0 or 1). Default: 1 (ignored if --maskSoft is set)
+  --refineMask <0|1>    optimize the mask (0 or 1): its edge width, and its threshold when
+                        that is automatic. Default: 1 (ignored if --maskSoft is set)
+  --force <0|1>         delete the cached mask searches and search again (1). Default: 0
   --verbose <0-2>       verbose level (0-2). Default: 1
 ```

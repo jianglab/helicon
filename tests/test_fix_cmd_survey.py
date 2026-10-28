@@ -336,22 +336,22 @@ class TestTrueFSC:
         f1, f2 = _make_half_maps(tmp_path)
         calls = []
 
-        def fake_slope(input_files, params, *args):
+        def fake_search(input_files, params, *args):
             calls.append(input_files)
-            return 3.0
+            return dict(thresh=args[5][0], width=3.0, kept=1.0, score=0.0)
 
-        with patch.object(trueFSC, "_optimal_mask_slope", fake_slope):
+        with patch.object(trueFSC, "_optimal_mask", fake_search):
             trueFSC.compute_truefsc(f1, f2, str(tmp_path / "fsc.pdf"))
         assert calls == [[trueFSC._file_identity(f1), trueFSC._file_identity(f2)]]
 
-    def test_optimal_mask_slope_search_runs(self, tmp_path):
+    def test_optimal_mask_search_runs(self, tmp_path):
         from helicon.commands import trueFSC
 
         f1, f2 = _make_half_maps(tmp_path)
-        search = getattr(trueFSC._optimal_mask_slope, "__wrapped__", None)
+        search = getattr(trueFSC._optimal_mask, "__wrapped__", None)
         if search is None:
             pytest.skip("cache wrapper does not expose the function")
-        with patch.object(trueFSC, "_optimal_mask_slope", search):
+        with patch.object(trueFSC, "_optimal_mask", search):
             result = trueFSC.compute_truefsc(f1, f2, str(tmp_path / "fsc.pdf"))
         assert np.isfinite(result["resolution"])
 
