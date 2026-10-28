@@ -347,6 +347,33 @@ class TestThumbnails:
         a[0, 0] = 1e9
         assert bp.thumbnail_array(a)[50, 50] > 100
 
+    def test_the_flat_background_of_a_masked_map_is_left_out(self):
+        # a filament a few percent of the section, exactly 0 outside its mask: the
+        # percentiles of all the pixels clipped a sixth of the density white
+        rng = np.random.default_rng(0)
+        y, x = np.mgrid[:200, :200] - 100.0
+        inside = np.hypot(x, y) < 25
+        a = np.where(inside, rng.normal(1.0, 0.5, (200, 200)), 0.0)
+        pic = bp.thumbnail_array(a)
+        assert np.mean(pic[inside] == 255) < 0.02
+        assert np.mean(pic[inside] == 0) < 0.02
+
+    def test_an_8_bit_picture_keeps_its_common_levels(self):
+        a = np.zeros((100, 100), np.uint8)
+        a[:, 50:] = 200
+        assert bp.contrast_limits(a) == (0.0, 200.0)
+        assert bp.contrast_limits(np.full((5, 5), 7.0)) is None
+
+    def test_a_picture_is_binned_not_decimated(self):
+        # one pixel of each block keeps all of the noise; the mean of the block averages it out
+        rng = np.random.default_rng(1)
+        a = rng.normal(size=(1024, 1024)).astype(np.float32)
+        a[:, 512:] += 1.0
+        pic = bp.thumbnail_array(a, max_size=128).astype(float)
+        assert pic.shape == (128, 128)
+        left, right = pic[:, :64], pic[:, 64:]
+        assert right.mean() - left.mean() > 4 * (left.std() + right.std())
+
 
 class TestPreviews:
     @staticmethod
@@ -891,6 +918,59 @@ class TestInTheBrowser:
         w2.close()
         for x in (w, w2):
             x._preview.wait()
+
+    def test_a_pane_hidden_at_the_last_launch_is_hidden(self, qapp, project):
+        # the action starts unchecked: unchecking it emitted nothing, the pane came back
+        w = fb.FolderBrowserWidget(start_dir=str(project))
+        w._sidebar_action.setChecked(False)
+        w.close()
+        w2 = fb.FolderBrowserWidget(start_dir=str(project))
+        w2.show()
+        qapp.processEvents()
+        assert not w2._sidebar_action.isChecked() and not w2._sidebar.isVisible()
+        w2._sidebar_action.setChecked(True)  # one press of F9 shows it
+        assert w2._sidebar.isVisible()
+        w2.close()
+        for x in (w, w2):
+            x._preview.wait()
+
+    def test_the_widths_are_saved_while_a_pane_is_hidden(self, qapp, project):
+        # they were not saved at all: a hidden pane has no width
+        w = fb.FolderBrowserWidget(start_dir=str(project))
+        w._sidebar_action.setChecked(False)
+        w._preview_action.setChecked(True)
+        w.resize(1200, 700)
+        w.show()
+        qapp.processEvents()
+        total = sum(w._splitter.sizes())
+        w._splitter.setSizes([0, total - 400, 400])  # a wider preview
+        qapp.processEvents()
+        w.close()
+        saved = fb.QSettings("helicon", "display").value("browser_pane_sizes")
+        saved = [int(x) for x in saved]
+        assert saved[0] > 0  # the width the sidebar had, for when it is shown again
+        assert abs(saved[2] - 400) <= 2
+        w._sidebar_action.setChecked(True)
+        w._save_panes()
+        w._preview.wait()
+
+    def test_quit_closes_the_window_so_its_layout_is_saved(
+        self, qapp, project, monkeypatch
+    ):
+        from PySide6.QtWidgets import QApplication
+
+        w = fb.FolderBrowserWidget(start_dir=str(project))
+        # the other windows of the tests are left alone
+        monkeypatch.setattr(QApplication, "topLevelWidgets", staticmethod(lambda: [w]))
+        monkeypatch.setattr(qapp, "quit", lambda: None)
+        w.show()
+        w._preview_action.setChecked(False)
+        w._quit_action.trigger()
+        assert not w.isVisible()
+        settings = fb.QSettings("helicon", "display")
+        assert not settings.value("browser_show_preview", True, type=bool)
+        settings.setValue("browser_show_preview", True)
+        w._preview.wait()
 
 
 class TestFlowLayout:

@@ -2438,8 +2438,13 @@ class TestFolderBrowser(object):
         from helicon.lib.gui.file_browser import FolderBrowserWidget
 
         widget = FolderBrowserWidget(start_dir=str(tmp_path))
-        with patch.object(qapp, "quit") as mock_quit:
+        with (
+            patch("helicon.lib.gui.trackers._quit_all_windows") as mock_close,
+            patch.object(qapp, "quit") as mock_quit,
+        ):
             widget._quit_action.trigger()
+        # the windows are closed first, so that their sizes and layouts are saved
+        mock_close.assert_called_once()
         mock_quit.assert_called_once()
 
     def test_documentation_action_opens_readthedocs(self, tmp_path, qapp):

@@ -60,6 +60,21 @@ class TestPlacedBeforeItIsShown:
         qapp.processEvents()
         assert (window.width(), window.height()) == (500, 300)
 
+    def test_a_new_viewer_gets_the_size_of_the_one_closed_last(self, qapp, settings):
+        saved = QWidget()
+        saved.setGeometry(60, 70, 640, 480)
+        settings.setValue("viewer_ba", saved.saveGeometry())
+        window = QWidget()
+
+        class _Viewer:
+            class window:
+                pass
+
+        _Viewer.window._qt_window = window
+        assert v._restore_viewer_geometry(_Viewer)
+        assert (window.width(), window.height()) == (640, 480)
+        assert not v._restore_viewer_geometry(object())  # not a viewer: nothing done
+
     def test_a_window_that_was_not_placed_is_still_restored_later(self, qapp, settings):
         saved = QWidget()
         saved.setGeometry(50, 50, 600, 400)

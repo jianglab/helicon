@@ -3,7 +3,7 @@
 The preview of a job folder shows the outcome of the job, not a list of its files (they are in the
 list of the window): for a 2D classification the class averages of the last iteration, for a 3D classification
 the central sections of the classes and the tilt angles of the particles, for a refinement the central
-section of the map, its FSC curve, the distribution of the views and of the tilt angles, for a post-processing
+section of the map, its FSC curve, the tilt angles and the distribution of the views, for a post-processing
 the sharpened map and the corrected FSC with the resolution, for a mask the mask and the map it was
 made from multiplied by it, for a CTF estimation the histograms of the
 defocus and of the resolution of the fits, for a CTF refinement the change of the defocus and the fitted
@@ -54,7 +54,7 @@ EXACT_BYTES = 1 << 30
 OUTCOME_DAYS = 30
 # part of the key of the outcomes in the cache: raised when what an outcome shows changes, so
 # that the outcomes kept before are made again
-OUTCOME_VERSION = 3
+OUTCOME_VERSION = 4
 # the most trajectory files of a CryoSPARC motion correction that are read
 MAX_TRAJECTORIES = 600
 BLOCK_ROWS = 50_000
@@ -160,7 +160,7 @@ def _central_slice(path: Path):
 
 
 def _image(array) -> "np.ndarray":  # noqa: F821
-    """A section as a grey-level picture, stretched between its 1st and 99th percentiles."""
+    """A section as a grey-level picture, stretched by :func:`.browser_parts.contrast_limits`."""
     from .browser_parts import thumbnail_array
 
     return thumbnail_array(array, max_size=300)
@@ -934,7 +934,7 @@ def _micrograph_picture(path: Path, max_size: int = MICROGRAPH_PIXELS):
     import mrcfile
     import numpy as np
 
-    from .browser_parts import thumbnail_array
+    from .browser_parts import _binned, thumbnail_array
 
     with mrcfile.mmap(path, mode="r", permissive=True) as mrc:
         data = mrc.data
@@ -944,15 +944,9 @@ def _micrograph_picture(path: Path, max_size: int = MICROGRAPH_PIXELS):
             data = data[0]
         ny, nx = data.shape
         step = max(1, int(np.ceil(max(nx, ny) / max_size)))
-        h, w = ny // step, nx // step
-        if h < 1 or w < 1:
+        if ny // step < 1 or nx // step < 1:
             return None
-        binned = np.empty((h, w), dtype=np.float32)
-        chunk = max(1, 256 // step)  # rows of the binned picture read at a time
-        for y in range(0, h, chunk):
-            stop = min(y + chunk, h)
-            block = np.asarray(data[y * step : stop * step, : w * step], np.float32)
-            binned[y:stop] = block.reshape(stop - y, step, w, step).mean(axis=(1, 3))
+        binned = _binned(data, step)
     return thumbnail_array(binned, max_size), step
 
 
@@ -1801,14 +1795,15 @@ def _relion_refine3d(folder: Path) -> dict | None:
         data = last if last is not None else data
     angles = _particle_angles(data) if data.is_file() else None
     if angles is not None and len(angles[0]):
+        # the tilts first: of a helical refinement they are what is looked at
+        panel = _tilt_panel(angles[1])
+        if panel:
+            panels.append(panel)
         panel = _plot_panel(
             "Views",
             lambda: view_distribution_image(*angles),
             _views_caption(len(angles[0])),
         )
-        if panel:
-            panels.append(panel)
-        panel = _tilt_panel(angles[1])
         if panel:
             panels.append(panel)
     if not panels:

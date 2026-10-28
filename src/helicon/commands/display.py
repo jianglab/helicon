@@ -177,6 +177,7 @@ from helicon.lib.gui.viewer import (  # noqa: E402
     _place_dock_by_default,
     _restore_dock_geometry_now,
     _restore_geometry,
+    _restore_viewer_geometry,
     _save_geometry,
     _save_qimage,
     _save_viewport,
@@ -1394,6 +1395,8 @@ def main(args: argparse.Namespace) -> None:
         if v is not None:
             return v
         new_viewer = _create_napari_viewer()
+        # the size and place of the viewer window closed last
+        _restore_viewer_geometry(new_viewer)
         _track_viewer(new_viewer)
         _add_welcome_shortcut(new_viewer)
         _install_panel_toggle(new_viewer)

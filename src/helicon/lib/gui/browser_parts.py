@@ -53,6 +53,7 @@ __all__ = [
     "project_jobs",
     "project_types",
     "read_cryosparc_job",
+    "contrast_limits",
     "thumbnail_array",
 ]
 
@@ -612,9 +613,73 @@ def _relion_links(root: Path, job: Path) -> dict[str, list[tuple[str, str | None
     )
 
 
+# a picture of more bytes than this is cut down by taking every n-th pixel, not by binning: binning
+# reads all of it
+_BIN_BYTES = 512 * 2**20
+# a value shared exactly by this share of the pixels is flat background (the zeros outside a mask)
+_BACKGROUND_SHARE = 0.1
+
+
+def _binned(data, step: int):
+    """The mean of each ``step`` × ``step`` block of a 2D array, as float32.
+
+    Read a few rows at a time, so that a memory-mapped micrograph is not read into memory whole;
+    the rows and columns left over at the end are dropped.
+    """
+    import numpy as np
+
+    ny, nx = data.shape
+    h, w = ny // step, nx // step
+    out = np.empty((h, w), dtype=np.float32)
+    chunk = max(1, 256 // step)  # rows of the binned picture read at a time
+    for y in range(0, h, chunk):
+        stop = min(y + chunk, h)
+        block = np.asarray(data[y * step : stop * step, : w * step], np.float32)
+        out[y:stop] = block.reshape(stop - y, step, w, step).mean(axis=(1, 3))
+    return out
+
+
+def contrast_limits(data) -> tuple[float, float] | None:
+    """The black and white points of a picture: the 1st and 99th percentiles of its pixels, leaving
+    out the flat background.
+
+    A masked map or a class average is mostly a single value outside its mask (0); with it the
+    percentiles fall inside the density, which is then clipped white and black (a sixth of a masked
+    filament, say). The value shared by a tenth of the pixels or more is left out when the picture
+    has more than 256 levels: in an 8-bit picture many pixels share each level.
+
+    Parameters
+    ----------
+    data : array_like
+
+    Returns
+    -------
+    tuple[float, float] or None
+        ``(black, white)`` with white > black, or None if the picture is flat or has no finite pixel.
+    """
+    import numpy as np
+
+    a = np.asarray(data)
+    finite = a[np.isfinite(a)]
+    if finite.size == 0:
+        return None
+    values, counts = np.unique(finite, return_counts=True)
+    signal = finite
+    if len(values) > 256:
+        mode = int(counts.argmax())
+        if counts[mode] >= _BACKGROUND_SHARE * finite.size:
+            signal = finite[finite != values[mode]]
+    lo, hi = (float(v) for v in np.percentile(signal, (1, 99)))
+    if hi <= lo:
+        lo, hi = float(values[0]), float(values[-1])
+    if hi <= lo:
+        return None
+    return lo, hi
+
+
 def thumbnail_array(data, max_size: int = 256):
-    """A grey-level picture of a 2D array: stretched between its 1st and 99th
-    percentiles and cut down by whole steps to at most ``max_size`` pixels a side.
+    """A grey-level picture of a 2D array: binned by whole steps to at most ``max_size`` pixels a
+    side and stretched between the black and white points of :func:`contrast_limits`.
 
     Parameters
     ----------
@@ -633,16 +698,17 @@ def thumbnail_array(data, max_size: int = 256):
     a = np.asarray(data)
     step = max(1, int(np.ceil(max(a.shape) / max_size)))
     if step > 1:
-        a = a[::step, ::step]
+        # the mean of each block, not one pixel of it: the noise of a class average or a
+        # micrograph falls with the binning, one pixel of each block keeps all of it
+        if min(a.shape) >= step and a.nbytes <= _BIN_BYTES:
+            a = _binned(a, step)
+        else:
+            a = a[::step, ::step]
     a = a.astype(np.float32, copy=False)
-    finite = a[np.isfinite(a)]
-    if finite.size == 0:
+    limits = contrast_limits(a)
+    if limits is None:
         return np.zeros(a.shape, dtype=np.uint8)
-    lo, hi = np.percentile(finite, (1, 99))
-    if hi <= lo:
-        lo, hi = float(finite.min()), float(finite.max())
-    if hi <= lo:
-        return np.zeros(a.shape, dtype=np.uint8)
+    lo, hi = limits
     return np.clip((a - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
 
 

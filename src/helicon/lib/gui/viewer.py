@@ -165,6 +165,27 @@ def _restore_geometry(dock, viewer):
     QTimer.singleShot(0, _apply)
 
 
+def _restore_viewer_geometry(viewer) -> bool:
+    """Give a new napari window the size and place of the one closed last.
+
+    :func:`_save_geometry` saves it when a viewer window closes; the viewer is made when the first
+    file is shown, after the browser has been placed, so :func:`_restore_geometry` (which places
+    the browser too) is not the one to call.
+
+    Returns
+    -------
+    bool
+        True if a saved geometry was applied.
+    """
+    saved = _get_qsettings().value("viewer_ba")
+    if saved is None:
+        return False
+    try:
+        return bool(viewer.window._qt_window.restoreGeometry(saved))
+    except (AttributeError, TypeError):
+        return False
+
+
 def _position_default(dock, viewer):
     try:
         napari_rect = viewer.window._qt_window.frameGeometry()

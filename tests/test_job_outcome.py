@@ -225,7 +225,7 @@ def _make_refine(job, data=True, model=True, mapfile=True):
 
 
 class TestRelionJobs:
-    def test_a_refinement_gives_the_map_the_fsc_the_views_and_the_tilts(self, relion):
+    def test_a_refinement_gives_the_map_the_fsc_the_tilts_and_the_views(self, relion):
         job = relion / "Refine3D" / "job014"
         job.mkdir(parents=True)
         _make_refine(job)
@@ -233,12 +233,12 @@ class TestRelionJobs:
         assert [p["title"] for p in outcome["panels"]] == [
             "Map, central section",
             "FSC",
-            "Views",
             "Tilt angles",
+            "Views",
         ]
         assert all(p["image"].dtype == np.uint8 for p in outcome["panels"])
         # the tilts of _make_refine are about 90°
-        tilts = outcome["panels"][3]["caption"]
+        tilts = outcome["panels"][2]["caption"]
         assert tilts.startswith("500 particles; the dashed line is the median, ")
         assert float(tilts.split("median, ")[1].rstrip("°")) == pytest.approx(90, abs=1)
         resolution = dict(outcome["facts"])["Resolution"]
@@ -1798,7 +1798,7 @@ class TestTheCaptionOfTheViews:
         job.mkdir(parents=True)
         _make_refine(job)
         outcome = jo.build_outcome(job, "relion")
-        assert outcome["panels"][2]["caption"] == "500 particles"
+        assert outcome["panels"][3]["caption"] == "500 particles"
 
 
 class TestInThePreview:

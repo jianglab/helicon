@@ -782,27 +782,44 @@ class FolderBrowserWidget(QMainWindow):
     def _restore_panes(self) -> None:
         """Restore which side panes are shown, and how wide, from the last launch."""
         settings = QSettings("helicon", "display")
-        for action, key in (
-            (self._sidebar_action, "browser_show_sidebar"),
-            (self._preview_action, "browser_show_preview"),
+        for action, pane, key in (
+            (self._sidebar_action, self._sidebar, "browser_show_sidebar"),
+            (self._preview_action, self._preview, "browser_show_preview"),
         ):
-            action.setChecked(settings.value(key, True, type=bool))
+            shown = settings.value(key, True, type=bool)
+            action.setChecked(shown)
+            # the action starts unchecked: unchecking it again emits no toggled, and the
+            # pane hidden at the last launch came back shown
+            pane.setVisible(shown)
+        sizes = self._saved_pane_sizes(settings)
+        if sizes:
+            self._splitter.setSizes(sizes)
+
+    @staticmethod
+    def _saved_pane_sizes(settings) -> list[int]:
+        """The widths of the sidebar, the list and the preview saved at the last launch, or []."""
         sizes = settings.value("browser_pane_sizes", [], type=list)
         try:
             sizes = [int(x) for x in sizes]
         except (TypeError, ValueError):
-            sizes = []
-        if len(sizes) == 3 and sizes[1] > 0:
-            self._splitter.setSizes(sizes)
+            return []
+        return sizes if len(sizes) == 3 and sizes[1] > 0 else []
 
     def _save_panes(self) -> None:
         settings = QSettings("helicon", "display")
         settings.setValue("browser_show_sidebar", self._sidebar_action.isChecked())
         settings.setValue("browser_show_preview", self._preview_action.isChecked())
         sizes = self._splitter.sizes()
-        # a hidden pane has no width; keep the last one it had
-        if all(sizes[i] > 0 for i in (0, 2)):
-            settings.setValue("browser_pane_sizes", sizes)
+        if len(sizes) != 3 or sizes[1] <= 0:
+            return  # not laid out
+        # a hidden pane has no width: keep the last one it had, taken from the list, which
+        # has its room meanwhile (the widths of the others are still saved)
+        saved = self._saved_pane_sizes(settings) or [180, 760, 300]
+        for i in (0, 2):
+            if sizes[i] <= 0:
+                sizes[i] = saved[i]
+                sizes[1] = max(sizes[1] - saved[i], 100)
+        settings.setValue("browser_pane_sizes", sizes)
 
     def _on_sidebar_toggled(self, shown: bool) -> None:
         self._sidebar.setVisible(shown)
@@ -1700,7 +1717,15 @@ class FolderBrowserWidget(QMainWindow):
             )
 
     def _quit(self) -> None:
-        """Exit the application (File → Quit / Ctrl+Q)."""
+        """Exit the application (File → Quit / Ctrl+Q).
+
+        The windows are closed first, as Ctrl+Q does in the other windows: ``quit`` alone sends
+        them no close event, so the size and place of the windows and the layout of this one
+        (the panes, the columns, the sort) were not saved.
+        """
+        from .trackers import _quit_all_windows
+
+        _quit_all_windows()
         app = QApplication.instance()
         if app is not None:
             app.quit()
