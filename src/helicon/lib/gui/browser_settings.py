@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import partial
 from pathlib import Path
 
@@ -41,7 +42,8 @@ def _get_recent_folders() -> list[str]:
 
 def _add_recent_folder(path: str) -> None:
     """Record ``path`` as the most-recent starting folder (max 5 kept)."""
-    path = str(Path(path).resolve())
+    # abspath, not resolve: a folder reached through a link is remembered so
+    path = os.path.abspath(path)
     if not Path(path).is_dir():
         return
     cur = _get_recent_folders()
@@ -54,7 +56,7 @@ def _add_recent_folder(path: str) -> None:
 
 def _bookmark_key(path: str) -> str:
     """The form in which a folder is stored as a bookmark."""
-    return str(Path(path).expanduser().resolve())
+    return os.path.abspath(os.path.expanduser(path))
 
 
 def _get_bookmarks() -> list[str]:

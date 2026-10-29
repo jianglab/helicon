@@ -845,6 +845,46 @@ class TestInTheBrowser:
         assert not browser._tree.selectionModel().hasSelection()
         assert len(browser._history) == steps  # not a new step back
 
+    def test_a_linked_folder_is_entered_through_the_link(
+        self, browser, project, tmp_path
+    ):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (project / "Refine3D").mkdir(exist_ok=True)
+        link = project / "Refine3D" / "job075"
+        link.symlink_to(elsewhere)
+        browser._navigate_to(str(link))
+        assert browser._model._root_path == str(link)
+        assert browser._path_edit.text() == str(link)
+
+    def test_a_link_has_its_own_icon_and_says_where_it_points(self, browser, tmp_path):
+        from helicon.lib.gui.browser_model import COL_NAME
+        from PySide6.QtCore import Qt
+
+        (tmp_path / "real").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        browser._navigate_to(str(tmp_path))
+        m = browser._model
+        rows = {m.data(m.index(r, COL_NAME)): m.index(r, COL_NAME) for r in range(m.rowCount())}  # fmt: skip
+        icon = {n: m.data(i, Qt.ItemDataRole.DecorationRole) for n, i in rows.items()}
+        assert icon["link/"].cacheKey() != icon["real/"].cacheKey()
+        assert str(tmp_path / "real") in m.data(
+            rows["link/"], Qt.ItemDataRole.ToolTipRole
+        )
+        assert not m.data(rows["real/"], Qt.ItemDataRole.ToolTipRole)
+
+    def test_the_target_of_a_link_can_be_gone_to(self, browser, tmp_path):
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / "a.txt").write_text("a")
+        browser._reveal(tmp_path / "real")
+        assert browser._model._root_path == str(tmp_path / "real")
+        browser._navigate_to(str(tmp_path))
+        browser._reveal(tmp_path / "real" / "a.txt")
+        assert browser._model._root_path == str(tmp_path / "real")
+        assert browser._model.file_path(browser._tree.currentIndex()) == str(
+            tmp_path / "real" / "a.txt"
+        )
+
     def test_a_click_on_a_breadcrumb_navigates(self, browser, project):
         browser._path_edit.pathClicked.emit(str(project))
         assert browser._model._root_path == str(project)

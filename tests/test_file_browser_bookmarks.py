@@ -63,14 +63,20 @@ class TestStoredBookmarks:
         fb._remove_bookmark(a)
         assert fb._get_bookmarks() == []
 
-    def test_a_path_with_a_dot_or_a_link_is_the_same_folder(self, tmp_path):
+    def test_a_path_with_a_dot_is_the_same_folder(self, tmp_path):
+        (a,) = _dirs(tmp_path, "a")
+        fb._add_bookmark(a)
+        fb._add_bookmark(a + "/.")
+        assert fb._get_bookmarks() == [a]
+
+    def test_a_folder_bookmarked_through_a_link_keeps_the_link(self, tmp_path):
+        # it reopens where it was bookmarked, not in the folder linked to
         (a,) = _dirs(tmp_path, "a")
         link = tmp_path / "link"
         link.symlink_to(a)
         fb._add_bookmark(str(link))
-        assert fb._is_bookmarked(a)
-        fb._add_bookmark(a + "/.")
-        assert fb._get_bookmarks() == [a]
+        assert fb._get_bookmarks() == [str(link)]
+        assert not fb._is_bookmarked(a)
 
     def test_a_folder_that_is_gone_is_kept(self, tmp_path):
         (a,) = _dirs(tmp_path, "a")

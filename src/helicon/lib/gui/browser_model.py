@@ -8,11 +8,14 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QModelIndex, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QIcon,
+    QPainter,
+    QPainterPath,
+    QPen,
     QStandardItem,
     QStandardItemModel,
 )
@@ -35,6 +38,8 @@ from helicon.lib.gui.browser_style import _THEME_COLORS, _resolved_theme, _saved
 
 
 ROLE_KIND = Qt.ItemDataRole.UserRole + 2
+# True for a row that is a symbolic link
+ROLE_LINK = Qt.ItemDataRole.UserRole + 3
 
 # the kind of a row, for its icon: folder, image, stack, table, text, pdf, web, plot, file
 _IMAGE_SUFFIXES = {
@@ -68,7 +73,7 @@ _KIND_ICONS = {
     "file": "fa5s.file",
 }
 
-_icon_cache: dict[tuple[str, str], QIcon] = {}
+_icon_cache: dict[tuple[str, str, bool], QIcon] = {}
 
 
 def _icon_kind(type_label: str, suffix: str, is_dir: bool) -> str:
@@ -83,15 +88,45 @@ def _icon_kind(type_label: str, suffix: str, is_dir: bool) -> str:
     return _KIND_FOR_LABEL.get(type_label, "file")
 
 
-def _themed_icon(kind: str, colors: dict[str, str]) -> QIcon:
-    """The icon of a kind in the colour of the theme, cached.
+def _with_link_badge(icon: QIcon) -> QIcon:
+    """``icon`` with a small curved arrow in its lower left corner: a link."""
+    out = QIcon()
+    for size in (16, 18, 32, 36):
+        for mode in (QIcon.Mode.Normal, QIcon.Mode.Selected):
+            pixmap = icon.pixmap(size, size, mode)
+            r = 0.55 * size
+            x, y = 0.0, size - r
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawRoundedRect(QRectF(x, y, r, r), r / 5, r / 5)
+            painter.setPen(QPen(QColor("#202020"), max(1.0, size / 14)))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            arrow = QPainterPath()
+            arrow.moveTo(x + 0.3 * r, y + 0.82 * r)
+            arrow.quadTo(x + 0.3 * r, y + 0.4 * r, x + 0.75 * r, y + 0.4 * r)
+            arrow.moveTo(x + 0.55 * r, y + 0.2 * r)
+            arrow.lineTo(x + 0.77 * r, y + 0.4 * r)
+            arrow.lineTo(x + 0.55 * r, y + 0.6 * r)
+            painter.drawPath(arrow)
+            painter.end()
+            out.addPixmap(pixmap, mode)
+    return out
+
+
+def _themed_icon(kind: str, colors: dict[str, str], link: bool = False) -> QIcon:
+    """The icon of a kind in the colour of the theme, cached; with a badge for a link.
 
     Drawn by qtawesome when it is installed (loaded here, not at import, to keep
     start-up short); otherwise the style's own folder and file icons.
     """
     color = colors["folder"] if kind == "folder" else colors["file_icon"]
-    key = (kind, color)
+    key = (kind, color, link)
     icon = _icon_cache.get(key)
+    if icon is None and link:
+        icon = _with_link_badge(_themed_icon(kind, colors))
+        _icon_cache[key] = icon
     if icon is None:
         try:
             import qtawesome
@@ -212,6 +247,7 @@ class FileBrowserModel(QStandardItemModel):
         self._stats_running = 0
         self._cs_parents: dict[str, bool] = {}
         self._aliases: dict[str, str] = {}  # job -> alias, in the folder shown
+        self._links: set[str] = set()  # names of the links in the folder shown
         # the files and the folders of the folder shown, as the rows are made
         self._listed_files: list[str] = []
         self._listed_dirs: list[str] = []
@@ -235,7 +271,11 @@ class FileBrowserModel(QStandardItemModel):
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         column = index.column()
         if role == Qt.ItemDataRole.DecorationRole and column == COL_NAME:
-            return _themed_icon(super().data(index, ROLE_KIND) or "file", self._colors)
+            return _themed_icon(
+                super().data(index, ROLE_KIND) or "file",
+                self._colors,
+                link=bool(super().data(index, ROLE_LINK)),
+            )
         if role == Qt.ItemDataRole.ForegroundRole and column != COL_NAME:
             return QBrush(QColor(self._colors["muted"]))
         if role == Qt.ItemDataRole.TextAlignmentRole and column in _RIGHT_COLUMNS:
@@ -271,6 +311,7 @@ class FileBrowserModel(QStandardItemModel):
         # the alias of a RELION job is a link to it in the same folder: one row for the two,
         # the job with its alias, not the job and the link
         self._aliases = {}
+        self._links = {name for name, _link in links}
         hidden = set()
         if links:
             from helicon.lib.gui.job_alias import alias_target
@@ -431,6 +472,12 @@ class FileBrowserModel(QStandardItemModel):
         if alias:
             name_item.setToolTip(f"{path.name}, alias {alias}")
         name_item.setData(str(path), Qt.ItemDataRole.UserRole)
+        if path.name in self._links:
+            name_item.setData(True, ROLE_LINK)
+            try:
+                name_item.setToolTip(f"{path.name} \u2192 {os.readlink(path)}")
+            except OSError:
+                pass
         (self._listed_dirs if is_dir else self._listed_files).append(str(path))
         self._name_items[str(path)] = name_item
         name_item.setEditable(False)

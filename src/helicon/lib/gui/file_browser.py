@@ -290,7 +290,8 @@ class FolderBrowserWidget(QMainWindow):
 
         if start_dir is None:
             start_dir = os.getcwd()
-        start_dir = str(Path(start_dir).resolve())
+        # abspath, not resolve: a folder reached through a link keeps its path
+        start_dir = os.path.abspath(start_dir)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1334,7 +1335,8 @@ class FolderBrowserWidget(QMainWindow):
         return False
 
     def _navigate_to(self, path: str) -> None:
-        path = str(Path(path).resolve())
+        # abspath, not resolve: a linked job folder stays in its project
+        path = os.path.abspath(path)
         if path != self._history[self._history_index]:
             # (going to the folder one is in again is a refresh, not a new step back)
             if self._history_index < len(self._history) - 1:
@@ -1894,6 +1896,20 @@ class FolderBrowserWidget(QMainWindow):
         )
         menu.addAction(copy_name_action)
 
+        if Path(file_path).is_symlink():
+            target = Path(os.path.realpath(file_path))
+            go_action = QAction(
+                (
+                    "Go to Linked Folder"
+                    if target.is_dir()
+                    else "Show Linked File in Its Folder"
+                ),
+                self._tree,
+            )
+            go_action.setEnabled(target.exists())  # not for a broken link
+            go_action.triggered.connect(lambda: self._reveal(target))
+            menu.addAction(go_action)
+
         if Path(file_path).is_dir():
             menu.addSeparator()
             marked = _is_bookmarked(file_path)
@@ -1906,6 +1922,26 @@ class FolderBrowserWidget(QMainWindow):
             menu.addAction(bookmark_action)
 
         menu.exec_(self._tree.viewport().mapToGlobal(pos))
+
+    def _reveal(self, target: Path) -> None:
+        """Go into folder ``target``, or to the folder of file ``target`` with it selected."""
+        if target.is_dir():
+            self._navigate_to(str(target))
+            return
+
+        def select():
+            item = self._model._name_items.get(str(target))
+            if item is not None:
+                self._tree.setCurrentIndex(item.index())
+                self._tree.scrollTo(item.index())
+
+        self._navigate_to(str(target.parent))
+        if self._model._loading:  # a long folder: its rows are still coming
+            self._model.load_finished.connect(
+                select, Qt.ConnectionType.SingleShotConnection
+            )
+        else:
+            select()
 
     def set_root_path(self, path: str | Path) -> None:
         self._navigate_to(str(path))
