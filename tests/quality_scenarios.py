@@ -97,6 +97,43 @@ def ring_period() -> dict[str, float]:
     return out
 
 
+def ring_map_period() -> dict[str, float]:
+    """The repeat from the segments alone and with the class-average maps, on
+    filaments half a repeat long (where the segments alone are biased)."""
+    from helicon.webApps.lib import helical_pitch_phase as ph
+
+    syn = _synthetic_module()
+    period, n_classes, apix = 700.0, 20, 4.0
+    nx = 2 * int(round(0.96 * period / apix / 2))
+    images, _ = syn.class_averages(
+        period,
+        n_classes,
+        nx=nx,
+        apix=apix,
+        contamination=0.4,
+        seed=12,
+        structure_seed=2,
+    )
+    table = syn.class2d_table(
+        period, n_classes, n_fil=200, length=0.5 * period, mislabel=0.4, seed=12
+    )
+    classes = list(range(1, n_classes + 1))
+    out = {}
+    for label, fit in (("meta", None), ("maps", dict(rise=4.75))):
+        r = ph.analyze(
+            table,
+            class_ids=classes,
+            n_boot=2,
+            image_apix=apix,
+            class_images={c: images[c - 1] for c in classes},
+            map_fit=fit,
+        )
+        out[f"ring_map.{label}.short.period_error_pct"] = abs(
+            100.0 * (r.period / period - 1.0)
+        )
+    return out
+
+
 def two_types() -> dict[str, float]:
     """Two helical types sharing their classes are found; a single type is not split."""
     from helicon.webApps.lib import helical_pitch_mixture as mx
@@ -213,6 +250,7 @@ def true_fsc() -> dict[str, float]:
 
 SCENARIOS = {
     "ring_period": ring_period,
+    "ring_map_period": ring_map_period,
     "two_types": two_types,
     "context_typing": context_typing,
     "true_fsc": true_fsc,

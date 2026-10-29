@@ -2448,6 +2448,9 @@ class PhasePitchResult:
     # the repeat the scan would have chosen if the class averages had not ruled it
     # out (None if they did not change it)
     vetoed_period: float = None
+    # the repeat from the segments and the class-average maps together
+    # (helical_pitch_mapfit.estimate), when analyze was asked for it
+    map_fit: dict = None
 
 
 def analyze(
@@ -2459,9 +2462,18 @@ def analyze(
     counterparts=None,
     image_apix=None,
     class_images=None,
+    map_fit=None,
     **kw,
 ):
     """Pitch, its uncertainty, class phases and per-filament spread in one call.
+
+    ``map_fit`` (a dict with ``rise``, in A, and optionally ``cpu``), with
+    ``class_images``, decides the repeat with the class averages as well: maps
+    from them at each candidate repeat are scored by how well averages left out
+    of a map fit it (:func:`helical_pitch_mapfit.estimate`). Where the segment
+    pairs reach half the repeat it is then refined from them as usual; where they
+    do not, the maps' repeat is taken as it is, without the calibration below.
+    ``PhasePitchResult.map_fit`` holds what was measured.
 
     ``class_images`` (class number -> class average, with ``image_apix``) lets a class
     average that does not repeat at half a candidate repeat rule that candidate out
@@ -2565,15 +2577,62 @@ def analyze(
         before = est.get("ungated_period")
         if before is not None and abs(before / est["period"] - 1.0) > 0.1:
             vetoed = float(before)
-    step("calibrating on this dataset's segment geometry")
-    cal = calibrate_period(pairs, est["period"], length_scale=length_scale)
-    step("resampling filaments")
-    boot = bootstrap_period(
-        pairs, est["period"], n_boot=n_boot, length_scale=length_scale
-    )
-    sd = (
-        float(np.std(boot) / max(cal["slope"], 1e-6)) if len(boot) > 1 else float("nan")
-    )
+    class_zdir = -pairs.class_axis + np.where(pairs.class_sign < 0, 180.0, 0.0)
+    fitted_maps = None
+    if map_fit is not None and class_images is not None:
+        from . import helical_pitch_map as maps
+        from . import helical_pitch_mapfit as mapfit
+
+        apix = float(image_apix or 1.0)
+        straight = maps.straighten_classes(
+            [class_images[int(c)] for c in pairs.class_ids],
+            class_zdir,
+            target_apix=apix,
+            apix=apix,
+        )
+        fitted_maps = mapfit.estimate(
+            pairs,
+            straight,
+            apix,
+            gate=gate,
+            length_scale=length_scale,
+            progress=step,
+            **map_fit,
+        )
+        scan = est
+        if fitted_maps["source"] == "metadata":
+            b = fitted_maps["basin"]
+            window = np.arange(b * (1 - mapfit.WINDOW), b * (1 + mapfit.WINDOW), 2.0)
+            est = estimate_period(
+                pairs, periods=window, length_scale=length_scale, gate=gate
+            )
+        else:
+            # the maps set the repeat: the ring only gives the phases at it
+            est = estimate_period(
+                pairs,
+                periods=np.array([fitted_maps["period"]]),
+                length_scale=length_scale,
+                refine_fraction=0.0005,
+            )
+        # the scan of every repeat stays what the display shows
+        for key in ("periods", "scores", "ungated_scores"):
+            est[key] = scan[key]
+    if fitted_maps is not None and fitted_maps["source"] == "map":
+        # the calibration corrects the ring's bias, not the maps'
+        cal = dict(period=est["period"], slope=1.0, intercept=0.0, bias=0.0)
+        sd = fitted_maps["period_sd"]
+    else:
+        step("calibrating on this dataset's segment geometry")
+        cal = calibrate_period(pairs, est["period"], length_scale=length_scale)
+        step("resampling filaments")
+        boot = bootstrap_period(
+            pairs, est["period"], n_boot=n_boot, length_scale=length_scale
+        )
+        sd = (
+            float(np.std(boot) / max(cal["slope"], 1e-6))
+            if len(boot) > 1
+            else float("nan")
+        )
     step("fitting individual filaments")
     het = filament_heterogeneity(pairs, cal["period"], est["phases"])
     # every filament with a pair is fitted, however short: a filament whose fit
@@ -2668,9 +2727,10 @@ def analyze(
         params_used=used,
         merged_classes=[int(c) for c in merged],
         merged_into=_merged_into(counterparts, merged),
-        class_zdir=(-pairs.class_axis + np.where(pairs.class_sign < 0, 180.0, 0.0)),
+        class_zdir=class_zdir,
         class_tilt=pairs.class_tilt,
         class_across=pairs.class_across,
         class_count=pairs.class_count,
         vetoed_period=vetoed,
+        map_fit=fitted_maps,
     )

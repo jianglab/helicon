@@ -85,6 +85,7 @@ BOOKMARK_DEFAULTS = {
     "hand": ("map_hand", "left"),
     "map_method": ("map_method", "joint"),
     "n_boot": ("phase_n_boot", 20),
+    "map_fit": ("repeat_map_fit", False),
     "split": ("split_axis_distance", 50),
     "two_rounds": ("map_refine", False),
     # suggested from the class fits of each result
@@ -638,6 +639,7 @@ def abinitio3d_tab_server(input, output, session):
             # that candidate out (the segments alone cannot, when views are missing)
             class_images={int(c) + 1: im for c, im in zip(job["ids"], job["images"])},
             max_sep=job["max_repeat"],
+            map_fit=job["map_fit"],
         )
         result.pixel_check = _pixel_check(job, result, progress)
         result.lattice = _lattice(job, result)
@@ -717,7 +719,8 @@ def abinitio3d_tab_server(input, output, session):
         _phase_work,
         _phase_apply,
         _phase_error,
-        progress_max=9,
+        # 4 more stages with the class-average maps
+        progress_max=13,
         session=session,
         label="Class-azimuth pitch estimate",
     )
@@ -775,6 +778,15 @@ def abinitio3d_tab_server(input, output, session):
                 n_boot=helicon.shiny.clamp_number(input.phase_n_boot(), 20, 2, 200),
                 merge=merge,
                 max_repeat=_max_repeat(),
+                map_fit=(
+                    dict(
+                        rise=helicon.shiny.clamp_number(
+                            input.rise(), 4.75, 0.01, 1000.0, float
+                        )
+                    )
+                    if input.repeat_map_fit()
+                    else None
+                ),
                 # also read for the check of the ring against the registered averages
                 ids=list(displayed_class_ids()),
                 images=list(displayed_class_images()),
@@ -2186,7 +2198,48 @@ def abinitio3d_tab_server(input, output, session):
                 style="margin-bottom: 2px;",
             )
         ]
+        mf = r.map_fit
+        if mf is not None:
+            fits = ", ".join(f"C{c} {v:.3f}" for c, v in mf["fit_by_csym"].items())
+            lines.append(
+                ui.p(
+                    (
+                        "Repeat refined from the segments; the class-average maps "
+                        f"put it near {mf['basin']:.0f} Å"
+                        if mf["source"] == "metadata"
+                        else "Repeat from the class-average maps (the segment pairs "
+                        "do not reach half of it)"
+                    ),
+                    f" · the averages fit C{mf['csym']} best",
+                    _info(
+                        "Maps from two thirds of the averages at each candidate "
+                        "repeat, scored by how well the others fit them, combined "
+                        "with the segments' score (Parameters). Best mean fit of "
+                        f"the held-out averages: {fits}; {mf['workers']} worker "
+                        "processes."
+                    ),
+                    style="margin-bottom: 2px;",
+                )
+            )
+            if int(input.rot_fold() or 1) != mf["csym"]:
+                lines.append(
+                    ui.p(
+                        f"The class averages fit C{mf['csym']} better than the "
+                        f"C{int(input.rot_fold() or 1)} set in Parameters.",
+                        class_="text-warning",
+                        style="margin-bottom: 2px;",
+                    )
+                )
         lat = getattr(r, "lattice", None)
+        if lat is not None and mf is not None:
+            lines.append(
+                ui.p(
+                    "The class-average maps assume one turn per repeat, which this "
+                    "lattice is not: read the repeat from the segments.",
+                    class_="text-warning",
+                    style="margin-bottom: 2px;",
+                )
+            )
         if lat is not None:
             peaks = ", ".join(f"{d:.1f}" for d, _, _ in lat.peaks)
             lines.append(

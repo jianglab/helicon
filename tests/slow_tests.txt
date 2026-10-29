@@ -48,3 +48,4 @@ tests/test_spare_viewer.py::TestTheRealProcess::test_a_spare_whose_browser_goes_
 tests/test_task_pool.py::TestTaskPool::test_it_runs_tasks_in_worker_processes
 tests/test_versioninfo.py::TestVersionInfo::test_the_command_line_prints_the_description
 tests/test_whereIsMyClass_app.py::test_select_helix_renders_micrograph_and_class_choices
+tests/test_helical_pitch_mapfit.py::TestEstimate::test_filaments_half_a_repeat_long

@@ -695,6 +695,26 @@ def abinitio3d_tab_ui():
                         step=1,
                         update_on="blur",
                     ),
+                    ui.input_checkbox(
+                        "repeat_map_fit",
+                        ui.span(
+                            "Decide the repeat with maps from the class averages "
+                            "too (minutes)",
+                            _info(
+                                "At every candidate repeat, a map is made from two "
+                                "thirds of the selected averages at the ring's "
+                                "azimuths, and the rest are scored by how well they "
+                                "fit it. That score and the segments' are combined: "
+                                "the segments refine the repeat where their pairs "
+                                "reach half of it, the maps decide it where they do "
+                                "not (filaments shorter than a repeat, which bias "
+                                "the segments). The maps also tell whether the pitch "
+                                "is one or two repeats (C1 or C2). Uses all the "
+                                "CPUs available."
+                            ),
+                        ),
+                        value=False,
+                    ),
                     ui.hr(),
                     ui.tags.b("3D map from classes"),
                     ui.div(

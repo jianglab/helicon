@@ -14,6 +14,8 @@
  "ring.pixel.clean.phase_rms": 0.0022,
  "ring.pixel.mislabelled.period_error_pct": 2.0834,
  "ring.pixel.mislabelled.phase_rms": 0.0028,
+ "ring_map.maps.short.period_error_pct": 1.3682,
+ "ring_map.meta.short.period_error_pct": 39.4489,
  "truefsc.helix_central.res_bias": 0.0455,
  "truefsc.helix_central.res_true": 4.8135,
  "truefsc.helix_central.signal_kept": 0.9977,
