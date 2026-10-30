@@ -48,8 +48,6 @@ streamlit = ['atomium', 'bokeh', 'kneebow', 'qrcode', 'shapely', 'st-clickable-i
 
 gui = ['napari', 'PySide6', 'pyqtgraph', 'qtawesome']
 
-curvelet_fdct = ['curvepy-fdct>=1.0']
-
 curvelet_udct = ['curvelets']
 
 # The torch-backed Gaussian representation in helicon.lib.gauss and the free
@@ -84,7 +82,6 @@ all = [
     "helicon[shiny]",
     "helicon[streamlit]",
     "helicon[gui]",
-    "helicon[curvelet_fdct]",
     "helicon[curvelet_udct]",
 ]
 

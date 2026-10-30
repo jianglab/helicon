@@ -13,7 +13,6 @@ __all__ = [
     "validate_param_dict",
     "has_shiny",
     "has_streamlit",
-    "has_curvelet_fdct",
     "has_curvelet_udct",
     "has_curvelet_udct_gpu",
     "available_cpu",
@@ -164,26 +163,6 @@ def has_napari() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("napari") is not None
-
-
-def has_curvelet_fdct() -> bool:
-    """Check whether the curvepy-fdct package is available.
-
-    Returns
-    -------
-    bool
-        True if curvepy-fdct can be imported, False otherwise.
-    """
-    import io
-    from contextlib import redirect_stdout
-
-    try:
-        with redirect_stdout(io.StringIO()):
-            from curvepy.curvepy import CurveletFrequencyGrid  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
 
 
 def has_curvelet_udct() -> bool:

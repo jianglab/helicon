@@ -33,6 +33,7 @@ SPECS = {
     "res_bias": ("max", 0.1),
     "res_true": ("max", 0.1),
     "signal_kept": ("min", 0.005),
+    "rmse_ratio": ("max", 0.01),
 }
 
 
@@ -248,12 +249,32 @@ def true_fsc() -> dict[str, float]:
     return out
 
 
+def denoising() -> dict[str, float]:
+    """Micrograph denoising of filaments in white noise: the error left against the
+    clean image, as a fraction of the noisy image's, at the default strength and at 1.
+    """
+    from test_denoise import filaments, rmse
+
+    from helicon.lib.denoise import denoise_micrograph
+
+    out = {}
+    for label, noise_sd in (("snr_high", 1.0), ("snr_low", 2.5)):
+        clean, noisy = filaments(shape=(256, 256), noise_sd=noise_sd, seed=4)
+        for strength in (1.0, 2.0):
+            denoised, _ = denoise_micrograph(noisy, strength=strength, workers=1)
+            out[f"denoise.{label}.strength{strength:g}.rmse_ratio"] = round(
+                rmse(denoised, clean) / rmse(noisy, clean), 4
+            )
+    return out
+
+
 SCENARIOS = {
     "ring_period": ring_period,
     "ring_map_period": ring_map_period,
     "two_types": two_types,
     "context_typing": context_typing,
     "true_fsc": true_fsc,
+    "denoising": denoising,
 }
 
 

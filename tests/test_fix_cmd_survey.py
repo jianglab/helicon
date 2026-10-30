@@ -966,19 +966,13 @@ class TestDenoiseCurvelet:
     def _run(self, tmp_path, monkeypatch, data, outdir):
         from helicon.plugins.images2star import denoisecurvelet
 
-        monkeypatch.setattr(
-            denoisecurvelet, "_check_transform_dependencies", lambda *a: None
-        )
-        monkeypatch.setattr(
-            denoisecurvelet,
-            "_denoise_batch",
-            lambda images, *a, **k: [np.asarray(i) for i in images],
-        )
+        # cpu=1 runs _one in this process, so the patch reaches it
+        monkeypatch.setattr(denoisecurvelet, "_one", lambda job: (job[0], {}))
         return denoisecurvelet.handle(
             data,
             argparse.Namespace(verbose=0, cpu=1),
             {"denoiseCurvelet": 0},
-            f"transform=mct:sigma=3:outdir={outdir}",
+            f"outdir={outdir}",
         )
 
     def test_the_output_stack_is_rebuilt_with_sequential_numbers(

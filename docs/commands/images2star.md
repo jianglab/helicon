@@ -38,7 +38,7 @@ usage: helicon images2star [-h] [--csparcPassthroughFiles <filename> [<filename>
                            [--copyParm <starfile< var ~var ...>> [<starfile< var ~var ...>> ...]]
                            [--createStack output.mrcs:rescale2size=<n>:float16=<0|1>:force=<0|1>]
                            [--delParm <var> [<var> ...]]
-                           [--denoiseCurvelet [[transform=<mct|udct|fdct>[:sigma=<float>][:numScales=<auto>][:wedgesPerDir=<3>][:gpu=<true|false>][:tileSize=<N>][:overlap=<N>][:outdir=<path>]]]]
+                           [--denoiseCurvelet [[strength=<2>][:outdir=<./denoised/>][:noiseSd=<auto>]]]
                            [--duplicateParm <from> <to> <from> <to>]
                            [--estimateHelicalAngleVariance <0|1>]
                            [--estimateHelicalTubeLength <0|1>]
@@ -148,14 +148,14 @@ options:
                         create a new mrcs file to store all particles
   --delParm <var> [<var> ...]
                         remove parameter var for each image
-  --denoiseCurvelet [[transform=<mct|udct|fdct>[:sigma=<float>][:numScales=<auto>][:wedgesPerDir=<3>][:gpu=<true|false>][:tileSize=<N>][:overlap=<N>][:outdir=<path>]]]
-                        apply curvelet-based denoising to particle images in parallel, or
-                        micrographs when rlnImageName is absent. Transform defaults to MCT.
-                        Use tileSize=N to enable tiled processing (parallel within each large
-                        image). Defaults: transform=mct, sigma=3, numScales=auto,
-                        wedgesPerDir=3, gpu=false, outdir=./denoised/, overlap=32. CPU count
-                        from --cpu flag. Requires curvepy-fdct (fdct) or curvelets (udct/mct).
-                        disabled by default
+  --denoiseCurvelet [[strength=<2>][:outdir=<./denoised/>][:noiseSd=<auto>]]
+                        denoise particle images, or micrographs when rlnImageName is absent,
+                        automatically: monogenic curvelets (lines such as filaments) and starlets
+                        (spots) with thresholds set for every sub-band from the image's own noise,
+                        averaged. strength scales all thresholds: 2 (default) gives a clean view
+                        for looking at and picking filaments, 1 keeps more fine texture. noiseSd
+                        overrides the per-pixel noise level estimated from each image. Images are
+                        written to outdir. CPU count from --cpu. disabled by default
   --duplicateParm <from> <to> <from> <to>
                         duplicate parameter
   --estimateHelicalAngleVariance <0|1>

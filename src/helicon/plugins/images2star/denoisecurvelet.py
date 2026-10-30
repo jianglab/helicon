@@ -1,12 +1,13 @@
-"""Handler for the denoiseCurvelet option (supports FDCT, UDCT, and MCT backends)."""
+"""Handler for the denoiseCurvelet option: automatic curvelet + starlet denoising."""
 
 from __future__ import annotations
+
 import logging
 from pathlib import Path
-import helicon
-from helicon.lib.exceptions import HeliconError
 
-logger = logging.getLogger(__name__)
+import helicon
+
+logger = logging.getLogger("helicon.commands.images2star")
 
 option_name = "denoiseCurvelet"
 
@@ -16,16 +17,15 @@ def add_args(parser):
         "--denoiseCurvelet",
         nargs="?",
         const="",
-        metavar="[transform=<mct|udct|fdct>[:sigma=<float>][:numScales=<auto>][:wedgesPerDir=<3>][:gpu=<true|false>][:tileSize=<N>][:overlap=<N>][:outdir=<path>]]",
+        metavar="[strength=<2>][:outdir=<./denoised/>][:noiseSd=<auto>]",
         action="append",
-        help="apply curvelet-based denoising to particle images in parallel, "
-        "or micrographs when rlnImageName is absent. "
-        "Transform defaults to MCT. "
-        "Use tileSize=N to enable tiled processing (parallel within each large image). "
-        "Defaults: transform=mct, sigma=3, numScales=auto, wedgesPerDir=3, gpu=false, "
-        "outdir=./denoised/, overlap=32. "
-        "CPU count from --cpu flag. Requires curvepy-fdct (fdct) or curvelets (udct/mct). "
-        "disabled by default",
+        help="denoise particle images, or micrographs when rlnImageName is absent, "
+        "automatically: monogenic curvelets (lines such as filaments) and starlets "
+        "(spots) with thresholds set for every sub-band from the image's own noise, "
+        "averaged. strength scales all thresholds: 2 (default) gives a clean view "
+        "for looking at and picking filaments, 1 keeps more fine texture. noiseSd "
+        "overrides the per-pixel noise level estimated from each image. Images are "
+        "written to outdir. CPU count from --cpu. disabled by default",
         default=[],
     )
 
@@ -33,22 +33,10 @@ def add_args(parser):
 def handle(data, args, index_d, param):
     if param is not None:
         _, param_dict = helicon.parse_param_str(param) if param else ({}, {})
-        transform = param_dict.get("transform", "mct")
-        sigma = param_dict.get("sigma", None)
-        if sigma is not None:
-            sigma = float(sigma)
-        else:
-            sigma = 3.0
-        num_scales = param_dict.get("numScales", None)
-        if num_scales is not None:
-            num_scales = int(num_scales)
-        wedges_per_dir = int(param_dict.get("wedgesPerDir", 3))
-        use_gpu = param_dict.get("gpu", False) in (True, 1, "true", "1", "yes")
-        tile_size = param_dict.get("tileSize", None)
-        if tile_size is not None:
-            tile_size = int(tile_size)
-        overlap = int(param_dict.get("overlap", 32))
+        strength = float(param_dict.get("strength", 2.0))
         outdir = param_dict.get("outdir", None) or "./denoised/"
+        noise_sd = param_dict.get("noiseSd", None)
+        noise_sd = float(noise_sd) if noise_sd not in (None, "", "auto") else None
 
         has_image_col = "rlnImageName" in data
         has_micrograph_col = "rlnMicrographName" in data
@@ -60,296 +48,130 @@ def handle(data, args, index_d, param):
             index_d[option_name] += 1
             return data, index_d
 
-        _check_transform_dependencies(transform, use_gpu)
-
-        if num_scales is not None and num_scales < 2:
-            num_scales = None  # values < 2 trigger auto-decide
-
         n_jobs = getattr(args, "cpu", 0)
         if n_jobs < 1:
             n_jobs = helicon.available_cpu()
+        outdir = Path(outdir).resolve()
+        outdir.mkdir(parents=True, exist_ok=True)
 
         if has_image_col:
-            import mrcfile
-            import numpy as np
-
-            outdir = str(Path(outdir).resolve())
-            Path(outdir).mkdir(parents=True, exist_ok=True)
-
-            image_col = "rlnImageName"
-            tmp_col = helicon.unique_attr_name(data, attr_prefix=image_col)
-            data[tmp_col] = data[image_col].str.split("@", expand=True).iloc[:, -1]
-
-            unique_stacks = data[tmp_col].unique()
-            n_denoised = 0
-            for stack_path in unique_stacks:
-                # one stack at a time: holding every particle of every stack at
-                # once would need tens of GB
-                rows = data[data[tmp_col] == stack_path]
-                with mrcfile.open(stack_path, permissive=True) as mrc:
-                    stack_data = mrc.data
-                single_image = stack_data.ndim == 2
-                images = []
-                for _, row in rows.iterrows():
-                    if single_image:
-                        img = np.asarray(stack_data, dtype=np.float64)
-                    else:
-                        particle_idx = int(row[image_col].split("@")[0]) - 1
-                        img = np.asarray(stack_data[particle_idx], dtype=np.float64)
-                    images.append(img)
-
-                if args.verbose > 1:
-                    device_tag = "GPU" if use_gpu else "CPU"
-                    logger.info(
-                        "\tdenoising %d particles of %s with %d workers (%s on %s) ...",
-                        len(images),
-                        stack_path,
-                        n_jobs,
-                        transform.upper(),
-                        device_tag,
-                    )
-
-                if tile_size is not None:
-                    denoised = [
-                        _denoise_tiled(
-                            img,
-                            transform,
-                            sigma,
-                            num_scales,
-                            wedges_per_dir,
-                            tile_size,
-                            overlap,
-                            n_jobs,
-                            use_gpu,
-                        )
-                        for img in images
-                    ]
-                else:
-                    denoised = _denoise_batch(
-                        images,
-                        transform,
-                        sigma=sigma,
-                        num_scales=num_scales,
-                        wedges_per_dir=wedges_per_dir,
-                        n_jobs=n_jobs,
-                        use_gpu=use_gpu,
-                    )
-
-                # always rebuild the output stack: appending to an existing one
-                # would leave the rewritten particle numbers pointing at the old images
-                out_stack = str(Path(outdir) / Path(stack_path).name)
-                with mrcfile.new(out_stack, overwrite=True) as mrc:
-                    mrc.set_data(np.stack(denoised).astype(np.float32))
-                data.loc[rows.index, image_col] = [
-                    f"{k + 1}@{out_stack}" for k in range(len(rows))
-                ]
-                n_denoised += len(denoised)
-
-            data.drop(tmp_col, inplace=True, axis=1)
-
-            if args.verbose > 1:
-                logger.info(
-                    "\tdenoised %d particles written to %s",
-                    n_denoised,
-                    outdir,
-                )
-
-        elif has_micrograph_col:
-            import mrcfile
-            import numpy as np
-
-            outdir = str(Path(outdir).resolve())
-            Path(outdir).mkdir(parents=True, exist_ok=True)
-
-            image_col = "rlnMicrographName"
-            unique_micrographs = data[image_col].unique()
-            images = []
-            voxel_sizes = {}
-            for micrograph_path in unique_micrographs:
-                with mrcfile.open(micrograph_path, permissive=True) as mrc:
-                    micrograph_data = mrc.data
-                    if micrograph_data.ndim != 2:
-                        raise HeliconError(
-                            "\tERROR: --denoiseCurvelet micrograph fallback expects "
-                            f"2D MRC files in rlnMicrographName. {micrograph_path} "
-                            f"has {micrograph_data.ndim} dimensions."
-                        )
-                    images.append(np.asarray(micrograph_data, dtype=np.float64).copy())
-                    voxel_sizes[micrograph_path] = (
-                        float(mrc.voxel_size.x),
-                        float(mrc.voxel_size.y),
-                        float(mrc.voxel_size.z),
-                    )
-
-            if args.verbose > 1:
-                device_tag = "GPU" if use_gpu else "CPU"
-                logger.info(
-                    "\tdenoising %d micrographs with %d workers (%s on %s) ...",
-                    len(images),
-                    n_jobs,
-                    transform.upper(),
-                    device_tag,
-                )
-
-            if tile_size is not None:
-                denoised = [
-                    _denoise_tiled(
-                        img,
-                        transform,
-                        sigma,
-                        num_scales,
-                        wedges_per_dir,
-                        tile_size,
-                        overlap,
-                        n_jobs,
-                        use_gpu,
-                    )
-                    for img in images
-                ]
-            else:
-                denoised = _denoise_batch(
-                    images,
-                    transform,
-                    sigma,
-                    num_scales,
-                    wedges_per_dir,
-                    n_jobs,
-                    use_gpu,
-                )
-
-            new_micrographs = {}
-            for micrograph_path, denoised_micrograph in zip(
-                unique_micrographs, denoised
-            ):
-                out_micrograph = str(Path(outdir) / Path(micrograph_path).name)
-                new_micrographs[micrograph_path] = out_micrograph
-                with mrcfile.new(out_micrograph, overwrite=True) as mrc:
-                    mrc.set_data(denoised_micrograph.astype(np.float32))
-                    mrc.voxel_size = voxel_sizes[micrograph_path]
-
-            data[image_col] = data[image_col].map(new_micrographs)
-
-            if args.verbose > 1:
-                logger.info(
-                    "\tdenoised %d micrographs written to %s",
-                    len(denoised),
-                    outdir,
-                )
+            _denoise_particles(data, args, strength, noise_sd, outdir, n_jobs)
+        else:
+            _denoise_micrographs(data, args, strength, noise_sd, outdir, n_jobs)
 
         index_d[option_name] += 1
 
     return data, index_d
 
 
-def _check_transform_dependencies(transform, use_gpu):
-    if transform == "fdct":
-        if not helicon.has_curvelet_fdct():
-            raise HeliconError(
-                "\tERROR: curvepy-fdct is required for --denoiseCurvelet transform=fdct. "
-                "Install with: pip install curvepy-fdct"
-            )
-        if use_gpu:
-            raise HeliconError(
-                "\tERROR: FDCT does not support GPU. Use transform=udct for GPU."
-            )
-    elif transform == "udct":
-        if not helicon.has_curvelet_udct():
-            raise HeliconError(
-                "\tERROR: curvelets package is required for --denoiseCurvelet transform=udct. "
-                "Install with: pip install curvelets"
-            )
-        if use_gpu and not helicon.has_curvelet_udct_gpu():
-            raise HeliconError(
-                "\tERROR: UDCT GPU support requires torch. Install with: pip install torch"
-            )
-    elif transform == "mct":
-        if not helicon.has_curvelet_udct():
-            raise HeliconError(
-                "\tERROR: curvelets package is required for --denoiseCurvelet transform=mct. "
-                "Install with: pip install curvelets"
-            )
-        if use_gpu:
-            raise HeliconError(
-                "\tERROR: MCT does not support GPU. Use transform=udct for GPU."
-            )
-    else:
-        raise HeliconError(
-            f"\tERROR: unknown transform '{transform}' for --denoiseCurvelet. "
-            "Use 'fdct', 'udct', or 'mct'."
-        )
-
-
-def _denoise_tiled(
-    img,
-    transform,
-    sigma,
-    num_scales,
-    wedges_per_dir,
-    tile_size,
-    overlap,
-    n_jobs,
-    use_gpu,
-):
-    if transform == "fdct":
-        return helicon.curvelet_denoise_fdct_tiled(
-            img,
-            sigma=sigma,
-            num_scales=num_scales,
-            tile_size=tile_size,
-            overlap=overlap,
-            n_jobs=n_jobs,
-        )
-    if transform == "mct":
-        return helicon.curvelet_denoise_mct_tiled(
-            img,
-            sigma=sigma,
-            num_scales=num_scales,
-            wedges_per_dir=wedges_per_dir,
-            tile_size=tile_size,
-            overlap=overlap,
-            n_jobs=n_jobs,
-        )
-    return helicon.curvelet_denoise_udct_tiled(
-        img,
-        sigma=sigma,
-        num_scales=num_scales,
-        wedges_per_dir=wedges_per_dir,
-        tile_size=tile_size,
-        overlap=overlap,
-        n_jobs=n_jobs,
-        use_gpu=use_gpu,
+def _report(info, what):
+    logger.info(
+        "\tdenoiseCurvelet %s: strength %g, noise sd %.4g (from %s)",
+        what,
+        info["strength"],
+        info["noise_sd"],
+        info["noise_from"],
     )
 
 
-def _denoise_batch(
-    images,
-    transform,
-    sigma,
-    num_scales,
-    wedges_per_dir,
-    n_jobs,
-    use_gpu,
-):
-    if transform == "fdct":
-        return helicon.curvelet_denoise_batch_fdct(
-            images,
-            sigma=sigma,
-            num_scales=num_scales,
-            n_jobs=n_jobs,
+def _one(job):
+    from helicon.lib.denoise import denoise_micrograph
+
+    image, strength, noise_sd = job
+    return denoise_micrograph(image, strength=strength, noise_sd=noise_sd, workers=1)
+
+
+def _pool(n_jobs, n_images):
+    """Worker processes for the particles, or None to denoise them in this process."""
+    if n_jobs < 2 or n_images < 2:
+        return None
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+
+    # a fork server: forking this process (threads, or the GUI) can hang the children
+    try:
+        context = mp.get_context("forkserver")
+        context.set_forkserver_preload(["helicon.lib.denoise", "scipy.fft"])
+    except ValueError:
+        context = mp.get_context("spawn")
+    return ProcessPoolExecutor(max_workers=min(n_jobs, n_images), mp_context=context)
+
+
+def _denoise_particles(data, args, strength, noise_sd, outdir, n_jobs):
+    from contextlib import nullcontext
+
+    import mrcfile
+    import numpy as np
+
+    image_col = "rlnImageName"
+    tmp_col = helicon.unique_attr_name(data, attr_prefix=image_col)
+    data[tmp_col] = data[image_col].str.split("@", expand=True).iloc[:, -1]
+    n_denoised = 0
+    pool = _pool(n_jobs, len(data))
+    with pool or nullcontext():
+        for stack_path in data[tmp_col].unique():
+            # one stack at a time: holding every particle of every stack at once
+            # would need tens of GB
+            rows = data[data[tmp_col] == stack_path]
+            with mrcfile.open(stack_path, permissive=True) as mrc:
+                stack = mrc.data
+            if stack.ndim == 2:
+                images = [np.asarray(stack, np.float64)] * len(rows)
+            else:
+                idx = [int(s.split("@")[0]) - 1 for s in rows[image_col]]
+                images = [np.asarray(stack[i], np.float64) for i in idx]
+            # small images: one per worker, each FFT single-threaded
+            jobs = [(img, strength, noise_sd) for img in images]
+            if pool is not None and len(jobs) > 1:
+                chunk = max(1, len(jobs) // (4 * n_jobs))
+                done = list(pool.map(_one, jobs, chunksize=chunk))
+            else:
+                done = [_one(j) for j in jobs]
+            if args.verbose and done:
+                _report(done[0][1], f"{len(done)} particles of {stack_path}, first")
+            # always rebuild the output stack: appending to an existing one would
+            # leave the rewritten particle numbers pointing at the old images
+            out_stack = str(outdir / Path(stack_path).name)
+            with mrcfile.new(out_stack, overwrite=True) as mrc:
+                mrc.set_data(np.stack([d for d, _ in done]).astype(np.float32))
+            data.loc[rows.index, image_col] = [
+                f"{k + 1}@{out_stack}" for k in range(len(rows))
+            ]
+            n_denoised += len(done)
+    data.drop(tmp_col, inplace=True, axis=1)
+    if args.verbose > 1:
+        logger.info("\tdenoised %d particles written to %s", n_denoised, outdir)
+
+
+def _denoise_micrographs(data, args, strength, noise_sd, outdir, n_jobs):
+    import mrcfile
+    import numpy as np
+
+    from helicon.lib.denoise import denoise_micrograph
+    from helicon.lib.exceptions import HeliconError
+
+    image_col = "rlnMicrographName"
+    new_names = {}
+    for path in data[image_col].unique():
+        with mrcfile.open(path, permissive=True) as mrc:
+            image = np.asarray(mrc.data, np.float64)
+            voxel_size = mrc.voxel_size
+        if image.ndim != 2:
+            raise HeliconError(
+                "\tERROR: --denoiseCurvelet expects 2D MRC files in rlnMicrographName. "
+                f"{path} has {image.ndim} dimensions."
+            )
+        # one large image at a time, its FFTs using all the CPUs
+        denoised, info = denoise_micrograph(
+            image, strength=strength, noise_sd=noise_sd, workers=n_jobs
         )
-    if transform == "mct":
-        return helicon.curvelet_denoise_batch_mct(
-            images,
-            sigma=sigma,
-            num_scales=num_scales,
-            wedges_per_dir=wedges_per_dir,
-            n_jobs=n_jobs,
-        )
-    return helicon.curvelet_denoise_batch_udct(
-        images,
-        sigma=sigma,
-        num_scales=num_scales,
-        wedges_per_dir=wedges_per_dir,
-        n_jobs=n_jobs,
-        use_gpu=use_gpu,
-    )
+        if args.verbose:
+            _report(info, f"{Path(path).name}")
+        out = str(outdir / Path(path).name)
+        with mrcfile.new(out, overwrite=True) as mrc:
+            mrc.set_data(denoised)
+            mrc.voxel_size = voxel_size
+        new_names[path] = out
+    data[image_col] = data[image_col].map(new_names)
+    if args.verbose > 1:
+        logger.info("\tdenoised %d micrographs written to %s", len(new_names), outdir)

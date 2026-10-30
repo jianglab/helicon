@@ -70,4 +70,5 @@ def _group(scenario):
         "two_types": "types",
         "context_typing": "context",
         "true_fsc": "truefsc",
+        "denoising": "denoise",
     }[scenario]
