@@ -15,7 +15,7 @@ helicon proc3d input.mrc output.mrc [options]
 ```text
 usage: helicon proc3d [-h] [--force <0|1>] [--verbose <0|1|2>] [--cpu <n>]
                       [--apix <param>=<val>:...] [--clip <param>=<val>:...]
-                      [--denoiseCurvelet [<sigma=<float>[:numScales=<3>][:wedgesPerDir=<3>][:gpu=<true|false>][:transform=<udct|mct>][:]tileSize=<int>[:overlap=<32>]>]]
+                      [--denoiseCurvelet [[strength=<auto|x>][:halfMaps=<half1,half2>][:precision=<single|double>][:tileSize=<auto|n>]]]
                       [--fft_resample <param>=<val>:...] [--flip_hand <param>=<val>:...]
                       [--helical_sym <param>=<val>:...] [--z_moving_average <param>=<val>:...]
                       <inputMapFile> [<outputMapFile>]
@@ -35,11 +35,23 @@ options:
                         apix parameter
   --clip <param>=<val>:...
                         clip parameter
-  --denoiseCurvelet [<sigma=<float>[:numScales=<3>][:wedgesPerDir=<3>][:gpu=<true|false>][:transform=<udct|mct>][:]tileSize=<int>[:overlap=<32>]>]
-                        apply curvelet-based denoising to the 3D volume (UDCT or MCT).
-                        Defaults: sigma=3.0, numScales=3, wedgesPerDir=3, gpu=false,
-                        transform=mcttileSize=0 auto-detects from available memory. Requires
-                        curvelets package. disabled by default
+  --denoiseCurvelet [[strength=<auto|x>][:halfMaps=<half1,half2>][:precision=<single|double>][:tileSize=<auto|n>]]
+                        denoise the 3D map automatically: monogenic curvelets (sheets and
+                        lines) and wavelets (spots), with every sub-band's threshold set from
+                        its own noise, averaged. strength scales all thresholds. auto
+                        (default): tuned so that denoised half map 1 best predicts half map 2
+                        when the half maps are found by their RELION, cryoSPARC or EMDB names
+                        next to the input map (or given as halfMaps) and this is the first
+                        option; otherwise 1.5, the best on amyloid maps (others wanted up to
+                        6); or a number. Tuning takes 4-7 extra denoising runs. When the map
+                        is a half map or the plain average of the two (not filtered or
+                        sharpened), every sub-band's noise is measured on their difference
+                        rather than guessed from the map: closer to the truth, with the best
+                        strengths near 1. precision: single (default) gave the same maps as
+                        double, 2-3 times faster in half the memory. tileSize: auto (default)
+                        denoises the whole map when it fits in the free memory, otherwise in
+                        the largest tiles that fit; n uses tiles of n voxels a side, 0 the
+                        whole map. CPU count from --cpu. disabled by default
   --fft_resample <param>=<val>:...
                         fft_resample parameter
   --flip_hand <param>=<val>:...

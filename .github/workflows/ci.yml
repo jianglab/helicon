@@ -142,7 +142,7 @@ jobs:
       # the default torch wheel is the CUDA build, which brings several GB of nvidia-* packages and
       # filled the runner's disk ("No space left on device"); the tests need only the CPU build
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e ".[test,gui,shiny,gauss,curvelet_fdct,curvelet_udct]"
+      - run: pip install -e ".[test,gui,shiny,gauss]"
       - run: df -h /
       - run: playwright install --with-deps chromium
       - run: pytest tests -n auto -p no:cacheprovider --durations=30

@@ -38,7 +38,7 @@ square brackets, separated by commas, for example `helicon[shiny,gui]`.
 | `shiny` | the web apps (`helicon webApps`, or just `helicon`) |
 | `gui` | the `display` file browser (napari, PySide6, pyqtgraph) |
 | `streamlit` | the Streamlit apps (`ctfSimulation`, `map2seq`, `procart`) |
-| `all` | `shiny`, `streamlit`, `gui` and the curvelet extras |
+| `all` | `shiny`, `streamlit` and `gui` |
 
 A program whose extra is missing is left out of `helicon --help`. Install the extra and it
 appears.

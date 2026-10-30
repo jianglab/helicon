@@ -408,132 +408,231 @@ class TestProc3dHandlers(object):
 
     # --- denoiseCurvelet ---
 
+    def _denoise(self, data, param, **args):
+        from helicon.plugins.proc3d.denoise_curvelet import handle
+
+        index_d = {"denoiseCurvelet": 0}
+        out = handle(
+            data,
+            argparse.Namespace(verbose=1, cpu=1, **args),
+            index_d,
+            param,
+            self.apix,
+            self.nx,
+            self.ny,
+            self.nz,
+        )
+        assert index_d["denoiseCurvelet"] == 1
+        return out
+
     def test_denoise_curvelet3d_argparse(self):
         parser = argparse.ArgumentParser()
         proc3d.add_args(parser)
-        args = parser.parse_args(
-            ["input.mrc", "--denoiseCurvelet", "sigma=0.1:numScales=2"]
+        args = parser.parse_args(["input.mrc", "--denoiseCurvelet", "strength=1"])
+        assert args.denoiseCurvelet == ["strength=1"]
+        args = parser.parse_args(["input.mrc", "--denoiseCurvelet"])
+        assert args.denoiseCurvelet == [""]
+        args = parser.parse_args(["input.mrc", "--denoiseCurvelet", "tileSize=128"])
+        assert args.denoiseCurvelet == ["tileSize=128"]
+
+    def test_denoise_curvelet3d_removes_noise_and_keeps_the_box(self):
+        z, y, x = np.mgrid[:32, :32, :32] - 16
+        ball = (z**2 + y**2 + x**2 < 64).astype(np.float32)
+        noisy = ball + np.random.default_rng(0).normal(scale=0.3, size=ball.shape)
+        result, apix, nx, ny, nz = self._denoise(noisy.astype(np.float32), "")
+        assert result.shape == ball.shape and result.dtype == np.float32
+        assert (apix, nx, ny, nz) == (self.apix, self.nx, self.ny, self.nz)
+        assert np.sqrt(np.mean((result - ball) ** 2)) < 0.45 * np.sqrt(
+            np.mean((noisy - ball) ** 2)
         )
-        assert args.denoiseCurvelet == ["sigma=0.1:numScales=2"]
 
-    def test_denoise_curvelet3d_handler_mad(self):
-        pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoise_curvelet import handle
+    @pytest.mark.parametrize(
+        "param, strength, precision, tile_size",
+        [
+            ("", 1.5, "single", None),
+            ("strength=1:precision=double", 1.0, "double", None),
+            ("tileSize=96", 1.5, "single", 96),
+            ("tileSize=0", 1.5, "single", 0),
+        ],
+    )
+    def test_denoise_curvelet3d_parameters_reach_the_denoiser(
+        self, monkeypatch, param, strength, precision, tile_size
+    ):
+        import helicon.lib.denoise
 
-        data = self.data.copy().astype(np.float64)
-        args = argparse.Namespace(verbose=0)
-        index_d = {"denoiseCurvelet": 0}
-        result, apix, nx, ny, nz = handle(
-            data,
-            args,
-            index_d,
-            "sigma=0.1:numScales=2",
-            self.apix,
-            self.nx,
-            self.ny,
-            self.nz,
-        )
-        assert result.shape == (self.nz, self.ny, self.nx)
-        assert index_d["denoiseCurvelet"] == 1
-        assert np.isfinite(result).all()
+        calls = []
 
-    def test_denoise_curvelet3d_handler_elbow(self):
-        pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoise_curvelet import handle
+        def fake(volume, strength, workers, precision, tile_size, noise):
+            calls.append((strength, workers, precision, tile_size))
+            info = dict(
+                strength=strength,
+                precision=precision,
+                noise_from="test",
+                tile_size=tile_size or None,
+                tiles_why="given",
+            )
+            return volume, info
 
-        data = self.data.copy().astype(np.float64)
-        args = argparse.Namespace(verbose=0)
-        index_d = {"denoiseCurvelet": 0}
-        result, apix, nx, ny, nz = handle(
-            data,
-            args,
-            index_d,
-            "numScales=2",
-            self.apix,
-            self.nx,
-            self.ny,
-            self.nz,
-        )
-        assert result.shape == (self.nz, self.ny, self.nx)
-        assert index_d["denoiseCurvelet"] == 1
+        monkeypatch.setattr(helicon.lib.denoise, "denoise_map", fake)
+        self._denoise(self.data.copy(), param)
+        assert calls == [(strength, 1, precision, tile_size)]
 
-    def test_denoise_curvelet3d_few_scales_auto(self):
-        pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoise_curvelet import handle
-
-        data = self.data.copy().astype(np.float64)
-        args = argparse.Namespace(verbose=0)
-        index_d = {"denoiseCurvelet": 0}
-        result, apix, nx, ny, nz = handle(
-            data,
-            args,
-            index_d,
-            "sigma=0.1:numScales=1",
-            self.apix,
-            self.nx,
-            self.ny,
-            self.nz,
-        )
-        assert result.shape == (self.nz, self.ny, self.nx)
-        assert index_d["denoiseCurvelet"] == 1
-
-    def test_denoise_curvelet3d_handler_mct_mad(self):
-        pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoise_curvelet import handle
-
-        data = self.data.copy().astype(np.float64)
-        args = argparse.Namespace(verbose=0)
-        index_d = {"denoiseCurvelet": 0}
-        result, apix, nx, ny, nz = handle(
-            data,
-            args,
-            index_d,
-            "sigma=0.1:numScales=2:transform=mct",
-            self.apix,
-            self.nx,
-            self.ny,
-            self.nz,
-        )
-        assert result.shape == (self.nz, self.ny, self.nx)
-        assert index_d["denoiseCurvelet"] == 1
-        assert np.isfinite(result).all()
-
-    def test_denoise_curvelet3d_handler_mct_elbow(self):
-        pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoise_curvelet import handle
-
-        data = self.data.copy().astype(np.float64)
-        args = argparse.Namespace(verbose=0)
-        index_d = {"denoiseCurvelet": 0}
-        result, apix, nx, ny, nz = handle(
-            data,
-            args,
-            index_d,
-            "numScales=2:transform=mct",
-            self.apix,
-            self.nx,
-            self.ny,
-            self.nz,
-        )
-        assert result.shape == (self.nz, self.ny, self.nx)
-        assert index_d["denoiseCurvelet"] == 1
-
-    def test_denoise_curvelet3d_mct_unknown_transform_errors(self):
-        pytest.importorskip("curvelets")
-        from helicon.plugins.proc3d.denoise_curvelet import handle
+    @pytest.mark.parametrize(
+        "param, match",
+        [
+            ("precision=half", "precision"),
+            ("tileSize=big", "tileSize"),
+            ("strength=strong", "strength"),
+            ("halfMaps=one.mrc", "halfMaps"),
+        ],
+    )
+    def test_denoise_curvelet3d_bad_parameters_error(self, param, match):
         from helicon.lib.exceptions import HeliconError
 
-        data = self.data.copy()
-        args = argparse.Namespace(verbose=0)
-        index_d = {"denoiseCurvelet": 0}
-        with pytest.raises(HeliconError, match="unknown transform"):
-            handle(
-                data,
-                args,
-                index_d,
-                "transform=fdct",
-                self.apix,
-                self.nx,
-                self.ny,
-                self.nz,
+        with pytest.raises(HeliconError, match=match):
+            self._denoise(self.data.copy(), param)
+
+    def _half_map_files(self, folder, shape=None):
+        """A RELION Refine3D map and its two half maps."""
+        import mrcfile
+
+        rng = np.random.default_rng(0)
+        for name in (
+            "run_class001",
+            "run_half1_class001_unfil",
+            "run_half2_class001_unfil",
+        ):
+            data = rng.normal(size=shape or self.data.shape).astype(np.float32)
+            mrcfile.new(folder / f"{name}.mrc", data=data).close()
+        return folder / "run_class001.mrc"
+
+    def _tuned(self, monkeypatch, data, **args):
+        """Run the handler with tune_strength and denoise_map faked; return
+        (the half maps tuned on, the strength the map was denoised with)."""
+        import helicon.lib.denoise
+
+        tuned, used = [], []
+
+        def fake_tune(h1, h2, **kwargs):
+            tuned.append((h1, h2, kwargs["noise_from_halves"]))
+            return 3.0, {1.5: 2.0, 3.0: 1.0, 6.0: 1.5}
+
+        def fake_denoise(volume, strength, **kwargs):
+            used.append(strength)
+            self.noise_used = kwargs["noise"]
+            info = dict(
+                strength=strength,
+                precision="single",
+                noise_from="test",
+                tile_size=None,
+                tiles_why="test",
             )
+            return volume, info
+
+        monkeypatch.setattr(helicon.lib.denoise, "tune_strength", fake_tune)
+        monkeypatch.setattr(helicon.lib.denoise, "denoise_map", fake_denoise)
+        self._denoise(data, args.pop("param", ""), **args)
+        return tuned, used[0]
+
+    def test_denoise_curvelet3d_tunes_on_the_half_maps_next_to_the_map(
+        self, monkeypatch, tmp_path
+    ):
+        import mrcfile
+
+        path = self._half_map_files(tmp_path)
+        tuned, strength = self._tuned(
+            monkeypatch,
+            self.data.copy(),
+            inputMapFile=str(path),
+            all_options=["denoiseCurvelet"],
+        )
+        half1 = mrcfile.read(tmp_path / "run_half1_class001_unfil.mrc")
+        assert len(tuned) == 1 and np.array_equal(tuned[0][0], half1)
+        assert strength == 3.0
+
+    def test_denoise_curvelet3d_tuning_is_kept_until_a_half_map_changes(
+        self, monkeypatch, tmp_path
+    ):
+        import os
+
+        path = self._half_map_files(tmp_path)
+        args = dict(inputMapFile=str(path), all_options=["denoiseCurvelet"])
+        first, _ = self._tuned(monkeypatch, self.data.copy(), **args)
+        again, strength = self._tuned(monkeypatch, self.data.copy(), **args)
+        assert len(first) == 1 and again == [] and strength == 3.0
+        half2 = tmp_path / "run_half2_class001_unfil.mrc"
+        os.utime(half2, ns=(0, half2.stat().st_mtime_ns + 10**9))
+        changed, _ = self._tuned(monkeypatch, self.data.copy(), **args)
+        assert len(changed) == 1
+
+    def test_denoise_curvelet3d_tunes_on_given_half_maps(self, monkeypatch, tmp_path):
+        self._half_map_files(tmp_path)
+        halves = ",".join(
+            str(tmp_path / f"run_half{h}_class001_unfil.mrc") for h in (1, 2)
+        )
+        tuned, strength = self._tuned(
+            monkeypatch, self.data.copy(), param=f"halfMaps={halves}"
+        )
+        assert len(tuned) == 1 and strength == 3.0
+
+    @pytest.mark.parametrize("case", ["no halves", "options before", "other size"])
+    def test_denoise_curvelet3d_otherwise_uses_the_default(
+        self, monkeypatch, tmp_path, case
+    ):
+        shape = (8, 8, 8) if case == "other size" else None
+        path = self._half_map_files(tmp_path, shape)
+        if case == "no halves":
+            (tmp_path / "run_half2_class001_unfil.mrc").unlink()
+        options = ["clip", "denoiseCurvelet"] if case == "options before" else []
+        tuned, strength = self._tuned(
+            monkeypatch,
+            self.data.copy(),
+            inputMapFile=str(path),
+            all_options=options + ["denoiseCurvelet"],
+        )
+        assert tuned == [] and strength == 1.5
+        assert self.noise_used is None
+
+    @pytest.mark.parametrize(
+        "map_is, scale",
+        [("half 1", np.sqrt(0.5)), ("half 2", np.sqrt(0.5)), ("average", 0.5)],
+    )
+    def test_denoise_curvelet3d_measures_the_noise_on_the_half_maps(
+        self, monkeypatch, tmp_path, map_is, scale
+    ):
+        import mrcfile
+
+        path = self._half_map_files(tmp_path)
+        h1, h2 = (
+            mrcfile.read(tmp_path / f"run_half{h}_class001_unfil.mrc") for h in (1, 2)
+        )
+        data = {"half 1": h1, "half 2": h2, "average": (h1 + h2) / 2}[map_is]
+        args = dict(inputMapFile=str(path), all_options=["denoiseCurvelet"])
+        tuned, strength = self._tuned(monkeypatch, data.copy(), **args)
+        assert tuned[0][2] is True and strength == 3.0
+        assert np.allclose(self.noise_used, (h1 - h2) * scale)
+        # a given strength still uses the noise, without tuning
+        tuned, strength = self._tuned(
+            monkeypatch, data.copy(), param="strength=2", **args
+        )
+        assert tuned == [] and strength == 2.0 and self.noise_used is not None
+
+    def test_denoise_curvelet3d_a_sharpened_map_keeps_the_guessed_noise(
+        self, monkeypatch, tmp_path
+    ):
+        path = self._half_map_files(tmp_path)  # the map is unrelated to its halves
+        tuned, strength = self._tuned(
+            monkeypatch,
+            self.data.copy(),
+            inputMapFile=str(path),
+            all_options=["denoiseCurvelet"],
+        )
+        assert tuned[0][2] is False and strength == 3.0
+        assert self.noise_used is None
+
+    def test_denoise_curvelet3d_tiles_keep_the_box(self):
+        result, *_ = self._denoise(
+            np.random.default_rng(0).normal(size=(40, 36, 32)).astype(np.float32),
+            "tileSize=16",
+        )
+        assert result.shape == (40, 36, 32) and np.isfinite(result).all()

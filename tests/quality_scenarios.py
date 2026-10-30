@@ -250,12 +250,12 @@ def true_fsc() -> dict[str, float]:
 
 
 def denoising() -> dict[str, float]:
-    """Micrograph denoising of filaments in white noise: the error left against the
-    clean image, as a fraction of the noisy image's, at the default strength and at 1.
+    """Denoising of filaments in white noise (micrographs) and of a map in coloured
+    noise: the error left against the clean image, as a fraction of the noisy one's.
     """
-    from test_denoise import filaments, rmse
+    from test_denoise import filaments, rmse, rods_map
 
-    from helicon.lib.denoise import denoise_micrograph
+    from helicon.lib.denoise import denoise_map, denoise_micrograph
 
     out = {}
     for label, noise_sd in (("snr_high", 1.0), ("snr_low", 2.5)):
@@ -265,6 +265,11 @@ def denoising() -> dict[str, float]:
             out[f"denoise.{label}.strength{strength:g}.rmse_ratio"] = round(
                 rmse(denoised, clean) / rmse(noisy, clean), 4
             )
+    clean, noisy = rods_map(n=64, noise_sd=1.0, seed=4)
+    denoised, _ = denoise_map(noisy, strength=2.0, workers=1)
+    out["denoise.map.strength2.rmse_ratio"] = round(
+        rmse(denoised, clean) / rmse(noisy, clean), 4
+    )
     return out
 
 

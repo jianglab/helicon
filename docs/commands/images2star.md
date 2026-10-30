@@ -150,12 +150,13 @@ options:
                         remove parameter var for each image
   --denoiseCurvelet [[strength=<2>][:outdir=<./denoised/>][:noiseSd=<auto>]]
                         denoise particle images, or micrographs when rlnImageName is absent,
-                        automatically: monogenic curvelets (lines such as filaments) and starlets
-                        (spots) with thresholds set for every sub-band from the image's own noise,
-                        averaged. strength scales all thresholds: 2 (default) gives a clean view
-                        for looking at and picking filaments, 1 keeps more fine texture. noiseSd
-                        overrides the per-pixel noise level estimated from each image. Images are
-                        written to outdir. CPU count from --cpu. disabled by default
+                        automatically: monogenic curvelets (lines such as filaments) and
+                        wavelets (spots) with thresholds set for every sub-band from the
+                        image's own noise, averaged. strength scales all thresholds: 2
+                        (default) gives a clean view for looking at and picking filaments, 1
+                        keeps more fine texture. noiseSd overrides the per-pixel noise level
+                        estimated from each image. Images are written to outdir. CPU count
+                        from --cpu. disabled by default
   --duplicateParm <from> <to> <from> <to>
                         duplicate parameter
   --estimateHelicalAngleVariance <0|1>

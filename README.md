@@ -49,7 +49,7 @@ square brackets, separated by commas, e.g. `helicon[shiny,gui]`.
 | `shiny` | the web apps (`helicon webApps`, or just `helicon`) |
 | `gui` | the `display` file viewer (napari, PySide6, pyqtgraph) |
 | `streamlit` | the Streamlit apps (`ctfSimulation`, `map2seq`, `procart`) |
-| `all` | `shiny`, `streamlit`, `gui` and the curvelet extras |
+| `all` | `shiny`, `streamlit` and `gui` |
 | `test` | what the test suite needs, for developers |
 
 ### Keeping up to date

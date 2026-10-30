@@ -1,4 +1,5 @@
-"""How many CPUs helicon may use: numba's thread limit without importing numba."""
+"""How many CPUs helicon may use (numba's thread limit without importing numba), and
+how much memory."""
 
 import os
 import sys
@@ -84,3 +85,28 @@ class TestAvailableCpu:
         monkeypatch.setenv("SLURM_CPUS_ON_NODE", "1")
         monkeypatch.setattr(system, "_numba_thread_limit", lambda: 0)
         assert system.available_cpu() == 1
+
+
+class TestAvailableMemory:
+    def test_the_slurm_job_limit_caps_it(self, monkeypatch):
+        import psutil
+
+        used = psutil.Process().memory_info().rss
+        monkeypatch.setenv("SLURM_MEM_PER_NODE", str(used // 2**20 + 100))
+        assert system.available_memory() <= 101 * 2**20
+
+    def test_the_limit_per_cpu_counts_every_cpu(self, monkeypatch):
+        import psutil
+
+        used = psutil.Process().memory_info().rss
+        monkeypatch.delenv("SLURM_MEM_PER_NODE", raising=False)
+        monkeypatch.setenv("SLURM_MEM_PER_CPU", str(used // 2**20 // 4 + 50))
+        monkeypatch.setenv("SLURM_CPUS_ON_NODE", "4")
+        assert system.available_memory() <= 201 * 2**20
+
+    def test_without_a_job_limit_it_is_at_most_the_free_memory(self, monkeypatch):
+        import psutil
+
+        for name in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU"):
+            monkeypatch.delenv(name, raising=False)
+        assert 0 < system.available_memory() <= psutil.virtual_memory().total

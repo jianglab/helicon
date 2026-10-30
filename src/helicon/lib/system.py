@@ -13,9 +13,8 @@ __all__ = [
     "validate_param_dict",
     "has_shiny",
     "has_streamlit",
-    "has_curvelet_udct",
-    "has_curvelet_udct_gpu",
     "available_cpu",
+    "available_memory",
     "omp_get_max_threads",
     "omp_set_num_threads",
     "get_terminal_size",
@@ -165,39 +164,6 @@ def has_napari() -> bool:
     return importlib.util.find_spec("napari") is not None
 
 
-def has_curvelet_udct() -> bool:
-    """Check whether the curvelets package is available.
-
-    Returns
-    -------
-    bool
-        True if curvelets can be imported, False otherwise.
-    """
-    try:
-        from curvelets.numpy import UDCT  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def has_curvelet_udct_gpu() -> bool:
-    """Check whether UDCT GPU support is available (curvelets torch + torch).
-
-    Returns
-    -------
-    bool
-        True if curvelets.torch.UDCT and torch can be imported, False otherwise.
-    """
-    try:
-        from curvelets.torch import UDCT  # noqa: F401
-        import torch  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
 def _numba_thread_limit() -> int | None:
     """The number of threads numba will run, without importing numba for it.
 
@@ -260,6 +226,67 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
         cpu = min(cpu, int(mem.available / 1024**3 / mem_gb_per_cpu))
 
     return max(1, cpu)
+
+
+def available_memory() -> int:
+    """Return the bytes of memory this process can still use.
+
+    The node's available memory, capped by the Slurm job's ``--mem`` (less what
+    this process uses) and by every memory cgroup the process is in: a job is
+    killed at its own limit long before the node runs out. A cgroup's file cache
+    counts as free, since it is given back before anything is killed.
+
+    Returns
+    -------
+    int
+        Available memory in bytes.
+    """
+    from pathlib import Path
+
+    import psutil
+
+    available = psutil.virtual_memory().available
+    # Slurm may enforce --mem by watching the job, without a cgroup limit
+    if "SLURM_MEM_PER_NODE" in os.environ:
+        limit_mb = int(os.environ["SLURM_MEM_PER_NODE"])
+    elif "SLURM_MEM_PER_CPU" in os.environ:
+        limit_mb = int(os.environ["SLURM_MEM_PER_CPU"]) * int(
+            os.environ.get("SLURM_CPUS_ON_NODE", 1)
+        )
+    else:
+        limit_mb = 0
+    if limit_mb > 0:
+        used = psutil.Process().memory_info().rss
+        available = min(available, limit_mb * 2**20 - used)
+    try:
+        lines = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        return available
+    root = Path("/sys/fs/cgroup")
+    for line in lines:
+        _, controllers, path = line.split(":", 2)
+        if controllers == "":  # cgroup v2: the limit may be on any ancestor
+            group, names = root / path.lstrip("/"), ("memory.max", "memory.current")
+        elif "memory" in controllers.split(","):  # cgroup v1
+            group = root / "memory" / path.lstrip("/")
+            names = ("memory.limit_in_bytes", "memory.usage_in_bytes")
+        else:
+            continue
+        while root in group.parents or group == root:
+            try:
+                limit = (group / names[0]).read_text().strip()
+                used = int((group / names[1]).read_text())
+                stat = (group / "memory.stat").read_text().split()
+                cache = dict(zip(stat[::2], stat[1::2]))
+                used -= int(cache.get("file", cache.get("total_cache", 0)))
+                if limit != "max" and int(limit) < 2**60:
+                    available = min(available, int(limit) - max(used, 0))
+            except (OSError, ValueError):
+                pass
+            if group == root:
+                break
+            group = group.parent
+    return max(0, available)
 
 
 def _load_omp_library():

@@ -110,3 +110,20 @@ class TestUtil(object):
         mock_func.assert_called_once()
         assert result1 == 42
         assert result2 == 42
+
+
+class TestParseParamStr:
+    """Option values of the form name:key=value:..."""
+
+    def test_a_value_may_contain_an_equals_sign(self):
+        from helicon.lib.util import parse_param_str
+
+        _, d = parse_param_str("rlnMicrographName=/data/a=b.mrc")
+        assert d == {"rlnMicrographName": "/data/a=b.mrc"}
+
+    def test_a_leading_name_still_separates_from_the_pairs(self):
+        from helicon.lib.util import parse_param_str
+
+        name, d = parse_param_str("noEqualsHere:sigma=3")
+        assert name == "noEqualsHere"
+        assert d == {"sigma": 3}

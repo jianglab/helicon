@@ -178,9 +178,8 @@ from .lib.util import (
     has_shiny,
     has_streamlit,
     has_napari,
-    has_curvelet_udct,
-    has_curvelet_udct_gpu,
     available_cpu,
+    available_memory,
     omp_get_max_threads,
     omp_set_num_threads,
     get_terminal_size,
@@ -193,20 +192,11 @@ from .lib.util import (
     set_to_periodic_range,
 )
 
-# The 3D curvelet denoisers need curvelets, whose import (numba, h5py) takes
-# seconds: they are looked up on first use (PEP 562 below), not imported with
-# helicon. A name is there only if the package is installed, as before.
-_LAZY_FROM_CURVELET = (
-    "curvelet_denoise_3d_udct",
-    "curvelet_denoise_3d_udct_tiled",
-    "curvelet_denoise_3d_mct",
-    "curvelet_denoise_3d_mct_tiled",
-)
 # The Gaussian representations need torch, which is imported only when one of
 # them is first used (PEP 562 below), not with helicon: torch bundles its own
 # OpenMP runtime, and a second libomp next to the one numpy/scipy/numba use
 # segfaults the process in __kmp_fork_barrier -- seen in the web app's HILL tab
-# on macOS, where pip's torch ships libomp.dylib. See also lib/curvelet.py.
+# on macOS, where pip's torch ships libomp.dylib.
 _LAZY_FROM_GAUSS = (
     "AnisotropicGaussian",
     "AnisotropicGaussianSet",
@@ -233,17 +223,6 @@ def __getattr__(name):
             ) from e
         globals()[name] = shiny  # resolved once
         return shiny
-    if name in _LAZY_FROM_CURVELET:
-        if not has_curvelet_udct():
-            raise AttributeError(
-                f"module 'helicon' has no attribute {name!r} "
-                "(the curvelet package it needs is not installed)"
-            )
-        from .lib import curvelet
-
-        value = getattr(curvelet, name)
-        globals()[name] = value  # resolved once
-        return value
     if name in _LAZY_FROM_GAUSS:
         try:
             from .lib import gauss
@@ -262,8 +241,3 @@ def __getattr__(name):
 cache_dir = setup_cache_dir(create=False)
 
 from .lib import dataset
-
-try:
-    from .lib import curvelet
-except ImportError:
-    pass

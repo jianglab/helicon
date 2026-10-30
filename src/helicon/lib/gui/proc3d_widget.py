@@ -56,7 +56,8 @@ _MRC_FILTER = "MRC map (*.mrc *.map);;All files (*)"
 _PARAM_PLACEHOLDERS = {
     "apix": "pixel size in \u00c5/pixel, e.g. 1.35",
     "clip": "new_nx=..:new_ny=..:new_nz=.. (optional center_x/y/z=..)",
-    "denoiseCurvelet": "sigma=..:numScales=..:transform=udct|mct",
+    "denoiseCurvelet": "optional strength=auto|1.5:halfMaps=h1.mrc,h2.mrc:"
+    "precision=single:tileSize=auto",
     "fft_resample": "new_nx=..:new_ny=..:new_nz=..",
     "flip_hand": "axis to flip: x, y, or z",
     "helical_sym": "twist=..:rise=.. (optional csym=.., new_apix=.., "

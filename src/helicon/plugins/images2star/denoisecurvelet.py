@@ -1,4 +1,4 @@
-"""Handler for the denoiseCurvelet option: automatic curvelet + starlet denoising."""
+"""Handler for the denoiseCurvelet option: automatic curvelet + wavelet denoising."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def add_args(parser):
         metavar="[strength=<2>][:outdir=<./denoised/>][:noiseSd=<auto>]",
         action="append",
         help="denoise particle images, or micrographs when rlnImageName is absent, "
-        "automatically: monogenic curvelets (lines such as filaments) and starlets "
+        "automatically: monogenic curvelets (lines such as filaments) and wavelets "
         "(spots) with thresholds set for every sub-band from the image's own noise, "
         "averaged. strength scales all thresholds: 2 (default) gives a clean view "
         "for looking at and picking filaments, 1 keeps more fine texture. noiseSd "
