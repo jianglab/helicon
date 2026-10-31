@@ -8,7 +8,7 @@ the classes you select, shows the classes assigned to the selected filaments, an
 micrograph.
 
 ```{image} ../images/whereismyclass.png
-:alt: The WhereIsMyClass app before a file is loaded
+:alt: WhereIsMyClass on the public data of EMPIAR-10940: a filament on its micrograph, marked by class
 :width: 100%
 ```
 
@@ -28,12 +28,10 @@ classes of each filament and the distances between segments work without them.
    the same filament is plotted (see [HelicalPitch](helicalpitch.md)).
 3. **Select a filament** in the table. The classes assigned to it appear under the table, and its micrograph
    on the right, with the segments of the filament marked in a colour for each class. *Mark these classes*
-   chooses which classes are marked; *Select all* and *Unselect all* change them all at once. Use shift and click on the displayed micrograph to measure a disance manually.
-
-```{image} ../images/whereismyclass.png
-:alt: WhereIsMyClass on the public data of EMPIAR-10940: a filament on its micrograph, marked by class
-:width: 100%
-```
+   chooses which classes are marked; *Select all* and *Unselect all* change them all at once.
+   To measure a distance on the micrograph, shift-click one end and move the mouse to the other end
+   with shift held down. A dotted line is drawn, and pointing at it shows its length in Å. A click
+   without shift clears it.
 
 ## The micrographs
 

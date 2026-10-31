@@ -9,6 +9,10 @@ helicon --help               # the programs that are installed
 helicon <program> --help     # the options of one
 ```
 
+The options of `images2star`, `proc3d` and `cryosparc` that change the data are applied one after
+the other, in the order given, and the same option may be given more than once, each time with
+its own value.
+
 | Program | What it does | Needs |
 |---|---|---|
 | [images2star](images2star.md) | Analyze and transform datasets and save them as a RELION star file |  |

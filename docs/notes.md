@@ -39,6 +39,24 @@ difference plot of HILL. Classes of ice, carbon edges and other non-filament par
 filaments that tilt out of the plane of the image, give poor results; choose the clearest classes
 for indexing.
 
+## Denoise micrographs, particles or a map
+
+`helicon images2star --denoiseCurvelet` denoises the micrographs (or the particle images) of a star
+file, and `helicon proc3d --denoiseCurvelet` a 3D map. Both set every threshold from the noise of
+the data themselves, so there is usually nothing to choose:
+
+```sh
+helicon images2star micrographs.star denoised.star --denoiseCurvelet
+helicon proc3d run_class001.mrc denoised.mrc --denoiseCurvelet
+```
+
+For micrographs, `strength=2` (the default) gives a clean view for looking at filaments and picking;
+`strength=1` keeps more fine texture. For a map, Helicon looks for its half maps beside it, by the
+names RELION, CryoSPARC and the EMDB give them (or take `halfMaps=half1.mrc,half2.mrc`), measures
+the noise on their difference and picks the strength with which denoised half map 1 best predicts
+half map 2. The choice is kept, so a second run on the same map is fast. Without half maps it uses
+1.5. A map too large for the memory is denoised in tiles. The output says what was chosen and why.
+
 ## Units
 
 All distances are in Å, angles in degrees.

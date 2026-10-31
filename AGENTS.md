@@ -76,8 +76,10 @@ in a tab.
   A change that makes one worse by more than its tolerance fails; after a change that is meant
   to move a number, run `python tests/update_quality_baselines.py` and commit the diff of the
   file with the change. A new method gets a scenario there.
-- CI (`.github/workflows/ci.yml`): Black, the fast tests and a no-extras install on every
-  push; the whole suite nightly. Install the local hook once with `pre-commit install`.
+- CI (`.github/workflows/ci.yml`): Black, ruff and the private-data check, the fast tests,
+  the docs build (`-W`) and a no-extras install on every push; the whole suite nightly. Install
+  the local hooks once with `pre-commit install --hook-type pre-commit --hook-type commit-msg`
+  (the second checks commit messages for private names, `tools/check_private_names.py`).
 
 **Policy:** every new option added to `proc3d.py`, `images2star.py`, or `cryosparc.py` must be coupled with tests covering both argparse wiring and handler logic. Use in-memory data (numpy arrays, DataFrames, `MockDataset`) rather than file I/O.
 
@@ -128,8 +130,8 @@ when expanding environment variables in paths.
   `webApps/app.py`); what the page needs at start-up (its `BOOKMARK_DEFAULTS`) lives in a
   small module of its own (`<tab>_bookmark.py`).
 - numba: decorate with `lib/numba_compat.lazy_jit("njit", ...)` (compiled on the first
-  call), never import numba at module level; `import helicon` must not load numba,
-  curvepy or h5py (`tests/test_numba_compat.py` checks it).
+  call), never import numba at module level; `import helicon` must not load numba
+  or h5py (`tests/test_numba_compat.py` checks it).
 - Worker processes started from the web app use the `forkserver` context with the
   module preloaded (`layerline_index._pool_context`): spawned workers re-import helicon
   each, and forking a threaded server can hang. Keep heavy imports of a script that

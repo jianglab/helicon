@@ -18,9 +18,13 @@ spectrum of a 2D class average or of a 3D map by moving the **twist**, **pitch**
 ## The screen
 
 **On the left**, three tabs. *Inputs* has the *Input Mode* (*server*, *upload*, *url* or *emd-xxxxx*, an
-EMDB id), the gallery of the images (or the sections of the map) to choose from, and *Image Parameters*
-for the selected image. *Parameters* has the settings that rarely need a change: the out-of-plane tilt and
-whether twist or pitch is kept when the rise changes (*Helical symmetry*), the resolution limits and the
+EMDB id), the gallery of the images (or the sections of the map) to choose from (*Select image(s):*), a
+second gallery of the images you selected, and *Image Parameters (image N)* for the image clicked in the
+second gallery. That panel starts collapsed: click its title to open it. Below them are the transformed
+image, its radial profile, the auto-correlation along the filament, and the *Suggest csym, twist and rise*
+button. *Parameters* has the settings that rarely need a change: the out-of-plane tilt and
+whether twist or pitch is kept when the rise changes (*Helical symmetry*), how the filaments are stood
+upright and centred automatically (*Image alignment*), the resolution limits and the
 size of the Fourier transform (*Fourier transform*), the peak detection of the profile (*Y profile*), what
 the *Layer lines* show, and what is *Display*ed. *Advanced* has more tools.
 
@@ -92,6 +96,60 @@ lines.
 Helical assemblies can have an additional cyclic symmetry: two-fold, three-fold, four-fold and so on.
 The examples below show one with an odd symmetry and one with an even symmetry.
 
+## Several images and automatic suggestion
+
+**Selecting several images.** Click more than one image in the first gallery. The images you selected
+appear in the second gallery (*Selected images (click one to set its transformation):*). Each selected image
+gets its own rotation, shift and mask, estimated automatically when it is first selected; click an image there
+to see its transform and change it with the sliders of *Image Parameters*. HILL remembers the values of each
+image. The selection is kept in the bookmark of the page, so a saved link opens with the same images.
+
+With two or more images selected, two buttons appear below the galleries:
+
+- **Average PS & PD** averages the power spectra and the PD of the selected images, each made with its own
+  transform, and shows the averages. Noise that differs from image to image averages out, and layer lines that
+  the images share stand out.
+- **Auto-stitch** joins the selected images into one longer image. Each image is stood upright by its own
+  transform; the pairs of images are then registered against each other and laid end to end along the
+  filament, as far as their content allows. A progress bar shows the work. The stitched image takes the place
+  of the selection: it is shown as the transformed image, with its radial profile, diameter and
+  auto-correlation, and the power
+  spectrum and the symmetry search use it. A longer image covers more of a helical turn than any single one.
+  The images must be 2D images of one size. To go back to the separate images, change the selection.
+
+**Suggest csym, twist and rise** searches the layer lines of the selected images (or of the stitched image)
+for the helical symmetries that explain them. It tries the cyclic symmetries C1 to C6 and C8, twists of 2° to
+60° and rises of 3 Å to 40 Å. In plain words, it:
+
+- looks for the heights of the layer lines first. The rise and the product csym × twist fix them, so several
+  symmetries can put their lines at the same heights (C4 at 45°, C6 at 30° and C8 at 22.5°, for example);
+- scores each candidate by how well its predicted layer lines fit the power spectrum, times how well the
+  phase differences across the meridian agree with the even or odd Bessel orders it predicts;
+- lowers the score of a candidate that predicts layer lines where the transform has none;
+- among the candidates with the same line heights, reads the Bessel order of each strong layer line from where
+  it starts away from the meridian. This depends on the *Tube/filament diameter (Å)*.
+
+The scores of several images of one helix add up, so several class averages of one helix do better than one.
+The search also uses *Resolution limit X (Å)* (*Parameters*, *Fourier transform*). It needs 2D images (not
+power spectra or maps), all of one size. A progress bar shows the work.
+
+The result is a table, best first, with the *Rank*, *Csym*, *Twist (°)*, *Rise (Å)*, *Pitch (Å)*, *Group*
+and *Score (%)* (relative to the best candidate). Click a row to set the csym, twist and rise to it. A power
+spectrum cannot show the hand of the helix, so the twists keep the sign of the current twist. Candidates in
+the same **Group** put their layer lines at the same heights and differ only in the Bessel order of each line.
+The table lists the first 8 candidates and every other candidate of Group A (the group of the best one).
+
+When Group A has more than one csym, a warning, **Csym is uncertain.**, names them. The layer lines of 2D
+images tell these candidates apart only weakly: their ranking can be wrong even when the twist and rise are
+right, and their scores depend on the diameter, so a low score (even 0%) does not rule one out. When the
+group has odd and even csym, the PD plot tells them apart more reliably.
+
+Treat the table as a suggestion to check, not as the answer. Click the first few rows, and every row of Group
+A, and compare the drawn layer lines with the power spectrum and the PD plot, as in the examples below. Search
+several class averages together, and confirm the choice with a 3D reconstruction ([HI3D](hi3d.md), [Denovo3D](denovo3d.md))
+or a known structure. When the resolution limit is coarser than the rise (in Å), the layer lines of m = 1 or
+−1 are out of reach, and the search cannot tell the rise.
+
 ## Example 1: VipA/VipB
 
 **Example data:** in *Input Mode* select *url*, with the address
@@ -112,10 +170,16 @@ lines show as ellipses only, and *Max M* sets how many orders *m* are drawn.
 ```
 
 Under the image on the left you see the **radial profile**, the distribution of the density across the
-filament. The **diameter** of the filament is a parameter of the indexing: it is used to estimate the
-Bessel order of the layer lines. Do not use the diameter measured at the edge of the filament or at a peak
-of the radial profile. HILL estimates it by default, from a model of a core and a shell, using the centre
-of mass of the density along the radius. Use that estimate, unless the Bessel orders are unclear.
+filament. Below it are two sliders, drawn on the profile as dashed lines: *Mask radius (Å)* (green), beyond
+which the image is masked out (0: no mask), and *Tube/filament diameter (Å)* (orange). The **diameter** of
+the filament is a parameter of the indexing: it decides where each layer line starts away from the
+meridian, and so the Bessel orders of the drawn layer lines and the results of *Suggest csym, twist and
+rise*. Do not use the diameter measured at the edge of the filament or at a peak of the radial profile.
+HILL estimates it from each image: it sums the image along the filament, keeps what stands above a tenth
+of the height of that profile, fits to it a model of a core and a shell, and takes twice the centre of mass
+of the model's density along the radius. The estimate is made again whenever the transformed image changes,
+unless *Inhibit automatic update* (*Parameters*, *Image alignment*) is on. Use that estimate, unless the
+Bessel orders are unclear; to type a value, double-click the number of the slider.
 
 ```{image} ../images/hill/radial-profile.png
 :alt: The transformed image, its radial profile and the diameter
@@ -123,7 +187,11 @@ of mass of the density along the radius. Use that estimate, unless the Bessel or
 ```
 
 Another useful setting is the **resolution limit** on X and Y (*Parameters*, *Fourier transform*). A
-lower limit lets you look at the region close to the centre of the power spectrum and the PD plot.
+lower limit lets you look at the region close to the centre of the power spectrum and the PD plot. In the
+same panel, *Scale the spectra by:* chooses how the power spectrum is shown: *Log + filter* (the default)
+takes the log of the amplitudes and applies a Fourier high-pass and low-pass; *Shell median* divides each
+ring of the transform (one spatial frequency) by its median and then takes the log, so that a layer line
+shows by how far it stands above the background at its own resolution.
 
 ### Estimation of the helical rise
 

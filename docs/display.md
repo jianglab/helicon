@@ -20,7 +20,10 @@ helicon display <folder>    # browse a folder
   next to it limits the list to the names that match (`*` is any text; tick *Regex* for a regular
   expression).
 - **The list** shows the files with their size, type, and, for an image or a stack, the number of
-  images, their dimensions and the pixel size. Click a column to sort.
+  images, their dimensions and the pixel size. Click a column to sort. A **link** (a RELION job linked
+  from another folder, say) has a small arrow on its icon, and its tooltip says where it points. A
+  linked folder opens at the path of the link, not of its target; to go to the target, right-click it
+  (*Go to Linked Folder*, or *Show Linked File in Its Folder* for a file).
 - **The sidebar** has *Places*, the *Bookmarks* you keep (menu *Bookmarks*), and the folders you opened
   last (*Recent*). In a **RELION or CryoSPARC project** it also shows the project: *Project folder*, and
   below it the job types and their jobs, so that you can move between jobs with a click.
@@ -30,8 +33,21 @@ helicon display <folder>    # browse a folder
   name; an empty name gives back the name of the folder.
 - **The preview** on the right shows what the selected file holds: a picture for an image, a stack or a
   map, the table for a star file, the text for a text file, with its size, pixel size and other facts.
-- **The action bar** at the bottom has a button for each way to open the selected file. Which buttons
-  there are depends on the file (below).
+  Below the facts is a button for each way to open the selected file, and the *New window* box. Which
+  buttons there are depends on the file (below). When you hide the preview pane, the buttons go to the
+  bottom of the window.
+  Right-click a picture of the preview (*Save image as…*) to save it as an image file, at its own size,
+  not as it is scaled in the pane.
+- **The preview of a star file** shows more than its table:
+  - a table of micrographs (`micrographs.star` of an import, `corrected_micrographs.star` of a motion
+    correction, `micrographs_ctf.star` of a CTF estimation) shows its first micrograph, with its defocus and
+    the resolution of its CTF fit when the table has them;
+  - the particle table of a RELION Class2D, Class3D or Refine3D job (`run_data.star`,
+    `run_it025_data.star`) shows the micrograph with the most filaments, with a dot at each segment, one
+    colour per filament, and says how many of its filaments are fragmented (have gaps wider than 1.5 times
+    the spacing of the segments).
+
+  Both pictures need more reading than the table, so they come a moment after it.
 
 The window stays responsive while a long folder is listed or a large file is read: the work is done in
 the background, and a folder of tens of thousands of files appears in a moment.
@@ -55,12 +71,12 @@ its files (the files are in the list of the window), and has what is needed to m
   | Extract | the number of particles and micrographs, the average per micrograph, and a few of the particles |
   | Select | the classes and the particles kept, of all of them (2D or 3D), with the percentage of the particles, and the selected 2D class averages |
   | Class2D, 2D classification | the class averages of the last iteration, the most populated first, with the share of the particles of the first few |
-  | Class3D, InitialModel, 3D classification | the central section of each map |
-  | Refine3D, refinement | the central section of the map, the **FSC** curve with the resolution at FSC 0.143 (RELION only: CryoSPARC keeps the curve in its database, not in files), the **views**: how many particles there are at each rotation and tilt angle (the first 300,000 particles) |
+  | Class3D, InitialModel, 3D classification | the central section of each map; for a RELION Class3D, the histogram of the tilt angles of the particles, with their median |
+  | Refine3D, refinement | the central section of the map, the **FSC** curve with the resolution at FSC 0.143 (RELION only: CryoSPARC keeps the curve in its database, not in files), the histogram of the **tilt angles** with their median (RELION), the **views**: how many particles there are at each rotation and tilt angle (the first 300,000 particles) |
   | CtfRefine | the histogram of the change of the defocus of the particles (compared with the input of the job), and the fitted aberrations: beam tilt, higher-order aberrations and anisotropic magnification |
   | Polish (RELION), reference-based motion correction (CryoSPARC) | how much each movie frame contributes at some resolutions: early frames count at high resolution, late ones only at low resolution |
   | PostProcess | the central section of the sharpened map, the FSC curve, the resolution and the B-factor |
-  | MaskCreate | the central section of the mask |
+  | MaskCreate | the central section of the mask, and of the map it was made from multiplied by the mask; *Open masked map* writes that map (to the cache of Helicon) and opens it |
   | Reconstruct3D, reconstruction | the central section of the map |
   | LocalRes | the central section of the local resolution map, and the histogram of its values |
   | ModelAngelo | the number of chains, residues and atoms of the model |
@@ -127,8 +143,8 @@ at that moment is left alone, and you can try again.
 
 ## Open a file
 
-Select the file and click a button of the action bar, or double-click the file. The bar offers only what
-fits the file you selected, in alphabetical order. The buttons that open a viewer window are drawn plain; those
+Select the file and click one of its buttons in the preview pane (below the facts), or double-click the
+file. The buttons offer only what fits the file you selected. The buttons that open a viewer window are drawn plain; those
 that open a web app or a panel of tools are outlined in colour. Tick **New window** to open the file in a
 window of its own instead of the one already open. A file that Helicon cannot read gets no buttons.
 
@@ -149,6 +165,9 @@ window of its own instead of the one already open. A file that Helicon cannot re
 **Ortho Slice**
 : An interactive viewer of the three orthogonal sections (XY, XZ and YZ) of a 3D map, with controls to
   move each section.
+
+**Projection**
+: For a 3D map: its projections along Z, Y and X, side by side in a gallery window.
 
 **ChimeraX**
 : Opens the file in ChimeraX, which must be installed; the button is greyed out, with a note, when Helicon
@@ -181,6 +200,25 @@ window of its own instead of the one already open. A file that Helicon cannot re
   of a 3D classification. If the job folder holds several `model.star` files, you pick the iterations to
   overlay.
 
+### Particles on micrographs
+
+The preview of a RELION star file whose particles have positions on the micrographs (an extraction, a
+selection, a classification, a refinement) has a button, **View particles on micrographs…**. So do the
+listing of a picking job (`manualpick.star`, `autopick.star`), the coordinate file of one micrograph
+(the window then opens at that micrograph), and the folder of a ManualPick, AutoPick or Extract job.
+It opens a window with:
+
+- on the left, the **list of the micrographs**, with the number of particles of each (for helical
+  segments, of segments and filaments; for filaments picked by their start and end, of filaments). Click a
+  column to sort; the *Filter micrographs* box limits the list. Below it, the total, and for a picking job
+  how the picks were made;
+- on the right, the **selected micrograph with its picks** on it, one colour per filament. Single particles
+  are circles as large as the particle diameter of the job, filaments picked by their start and end are
+  bands as wide as the filament, and helical segments are dots. The *Show particles* box (*Show picks* for
+  a picking job) hides them, to see the micrograph alone.
+
+A micrograph that cannot be found is shown as the positions alone, on a plain background.
+
 ### Working on the data
 
 **Images2Star**
@@ -189,13 +227,16 @@ window of its own instead of the one already open. A file that Helicon cannot re
   [`helicon images2star`](commands/images2star.md).
 
 **Proc3D**
-: Opens a panel of tools for a 3D map: flip the hand, clip, resample and more, with the result shown next
-  to the original, and saved as a new MRC file. It is the window version of
+: Opens a panel of tools for a 3D map: flip the hand, clip, resample, denoise (*--denoiseCurvelet*) and
+  more, with the result shown next to the original, and saved as a new MRC file. It is the window version of
   [`helicon proc3d`](commands/proc3d.md).
 
 **TrueFSC**
 : For the `model.star` of a RELION refinement: computes the **True FSC curve** from its two half maps
-  (see [`helicon trueFSC`](commands/trueFSC.md)).
+  (see [`helicon trueFSC`](commands/trueFSC.md)). *Optimize mask* searches the width of the soft edge of
+  the mask, and its threshold too when the threshold is automatic; *Central Z (A)* or *Z fraction* keep only
+  the central Z sections in the automatic mask, for a helical map. Besides the resolution, the
+  *Information* reports the area under the True FSC curve, a measure of the whole curve.
 
 ### A folder of EPU XML files
 
@@ -243,5 +284,7 @@ cryoSPARC's), because that is what the apps are for.
 - Press the *refresh* button after a job has finished writing files.
 - To keep a folder: *Bookmarks* → *Bookmark This Folder* (`Ctrl+D`). *File* → *Recent Folders* lists the
   last ones you opened.
+- *File* → *Quit* (`Ctrl+Q`) closes all the windows of Helicon. The size and place of each window, and the
+  panes, columns and sort of the browser, are saved and come back the next time.
 - The first image viewer or gallery window takes a few seconds to appear, because the viewer is
   loaded when it is first needed. Opening further files is faster.

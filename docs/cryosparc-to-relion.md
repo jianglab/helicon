@@ -46,8 +46,8 @@ tetrafoil of the CTF are not converted: Helicon warns about it when they are not
 can fit them.
 
 **Image files.** A star file for RELION must name stacks that end in `.mrcs`. CryoSPARC writes `.mrc`
-stacks: Helicon makes a `.mrcs` symbolic link next to each one (or in a folder `mrc2mrcs` of the current
-folder, when it cannot write there) and uses the link in the star file. The images themselves are not
+stacks: Helicon makes a `.mrcs` symbolic link next to each one (or, when it cannot write there, in a
+folder `mrc2mrcs` beside the input file, else in the current folder) and uses the link in the star file. The images themselves are not
 copied.
 
 **Paths.** The `--path` option chooses how the files are named in the star file (by default, as they were read): `relative` (to the

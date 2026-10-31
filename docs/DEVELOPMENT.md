@@ -7,10 +7,18 @@ For people who change Helicon. Users: see the [README](../README.md).
 ```sh
 git clone https://github.com/jianglab/helicon.git
 cd helicon
-conda env create -f environment.yml && conda activate helicon   # or: pip install -e ".[all,test]" pytest-xdist
+conda env create -f environment.yml && conda activate helicon
+# or: pip install -e ".[all,test]" pre-commit "black==24.8.0" ruff
 pytest -n auto -m "not slow and not browser"   # the everyday run, a few minutes
-pytest -n auto                                 # everything (browser tests need `playwright install chromium`)
+pytest -n auto                                 # everything (browser tests need `playwright install chromium`,
+                                               # the gauss tests the `gauss` extra: torch)
 pre-commit install --hook-type pre-commit --hook-type commit-msg   # Black, and the names of private data
+```
+
+Before committing, check the formatting with the Black that CI pins (24.8.0) and the lint:
+
+```sh
+python -m black --check src tests tools && python -m ruff check src tests tools
 ```
 
 ## Documentation
@@ -59,8 +67,9 @@ with the change; a new method gets a scenario there.
 The tests that take 8 s or more are marked `slow` (the list is `tests/slow_tests.txt`,
 made by `tests/update_slow_tests.py`), and those that drive a web page are marked
 `browser`. A test run has its own settings folder and never opens a window on your
-screen. On GitHub, every push runs Black, the fast tests and an install with no extras,
-and the whole suite runs every night.
+screen. On GitHub, every push runs Black, ruff and the check for private data (`lint`), the fast
+tests (`fast`), the documentation build with warnings as errors (`docs`), and an install with no
+extras on Python 3.13 and 3.14 (`minimal`); the whole suite runs every night (`full`).
 
 The version comes from the release tags (`v2026.10`), so `helicon --version` in a
 checkout shows the commits since the last tag and the commit hash. Bugs and feature

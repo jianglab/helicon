@@ -39,12 +39,19 @@ def _project(root: Path) -> Path:
     urllib.request.urlretrieve(CLASSES, job / "run_it020_classes.mrcs")
     # what marks a RELION job as helical
     (job / "run_it020_model.star").write_text("data_model_general\n\n_rlnIsHelix 1\n")
+    import math
+
+    # three micrographs of five filaments, twenty segments each, spread over a 4k micrograph:
+    # the preview draws them on the micrograph with the most filaments
     rows = []
     for i in range(300):
+        mic, tube, k = i // 100 + 1, i // 20 + 1, i % 20
+        angle = math.radians(25 * tube)
+        x = 600 + 600 * (tube % 5) + 90 * k * math.cos(angle)
+        y = 700 + 500 * (tube % 5) + 90 * k * math.sin(angle)
         rows.append(
-            f"{i % 40 + 1:06d}@Extract/job009/mic{i // 30 + 1}.mrcs mic{i // 30 + 1}.mrc "
-            f"{100.0 + 4 * (i % 30):.1f} {200.0:.1f} {i // 30 + 1} {i % 40 + 1} 0.0 0.0 0.0 "
-            f"-1 {i % 30}"
+            f"{i % 40 + 1:06d}@Extract/job009/mic{mic}.mrcs mic{mic}.mrc "
+            f"{x:.1f} {y:.1f} {tube} {i % 40 + 1} 0.0 0.0 0.0 -1 {90.0 * k:.1f}"
         )
     (job / "run_it020_data.star").write_text(
         "data_particles\n\nloop_\n_rlnImageName\n_rlnMicrographName\n_rlnCoordinateX\n"
