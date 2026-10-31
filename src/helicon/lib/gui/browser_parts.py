@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -1948,7 +1948,9 @@ class PreviewPane(QWidget):
         self._text = QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFrameShape(QFrame.Shape.NoFrame)
-        self._text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # long lines wrap at the width of the pane, a path without spaces anywhere
+        self._text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._text.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self._note = QLabel("")
         self._note.setWordWrap(True)
         self._note.setObjectName("previewNote")

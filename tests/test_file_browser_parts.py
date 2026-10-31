@@ -651,6 +651,22 @@ class TestPreviewPane:
         assert "Size" in pane._facts.text()
         assert pane._text.isHidden()
 
+    def test_long_lines_of_text_wrap_in_the_pane(self, qapp):
+        pane = bp.PreviewPane()
+        pane.resize(300, 500)
+        pane.show()
+        words = " ".join(["word"] * 200)
+        path = "/very/long/path/" + "x" * 300
+        pane.show_info(
+            dict(title="a.txt", facts=[], image=None, text=words + "\n" + path)
+        )
+        qapp.processEvents()
+        assert pane._text.horizontalScrollBar().maximum() == 0
+        # each of the two lines, with spaces or without, takes several rows of the pane
+        document = pane._text.document()
+        assert document.firstBlock().layout().lineCount() > 3
+        assert document.lastBlock().layout().lineCount() > 3
+
     def test_a_tall_picture_fits_in_the_pane(self, qapp):
         # the central slice of a long, thin map (43 × 123): scaled to the width of the
         # pane it was 1030 pixels tall and covered the facts and the buttons
