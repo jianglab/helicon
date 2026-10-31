@@ -1,6 +1,6 @@
 """Utility functions for de novo helical indexing and 3D reconstruction."""
 
-import itertools, os, sys, pathlib, datetime, logging, joblib
+import itertools, os, sys, pathlib, datetime, logging
 from pathlib import Path
 import numpy as np
 
