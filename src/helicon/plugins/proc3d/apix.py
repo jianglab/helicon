@@ -19,8 +19,9 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--apix",
         type=str,
-        metavar="<param>=<val>:...",
-        help="apix parameter",
+        metavar="<Å>",
+        help="set the pixel size of the map (Å) without changing its voxels: to correct a "
+        "wrong header. Use --fft_resample to change the sampling",
         action="append",
         default=None,
     )

@@ -25,7 +25,11 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "--helical_sym",
         type=str,
         metavar="<param>=<val>:...",
-        help="helical_sym parameter",
+        help="impose helical symmetry: twist (°), rise (Å) and csym (default 1) from a "
+        "central part of the map, given by exactly one of center_len (Å), center_n_rise "
+        "(number of rises) or center_fraction (of the map length). Optional new_apix, "
+        "new_nz and new_nxy (a square cross-section) set the output sampling and box. "
+        "Example: --helical_sym twist=-1.2:rise=4.75:center_fraction=0.3",
         action="append",
         default=None,
     )

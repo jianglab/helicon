@@ -25,7 +25,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "--fft_resample",
         type=str,
         metavar="<param>=<val>:...",
-        help="fft_resample parameter",
+        help="resample the map to new_nx, new_ny, new_nz voxels (by default the current "
+        "size) by cropping or padding its Fourier transform; the pixel size changes to "
+        "match (keep the three ratios equal for an even sampling). "
+        "Example: --fft_resample new_nx=128:new_ny=128:new_nz=128",
         action="append",
         default=None,
     )

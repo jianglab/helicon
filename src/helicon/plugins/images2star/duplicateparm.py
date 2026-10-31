@@ -15,7 +15,7 @@ def add_args(parser):
         metavar="<from> <to>",
         type=str,
         nargs=2,
-        help="duplicate parameter",
+        help="copy the column <from> to a new column <to> (skipped if <to> exists)",
         action="append",
         default=[],
     )

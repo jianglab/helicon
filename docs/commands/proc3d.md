@@ -13,10 +13,10 @@ helicon proc3d input.mrc output.mrc [options]
 ## Options
 
 ```text
-usage: helicon proc3d [-h] [--force <0|1>] [--verbose <0|1|2>] [--cpu <n>]
-                      [--apix <param>=<val>:...] [--clip <param>=<val>:...]
+usage: helicon proc3d [-h] [--force <0|1>] [--verbose <0|1|2>] [--cpu <n>] [--apix <Å>]
+                      [--clip <param>=<val>:...]
                       [--denoiseCurvelet [[strength=<auto|x>][:halfMaps=<half1,half2>][:precision=<single|double>][:tileSize=<auto|n>]]]
-                      [--fft_resample <param>=<val>:...] [--flip_hand <param>=<val>:...]
+                      [--fft_resample <param>=<val>:...] [--flip_hand <x|y|z>]
                       [--helical_sym <param>=<val>:...] [--z_moving_average <param>=<val>:...]
                       <inputMapFile> [<outputMapFile>]
 
@@ -31,10 +31,13 @@ options:
   --force <0|1>         force overwrite the output file. default to 0
   --verbose <0|1|2>     verbose mode. default to 2
   --cpu <n>             number of cpus to use. default to -1 and use all idle cpus
-  --apix <param>=<val>:...
-                        apix parameter
+  --apix <Å>            set the pixel size of the map (Å) without changing its voxels: to
+                        correct a wrong header. Use --fft_resample to change the sampling
   --clip <param>=<val>:...
-                        clip parameter
+                        cut the map to a new box, or pad it with zeros where the box is
+                        larger: new_nx, new_ny, new_nz (voxels; by default the current size)
+                        around center_x, center_y, center_z (voxels; by default the centre of
+                        the map). Example: --clip new_nx=200:new_ny=200
   --denoiseCurvelet [[strength=<auto|x>][:halfMaps=<half1,half2>][:precision=<single|double>][:tileSize=<auto|n>]]
                         denoise the 3D map automatically: monogenic curvelets (sheets and
                         lines) and wavelets (spots), with every sub-band's threshold set from
@@ -54,11 +57,18 @@ options:
                         that fit; n uses tiles of n voxels a side, 0 the whole map. CPU count
                         from --cpu. disabled by default
   --fft_resample <param>=<val>:...
-                        fft_resample parameter
-  --flip_hand <param>=<val>:...
-                        flip_hand parameter
+                        resample the map to new_nx, new_ny, new_nz voxels (by default the
+                        current size) by cropping or padding its Fourier transform; the pixel
+                        size changes to match (keep the three ratios equal for an even
+                        sampling). Example: --fft_resample new_nx=128:new_ny=128:new_nz=128
+  --flip_hand <x|y|z>   flip the hand of the map by mirroring it along this axis
   --helical_sym <param>=<val>:...
-                        helical_sym parameter
+                        impose helical symmetry: twist (°), rise (Å) and csym (default 1) from
+                        a central part of the map, given by exactly one of center_len (Å),
+                        center_n_rise (number of rises) or center_fraction (of the map
+                        length). Optional new_apix, new_nz and new_nxy (a square cross-
+                        section) set the output sampling and box. Example: --helical_sym
+                        twist=-1.2:rise=4.75:center_fraction=0.3
   --z_moving_average <param>=<val>:...
                         apply a moving average filter along the z-axis
 ```

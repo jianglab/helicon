@@ -25,7 +25,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "--clip",
         type=str,
         metavar="<param>=<val>:...",
-        help="clip parameter",
+        help="cut the map to a new box, or pad it with zeros where the box is larger: "
+        "new_nx, new_ny, new_nz (voxels; by default the current size) around center_x, "
+        "center_y, center_z (voxels; by default the centre of the map). "
+        "Example: --clip new_nx=200:new_ny=200",
         action="append",
         default=None,
     )

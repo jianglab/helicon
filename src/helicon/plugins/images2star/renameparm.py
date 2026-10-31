@@ -15,7 +15,7 @@ def add_args(parser):
         metavar="<old> <new>",
         type=str,
         nargs=2,
-        help="rename parameter",
+        help="rename the column <old> to <new> (skipped if <new> exists)",
         action="append",
         default=[],
     )

@@ -158,7 +158,7 @@ options:
                         estimated from each image. Images are written to outdir. CPU count
                         from --cpu. disabled by default
   --duplicateParm <from> <to> <from> <to>
-                        duplicate parameter
+                        copy the column <from> to a new column <to> (skipped if <to> exists)
   --estimateHelicalAngleVariance <0|1>
                         estimate the variance of the tilt, psi, rot angles of segments in the
                         same helical tube/filament
@@ -212,7 +212,7 @@ options:
   --removeDuplicates <var> [<var> ...]
                         remove images with duplicate parameters. disabled by default
   --renameParm <old> <new> <old> <new>
-                        rename parameter
+                        rename the column <old> to <new> (skipped if <new> exists)
   --replaceImageName <new mrcs file>
                         replace rlnImageName column by the provided mrcs file that has the
                         same number of particles

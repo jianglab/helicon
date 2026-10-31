@@ -21,8 +21,8 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--flip_hand",
         type=str,
-        metavar="<param>=<val>:...",
-        help="flip_hand parameter",
+        metavar="<x|y|z>",
+        help="flip the hand of the map by mirroring it along this axis",
         action="append",
         default=None,
     )
