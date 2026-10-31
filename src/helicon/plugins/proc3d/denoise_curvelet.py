@@ -37,10 +37,11 @@ def add_args(parser: argparse.ArgumentParser) -> None:
         "are found by their RELION, cryoSPARC or EMDB names next to the input map "
         "(or given as halfMaps) and this is the first option; otherwise 1.5, the "
         "best on amyloid maps (others wanted up to 6); or a number. Tuning takes "
-        "4-7 extra denoising runs. When the map is a half map or the plain average "
-        "of the two (not filtered or sharpened), every sub-band's noise is measured "
-        "on their difference rather than guessed from the map: closer to the truth, "
-        "with the best strengths near 1. precision: single (default) gave the same maps "
+        "4-7 extra denoising runs (one fewer when the map is half map 1). When the "
+        "map is a half map or the average of the two, also FSC-weighted or "
+        "sharpened (but not masked), every sub-band's noise is measured on their "
+        "difference rather than guessed from the map: closer to the truth, with the "
+        "best strengths near 1. precision: single (default) gave the same maps "
         "as double, "
         "2-3 times faster in half the memory. tileSize: auto (default) denoises the "
         "whole map when it fits in the free memory, otherwise in the largest tiles "
@@ -107,10 +108,10 @@ def handle(
         if n_jobs < 1:
             n_jobs = helicon.available_cpu()
         tile_size = None if tile_size == "auto" else int(tile_size)
-        strength, strength_why, noise, noise_why = _strength(
+        strength, strength_why, noise, noise_why, done = _strength(
             data, args, index_d, param_dict, n_jobs, precision, tile_size
         )
-        data, info = denoise_map(
+        data, info = done or denoise_map(
             data,
             strength=strength,
             workers=n_jobs,
@@ -118,6 +119,7 @@ def handle(
             tile_size=tile_size,
             noise=noise,
         )
+        del noise
         if getattr(args, "verbose", 0):
             tiles = (
                 f"tiles of {info['tile_size']} voxels"
@@ -144,16 +146,19 @@ def _strength(data, args, index_d, param_dict, n_jobs, precision, tile_size):
     """The strength to use and why, and the map's noise from its half maps and why.
 
     The strength is given, tuned on the half maps, or the default. The noise
-    map is None when the half maps are not found or do not match the map.
+    map is None when the half maps are not found or do not match the map. When
+    the map is half map 1 and was just tuned on, the tuning's run at the chosen
+    strength is returned too, so it is not run again.
 
     Returns
     -------
-    tuple of (float, str, numpy.ndarray or None, str)
+    tuple of (float, str, numpy.ndarray or None, str, tuple or None)
+        The last is ``(denoised, info)`` of that run, or None.
     """
     from helicon.lib.denoise import (
         MAP_STRENGTH,
         find_half_maps,
-        half_map_noise,
+        map_noise,
         tune_strength,
     )
 
@@ -169,8 +174,8 @@ def _strength(data, args, index_d, param_dict, n_jobs, precision, tile_size):
 
     def without_halves(why):
         if given is not None:
-            return given, "given", None, why
-        return MAP_STRENGTH, f"the default: {why}", None, why
+            return given, "given", None, why, None
+        return MAP_STRENGTH, f"the default: {why}", None, why, None
 
     if "halfMaps" in param_dict:
         halves = str(param_dict["halfMaps"]).split(",")
@@ -202,40 +207,34 @@ def _strength(data, args, index_d, param_dict, n_jobs, precision, tile_size):
         with mrcfile.open(path, permissive=True) as mrc:
             return np.array(mrc.data, np.float32)
 
-    # the difference is the map's noise only if the map is a half map or their
-    # plain average, not filtered or sharpened
     h1, h2 = (read(h) for h in halves)
-    rms = lambda a: float(
-        np.sqrt(np.mean(np.square(a, dtype=np.float64)))
-    )  # noqa: E731
-    spread = rms(h1 - h2) / 2
-    noise, noise_why = None, "the map is neither a half map nor their plain average"
-    for of, why, ref in (
-        ("half", "the map is a half map", h1),
-        ("half", "the map is a half map", h2),
-        ("average", "the map is the half maps' average", (h1 + h2) / 2),
-    ):
-        if rms(data - ref) < 0.1 * spread:
-            noise, noise_why = half_map_noise(h1, h2, of), why
-            break
-    del h1, h2, ref
+    # the tuning's run on half map 1 at the chosen strength is this run
+    is_half1 = np.array_equal(data, h1)
+    try:
+        noise, noise_why = map_noise(data, h1, h2)
+    except MemoryError:
+        noise, noise_why = None, "not enough memory to compare it with the half maps"
+    del h1, h2
     if given is not None:
-        return given, "given", noise, noise_why
+        return given, "given", noise, noise_why, None
 
     # tuning a large map takes many minutes: keep the answer, keyed by the half
     # maps' paths, sizes and modification times (a changed half map is tuned again)
     @helicon.cache(
         cache_dir=str(helicon.cache_dir / "proc3d"),
-        ignore=["n_jobs", "tile_size"],
+        ignore=["n_jobs", "tile_size", "keep"],
         expires_after=90,
     )
-    def tuned(halves, stamps, precision, noise_from_halves, n_jobs, tile_size):
+    def tuned(
+        halves, stamps, precision, noise_from_halves, n_jobs, tile_size, keep=None
+    ):
         return tune_strength(
             *(read(h) for h in halves),
             workers=n_jobs,
             precision=precision,
             tile_size=tile_size,
             noise_from_halves=noise_from_halves,
+            keep=keep,
         )
 
     halves = [str(Path(h).resolve()) for h in halves]
@@ -249,7 +248,14 @@ def _strength(data, args, index_d, param_dict, n_jobs, precision, tile_size):
     cached = tuned.is_cached(n_jobs=n_jobs, tile_size=tile_size, **key)
     if getattr(args, "verbose", 0) and not cached:
         logger.info("\tdenoiseCurvelet: tuning the strength on %s and %s", *halves)
-    best, scores = tuned(n_jobs=n_jobs, tile_size=tile_size, **key)
+    runs = {}
+
+    def keep(s, score, denoised, info):
+        if is_half1 and (not runs or score < runs["score"]):
+            runs.update(strength=s, score=score, done=(denoised, info))
+
+    best, scores = tuned(n_jobs=n_jobs, tile_size=tile_size, keep=keep, **key)
     tried = ", ".join(f"{s:g}: {v:.4g}" for s, v in sorted(scores.items()))
     how = "found in the cache" if cached else "tuned on the half maps"
-    return best, f"{how}; error per strength {tried}", noise, noise_why
+    done = runs["done"] if runs.get("strength") == best else None
+    return best, f"{how}; error per strength {tried}", noise, noise_why, done

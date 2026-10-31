@@ -515,24 +515,24 @@ class TestProc3dHandlers(object):
 
         def fake_tune(h1, h2, **kwargs):
             tuned.append((h1, h2, kwargs["noise_from_halves"]))
-            return 3.0, {1.5: 2.0, 3.0: 1.0, 6.0: 1.5}
+            scores = {1.5: 2.0, 3.0: 1.0, 6.0: 1.5}
+            for s, score in scores.items():
+                info = dict(strength=s, precision="single", noise_from="tuning")
+                kwargs["keep"](s, score, np.full_like(h1, s), info | self._tiles)
+            return 3.0, scores
 
         def fake_denoise(volume, strength, **kwargs):
             used.append(strength)
             self.noise_used = kwargs["noise"]
-            info = dict(
-                strength=strength,
-                precision="single",
-                noise_from="test",
-                tile_size=None,
-                tiles_why="test",
-            )
-            return volume, info
+            info = dict(strength=strength, precision="single", noise_from="test")
+            return volume, info | self._tiles
 
         monkeypatch.setattr(helicon.lib.denoise, "tune_strength", fake_tune)
         monkeypatch.setattr(helicon.lib.denoise, "denoise_map", fake_denoise)
-        self._denoise(data, args.pop("param", ""), **args)
-        return tuned, used[0]
+        self.result = self._denoise(data, args.pop("param", ""), **args)[0]
+        return tuned, used[0] if used else None
+
+    _tiles = dict(tile_size=None, tiles_why="test")
 
     def test_denoise_curvelet3d_tunes_on_the_half_maps_next_to_the_map(
         self, monkeypatch, tmp_path
@@ -608,19 +608,33 @@ class TestProc3dHandlers(object):
         )
         data = {"half 1": h1, "half 2": h2, "average": (h1 + h2) / 2}[map_is]
         args = dict(inputMapFile=str(path), all_options=["denoiseCurvelet"])
+        self.noise_used = None
         tuned, strength = self._tuned(monkeypatch, data.copy(), **args)
-        assert tuned[0][2] is True and strength == 3.0
-        assert np.allclose(self.noise_used, (h1 - h2) * scale)
+        assert tuned[0][2] is True
+        if map_is == "half 1":
+            # the tuning's run at the chosen strength is the result: not run again
+            assert strength is None and (self.result == 3.0).all()
+            return
+        assert strength == 3.0
+        assert np.allclose(self.noise_used, (h1 - h2) * scale, atol=1e-5)
         # a given strength still uses the noise, without tuning
         tuned, strength = self._tuned(
             monkeypatch, data.copy(), param="strength=2", **args
         )
         assert tuned == [] and strength == 2.0 and self.noise_used is not None
 
-    def test_denoise_curvelet3d_a_sharpened_map_keeps_the_guessed_noise(
-        self, monkeypatch, tmp_path
+    @pytest.mark.parametrize("case", ["unrelated", "short of memory"])
+    def test_denoise_curvelet3d_otherwise_keeps_the_guessed_noise(
+        self, monkeypatch, tmp_path, case
     ):
+        import helicon.lib.denoise
+
+        def no_memory(*args):
+            raise MemoryError
+
         path = self._half_map_files(tmp_path)  # the map is unrelated to its halves
+        if case == "short of memory":
+            monkeypatch.setattr(helicon.lib.denoise, "map_noise", no_memory)
         tuned, strength = self._tuned(
             monkeypatch,
             self.data.copy(),

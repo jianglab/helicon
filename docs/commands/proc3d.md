@@ -43,15 +43,16 @@ options:
                         when the half maps are found by their RELION, cryoSPARC or EMDB names
                         next to the input map (or given as halfMaps) and this is the first
                         option; otherwise 1.5, the best on amyloid maps (others wanted up to
-                        6); or a number. Tuning takes 4-7 extra denoising runs. When the map
-                        is a half map or the plain average of the two (not filtered or
-                        sharpened), every sub-band's noise is measured on their difference
-                        rather than guessed from the map: closer to the truth, with the best
-                        strengths near 1. precision: single (default) gave the same maps as
-                        double, 2-3 times faster in half the memory. tileSize: auto (default)
-                        denoises the whole map when it fits in the free memory, otherwise in
-                        the largest tiles that fit; n uses tiles of n voxels a side, 0 the
-                        whole map. CPU count from --cpu. disabled by default
+                        6); or a number. Tuning takes 4-7 extra denoising runs (one fewer when
+                        the map is half map 1). When the map is a half map or the average of
+                        the two, also FSC-weighted or sharpened (but not masked), every sub-
+                        band's noise is measured on their difference rather than guessed from
+                        the map: closer to the truth, with the best strengths near 1.
+                        precision: single (default) gave the same maps as double, 2-3 times
+                        faster in half the memory. tileSize: auto (default) denoises the whole
+                        map when it fits in the free memory, otherwise in the largest tiles
+                        that fit; n uses tiles of n voxels a side, 0 the whole map. CPU count
+                        from --cpu. disabled by default
   --fft_resample <param>=<val>:...
                         fft_resample parameter
   --flip_hand <param>=<val>:...

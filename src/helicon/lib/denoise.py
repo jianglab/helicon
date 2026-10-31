@@ -909,6 +909,66 @@ def half_map_noise(
     return d
 
 
+def map_noise(
+    volume: np.ndarray, half1: np.ndarray, half2: np.ndarray
+) -> tuple[np.ndarray | None, str]:
+    """A map of the noise of ``volume`` from its half maps, and why.
+
+    The volume may be either half map, or their average through any filter
+    that depends on the spatial frequency alone (FSC weighting, sharpening, a
+    low-pass): the filter is fitted shell by shell and applied to the
+    difference of the halves. A masked or otherwise changed map fits none.
+
+    Parameters
+    ----------
+    volume : numpy.ndarray
+        The map to denoise.
+    half1, half2 : numpy.ndarray
+        Its half maps.
+
+    Returns
+    -------
+    noise : numpy.ndarray or None
+        float32; None when the map is none of these.
+    why : str
+    """
+    import scipy.fft as sf
+
+    x = np.asarray(volume, np.float32)
+    h1, h2 = np.asarray(half1, np.float32), np.asarray(half2, np.float32)
+
+    def rms(a):
+        return float(np.sqrt(np.mean(np.square(a, dtype=np.float64))))
+
+    spread = rms(h1 - h2) / 2
+    if any(rms(x - h) < 0.1 * spread for h in (h1, h2)):
+        return half_map_noise(h1, h2), "the map is a half map"
+    r = np.sqrt(sum(f**2 for f in _freqs(x.shape)))
+    # finer than the Fourier spacing: a steep sharpening changes within a shell
+    shells = np.rint(r * 4 * max(x.shape)).astype(np.int32)
+    del r
+    A = sf.rfftn((h1 + h2) / 2)
+    X = sf.rfftn(x)
+    num = np.bincount(shells.ravel(), (X * A.conj()).real.ravel())
+    den = np.bincount(shells.ravel(), (A.real**2 + A.imag**2).ravel())
+    g = num / np.maximum(den, 1e-30 * den.max())
+    X -= A * g[shells].astype(np.float32)
+    del A
+    residual = rms(sf.irfftn(X, s=x.shape))
+    del X
+    plain = half_map_noise(h1, h2, "average")
+    D = sf.rfftn(plain)
+    D *= g[shells].astype(np.float32)
+    noise = sf.irfftn(D, s=x.shape).astype(np.float32)
+    # RELION's final map, reconstructed from all the particles, is 25% of the
+    # noise off a filtered average: even all noise, that is 3% more of it
+    if residual >= 0.3 * rms(noise):
+        return None, "the map is neither a half map nor a filtered average of the two"
+    if rms(noise - plain) < 0.01 * rms(plain):
+        return plain, "the map is the half maps' average"
+    return noise, "the map is the half maps' average, filtered"
+
+
 def tune_strength(
     half1: np.ndarray,
     half2: np.ndarray,
@@ -916,6 +976,7 @@ def tune_strength(
     precision: str = "single",
     tile_size: int | None = None,
     noise_from_halves: bool = False,
+    keep=None,
 ) -> tuple[float, dict]:
     """The strength whose denoised half map 1 best predicts half map 2.
 
@@ -934,6 +995,10 @@ def tune_strength(
     noise_from_halves : bool
         Denoise half map 1 with its noise from :func:`half_map_noise`; the
         strength is then for maps denoised that way.
+    keep : callable, optional
+        Called as ``keep(strength, score, denoised, info)`` after every run,
+        with the result of :func:`denoise_map` on half map 1: a caller
+        denoising that half map can keep the best one instead of running again.
 
     Returns
     -------
@@ -947,7 +1012,7 @@ def tune_strength(
 
     def score(s):
         if s not in scores:
-            d, _ = denoise_map(
+            d, info = denoise_map(
                 half1,
                 s,
                 workers=workers,
@@ -955,8 +1020,9 @@ def tune_strength(
                 tile_size=tile_size,
                 noise=noise,
             )
-            d -= h2
-            scores[s] = float(np.square(d, dtype=np.float64).mean())
+            scores[s] = float(np.square(d - h2, dtype=np.float64).mean())
+            if keep is not None:
+                keep(s, scores[s], d, info)
         return scores[s]
 
     s = MAP_STRENGTH

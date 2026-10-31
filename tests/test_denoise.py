@@ -223,6 +223,51 @@ class TestMaps:
         with pytest.raises(ValueError, match="noise map"):
             denoise.denoise_map(half1, noise=noise[:-1])
 
+    @pytest.mark.parametrize("map_is", ["half 1", "average", "sharpened", "masked"])
+    def test_the_noise_of_a_half_or_a_filtered_average_is_found(self, map_is):
+        import scipy.fft as sf
+
+        clean, half1 = rods_map(seed=0)
+        _, half2 = rods_map(seed=1)
+        r = np.sqrt(sum(f**2 for f in denoise._freqs(clean.shape)))
+        # sharpened, then low-passed, as maps are
+        gain = {"sharpened": np.exp(20 * r**2) / (1 + (r / 0.33) ** 16)}.get(map_is, 1)
+
+        def filtered(x):
+            return sf.irfftn(sf.rfftn(x) * gain, s=x.shape)
+
+        average = filtered((half1 + half2) / 2)
+        volume = {"half 1": half1, "masked": average * (clean > 0.1)}.get(
+            map_is, average
+        )
+        noise, why = denoise.map_noise(volume, half1, half2)
+        if map_is == "masked":
+            assert noise is None and "neither" in why
+            return
+        truth = (
+            half1 - clean
+            if map_is == "half 1"
+            else filtered((half1 + half2) / 2 - clean)
+        )
+        assert np.std(noise) == pytest.approx(np.std(truth), rel=0.03)
+        assert why.endswith("filtered") == (map_is == "sharpened")
+
+    def test_the_tuning_hands_every_run_to_keep(self):
+        _, half1 = rods_map(n=24, seed=0)
+        _, half2 = rods_map(n=24, seed=1)
+        kept = {}
+        strength, scores = denoise.tune_strength(
+            half1,
+            half2,
+            workers=1,
+            keep=lambda s, score, d, info: kept.update({s: (score, d, info)}),
+        )
+        assert kept.keys() == scores.keys()
+        d, info = kept[strength][1:]
+        assert info["strength"] == strength
+        again, _ = denoise.denoise_map(half1, strength, workers=1)
+        assert np.array_equal(d, again)
+
 
 class TestFindHalfMaps:
     @pytest.mark.parametrize(
