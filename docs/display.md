@@ -215,13 +215,21 @@ It opens a window with:
 - on the left, the **list of the micrographs**, with the number of particles of each (for helical
   segments, of segments and filaments; for filaments picked by their start and end, of filaments). Click a
   column to sort; the *Filter micrographs* box limits the list. Below it, the total, and for a picking job
-  how the picks were made;
+  how the picks were made, the *Micrographs read* box (see below) and, for filaments, the histogram of
+  their lengths;
 - on the right, the **selected micrograph with its picks** on it, one colour per filament. Single particles
   are circles as large as the particle diameter of the job, filaments picked by their start and end are
   bands as wide as the filament, and helical segments are dots. The *Show particles* box (*Show picks* for
   a picking job) hides them, to see the micrograph alone.
 
 A micrograph that cannot be found is shown as the positions alone, on a plain background.
+
+**Micrographs read.** A picking job of many micrographs is read from some of them, spread over the job:
+3,000 unless set otherwise. The counts of the others are estimated from them ("about"), and the
+histogram of the filament lengths and the list of the window show only those read. The
+*Micrographs read* box, under the pictures of the preview of a picking job and under the list of its
+window, sets how many (*All* reads every one). The number is kept, and used by both. A table of
+particles is always read whole.
 
 ### Working on the data
 

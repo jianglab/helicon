@@ -59,8 +59,11 @@ OUTCOME_VERSION = 5
 MAX_TRAJECTORIES = 600
 BLOCK_ROWS = 50_000
 SAMPLE_BLOCKS = 5
-# the most coordinate files of a picking job that are read: the others are counted from these
+# the most coordinate files of a picking job that are read when the settings say nothing: the
+# others are counted from these (see :func:`picks_limit`)
 MAX_COORDINATE_FILES = 3000
+# the key of the settings of Helicon that holds how many coordinate files are read (0: all)
+PICKS_SETTING = "picks/micrographs"
 TILE = 112
 
 
@@ -1194,6 +1197,8 @@ PICK_MODES = ("particles", "startend", "segments", "points")
 _JOB_FOLDER = re.compile(r"job\d+")
 # the files of a picking job that list the coordinate file of each micrograph
 PICK_LISTINGS = ("manualpick.star", "autopick.star")
+# the RELION job types that pick
+_PICK_JOBS = ("ManualPick", "AutoPick")
 # the options of a picking job that give the diameter of a particle (Å), the first one set
 _PARTICLE_DIAMETER_OPTIONS = (
     "diameter",  # ManualPick
@@ -1281,33 +1286,99 @@ def pick_diameter(job: str | Path, mode: str) -> float | None:
     return None
 
 
-def picks_by_micrograph(listing: str | Path) -> dict:
+def _settings():
+    """The settings of Helicon (those of the file browser)."""
+    from PySide6.QtCore import QSettings
+
+    return QSettings("helicon", "display")
+
+
+def picks_limit() -> int:
+    """The most coordinate files of a picking job that are read (one to each micrograph), as
+    saved in the settings of Helicon; 0 for all of them, :data:`MAX_COORDINATE_FILES` when
+    nothing is saved. The preview of a picking job and the window of its picks share it.
+    """
+    value = _settings().value(PICKS_SETTING, MAX_COORDINATE_FILES)
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return MAX_COORDINATE_FILES
+
+
+def set_picks_limit(limit: int) -> None:
+    """Save how many coordinate files of a picking job are read (0: all of them)."""
+    _settings().setValue(PICKS_SETTING, max(int(limit), 0))
+
+
+def spread(total: int, limit: int) -> list[int]:
+    """The indices of ``limit`` items of ``total``, evenly spread over them; all of them when
+    ``limit`` is 0 or at least ``total``."""
+    if limit <= 0 or total <= limit:
+        return list(range(total))
+    step = total / limit
+    return [int(i * step) for i in range(limit)]
+
+
+def picks_by_micrograph(
+    listing: str | Path, limit: int | None = None, include: str | None = None
+) -> dict:
     """The picks of a RELION picking job, by micrograph, from its listing (``manualpick.star``,
     ``autopick.star``) and the coordinate files it names.
 
-    It reads all of the coordinate files, so it is meant to run in a thread.
+    It reads the coordinate files, so it is meant to run in a thread.
+
+    Parameters
+    ----------
+    listing : str or pathlib.Path
+        The listing of the job.
+    limit : int, optional
+        The most micrographs whose coordinate files are read, spread over all of them (0: all);
+        :func:`picks_limit` when not given.
+    include : str, optional
+        A micrograph that is read even when it is not one of those spread over the job.
 
     Returns
     -------
     dict
         ``mode`` (see :data:`PICK_MODES`), ``diameter`` (Å or None), ``picked`` (True: the
         positions are picks, not particles of a table) and ``micrographs``, as
-        :func:`particles_by_micrograph` (a micrograph without picks has none): for filaments picked
-        by their start and end, ``tube`` pairs the two ends of each.
+        :func:`particles_by_micrograph`, those read only (a micrograph without picks has none):
+        for filaments picked by their start and end, ``tube`` pairs the two ends of each. Also
+        ``total`` (the micrographs of the listing), ``sampled`` (those read), ``found`` (the
+        coordinate files found), ``filaments_known`` (True when the filament of each pick is
+        known: start-end picks, or segments with ``rlnHelicalTubeID``) and ``apix`` (the pixel
+        size of the micrographs, Å, for filaments; None if not known).
     """
     import numpy as np
+
+    from .browser_parts import find_project_root
 
     listing = Path(listing)
     table = _star_loop(listing, "coordinate_files")
     mics = table.get("rlnMicrographName", [])
     files = table.get("rlnMicrographCoordinates", [])
+    total = min(len(mics), len(files))
+    chosen = spread(total, picks_limit() if limit is None else limit)
+    if include is not None and include in mics[:total]:
+        k = mics.index(include)
+        if k not in chosen:
+            chosen = sorted(chosen + [k])
+    # the folders the coordinate files are named from, looked for once
+    roots = [find_project_root(listing), listing.parent.parent.parent, listing.parent]
+    roots = [r for r in dict.fromkeys(roots) if r is not None]
     read: dict[str, tuple] = {}
     helical_columns = False
-    for mic, name in zip(mics, files):
-        path = _find_micrograph(name, listing)
+    found_files = 0
+    for k in chosen:
+        mic, name = mics[k], files[k]
+        if Path(name).is_absolute():
+            path = Path(name) if Path(name).is_file() else None
+        else:
+            path = next((r / name for r in roots if (r / name).is_file()), None)
         rows = np.empty((0, 2))
         tube = None
         if path is not None:
+            found_files += 1
             names = _particle_header(path)
             wanted = ["rlnCoordinateX", "rlnCoordinateY"]
             if "rlnHelicalTubeID" in names:
@@ -1334,12 +1405,52 @@ def picks_by_micrograph(listing: str | Path) -> dict:
         elif mode == "particles":
             tube = None
         micrographs[mic] = dict(x=x, y=y, tube=tube)
+    apix = None
+    if mode != "particles" and found_files:
+        found_mics = [m for m, (rows, _t) in read.items() if len(rows)]
+        apix = _pick_pixel_size(listing.parent, listing, found_mics)
     return dict(
         mode=mode,
         diameter=pick_diameter(listing.parent, mode),
         micrographs=micrographs,
         picked=True,
+        total=total,
+        sampled=len(chosen),
+        found=found_files,
+        filaments_known=mode == "startend" or (mode == "segments" and helical_columns),
+        apix=apix,
     )
+
+
+def pick_lengths(found: dict):
+    """The lengths of the filaments picked (pixels), of a result of :func:`picks_by_micrograph`;
+    None when the picks are not filaments, or the filament of each segment is not known.
+    """
+    import numpy as np
+
+    if not found.get("filaments_known"):
+        return None
+    parts = [
+        filament_lengths(p["x"], p["y"], p["tube"], found["mode"])
+        for p in found["micrographs"].values()
+    ]
+    lengths = np.concatenate(parts) if parts else np.empty(0)
+    return lengths if len(lengths) else None
+
+
+def filament_length_histogram(found: dict):
+    """The histogram of the lengths of the filaments picked, of a result of
+    :func:`picks_by_micrograph`: ``(panel or None, fact)`` as :func:`_filament_length_panel`;
+    None when there are no filaments to measure. The plot is drawn with Qt (an application is
+    needed), which a thread may do."""
+    lengths = pick_lengths(found)
+    if lengths is None:
+        return None
+    sampled, total = found.get("sampled", 0), found.get("total", 0)
+    note = ""
+    if sampled < total:
+        note = f" of {sampled:,} micrograph{'s' if sampled != 1 else ''}"
+    return _filament_length_panel(lengths, found.get("apix"), found["mode"], note)
 
 
 def listing_of_coordinates(path: str | Path) -> tuple[Path, str] | None:
@@ -1370,11 +1481,14 @@ def listing_of_coordinates(path: str | Path) -> tuple[Path, str] | None:
     return None
 
 
-def coordinates_by_micrograph(star: str | Path) -> dict:
+def coordinates_by_micrograph(
+    star: str | Path, limit: int | None = None, include: str | None = None
+) -> dict:
     """The positions to show on each micrograph of a star file: the picks of a picking job or the
-    particles of a table, as :func:`picks_by_micrograph`."""
+    particles of a table, as :func:`picks_by_micrograph` (``limit`` and ``include`` are for the
+    picks; a table of particles is read whole)."""
     if is_pick_listing(star):
-        return picks_by_micrograph(star)
+        return picks_by_micrograph(star, limit, include)
     particles = particles_by_micrograph(star)
     helical = any(p["tube"] is not None for p in particles.values())
     return dict(
@@ -2211,7 +2325,12 @@ def _relion_import(folder: Path) -> dict | None:
 
 
 def _picks_outcome(
-    what: str, count: int, micrographs: int, approximate: bool = False, extra=()
+    what: str,
+    count: int,
+    micrographs: int,
+    approximate: bool = False,
+    extra=(),
+    note: str | None = None,
 ) -> dict:
     """The numbers of a picking job: how many were picked, in how many micrographs, and on average.
 
@@ -2225,6 +2344,9 @@ def _picks_outcome(
         True when ``count`` was extrapolated from some of the micrographs.
     extra : sequence of tuple
         More ``(label, value)`` facts, shown after the numbers.
+    note : str, optional
+        What an estimate was made from, when it stays an estimate: the exact number is then
+        not counted in the background (the outcome is not ``approximate``).
     """
     mark = "about " if approximate else ""
     facts = [(what, f"{mark}{count:,}")]
@@ -2235,8 +2357,13 @@ def _picks_outcome(
         )
     facts.extend(extra)
     if approximate:
-        facts.append(("", "estimated; the exact number is being counted"))
-    return dict(title="Picking", panels=[], facts=facts, approximate=approximate)
+        facts.append(("", note or "estimated; the exact number is being counted"))
+    return dict(
+        title="Picking",
+        panels=[],
+        facts=facts,
+        approximate=approximate and note is None,
+    )
 
 
 def _job_option(folder: Path, name: str) -> str | None:
@@ -2346,77 +2473,53 @@ def _filament_length_panel(lengths, apix: float | None, mode: str, note: str = "
 
 
 def _relion_picks(folder: Path, star_name: str) -> dict | None:
-    """Picks of a RELION ManualPick or AutoPick job: the number of picks in the coordinate file
-    of each micrograph (read from all of them up to ``MAX_COORDINATE_FILES``) and, for
-    filaments, the histogram of their lengths."""
-    import numpy as np
+    """Picks of a RELION ManualPick or AutoPick job: the number of picks in the coordinate files
+    of the micrographs (of as many as :func:`picks_limit` says, spread over the job, the others
+    counted from them) and, for filaments, the histogram of their lengths.
 
-    listing_path = folder / star_name
-    listing = _star_loop(listing_path, "coordinate_files")
-    files = listing.get("rlnMicrographCoordinates")
-    if not files:
+    The outcome has ``micrographs_read``, ``{"limit", "sampled", "total"}``: how many
+    micrographs were read, for the preview to offer to read more."""
+    listing = folder / star_name
+    if not listing.is_file():
         return None
-    mics = listing.get("rlnMicrographName", [])
-    total = len(files)
-    chosen = list(range(total))
-    if total > MAX_COORDINATE_FILES:
-        step = total / MAX_COORDINATE_FILES
-        chosen = [int(i * step) for i in range(MAX_COORDINATE_FILES)]
-    roots = [folder.parent.parent, folder]
-    paths = []
-    for k in chosen:
-        path = next((r / files[k] for r in roots if (r / files[k]).is_file()), None)
-        if path is not None:
-            paths.append((mics[k] if k < len(mics) else "", path))
-    if not paths:
+    limit = picks_limit()
+    found = picks_by_micrograph(listing, limit)
+    if not found["found"]:
         return None  # the coordinate files are not here: nothing to count
-    helical_columns = "rlnHelicalTubeID" in _particle_header(paths[0][1])
-    mode = pick_mode(listing_path, helical_columns)
-    rows, filaments, lengths = 0, 0, []
-    for _mic, path in paths:
-        if mode == "particles":
-            scan = _scan_table(path, ("",), ["rlnCoordinateX"], keep=1)
-            rows += scan["rows"] if scan else 0
-            continue
-        wanted = ["rlnCoordinateX", "rlnCoordinateY"]
-        if helical_columns:
-            wanted.append("rlnHelicalTubeID")
-        try:
-            found = list(_particle_rows(path, wanted))
-            x = np.array([float(r[0]) for r in found])
-            y = np.array([float(r[1]) for r in found])
-        except (OSError, ValueError):
-            continue
-        rows += len(found)
-        tube = [r[2] for r in found] if helical_columns else None
-        if mode == "startend":
-            filaments += len(found) // 2
-        elif tube is not None:
-            filaments += len(set(tube))
-        lengths.append(filament_lengths(x, y, tube, mode))
-    approximate = len(chosen) < total
+    total, sampled, mode = found["total"], found["sampled"], found["mode"]
+    picks = list(found["micrographs"].values())
+    rows = sum(len(p["x"]) for p in picks)
+    filaments = 0
+    if found["filaments_known"]:
+        filaments = sum(len(set(p["tube"].tolist())) for p in picks)
+    approximate = sampled < total
+    note = None
     if approximate:
-        rows = round(rows * total / len(paths))
-        filaments = round(filaments * total / len(paths))
+        # a coordinate file that is not there is a micrograph without picks
+        rows = round(rows * total / sampled)
+        filaments = round(filaments * total / sampled)
+        note = f"estimated from {sampled:,} of the micrographs"
     if mode == "particles":
-        return _picks_outcome("Particles", rows, total, approximate)
-    if mode == "startend":
+        outcome = _picks_outcome("Particles", rows, total, approximate, note=note)
+    elif mode == "startend":
         # a filament is picked by its start and its end: two coordinates
-        outcome = _picks_outcome("Filaments", rows // 2, total, approximate)
+        outcome = _picks_outcome("Filaments", filaments, total, approximate, note=note)
     else:
         mark = "about " if approximate else ""
-        extra = [("Filaments", f"{mark}{filaments:,}")] if helical_columns else []
-        outcome = _picks_outcome("Helical segments", rows, total, approximate, extra)
-    lengths = np.concatenate(lengths) if lengths else np.empty(0)
-    if len(lengths):
-        apix = _pick_pixel_size(folder, listing_path, [m for m, _p in paths])
-        plural = "s" if len(paths) != 1 else ""
-        note = f" of {len(paths):,} micrograph{plural}" if approximate else ""
-        panel, fact = _filament_length_panel(lengths, apix, mode, note)
+        extra = (
+            [("Filaments", f"{mark}{filaments:,}")] if found["filaments_known"] else []
+        )
+        outcome = _picks_outcome(
+            "Helical segments", rows, total, approximate, extra, note=note
+        )
+    histogram = filament_length_histogram(found)
+    if histogram is not None:
+        panel, fact = histogram
         # before the note of an estimate, which comes last
         outcome["facts"].insert(len(outcome["facts"]) - int(approximate), fact)
         if panel:
             outcome["panels"].append(panel)
+    outcome["micrographs_read"] = dict(limit=limit, sampled=sampled, total=total)
     return outcome
 
 
@@ -3744,6 +3847,9 @@ def build_outcome(
         outcome = _build(str(folder), kind, job_type, exact)
     else:
         signature = (OUTCOME_VERSION, _signature(folder))
+        if kind == "relion" and folder.parent.name in _PICK_JOBS:
+            # what is read of a picking job is set by the user
+            signature += (picks_limit(),)
         keeper = _keeper()
         # the exact answer, when it was made before, is better than an estimate
         if not exact and keeper.is_cached(str(folder), kind, job_type, True, signature):

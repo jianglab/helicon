@@ -7,7 +7,9 @@ micrograph with the positions on it, drawn as they were picked: a circle as larg
 at each single particle, a band along each filament picked by its start and end, a dot at each
 helical segment with one colour to each filament (see :data:`job_outcome.PICK_MODES`). The table
 is read once, in the background; each micrograph is read when it is selected, also in the
-background, and the last few are kept.
+background, and the last few are kept. Of a picking job, as many micrographs are read as
+:func:`job_outcome.picks_limit` says (a box under the list sets it, :class:`PicksLimit`), and
+for filaments the histogram of their lengths is shown under the list.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -32,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-__all__ = ["MicrographViewer"]
+__all__ = ["MicrographViewer", "PicksLimit"]
 
 # the longest side of the picture of a micrograph in the window
 PICTURE_PIXELS = 1024
@@ -44,23 +47,73 @@ _READING: set = set()
 
 
 class _TableWorker(QThread):
-    """Reads the positions of a table or of a picking job; ``done(found)`` at the end, as
-    :func:`job_outcome.coordinates_by_micrograph`, ``{}`` if it failed."""
+    """Reads the positions of a table or of a picking job; ``done(serial, found)`` at the end,
+    ``found`` as :func:`job_outcome.coordinates_by_micrograph` (``{}`` if it failed) with, for
+    filaments picked, ``histogram``: the histogram of their lengths as
+    :func:`job_outcome.filament_length_histogram`."""
 
-    done = Signal(dict)
+    done = Signal(int, dict)
 
-    def __init__(self, star: str):
+    def __init__(self, serial: int, star: str, include: str | None = None):
         super().__init__()
-        self._star = star
+        self._serial, self._star, self._include = serial, star, include
 
     def run(self) -> None:
-        from .job_outcome import coordinates_by_micrograph
+        from .job_outcome import coordinates_by_micrograph, filament_length_histogram
 
         try:
-            found = coordinates_by_micrograph(self._star)
+            found = coordinates_by_micrograph(self._star, include=self._include)
+            if found.get("picked"):
+                found["histogram"] = filament_length_histogram(found)
         except Exception:
             found = {}
-        self.done.emit(found)
+        self.done.emit(self._serial, found)
+
+
+class PicksLimit(QWidget):
+    """ "Micrographs read [n] of N": how many micrographs of a picking job are read, spread over
+    all of them (``All``: every one). The number is saved (:func:`job_outcome.set_picks_limit`)
+    and shared by the preview of the job and the window of its picks; ``changed(n)`` after it
+    is set."""
+
+    changed = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("Micrographs read"))
+        self.spin = QSpinBox()
+        self.spin.setRange(0, 10_000_000)
+        self.spin.setSingleStep(1000)
+        self.spin.setSpecialValueText("All")
+        self.spin.setGroupSeparatorShown(True)
+        # set when the typing is done (Enter, or the focus leaves), not at each digit
+        self.spin.setKeyboardTracking(False)
+        self.spin.setToolTip(
+            "How many micrographs of the picking job are read, spread over all of them, for "
+            "the counts, the histogram of the filament lengths and the list of the micrographs; "
+            "the others are counted from them. All (0) reads every one. The number is kept, "
+            "and used by the preview of a picking job and by this window."
+        )
+        row.addWidget(self.spin)
+        self._of = QLabel("")
+        row.addWidget(self._of)
+        row.addStretch(1)
+        self.spin.valueChanged.connect(self._on_value)
+
+    def set_counts(self, limit: int, total: int) -> None:
+        """Show the number read and the number of micrographs of the job, without saving."""
+        self.spin.blockSignals(True)
+        self.spin.setValue(limit)
+        self.spin.blockSignals(False)
+        self._of.setText(f"of {total:,}")
+
+    def _on_value(self, value: int) -> None:
+        from .job_outcome import set_picks_limit
+
+        set_picks_limit(value)
+        self.changed.emit(value)
 
 
 class _PictureWorker(QThread):
@@ -139,7 +192,18 @@ class _Picture(QLabel):
 
 class MicrographViewer(QMainWindow):
     """The micrographs of a table of particles or of a picking job: pick one in the list to see
-    its particles on it; ``select`` is the micrograph shown first."""
+    its particles on it; ``select`` is the micrograph shown first.
+
+    For a picking job, a box sets how many of its micrographs are read (:class:`PicksLimit`) and,
+    for filaments, the histogram of their lengths is under the list.
+
+    Signals
+    -------
+    limit_changed(int)
+        The number of micrographs read of a picking job was set in this window.
+    """
+
+    limit_changed = Signal(int)
 
     def __init__(self, star: str | Path, parent=None, select: str | None = None):
         super().__init__(parent)
@@ -176,6 +240,19 @@ class MicrographViewer(QMainWindow):
         self._summary = QLabel("Reading the table…")
         self._summary.setWordWrap(True)
         column.addWidget(self._summary)
+        self._limit = PicksLimit()
+        self._limit.changed.connect(self._on_limit)
+        self._limit.hide()  # for a picking job only
+        column.addWidget(self._limit)
+        self._histogram = _Picture()
+        self._histogram.setMinimumSize(200, 140)
+        self._histogram.hide()  # for filaments picked only
+        column.addWidget(self._histogram, 1)
+        self._histogram_caption = QLabel("")
+        self._histogram_caption.setWordWrap(True)
+        self._histogram_caption.hide()
+        column.addWidget(self._histogram_caption)
+        column.setStretchFactor(self._list, 2)
         splitter.addWidget(left)
 
         right = QWidget()
@@ -205,14 +282,27 @@ class MicrographViewer(QMainWindow):
         self.setCentralWidget(splitter)
         self.resize(1100, 760)
 
-        worker = _TableWorker(self.star)
+        self._serial = 0
+        self.reload()
+
+    def reload(self) -> None:
+        """Read the table again (in the background), keeping the micrograph shown."""
+        self._serial += 1
+        include = self._current if self._current is not None else self._first
+        worker = _TableWorker(self._serial, self.star, include)
         worker.done.connect(self._on_table)
         _start(worker)
+
+    def _on_limit(self, value: int) -> None:
+        self._summary.setText("Reading the table…")
+        self.reload()
+        self.limit_changed.emit(value)
 
     def set_theme(self, colors: dict[str, str]) -> None:
         self._muted = colors.get("muted", self._muted)
         self._summary.setStyleSheet(f"color: {self._muted};")
         self._caption.setStyleSheet(f"color: {self._muted};")
+        self._histogram_caption.setStyleSheet(f"color: {self._muted};")
         if "alt" in colors:
             self._picture.setStyleSheet(
                 f"background: {colors['alt']}; border-radius: 4px;"
@@ -220,9 +310,18 @@ class MicrographViewer(QMainWindow):
 
     # ── the list ───────────────────────────────────────────────────────────
 
-    def _on_table(self, found: dict) -> None:
+    def _on_table(self, serial: int, found: dict) -> None:
+        if serial != self._serial:
+            return  # read again meanwhile, with another number of micrographs
         particles = found.get("micrographs") or {}
         self._particles = particles
+        keep = self._current
+        self._list.blockSignals(True)
+        self._list.setSortingEnabled(False)
+        self._list.clear()
+        self._list.blockSignals(False)
+        self._show_limit(found)
+        self._show_histogram(found.get("histogram"))
         if not particles:
             self._summary.setText("No particles with positions in this table")
             self._picture.set_message("No particles with positions in this table")
@@ -261,10 +360,43 @@ class MicrographViewer(QMainWindow):
             if self._diameter:
                 summary += f", {self._diameter:g} Å across"
         self._summary.setText(summary)
+        self._current = None
         self._list.setCurrentItem(self._list.topLevelItem(0))
-        if self._first is not None:
-            self.select(self._first)
+        first = keep if keep is not None else self._first
+        if first is not None:
+            self.select(first)
         self._list.setFocus()
+
+    def _show_limit(self, found: dict) -> None:
+        """The box of the number of micrographs read, for a picking job."""
+        from .job_outcome import picks_limit
+
+        if not found.get("picked") or "total" not in found:
+            self._limit.hide()
+            return
+        self._limit.set_counts(picks_limit(), found["total"])
+        self._limit.show()
+
+    def _show_histogram(self, histogram) -> None:
+        """The histogram of the lengths of the filaments picked, under the list; ``histogram``
+        as :func:`job_outcome.filament_length_histogram`."""
+        panel = histogram[0] if histogram else None
+        if panel is None:
+            self._histogram.hide()
+            self._histogram_caption.hide()
+            return
+        self._histogram.set_array(panel["image"])
+        self._histogram.show()
+        self._histogram_caption.setText(panel["caption"])
+        self._histogram_caption.show()
+
+    def reads_picks(self) -> bool:
+        """If the window shows the picks of a picking job (not a table of particles)."""
+        return not self._limit.isHidden()
+
+    def histogram_shown(self) -> bool:
+        """If the histogram of the lengths of the filaments is shown (for tests)."""
+        return not self._histogram.isHidden()
 
     def _apply_filter(self, text: str) -> None:
         text = text.strip().lower()

@@ -1181,6 +1181,130 @@ class TestTheLengthOfTheFilamentsPicked:
         assert "filaments of 1 micrograph," in panel["caption"]
 
 
+def _pump(qapp, window, until=lambda: False, rounds=200):
+    """Let the reads in the background of a window (or a preview pane) end; True if ``until``
+    became true."""
+    import time
+
+    for _ in range(rounds):
+        window.wait()
+        qapp.processEvents()
+        if until():
+            return True
+        time.sleep(0.01)
+    return until()
+
+
+class TestHowManyMicrographsAreRead:
+    def test_the_saved_number(self):
+        assert jo.picks_limit() == jo.MAX_COORDINATE_FILES  # nothing saved
+        jo.set_picks_limit(500)
+        assert jo.picks_limit() == 500
+        jo.set_picks_limit(0)
+        assert jo.picks_limit() == 0
+        jo.set_picks_limit(-3)
+        assert jo.picks_limit() == 0
+
+    def test_the_micrographs_read_are_spread_over_the_job(self):
+        assert jo.spread(10, 4) == [0, 2, 5, 7]
+        assert jo.spread(3, 0) == [0, 1, 2]
+        assert jo.spread(3, 5) == [0, 1, 2]
+
+    def test_the_preview_reads_as_many_as_saved_and_says_so(self, relion):
+        job = TestThePicking._job(relion, picks=(2,) * 12)
+        jo.set_picks_limit(4)
+        outcome = jo.build_outcome(job, "relion")
+        facts = dict(outcome["facts"])
+        assert facts["Particles"] == "about 24"
+        assert facts[""] == "estimated from 4 of the micrographs"
+        assert outcome["micrographs_read"] == dict(limit=4, sampled=4, total=12)
+        # an estimate from some of the micrographs is not counted again in the background
+        assert "refine" not in outcome
+        # the number is part of the key of the cache: all of them are read now
+        jo.set_picks_limit(0)
+        outcome = jo.build_outcome(job, "relion")
+        assert dict(outcome["facts"])["Particles"] == "24"
+        assert outcome["micrographs_read"] == dict(limit=0, sampled=12, total=12)
+
+    def test_a_micrograph_asked_for_is_read_too(self, relion):
+        listing = _pick_job(relion)
+        found = jo.picks_by_micrograph(listing, limit=1)
+        assert list(found["micrographs"]) == ["MotionCorr/job002/mic_a.mrc"]
+        assert (found["sampled"], found["total"], found["found"]) == (1, 2, 1)
+        found = jo.picks_by_micrograph(
+            listing, limit=1, include="MotionCorr/job002/mic_b.mrc"
+        )
+        assert len(found["micrographs"]) == 2
+
+    def test_the_box_of_the_preview_sets_the_number_and_reads_again(self, qapp, relion):
+        job = TestThePicking._job(relion, picks=(2,) * 12)
+        (relion / "default_pipeline.star").write_text("data_pipeline_general\n")
+        jo.set_picks_limit(4)
+        pane = bp.PreviewPane()
+        pane.show()
+        pane.show_path(str(job))
+        assert _pump(qapp, pane, lambda: pane._picks_limit is not None)
+        assert "about 24" in pane._facts.text()
+        box = pane._picks_limit
+        assert box.spin.value() == 4 and box._of.text() == "of 12"
+        box.spin.setValue(0)  # All
+        assert jo.picks_limit() == 0
+        assert _pump(qapp, pane, lambda: "about" not in pane._facts.text())
+        assert ">24<" in pane._facts.text()
+        assert pane._picks_limit.spin.text() == "All"
+
+    def test_a_job_that_did_not_pick_has_no_box(self, qapp, relion):
+        job = relion / "Import" / "job001"
+        _star_file(
+            job / "movies.star",
+            _loop("movies", ["rlnMicrographMovieName"], [("a",), ("b",)]),
+        )
+        pane = bp.PreviewPane()
+        pane.show_info(bp.build_preview(job))
+        assert pane._picks_limit is None
+
+    def test_the_window_shows_the_lengths_and_reads_as_many_as_set(self, qapp, relion):
+        from helicon.lib.gui.micrograph_viewer import MicrographViewer
+
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        window = MicrographViewer(listing)
+        window.show()
+        assert _pump(qapp, window, lambda: window.micrographs() != [])
+        assert window.reads_picks() and window._limit._of.text() == "of 2"
+        assert window.histogram_shown()
+        assert window._histogram_caption.text().startswith(
+            "2 filaments, from the start to the end"
+        )
+        changed = []
+        window.limit_changed.connect(changed.append)
+        window._limit.spin.setValue(1)
+        assert changed == [1] and jo.picks_limit() == 1
+        assert _pump(qapp, window, lambda: len(window.micrographs()) == 1)
+        # the micrograph shown is kept
+        assert window.micrographs() == ["MotionCorr/job002/mic_a.mrc"]
+        window.close()
+
+    def test_the_window_of_single_particles_has_no_histogram(self, qapp, relion):
+        from helicon.lib.gui.micrograph_viewer import MicrographViewer
+
+        window = MicrographViewer(_pick_job(relion))
+        window.show()
+        assert _pump(qapp, window, lambda: window.micrographs() != [])
+        assert window.reads_picks() and not window.histogram_shown()
+        window.close()
+
+    def test_the_window_of_a_table_of_particles_reads_all_of_it(self, qapp, relion):
+        from helicon.lib.gui.micrograph_viewer import MicrographViewer
+
+        star = relion / "Extract/job005/particles.star"
+        _single_particle_table(star)
+        window = MicrographViewer(star)
+        window.show()
+        assert _pump(qapp, window, lambda: window.micrographs() != [])
+        assert not window.reads_picks() and not window.histogram_shown()
+        window.close()
+
+
 class TestTheSelection:
     @staticmethod
     def _classification(relion, classes=10, per_class=20, kind="Class2D"):

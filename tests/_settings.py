@@ -10,6 +10,8 @@ _MODULES = (
     "helicon.lib.gui.browser_style",
     "helicon.lib.gui.browser_model",
 )
+# the modules that make their QSettings in a function ``_settings`` (imported when used)
+_ACCESSORS = ("helicon.lib.gui.job_outcome",)
 
 
 def own_settings(monkeypatch, ini_path) -> None:
@@ -23,6 +25,8 @@ def own_settings(monkeypatch, ini_path) -> None:
         module = importlib.import_module(name)
         if hasattr(module, "QSettings"):
             monkeypatch.setattr(module, "QSettings", factory)
+    for name in _ACCESSORS:
+        monkeypatch.setattr(importlib.import_module(name), "_settings", factory)
 
 
 def use_theme(monkeypatch, theme: str) -> None:

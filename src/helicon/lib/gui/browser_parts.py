@@ -1945,6 +1945,10 @@ class PreviewPane(QWidget):
         self._outcome_panels: list[tuple[QLabel, "np.ndarray"]] = []  # noqa: F821
         # the button of a mask job that opens its map multiplied by the mask
         self._masked_button: QToolButton | None = None
+        # how many micrographs of a picking job are read (job_outcome.picks_limit)
+        self._picks_limit = None
+        # the path shown, to read again when what is read of it changes
+        self._path: str | None = None
         self._text = QPlainTextEdit()
         self._text.setReadOnly(True)
         self._text.setFrameShape(QFrame.Shape.NoFrame)
@@ -1992,6 +1996,7 @@ class PreviewPane(QWidget):
 
     def clear(self) -> None:
         self._serial += 1
+        self._path = None
         self._title.setText("")
         self._picture.hide()
         self._facts.setText("")
@@ -2013,6 +2018,7 @@ class PreviewPane(QWidget):
             self.clear()
             return
         self._serial += 1
+        self._path = str(path)
         self._title.setText(Path(path).name or str(path))
         self._note.setText("Reading…")
         self._note.show()
@@ -2167,7 +2173,9 @@ class PreviewPane(QWidget):
 
     def _show_outcome(self, outcome: dict | None) -> None:
         """Show what a job made: each picture with its title and a line of caption."""
-        if not outcome or not outcome["panels"]:  # counts only: the facts above say it
+        read = (outcome or {}).get("micrographs_read")
+        if not outcome or not (outcome["panels"] or read):
+            # counts only: the facts above say it
             if self._outcome_scroll is not None:
                 self._outcome_scroll.hide()
             return
@@ -2179,6 +2187,7 @@ class PreviewPane(QWidget):
                 item.widget().deleteLater()
         self._outcome_panels = []
         self._masked_button = None
+        self._picks_limit = None
         for panel in outcome["panels"]:
             heading = QLabel(panel["title"])
             font = heading.font()
@@ -2213,9 +2222,37 @@ class PreviewPane(QWidget):
                 column.count() - 1, button, 0, Qt.AlignmentFlag.AlignLeft
             )
             self._masked_button = button
+        if read:
+            # a picking job: how many of its micrographs are read, to read more or fewer
+            from .micrograph_viewer import PicksLimit
+
+            box = PicksLimit()
+            box.set_counts(read["limit"], read["total"])
+            box.changed.connect(self._on_picks_limit)
+            column.insertWidget(column.count() - 1, box)
+            self._picks_limit = box
         self._fit_outcome()
         self._outcome_scroll.show()
         self._outcome_scroll.verticalScrollBar().setValue(0)
+
+    def _read_again(self, _value=None) -> None:
+        """Make the preview of the path shown again (what is read of it has changed)."""
+        if self._path is not None:
+            self.show_path(self._path)
+
+    def _on_picks_limit(self, _value=None) -> None:
+        """The number of micrographs read of a picking job was set here: the preview and the
+        windows of picks read again."""
+        self._read_again()
+        for window in list(self._micrograph_windows.values()):
+            if window.reads_picks():  # a table of particles is read whole anyway
+                window.reload()
+
+    def _on_window_limit(self, _value=None) -> None:
+        """The number of micrographs read was set in a window of picks: a picking job in the
+        preview is read again."""
+        if self._picks_limit is not None:
+            self._read_again()
 
     def _fit_outcome(self) -> None:
         """Scale the pictures of the job to the width of the pane."""
@@ -2321,6 +2358,7 @@ class PreviewPane(QWidget):
             window.select(self._micrographs_first)
         if window is None:
             window = MicrographViewer(star, self.window(), self._micrographs_first)
+            window.limit_changed.connect(self._on_window_limit)
             window.destroyed.connect(
                 lambda _=None, s=star: self._micrograph_windows.pop(s, None)
             )
