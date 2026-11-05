@@ -180,7 +180,8 @@ window of its own instead of the one already open. A file that Helicon cannot re
 : The 2D class averages of a Class2D job. The panel at the side sorts them by abundance (the number
   of particles of each), by name, or not at all (the order of the `model.star`); when the `model.star` has a
   `rlnHelicalType` column, also by helical type (the default then: grouped by type, the most probable
-  class first within a type). **Label columns** picks the columns of the `model.star` shown on each image.
+  class first within a type). **Label columns** picks the columns of the `model.star` shown on each image;
+  rest the mouse on an image to see all of them.
 
 **3D Plot**
 : For a `.bild` file: the 3D coordinates it holds, drawn.

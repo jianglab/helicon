@@ -186,29 +186,29 @@ class TestLabels:
         gallery._apply_sort()
         assert gallery._make_labels()[0] == "Class 1\nClassDistribution: 30.0%"
 
-    def test_helical_defaults_show_the_type(self, tmp_path):
+    def test_helical_defaults_are_the_type_and_abundance(self, tmp_path):
         gallery = _gallery(tmp_path, helical=True)
-        assert gallery._label_columns == [
-            "Class",
-            "rlnClassDistribution",
-            "rlnHelicalType",
-            "rlnHelicalTypeProbability",
-        ]
+        assert gallery._label_columns == ["rlnHelicalType", "rlnClassDistribution"]
         # first tile: class 3
-        assert gallery._labels[0] == (
-            "Class 3\nClassDistribution: 25.0%\nHelicalType: 1\n"
-            "HelicalTypeProbability: 0.95"
-        )
+        assert gallery._labels[0] == "HelicalType: 1\nClassDistribution: 25.0%"
 
     def test_menu_offers_every_column_but_the_image(self, tmp_path):
         gallery = _gallery(tmp_path, helical=True)
+        # the helical columns come first, after the class number
         assert gallery._available_label_columns() == [
             "Class",
-            "rlnClassDistribution",
-            "rlnAccuracyRotations",
             "rlnHelicalType",
             "rlnHelicalTypeProbability",
+            "rlnClassDistribution",
+            "rlnAccuracyRotations",
         ]
+
+    def test_lines_follow_the_menu_order(self, tmp_path):
+        gallery = _gallery(tmp_path / "a", helical=True)
+        gallery._label_columns = ["rlnClassDistribution", "Class"]
+        gallery._save_settings()
+        again = _gallery(tmp_path / "b", helical=True)
+        assert again._label_columns == ["Class", "rlnClassDistribution"]
 
     def test_chosen_columns_only(self, tmp_path):
         gallery = _gallery(tmp_path, helical=False)
@@ -216,6 +216,16 @@ class TestLabels:
         assert set(gallery._make_labels()) == {"AccuracyRotations: 1.25"}
         gallery._label_columns = []
         assert gallery._make_labels() == [""] * 5
+
+    def test_tooltip_lists_every_column(self, tmp_path):
+        gallery = _gallery(tmp_path, helical=True)
+        # first tile: class 3, whatever the labels show
+        gallery._label_columns = []
+        assert gallery._make_tooltips()[0] == (
+            "Class 3\nHelicalType: 1\nHelicalTypeProbability: 0.95\n"
+            "ClassDistribution: 25.0%\nAccuracyRotations: 1.25"
+        )
+        assert len(gallery._tooltips) == 5
 
     def test_choice_is_saved(self, tmp_path):
         gallery = _gallery(tmp_path / "a", helical=False)
@@ -245,19 +255,42 @@ class TestPanel:
             assert combo.checked_items() == gallery._label_columns
             rows = [combo.model().item(r).text() for r in range(combo.count())]
 
-            # untick everything but the class number
-            for col in ("rlnClassDistribution", "rlnHelicalType"):
+            assert widget._labels[0] == "HelicalType: 1\nClassDistribution: 25.0%"
+
+            # only the class number
+            for col in ("Class", "rlnClassDistribution", "rlnHelicalType"):
                 combo.toggle_item(rows.index(col))
-            combo.toggle_item(rows.index("rlnHelicalTypeProbability"))
             assert combo.checked_items() == ["Class"]
             assert widget._labels[:2] == ["Class 3", "Class 5"]
             assert combo.display_text() == "Class"
 
             # what the gallery draws for several lines
-            combo.toggle_item(rows.index("rlnHelicalType"))
-            assert widget._labels[0] == "Class 3\nHelicalType: 1"
+            combo.toggle_item(rows.index("rlnHelicalTypeProbability"))
+            assert widget._labels[0] == "Class 3\nHelicalTypeProbability: 0.95"
             window.resize(400, 400)
             assert not widget.grab().isNull()
+        finally:
+            window.close()
+
+    def test_hover_shows_the_class_and_follows_the_sort(self, qapp, tmp_path):
+        from PySide6.QtCore import QEvent, QPoint
+        from PySide6.QtGui import QHelpEvent
+
+        gallery, window, panel, widget = self._open(tmp_path, helical=True)
+        try:
+            window.resize(600, 400)
+            widget.grab()  # lay the tiles out
+            first = widget._coords[0].center()
+            assert widget.tooltip_at(first).startswith("Class 3\n")
+            # nothing between the tiles or past the last one
+            assert widget.tooltip_at(QPoint(-5, -5)) == ""
+
+            panel._sort_column_combo.setCurrentText("None")
+            widget.grab()
+            assert widget.tooltip_at(widget._coords[0].center()).startswith("Class 1\n")
+
+            event = QHelpEvent(QEvent.ToolTip, first, widget.mapToGlobal(first))
+            assert widget.event(event)
         finally:
             window.close()
 
@@ -276,7 +309,7 @@ class TestPanel:
 
             sort_combo.setCurrentText("None")
             assert _class_order(gallery) == [1, 2, 3, 4, 5]
-            assert widget._labels[0].startswith("Class 1\n")
+            assert widget._labels[0] == "HelicalType: 2\nClassDistribution: 30.0%"
 
             # abundance comes with its own direction: large first
             sort_combo.setCurrentText("Abundance")

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionComboBox,
     QStylePainter,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -919,6 +920,7 @@ class ImageGalleryWidget(QWidget):
         self._img_h = 0
         self._dtype = None
         self._labels: list[str] | None = None
+        self._tooltips: list[str] | None = None
         self._source_name: str | None = None
         self._scale = 1.0
         self._scroll_y = 0
@@ -1034,6 +1036,8 @@ class ImageGalleryWidget(QWidget):
         self._img_h = int(img_h)
         self._dtype = dtype
         self._labels = labels
+        # tooltips belong to the old images; set_tooltips gives new ones
+        self._tooltips = None
         self._source_name = source_name
         self._panel = GalleryPanel(self._n, self._img_w, self._img_h)
         self._coords = {}
@@ -1043,6 +1047,42 @@ class ImageGalleryWidget(QWidget):
         self._selected_idx = None
 
         self.update()
+
+    def set_tooltips(self, tooltips: list[str] | None) -> None:
+        """Set the text shown when the mouse rests on an image.
+
+        Parameters
+        ----------
+        tooltips : list of str or None
+            One text per image, in gallery order; an empty text, or None for
+            all, shows no tooltip.
+        """
+        self._tooltips = tooltips
+
+    def tooltip_at(self, pos) -> str:
+        """The tooltip of the image drawn at ``pos``, or "" if none."""
+        idx = self._index_at(pos)
+        if idx is None or not self._tooltips or idx >= len(self._tooltips):
+            return ""
+        return self._tooltips[idx]
+
+    def _index_at(self, pos) -> int | None:
+        """Index of the image drawn at widget position ``pos``, if any."""
+        for i, rect in self._coords.items():
+            if rect.contains(pos):
+                return i
+        return None
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.ToolTip:
+            text = self.tooltip_at(event.pos())
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
+            else:
+                QToolTip.hideText()
+                event.ignore()
+            return True
+        return super().event(event)
 
     def invalidate_frames(self) -> None:
         """Drop the cached frames and pixmaps and repaint.
@@ -1468,13 +1508,12 @@ class ImageGalleryWidget(QWidget):
             and not self._dragged
             and not self._scrubbing
         ):
-            for i, rect in self._coords.items():
-                if rect.contains(event.pos()):
-                    self._selected_idx = i
-                    self._thumb_cache.clear()
-                    self.image_activated.emit(i)
-                    self.update()
-                    break
+            i = self._index_at(event.pos())
+            if i is not None:
+                self._selected_idx = i
+                self._thumb_cache.clear()
+                self.image_activated.emit(i)
+                self.update()
         if event.button() == Qt.RightButton and not self._dragged:
             self._show_save_menu(event.pos())
         self._drag_last = None

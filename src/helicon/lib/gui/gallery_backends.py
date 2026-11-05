@@ -67,6 +67,8 @@ class BaseGallery:
         self._img_h = 0
         self._apix = 1.0
         self._labels: list[str] = []
+        # text shown when the mouse rests on an image, one per image (optional)
+        self._tooltips: list[str] | None = None
         self._read_fn: Callable[[int], np.ndarray] | None = None
 
     def open(self, reuse_window: Any | None = None, tracker=None) -> Any | None:
@@ -107,6 +109,7 @@ class BaseGallery:
             labels=self._labels,
             source_name=Path(self.star_path).name,
         )
+        widget.set_tooltips(self._tooltips)
 
         from helicon.commands.display import _wrap_gallery_with_panel
 
@@ -749,6 +752,7 @@ class Class2dGallery(BaseGallery):
         self._load_settings()
         self._apply_sort()
         self._labels = self._make_labels()
+        self._tooltips = self._make_tooltips()
         self._parsed = True
 
     @property
@@ -774,16 +778,26 @@ class Class2dGallery(BaseGallery):
         return column == "Abundance"
 
     def _available_label_columns(self) -> list[str]:
-        """The entries of the label menu: the class number, then the table columns."""
-        cols = [c for c in self._table if c != "rlnReferenceImage"]
-        return [self.CLASS_LABEL] + cols
+        """The entries of the label menu, in the order the label lines take.
+
+        The class number, the helical type columns, then the other columns of
+        the table in file order.
+        """
+        helical = ["rlnHelicalType", "rlnHelicalTypeProbability"]
+        first = [c for c in helical if c in self._table]
+        rest = [c for c in self._table if c != "rlnReferenceImage" and c not in first]
+        return [self.CLASS_LABEL] + first + rest
+
+    def _in_menu_order(self, columns: list[str]) -> list[str]:
+        """``columns`` that the menu offers, in the order of the menu."""
+        wanted = set(columns)
+        return [c for c in self._available_label_columns() if c in wanted]
 
     def _default_label_columns(self) -> list[str]:
-        defaults = [self.CLASS_LABEL, self._dist_column]
         if self.has_helical_type:
-            defaults += ["rlnHelicalType", "rlnHelicalTypeProbability"]
-        available = self._available_label_columns()
-        return [c for c in defaults if c in available]
+            # sorted by type: the type and the abundance are what to compare
+            return self._in_menu_order(["rlnHelicalType", self._dist_column])
+        return self._in_menu_order([self.CLASS_LABEL, self._dist_column])
 
     def _load_settings(self) -> None:
         self._sort_columns = ["Helical Type"] if self.has_helical_type else []
@@ -795,7 +809,6 @@ class Class2dGallery(BaseGallery):
         self._sort_column = column if column in self._sort_columns else default_sort
         self._sort_reverse = self._saved_reverse(self._sort_column)
 
-        available = self._available_label_columns()
         saved = settings.value(f"{prefix}label_columns", None)
         if isinstance(saved, str):
             # QSettings returns a one-item list as a plain string on some
@@ -804,7 +817,7 @@ class Class2dGallery(BaseGallery):
         if saved is None:
             self._label_columns = self._default_label_columns()
         else:
-            self._label_columns = [c for c in saved if c in available]
+            self._label_columns = self._in_menu_order(saved)
 
     def _saved_reverse(self, column: str) -> bool:
         settings = self._get_settings()
@@ -878,13 +891,13 @@ class Class2dGallery(BaseGallery):
             return value
         return f"{v:.4g}"
 
-    def _make_labels(self) -> list[str]:
-        """One label per tile: a line per chosen column, in the menu's order."""
-        labels = []
+    def _class_text(self, columns: list[str]) -> list[str]:
+        """Per tile, in gallery order: a line per column of ``columns``."""
+        texts = []
         for pos in range(self._n):
             orig_idx = self._order[pos]
             lines = []
-            for col in self._label_columns:
+            for col in columns:
                 if col == self.CLASS_LABEL:
                     lines.append(f"Class {orig_idx + 1}")
                     continue
@@ -894,8 +907,16 @@ class Class2dGallery(BaseGallery):
                 short = col[3:] if col.startswith("rln") else col
                 value = self._format_label_value(col, values[orig_idx])
                 lines.append(f"{short}: {value}")
-            labels.append("\n".join(lines))
-        return labels
+            texts.append("\n".join(lines))
+        return texts
+
+    def _make_labels(self) -> list[str]:
+        """One label per tile: a line per chosen column, in the menu's order."""
+        return self._class_text(self._label_columns)
+
+    def _make_tooltips(self) -> list[str]:
+        """One tooltip per tile: every column of the class, chosen or not."""
+        return self._class_text(self._available_label_columns())
 
     def _read_image(self, i: int) -> np.ndarray:
 
@@ -935,6 +956,8 @@ class Class2dGallery(BaseGallery):
                 self._apply_sort()
             widget._labels = self._make_labels()
             if resort:
+                self._tooltips = self._make_tooltips()
+                widget.set_tooltips(self._tooltips)
                 widget.invalidate_frames()
             widget.update()
 
