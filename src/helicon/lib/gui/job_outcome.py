@@ -10,7 +10,7 @@ defocus and of the resolution of the fits, for a CTF refinement the change of th
 aberrations, for a motion correction the histogram of the total motion and the trajectories of a few
 micrographs, for a polishing the contribution of each movie frame at some resolutions, and for the jobs
 that import, pick, extract or select particles the numbers (and, for an extraction, a few of the
-particles). :func:`build_outcome` finds the files of the job (the highest iteration, the final map),
+particles; for a RELION picking job of filaments, the histogram of their lengths). :func:`build_outcome` finds the files of the job (the highest iteration, the final map),
 reads what is needed from them, and returns the pictures as arrays. It reads files, some of them large,
 and is meant to run in a thread; it needs no window, but the plots are drawn with Qt (``QImage`` and
 ``QPainter``), which a thread may do.
@@ -54,7 +54,7 @@ EXACT_BYTES = 1 << 30
 OUTCOME_DAYS = 30
 # part of the key of the outcomes in the cache: raised when what an outcome shows changes, so
 # that the outcomes kept before are made again
-OUTCOME_VERSION = 4
+OUTCOME_VERSION = 5
 # the most trajectory files of a CryoSPARC motion correction that are read
 MAX_TRAJECTORIES = 600
 BLOCK_ROWS = 50_000
@@ -2251,48 +2251,181 @@ def _job_option(folder: Path, name: str) -> str | None:
     return None
 
 
-def _relion_picks(folder: Path, star_name: str, helical_option: str) -> dict | None:
+def filament_lengths(x, y, tube, mode: str):
+    """The length of each filament picked on a micrograph, in pixels of the micrograph.
+
+    Parameters
+    ----------
+    x, y : array-like
+        The coordinates of the picks, in the order of the coordinate file.
+    tube : array-like or None
+        The filament of each pick (``rlnHelicalTubeID``), for helical segments.
+    mode : str
+        ``"startend"``: the picks are the start and the end of each filament, one after the
+        other; ``"segments"``: helical segments, in their order along the filament.
+
+    Returns
+    -------
+    numpy.ndarray
+        One length to each filament: from its start to its end, or along its segments from the
+        first to the last (0 for a filament of one segment). Empty for segments without
+        ``tube``: which filament a segment is on is not known.
+    """
+    import numpy as np
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if mode == "startend":
+        n = len(x) // 2 * 2  # a start without its end is not a filament
+        return np.hypot(x[1:n:2] - x[0:n:2], y[1:n:2] - y[0:n:2])
+    if mode != "segments" or tube is None or not len(x):
+        return np.empty(0)
+    tube = np.asarray(tube)
+    lengths = []
+    for t in dict.fromkeys(tube.tolist()):
+        on = tube == t
+        lengths.append(float(np.hypot(np.diff(x[on]), np.diff(y[on])).sum()))
+    return np.asarray(lengths)
+
+
+def _pick_pixel_size(folder: Path, listing: Path, mics: list[str]) -> float | None:
+    """The pixel size (Å) of the micrographs of a picking job: given to the job, in the header
+    of one of its micrographs or in the optics of its input; None if not known."""
+    try:
+        apix = float(_job_option(folder, "angpix") or "")
+        if apix > 0:
+            return apix
+    except ValueError:
+        pass
+    for mic in mics[:3]:
+        apix = micrograph_pixel_size(mic, listing)
+        if apix:
+            return apix
+    for option in ("fn_in", "fn_input_autopick"):
+        name = _job_option(folder, option)
+        if not name:
+            continue
+        for root in (folder.parent.parent, folder):
+            sizes = _star_loop(root / name, "optics").get("rlnMicrographPixelSize")
+            if sizes:
+                try:
+                    apix = float(sizes[0])
+                except ValueError:
+                    break
+                return apix if apix > 0 else None
+    return None
+
+
+def _filament_length_panel(lengths, apix: float | None, mode: str, note: str = ""):
+    """The histogram of the lengths of the filaments picked (pixels, in Å with ``apix``), and
+    the fact that sums it up: ``(panel or None, fact)``."""
+    import numpy as np
+
+    if apix:
+        lengths = lengths * apix
+    unit = "Å" if apix else "pixels"
+    median = float(np.median(lengths))
+    fact = (
+        "Filament length",
+        f"median {median:,.0f} {unit} ({lengths.min():,.0f} to {lengths.max():,.0f})",
+    )
+    along = (
+        "from the first segment to the last"
+        if mode == "segments"
+        else "from the start to the end"
+    )
+    panel = _plot_panel(
+        "Filament length",
+        lambda: _plot_histogram(
+            lengths, f"length of the filament ({unit})", "Filament length", median
+        ),
+        f"{len(lengths):,} filaments{note}, {along}; the dashed line is the median, "
+        f"{median:,.0f} {unit}",
+    )
+    return panel, fact
+
+
+def _relion_picks(folder: Path, star_name: str) -> dict | None:
     """Picks of a RELION ManualPick or AutoPick job: the number of picks in the coordinate file
-    of each micrograph (read from all of them up to ``MAX_COORDINATE_FILES``)."""
-    listing = _star_loop(folder / star_name, "coordinate_files")
+    of each micrograph (read from all of them up to ``MAX_COORDINATE_FILES``) and, for
+    filaments, the histogram of their lengths."""
+    import numpy as np
+
+    listing_path = folder / star_name
+    listing = _star_loop(listing_path, "coordinate_files")
     files = listing.get("rlnMicrographCoordinates")
     if not files:
         return None
+    mics = listing.get("rlnMicrographName", [])
     total = len(files)
-    chosen = files
+    chosen = list(range(total))
     if total > MAX_COORDINATE_FILES:
         step = total / MAX_COORDINATE_FILES
-        chosen = [files[int(i * step)] for i in range(MAX_COORDINATE_FILES)]
+        chosen = [int(i * step) for i in range(MAX_COORDINATE_FILES)]
     roots = [folder.parent.parent, folder]
-    rows, found = 0, 0
-    for name in chosen:
-        for root in roots:
-            path = root / name
-            if path.is_file():
-                scan = _scan_table(path, ("",), ["rlnCoordinateX"], keep=1)
-                rows += scan["rows"] if scan else 0
-                found += 1
-                break
-    if not found:
+    paths = []
+    for k in chosen:
+        path = next((r / files[k] for r in roots if (r / files[k]).is_file()), None)
+        if path is not None:
+            paths.append((mics[k] if k < len(mics) else "", path))
+    if not paths:
         return None  # the coordinate files are not here: nothing to count
+    helical_columns = "rlnHelicalTubeID" in _particle_header(paths[0][1])
+    mode = pick_mode(listing_path, helical_columns)
+    rows, filaments, lengths = 0, 0, []
+    for _mic, path in paths:
+        if mode == "particles":
+            scan = _scan_table(path, ("",), ["rlnCoordinateX"], keep=1)
+            rows += scan["rows"] if scan else 0
+            continue
+        wanted = ["rlnCoordinateX", "rlnCoordinateY"]
+        if helical_columns:
+            wanted.append("rlnHelicalTubeID")
+        try:
+            found = list(_particle_rows(path, wanted))
+            x = np.array([float(r[0]) for r in found])
+            y = np.array([float(r[1]) for r in found])
+        except (OSError, ValueError):
+            continue
+        rows += len(found)
+        tube = [r[2] for r in found] if helical_columns else None
+        if mode == "startend":
+            filaments += len(found) // 2
+        elif tube is not None:
+            filaments += len(set(tube))
+        lengths.append(filament_lengths(x, y, tube, mode))
     approximate = len(chosen) < total
     if approximate:
-        rows = round(rows * total / found)
-    helical = _job_option(folder, helical_option) == "Yes"
-    if helical and star_name == "manualpick.star":
+        rows = round(rows * total / len(paths))
+        filaments = round(filaments * total / len(paths))
+    if mode == "particles":
+        return _picks_outcome("Particles", rows, total, approximate)
+    if mode == "startend":
         # a filament is picked by its start and its end: two coordinates
-        return _picks_outcome("Filaments", rows // 2, total, approximate)
-    return _picks_outcome(
-        "Helical segments" if helical else "Particles", rows, total, approximate
-    )
+        outcome = _picks_outcome("Filaments", rows // 2, total, approximate)
+    else:
+        mark = "about " if approximate else ""
+        extra = [("Filaments", f"{mark}{filaments:,}")] if helical_columns else []
+        outcome = _picks_outcome("Helical segments", rows, total, approximate, extra)
+    lengths = np.concatenate(lengths) if lengths else np.empty(0)
+    if len(lengths):
+        apix = _pick_pixel_size(folder, listing_path, [m for m, _p in paths])
+        plural = "s" if len(paths) != 1 else ""
+        note = f" of {len(paths):,} micrograph{plural}" if approximate else ""
+        panel, fact = _filament_length_panel(lengths, apix, mode, note)
+        # before the note of an estimate, which comes last
+        outcome["facts"].insert(len(outcome["facts"]) - int(approximate), fact)
+        if panel:
+            outcome["panels"].append(panel)
+    return outcome
 
 
 def _relion_manualpick(folder: Path) -> dict | None:
-    return _relion_picks(folder, "manualpick.star", "do_startend")
+    return _relion_picks(folder, "manualpick.star")
 
 
 def _relion_autopick(folder: Path) -> dict | None:
-    return _relion_picks(folder, "autopick.star", "do_pick_helical_segments")
+    return _relion_picks(folder, "autopick.star")
 
 
 def _frame_shifts(path: Path):

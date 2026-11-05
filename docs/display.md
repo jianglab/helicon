@@ -67,7 +67,7 @@ its files (the files are in the list of the window), and has what is needed to m
   | Import | the number of movies, micrographs or particles imported |
   | MotionCorr (motion correction) | the histogram of the length of the motion trajectories, and the trajectories of a few micrographs, from the least to the most motion |
   | CtfFind, CTF estimation | the histograms of the defocus and of the maximum resolution of the CTF fit |
-  | ManualPick, AutoPick, pickers | the number of particles (or filaments, when picked by their start and end), of micrographs, and the average per micrograph |
+  | ManualPick, AutoPick, pickers | the number of particles (or filaments, when picked by their start and end), of micrographs, and the average per micrograph; for filaments picked in RELION (by their start and end, or as helical segments), the histogram of their lengths |
   | Extract | the number of particles and micrographs, the average per micrograph, and a few of the particles |
   | Select | the classes and the particles kept, of all of them (2D or 3D), with the percentage of the particles, and the selected 2D class averages |
   | Class2D, 2D classification | the class averages of the last iteration, the most populated first, with the share of the particles of the first few |

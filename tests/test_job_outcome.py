@@ -1082,6 +1082,105 @@ class TestThePicking:
         assert facts["Filaments"] == "6" and facts["Segments"] == "30"
 
 
+class TestTheLengthOfTheFilamentsPicked:
+    def test_a_filament_picked_by_its_ends_is_as_long_as_from_one_to_the_other(self):
+        x, y = [0, 3, 10, 10, 99], [0, 4, 0, 20, 99]
+        lengths = jo.filament_lengths(x, y, None, "startend")
+        # the last pick, a start without its end, is not a filament
+        assert lengths.tolist() == [5.0, 20.0]
+
+    def test_a_filament_of_segments_is_as_long_as_the_path_along_them(self):
+        x = [0, 3, 3, 50, 60]
+        y = [0, 4, 8, 50, 50]
+        tube = ["1", "1", "1", "2", "2"]
+        lengths = jo.filament_lengths(x, y, tube, "segments")
+        assert lengths.tolist() == [9.0, 10.0]
+
+    def test_a_filament_of_one_segment_has_no_length(self):
+        assert jo.filament_lengths([5], [5], [1], "segments").tolist() == [0.0]
+
+    def test_segments_without_their_filament_give_no_lengths(self):
+        assert len(jo.filament_lengths([0, 1], [0, 1], None, "segments")) == 0
+
+    def test_particles_have_no_length(self):
+        assert len(jo.filament_lengths([0, 1], [0, 1], None, "particles")) == 0
+
+    def test_filaments_picked_by_hand_have_a_histogram_of_their_lengths(self, relion):
+        # two filaments of 200 pixels; the header of the micrograph gives 2 Å a pixel
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        facts = dict(outcome["facts"])
+        assert facts["Filaments"] == "2"
+        assert facts["Filament length"] == "median 400 Å (400 to 400)"
+        panel = next(p for p in outcome["panels"] if p["title"] == "Filament length")
+        assert panel["image"].ndim == 3
+        assert "2 filaments, from the start to the end" in panel["caption"]
+
+    def test_helical_segments_picked_automatically_are_joined_into_filaments(
+        self, relion
+    ):
+        # the pixel size given to the job comes before the header of the micrograph
+        listing = _pick_job(
+            relion,
+            "AutoPick",
+            options="do_pick_helical_segments Yes\nangpix 1.5\n",
+            tube=True,
+        )
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        facts = dict(outcome["facts"])
+        assert facts["Helical segments"] == "4"
+        assert facts["Filaments"] == "2"
+        assert facts["Filament length"] == "median 300 Å (300 to 300)"
+        panel = next(p for p in outcome["panels"] if p["title"] == "Filament length")
+        assert "from the first segment to the last" in panel["caption"]
+
+    def test_without_the_pixel_size_the_lengths_are_in_pixels(self, relion):
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        (relion / "MotionCorr/job002/mic_a.mrc").unlink()
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        assert dict(outcome["facts"])["Filament length"] == (
+            "median 200 pixels (200 to 200)"
+        )
+
+    def test_the_pixel_size_of_the_input_micrographs(self, relion):
+        listing = _pick_job(
+            relion, options="do_startend Yes\nfn_in CtfFind/job003/micrographs.star\n"
+        )
+        (relion / "MotionCorr/job002/mic_a.mrc").unlink()
+        _star_file(
+            relion / "CtfFind/job003/micrographs.star",
+            _loop("optics", ["rlnOpticsGroup", "rlnMicrographPixelSize"], [(1, 0.5)]),
+        )
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        assert dict(outcome["facts"])["Filament length"] == "median 100 Å (100 to 100)"
+
+    def test_segments_without_their_filament_are_only_counted(self, relion):
+        listing = _pick_job(
+            relion, "AutoPick", options="do_pick_helical_segments Yes\n"
+        )
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        facts = dict(outcome["facts"])
+        assert facts["Helical segments"] == "4"
+        assert "Filaments" not in facts and "Filament length" not in facts
+        assert outcome["panels"] == []
+
+    def test_particles_have_no_histogram_of_lengths(self, relion):
+        listing = _pick_job(relion)
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        assert dict(outcome["facts"])["Particles"] == "4"
+        assert outcome["panels"] == []
+
+    def test_the_length_comes_before_the_note_of_an_estimate(self, relion, monkeypatch):
+        monkeypatch.setattr(jo, "MAX_COORDINATE_FILES", 1)
+        listing = _pick_job(relion, options="do_startend Yes\n")
+        outcome = jo.build_outcome(listing.parent, "relion", use_cache=False)
+        labels = [label for label, _value in outcome["facts"]]
+        assert labels.index("Filament length") == len(labels) - 2
+        assert labels[-1] == ""
+        panel = next(p for p in outcome["panels"] if p["title"] == "Filament length")
+        assert "filaments of 1 micrograph," in panel["caption"]
+
+
 class TestTheSelection:
     @staticmethod
     def _classification(relion, classes=10, per_class=20, kind="Class2D"):
