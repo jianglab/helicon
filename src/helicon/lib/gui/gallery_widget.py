@@ -8,14 +8,17 @@ The viewport-culling math is kept framework-agnostic in :class:`GalleryPanel`
 so it can be unit-tested without a Qt application.
 """
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QIcon,
     QImage,
     QPainter,
     QPen,
     QPixmap,
     QPolygonF,
+    QStandardItem,
+    QStandardItemModel,
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -29,6 +32,10 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSlider,
     QSizePolicy,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionComboBox,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -219,6 +226,106 @@ class GalleryPanel:
         return [self.rowstart, self.visiblerows, self.visiblecols]
 
 
+class _MultiSelectComboBox(QComboBox):
+    """Drop-down list of check boxes: any number of its items can be chosen.
+
+    Clicking an item toggles it and leaves the list open; the closed box
+    shows the chosen items joined by commas.
+
+    Signals
+    -------
+    selection_changed(list)
+        The checked item texts, in the order of the list, after each toggle.
+    """
+
+    selection_changed = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModel(QStandardItemModel(self))
+        # the plain delegate draws the check boxes in every style
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.view().viewport().installEventFilter(self)
+
+    def set_items(self, items: list[str], checked: list[str]) -> None:
+        """Replace the items, checking those in ``checked``. Emits nothing."""
+        model = self.model()
+        model.clear()
+        for text in items:
+            item = QStandardItem(text)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if text in checked else Qt.Unchecked)
+            model.appendRow(item)
+        self._update_tooltip()
+        self.update()
+
+    def checked_items(self) -> list[str]:
+        """The texts of the checked items, in the order of the list."""
+        model = self.model()
+        return [
+            model.item(r).text()
+            for r in range(model.rowCount())
+            if model.item(r).checkState() == Qt.Checked
+        ]
+
+    def toggle_item(self, row: int) -> None:
+        """Toggle the check box of item ``row`` and emit the new selection."""
+        item = self.model().item(row)
+        if item is None:
+            return
+        state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+        item.setCheckState(state)
+        self._update_tooltip()
+        self.update()
+        self.selection_changed.emit(self.checked_items())
+
+    def display_text(self) -> str:
+        """What the closed box shows."""
+        return ", ".join(self.checked_items()) or "(none)"
+
+    def _update_tooltip(self) -> None:
+        self.setToolTip("\n".join(self.checked_items()))
+
+    def eventFilter(self, obj, event):
+        # a click on an item toggles it; swallowing the release keeps the
+        # list open, so several items can be chosen in one go
+        if obj is self.view().viewport() and event.type() == QEvent.MouseButtonRelease:
+            index = self.view().indexAt(event.position().toPoint())
+            if index.isValid():
+                self.toggle_item(index.row())
+            return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event) -> None:
+        # the arrow keys of a closed box would pick a single item
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.showPopup()
+            return
+        if event.key() in (Qt.Key_Up, Qt.Key_Down):
+            return
+        super().keyPressEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        # scrolling over the closed box would pick a single item
+        event.ignore()
+
+    def paintEvent(self, event) -> None:
+        painter = QStylePainter(self)
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        width = (
+            self.style()
+            .subControlRect(QStyle.CC_ComboBox, opt, QStyle.SC_ComboBoxEditField, self)
+            .width()
+        )
+        opt.currentText = self.fontMetrics().elidedText(
+            self.display_text(), Qt.ElideRight, max(width, 0)
+        )
+        opt.currentIcon = QIcon()
+        painter.drawComplexControl(QStyle.CC_ComboBox, opt)
+        painter.drawControl(QStyle.CE_ComboBoxLabel, opt)
+
+
 class _ControlPanel(QWidget):
     """Collapsible side panel with brightness / contrast / gamma controls.
 
@@ -235,6 +342,7 @@ class _ControlPanel(QWidget):
     log_changed = Signal(bool)
     histogram_changed = Signal(bool)
     show_labels_changed = Signal(bool)
+    label_columns_changed = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -332,6 +440,15 @@ class _ControlPanel(QWidget):
         self._show_labels_chk.toggled.connect(self.show_labels_changed)
         root.addWidget(self._show_labels_chk)
 
+        # which columns of the star file the labels show (2D classes only)
+        self._label_columns_label = self._label("Label columns", lbl_style)
+        self._label_columns_label.setVisible(False)
+        root.addWidget(self._label_columns_label)
+        self._label_columns_combo = _MultiSelectComboBox()
+        self._label_columns_combo.setVisible(False)
+        self._label_columns_combo.selection_changed.connect(self.label_columns_changed)
+        root.addWidget(self._label_columns_combo)
+
         root.addSpacing(6)
         self._z_thickness_sep = QFrame()
         self._z_thickness_sep.setFrameShape(QFrame.HLine)
@@ -415,6 +532,28 @@ class _ControlPanel(QWidget):
             if current in columns:
                 self._sort_column_combo.setCurrentText(current)
             self._sort_column_combo.blockSignals(False)
+
+    def show_label_columns_ui(
+        self,
+        visible: bool = True,
+        columns: list[str] | None = None,
+        checked: list[str] | None = None,
+    ) -> None:
+        """Show the multi-select list of the columns the labels show.
+
+        Parameters
+        ----------
+        visible : bool
+            Whether to show the list.
+        columns : list of str, optional
+            The columns to choose from, in the order of the list.
+        checked : list of str, optional
+            The columns chosen at first.
+        """
+        self._label_columns_label.setVisible(visible)
+        self._label_columns_combo.setVisible(visible)
+        if visible and columns is not None:
+            self._label_columns_combo.set_items(columns, checked or [])
 
     def show_log_ui(self, visible: bool = True) -> None:
         self._log_chk.setVisible(visible)
@@ -1179,16 +1318,25 @@ class ImageGalleryWidget(QWidget):
                     )
                     trect = QRect(tx, ty, draw_w, draw_h)
                     metrics = painter.fontMetrics()
-                    tw = metrics.horizontalAdvance(text)
+                    # a label may hold several lines (one per chosen column)
+                    lines = text.split("\n") if text else [""]
+                    tw = max(metrics.horizontalAdvance(line) for line in lines)
                     th = metrics.height()
                     pad = 2
                     painter.save()
                     painter.setClipRect(trect)
                     painter.fillRect(
-                        tx, ty, min(tw + 2 * pad, trect.width()), th + 2 * pad, label_bg
+                        tx,
+                        ty,
+                        min(tw + 2 * pad, trect.width()),
+                        th * len(lines) + 2 * pad,
+                        label_bg,
                     )
                     painter.setPen(label_color)
-                    painter.drawText(tx + pad, ty + pad + metrics.ascent(), text)
+                    for k, line in enumerate(lines):
+                        painter.drawText(
+                            tx + pad, ty + pad + k * th + metrics.ascent(), line
+                        )
                     painter.restore()
 
         if needs_sb:

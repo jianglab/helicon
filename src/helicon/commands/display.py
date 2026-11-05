@@ -718,9 +718,10 @@ def _open_2d_classes_gallery(
 ) -> "QMainWindow | None":
     """Display 2D class averages from a Class2D model.star.
 
-    Shows one MRC per class (``_rlnReferenceImage``) with abundance labels
-    (``_rlnClassDistribution``). Sort-by-abundance and reverse-sort controls
-    are provided in the control panel.
+    Shows one MRC per class (``_rlnReferenceImage``). The control panel sorts
+    by helical type (the default when the table has ``_rlnHelicalType``),
+    abundance (``_rlnClassDistribution``), name or not at all, and picks the
+    columns of the table shown as labels.
     """
     from helicon.lib.gui.gallery_backends import Class2dGallery
 

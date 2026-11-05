@@ -15,6 +15,7 @@ Gallery Types
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Callable
 
@@ -687,52 +688,75 @@ class Refine3dGallery(BaseGallery):
 class Class2dGallery(BaseGallery):
     """Gallery for Class2D optimiser/model.star files.
 
-    Displays 2D class averages sorted by abundance with sort controls.
+    Displays 2D class averages with sort controls and a choice of the
+    model.star columns shown as labels.
+
+    Sort modes: ``Helical Type`` (only when the classes table has
+    ``rlnHelicalType``; the default then), ``Abundance``, ``Name`` and
+    ``None`` (the order of the star file). Each mode remembers its own
+    reverse setting.
     """
+
+    #: Pseudo-column of the label menu: the class number (row of the table).
+    CLASS_LABEL = "Class"
+    #: The column holding each class's share of the particles.
+    _dist_column = "rlnClassDistribution"
 
     def __init__(self, star_path: str) -> None:
         super().__init__(star_path)
         self._entries: list[tuple[str, int]] = []
         self._dists: list[float] = []
+        self._table: dict[str, list[str]] = {}
         self._order: list[int] = []
         self._sort_column = "Abundance"
         self._sort_reverse = True
-        self._sort_columns = ["Abundance", "Name"]
+        self._sort_columns = ["Abundance", "Name", "None"]
+        self._label_columns: list[str] = [self.CLASS_LABEL, self._dist_column]
+
+    # ---- parsing ----------------------------------------------------------
 
     def _parse(self) -> None:
-        from helicon.commands.display import (
-            _parse_class2d_model_star,
+        from helicon.lib.gui.star_parsers import (
+            _class_distributions,
             _find_model_star_from_optimiser,
+            _parse_class2d_model_classes,
         )
-
-        settings = self._get_settings()
-        self._sort_column = settings.value("sort_column", "Abundance", type=str)
-        self._sort_reverse = settings.value("sort_reverse", True, type=bool)
 
         name = Path(self.star_path).name
         if name.endswith("model.star"):
-            result = _parse_class2d_model_star(self.star_path)
+            result = _parse_class2d_model_classes(self.star_path)
         else:
             model_path = _find_model_star_from_optimiser(self.star_path)
             if model_path is None:
                 return
-            result = _parse_class2d_model_star(model_path)
+            result = _parse_class2d_model_classes(model_path)
 
         if result is None:
             return
-        self._entries, self._dists = result
+        self._entries, self._table = result
+        self._dists = _class_distributions(self._table, len(self._entries))
+        self._finish_parse(self._entries[0][0])
+
+    def _finish_parse(self, first_mrc: str) -> None:
+        """Set the image geometry, the sort and the labels once the table is read."""
         self._n = len(self._entries)
         if self._n == 0:
             return
-
-        first_mrc, first_frame = self._entries[0]
         with _open_mrc(first_mrc) as mrc:
             self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
             self._img_h, self._img_w = mrc.data.shape[-2:]
 
+        self._load_settings()
         self._apply_sort()
         self._labels = self._make_labels()
         self._parsed = True
+
+    @property
+    def has_helical_type(self) -> bool:
+        """Whether the classes table carries ``rlnHelicalType``."""
+        return "rlnHelicalType" in self._table
+
+    # ---- settings ---------------------------------------------------------
 
     @staticmethod
     def _get_settings():
@@ -740,15 +764,138 @@ class Class2dGallery(BaseGallery):
 
         return QSettings("helicon", "display")
 
-    def _apply_sort(self) -> None:
-        if self._sort_column == "Abundance":
-            indexed = list(enumerate(self._dists))
-            indexed.sort(key=lambda x: x[1], reverse=self._sort_reverse)
-            self._order = [i for i, _ in indexed]
+    def _settings_prefix(self) -> str:
+        # helical-type files keep their own choices: their default sort and
+        # labels differ, and one kind should not overwrite the other's
+        return "class2d_helical/" if self.has_helical_type else ""
+
+    @staticmethod
+    def _default_reverse(column: str) -> bool:
+        return column == "Abundance"
+
+    def _available_label_columns(self) -> list[str]:
+        """The entries of the label menu: the class number, then the table columns."""
+        cols = [c for c in self._table if c != "rlnReferenceImage"]
+        return [self.CLASS_LABEL] + cols
+
+    def _default_label_columns(self) -> list[str]:
+        defaults = [self.CLASS_LABEL, self._dist_column]
+        if self.has_helical_type:
+            defaults += ["rlnHelicalType", "rlnHelicalTypeProbability"]
+        available = self._available_label_columns()
+        return [c for c in defaults if c in available]
+
+    def _load_settings(self) -> None:
+        self._sort_columns = ["Helical Type"] if self.has_helical_type else []
+        self._sort_columns += ["Abundance", "Name", "None"]
+        settings = self._get_settings()
+        prefix = self._settings_prefix()
+        default_sort = "Helical Type" if self.has_helical_type else "Abundance"
+        column = settings.value(f"{prefix}sort_column", default_sort, type=str)
+        self._sort_column = column if column in self._sort_columns else default_sort
+        self._sort_reverse = self._saved_reverse(self._sort_column)
+
+        available = self._available_label_columns()
+        saved = settings.value(f"{prefix}label_columns", None)
+        if isinstance(saved, str):
+            # QSettings returns a one-item list as a plain string on some
+            # back ends; an empty list may come back as ""
+            saved = [saved] if saved else []
+        if saved is None:
+            self._label_columns = self._default_label_columns()
         else:
-            indexed = list(enumerate(self._entries))
-            indexed.sort(key=lambda x: x[1], reverse=self._sort_reverse)
-            self._order = [i for i, _ in indexed]
+            self._label_columns = [c for c in saved if c in available]
+
+    def _saved_reverse(self, column: str) -> bool:
+        settings = self._get_settings()
+        return settings.value(
+            f"{self._settings_prefix()}sort_reverse/{column}",
+            self._default_reverse(column),
+            type=bool,
+        )
+
+    def _save_settings(self) -> None:
+        settings = self._get_settings()
+        prefix = self._settings_prefix()
+        settings.setValue(f"{prefix}sort_column", self._sort_column)
+        settings.setValue(
+            f"{prefix}sort_reverse/{self._sort_column}", self._sort_reverse
+        )
+        settings.setValue(f"{prefix}label_columns", list(self._label_columns))
+
+    # ---- sorting and labels -----------------------------------------------
+
+    @staticmethod
+    def _as_float(value: str) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _helical_type_order(self) -> list[int]:
+        """Classes grouped by helical type, most probable first within a type.
+
+        The types are compared as numbers when every value is one, else as
+        text. ``Reverse Sort`` reverses the order of the types only; equal
+        probabilities fall back to abundance.
+        """
+        types = self._table.get("rlnHelicalType", [""] * self._n)
+        numeric = [self._as_float(t) for t in types]
+        type_keys = numeric if all(v is not None for v in numeric) else list(types)
+        probs = [
+            self._as_float(v)
+            for v in self._table.get("rlnHelicalTypeProbability", [""] * self._n)
+        ]
+        probs = [-math.inf if v is None else v for v in probs]
+
+        # sort within a type first, then (stably) by type
+        order = sorted(range(self._n), key=lambda i: (-probs[i], -self._dists[i]))
+        order.sort(key=lambda i: type_keys[i], reverse=self._sort_reverse)
+        return order
+
+    def _apply_sort(self) -> None:
+        if self._sort_column == "Helical Type" and self.has_helical_type:
+            self._order = self._helical_type_order()
+            return
+        if self._sort_column == "Abundance":
+            order = sorted(range(self._n), key=lambda i: self._dists[i])
+        elif self._sort_column == "Name":
+            order = sorted(range(self._n), key=lambda i: self._entries[i])
+        else:  # "None": the order of the star file
+            order = list(range(self._n))
+        if self._sort_reverse:
+            order.reverse()
+        self._order = order
+
+    def _format_label_value(self, column: str, value: str) -> str:
+        v = self._as_float(value)
+        if v is None:
+            return value
+        if column == self._dist_column:
+            return f"{v:.1%}"
+        if "." not in value and "e" not in value.lower():
+            # an integer column (a class number, a count): as written
+            return value
+        return f"{v:.4g}"
+
+    def _make_labels(self) -> list[str]:
+        """One label per tile: a line per chosen column, in the menu's order."""
+        labels = []
+        for pos in range(self._n):
+            orig_idx = self._order[pos]
+            lines = []
+            for col in self._label_columns:
+                if col == self.CLASS_LABEL:
+                    lines.append(f"Class {orig_idx + 1}")
+                    continue
+                values = self._table.get(col)
+                if values is None:
+                    continue
+                short = col[3:] if col.startswith("rln") else col
+                value = self._format_label_value(col, values[orig_idx])
+                lines.append(f"{short}: {value}")
+            labels.append("\n".join(lines))
+        return labels
 
     def _read_image(self, i: int) -> np.ndarray:
 
@@ -761,38 +908,58 @@ class Class2dGallery(BaseGallery):
                 d = d[frame_idx]
             return np.array(d, dtype=np.float32)
 
-    def _make_labels(self) -> list[str]:
-        labels = []
-        for pos in range(self._n):
-            orig_idx = self._order[pos]
-            dist = self._dists[orig_idx]
-            labels.append(f"Class {orig_idx + 1} ({dist:.1%})")
-        return labels
+    # ---- panel ------------------------------------------------------------
 
     def _setup_panel(self, container: Any, widget: Any) -> None:
         from helicon.lib.gui.gallery_widget import _ControlPanel
 
         panel = container.findChild(_ControlPanel)
-        if panel is not None:
-            panel.show_sort_ui(True, columns=self._sort_columns)
-            idx = panel._sort_column_combo.findText(self._sort_column)
-            if idx >= 0:
-                panel._sort_column_combo.setCurrentIndex(idx)
-            panel._sort_reverse_chk.setChecked(self._sort_reverse)
+        if panel is None:
+            return
+        panel.show_sort_ui(True, columns=self._sort_columns)
+        panel._sort_column_combo.blockSignals(True)
+        panel._sort_column_combo.setCurrentText(self._sort_column)
+        panel._sort_column_combo.blockSignals(False)
+        panel._sort_reverse_chk.blockSignals(True)
+        panel._sort_reverse_chk.setChecked(self._sort_reverse)
+        panel._sort_reverse_chk.blockSignals(False)
+        panel.show_label_columns_ui(
+            True,
+            columns=self._available_label_columns(),
+            checked=self._label_columns,
+        )
 
-            def _on_sort_changed():
-                self._sort_column = panel._sort_column_combo.currentText()
-                self._sort_reverse = panel._sort_reverse_chk.isChecked()
-                settings = self._get_settings()
-                settings.setValue("sort_column", self._sort_column)
-                settings.setValue("sort_reverse", self._sort_reverse)
+        def _refresh(resort: bool) -> None:
+            self._save_settings()
+            if resort:
                 self._apply_sort()
-                widget._labels = self._make_labels()
+            widget._labels = self._make_labels()
+            if resort:
                 widget.invalidate_frames()
-                widget.update()
+            widget.update()
 
-            panel.sort_column_changed.connect(lambda _: _on_sort_changed())
-            panel.sort_reverse_changed.connect(lambda _: _on_sort_changed())
+        def _on_sort_column(column: str) -> None:
+            if not column:
+                return
+            self._sort_column = column
+            # each mode keeps its own direction
+            self._sort_reverse = self._saved_reverse(column)
+            panel._sort_reverse_chk.blockSignals(True)
+            panel._sort_reverse_chk.setChecked(self._sort_reverse)
+            panel._sort_reverse_chk.blockSignals(False)
+            _refresh(True)
+
+        def _on_sort_reverse(checked: bool) -> None:
+            self._sort_reverse = bool(checked)
+            _refresh(True)
+
+        def _on_label_columns(columns: list) -> None:
+            self._label_columns = list(columns)
+            _refresh(False)
+
+        panel.sort_column_changed.connect(_on_sort_column)
+        panel.sort_reverse_changed.connect(_on_sort_reverse)
+        panel.label_columns_changed.connect(_on_label_columns)
 
 
 class CryosparcClass2dGallery(Class2dGallery):
@@ -805,16 +972,15 @@ class CryosparcClass2dGallery(Class2dGallery):
     those assignments is the abundance.
 
     Everything else, the sorting and the labels and the window, is the same
-    as for RELION, so only the parsing differs.
+    as for RELION, so only the parsing differs: the abundance is the one
+    column of its table.
     """
+
+    _dist_column = "Abundance"
 
     def _parse(self) -> None:
 
         from helicon.lib import cryosparc_project
-
-        settings = self._get_settings()
-        self._sort_column = settings.value("sort_column", "Abundance", type=str)
-        self._sort_reverse = settings.value("sort_reverse", True, type=bool)
 
         result = cryosparc_project.class_abundance(self.star_path)
         if result is None:
@@ -823,17 +989,10 @@ class CryosparcClass2dGallery(Class2dGallery):
 
         self._entries = [(str(self.star_path), int(f)) for f in frames]
         self._dists = [float(v) for v in fractions]
-        self._n = len(self._entries)
-        if self._n == 0:
+        self._table = {self._dist_column: [repr(v) for v in self._dists]}
+        if not self._entries:
             return
-
-        with _open_mrc(str(self.star_path)) as mrc:
-            self._apix = float(mrc.voxel_size.x) if mrc.voxel_size.x > 0 else 1.0
-            self._img_h, self._img_w = mrc.data.shape[-2:]
-
-        self._apply_sort()
-        self._labels = self._make_labels()
-        self._parsed = True
+        self._finish_parse(str(self.star_path))
 
 
 def gallery_for_star(star_path: str) -> BaseGallery | None:

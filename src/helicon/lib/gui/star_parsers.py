@@ -166,20 +166,31 @@ def _parse_model_star(model_path: str) -> list[str] | None:
     return mrc_paths if mrc_paths else None
 
 
-def _parse_class2d_model_star(
+def _parse_class2d_model_classes(
     model_path: str,
-) -> tuple[list[tuple[str, int]], list[float]] | None:
-    """Extract MRC references and class distributions from a RELION model.star.
+) -> tuple[list[tuple[str, int]], dict[str, list[str]]] | None:
+    """Read the classes table of a RELION Class2D model.star.
 
-    Reads the ``data_model_classes`` section and resolves
-    ``_rlnReferenceImage`` (which may be ``idx@path.mrcs`` for Class2D)
-    and ``_rlnClassDistribution`` (abundance) columns.
+    Reads the ``data_model_classes`` section, resolves each
+    ``_rlnReferenceImage`` (``idx@path.mrcs`` for Class2D) against the folder
+    of the model.star and its parents, and keeps every column of the classes
+    whose image was found.
+
+    Parameters
+    ----------
+    model_path : str
+        Path to the ``*_model.star`` file.
 
     Returns
     -------
-    tuple of (entries, distributions) or None
-        * ``entries``: list of ``(mrc_path, frame_idx)`` tuples.
-        * ``distributions``: list of class distribution values (0-1).
+    tuple of (entries, table) or None
+        * ``entries``: list of ``(mrc_path, frame_idx)`` tuples, one per class
+          whose reference image exists, in file order.
+        * ``table``: column name without the leading underscore (e.g.
+          ``"rlnClassDistribution"``) mapped to the raw string values, one per
+          entry.
+
+        None when the file cannot be read or no reference image resolves.
     """
     from pathlib import Path
 
@@ -188,9 +199,9 @@ def _parse_class2d_model_star(
     in_data_model_classes = False
     col_names: list[str] = []
     ref_image_col_idx = -1
-    class_dist_col_idx = -1
     entries: list[tuple[str, int]] = []
-    distributions: list[float] = []
+    rows: list[list[str]] = []
+    table_cols: list[str] = []
 
     try:
         with open(model_path) as f:
@@ -204,14 +215,12 @@ def _parse_class2d_model_star(
                     in_loop = False
                     col_names = []
                     ref_image_col_idx = -1
-                    class_dist_col_idx = -1
                     continue
 
                 if s == "loop_":
                     in_loop = True
                     col_names = []
                     ref_image_col_idx = -1
-                    class_dist_col_idx = -1
                     continue
 
                 if in_loop and s.startswith("_"):
@@ -219,8 +228,6 @@ def _parse_class2d_model_star(
                     col_names.append(col_name)
                     if "referenceimage" in col_name.lower():
                         ref_image_col_idx = len(col_names) - 1
-                    elif "classdistribution" in col_name.lower():
-                        class_dist_col_idx = len(col_names) - 1
                     continue
 
                 if not in_data_model_classes:
@@ -251,22 +258,70 @@ def _parse_class2d_model_star(
                 if not resolved:
                     continue
 
-                dist = 0.0
-                if class_dist_col_idx >= 0 and class_dist_col_idx < len(parts):
-                    try:
-                        dist = float(parts[class_dist_col_idx])
-                    except ValueError:
-                        dist = 0.0
-
+                table_cols = col_names
                 entries.append((resolved, frame_idx))
-                distributions.append(dist)
+                rows.append(
+                    [parts[i] if i < len(parts) else "" for i in range(len(col_names))]
+                )
     except Exception:
         return None
 
     if not entries:
         return None
 
-    return entries, distributions
+    table = {
+        name.lstrip("_"): [row[i] for row in rows] for i, name in enumerate(table_cols)
+    }
+    return entries, table
+
+
+def _parse_class2d_model_star(
+    model_path: str,
+) -> tuple[list[tuple[str, int]], list[float]] | None:
+    """Extract MRC references and class distributions from a RELION model.star.
+
+    Reads the ``data_model_classes`` section and resolves
+    ``_rlnReferenceImage`` (which may be ``idx@path.mrcs`` for Class2D)
+    and ``_rlnClassDistribution`` (abundance) columns.
+
+    Returns
+    -------
+    tuple of (entries, distributions) or None
+        * ``entries``: list of ``(mrc_path, frame_idx)`` tuples.
+        * ``distributions``: list of class distribution values (0-1).
+    """
+    parsed = _parse_class2d_model_classes(model_path)
+    if parsed is None:
+        return None
+    entries, table = parsed
+    return entries, _class_distributions(table, len(entries))
+
+
+def _class_distributions(table: dict[str, list[str]], n: int) -> list[float]:
+    """The ``rlnClassDistribution`` column as floats, 0 where missing.
+
+    Parameters
+    ----------
+    table : dict of str to list of str
+        Classes table from :func:`_parse_class2d_model_classes`.
+    n : int
+        Number of classes.
+
+    Returns
+    -------
+    list of float
+        One abundance per class.
+    """
+    raw = table.get("rlnClassDistribution")
+    if raw is None:
+        return [0.0] * n
+    dists = []
+    for v in raw:
+        try:
+            dists.append(float(v))
+        except ValueError:
+            dists.append(0.0)
+    return dists
 
 
 def _parse_star_image_refs(

@@ -177,7 +177,10 @@ window of its own instead of the one already open. A file that Helicon cannot re
 : For the `optimiser.star` of a RELION job: the centre sections (Z, Y and X) of the maps that it refers to.
 
 **2D Classes**
-: The 2D class averages of a Class2D job, sorted by abundance (the number of particles of each).
+: The 2D class averages of a Class2D job. The panel at the side sorts them by abundance (the number
+  of particles of each), by name, or not at all (the order of the `model.star`); when the `model.star` has a
+  `rlnHelicalType` column, also by helical type (the default then: grouped by type, the most probable
+  class first within a type). **Label columns** picks the columns of the `model.star` shown on each image.
 
 **3D Plot**
 : For a `.bild` file: the 3D coordinates it holds, drawn.
