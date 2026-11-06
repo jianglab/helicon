@@ -268,6 +268,145 @@ def as_csym(value, default=1) -> int:
     return number if number > 0 else default
 
 
+def axial_stretch_factors(range_percent=0.0, step_percent=5.0):
+    """The stretch factors a twist search tries, evenly spaced in log.
+
+    At low resolution, where the 4.75 A stacking of an amyloid is not resolved,
+    a filament with the same packing but a different twist is the same
+    filament stretched along its axis: with the density written as
+    ``F(r, phi - omega z)``, multiplying the twist per Angstrom ``omega`` by
+    ``s`` is scaling ``z`` by ``1 / s``. Its side projection is the side
+    projection stretched by ``1 / s`` -- exactly, for an untilted view -- so a
+    coarse twist search needs one projection per map and a stretch per factor.
+
+    A factor ``k`` multiplies the crossover distance by ``k`` and divides the
+    twist by ``k``. The factors run from ``1 / (1 + r)`` to ``1 + r``, so a
+    range of 20% reaches a twist 20% larger and one 20% smaller in the same
+    number of steps, and are evenly spaced in ``log k``: what a step of the
+    stretch moves at the end of a projection is proportional to ``k``, so the
+    same relative step costs the same everywhere. A step of ``d / L`` keeps
+    that movement under the resolution ``d`` over a segment ``L`` long, e.g.
+    5% for 20 A over 400 A.
+
+    Parameters
+    ----------
+    range_percent : float, optional
+        How far the crossover distance may move, in percent. 0 (the default)
+        searches no stretch at all.
+    step_percent : float, optional
+        The relative step between factors, in percent. Defaults to 5.
+
+    Returns
+    -------
+    tuple of float
+        The factors in increasing order, always including 1.0 and as many on
+        either side of it.
+    """
+    r = float(range_percent or 0.0) / 100.0
+    s = float(step_percent or 0.0) / 100.0
+    if r <= 0 or s <= 0:
+        return (1.0,)
+    half = math.log1p(r)
+    n = max(1, int(math.ceil(half / math.log1p(s) - 1e-9)))
+    return tuple(float(k) for k in np.exp(np.linspace(-half, half, 2 * n + 1)))
+
+
+def stretched_twist(twist, rise, factor):
+    """The twist of the filament stretched by ``factor``, at the same rise.
+
+    Stretching along the axis divides the twist per Angstrom by ``factor``.
+    For an amyloid that is a change of twist and not of rise, which stays at
+    4.75 A; but the twist to change is the small one between neighbouring
+    rungs, not the stored value. A pseudo-2_1 filament stores 179.4 degrees
+    at 2.38 A, and it is the 1.2 degrees per 4.75 A rung -- the deviation from
+    two units per turn -- that the stretch divides. The same holds for any
+    ``n``-fold pseudo screw, found as the rest of helicon finds it
+    (:func:`get_amyloid_n_sub_1_symmetry`).
+
+    For a helix whose subunits are resolved at the search resolution the
+    stretch is better read as the rise multiplied by ``factor`` at the same
+    twist; the twist returned here is then the continuous-helix equivalent.
+
+    Parameters
+    ----------
+    twist, rise : float
+        The map's helical parameters, in degrees and Angstroms.
+    factor : float
+        The stretch along the axis; above 1 the crossover is longer.
+
+    Returns
+    -------
+    float
+        The twist in degrees, in the same convention as ``twist``.
+    """
+    n = get_amyloid_n_sub_1_symmetry(twist=twist, rise=rise)
+    deviation = helicon.set_to_periodic_range(n * float(twist), min=-180, max=180)
+    return float(twist) + deviation * (1.0 / float(factor) - 1.0) / n
+
+
+def stretch_along_axis(image, factor, length):
+    """A side projection stretched along the helical axis.
+
+    The axis runs along x, as in every side projection here. The image is
+    resampled about its centre, so ``out[:, j]`` is the input at
+    ``(j - length // 2) / factor + nx // 2``, and the result is ``length``
+    pixels wide; the part of it the input does not reach is zero. A
+    compression is blurred along the axis first, by as much as the step
+    between the samples grows, so the finer detail does not alias.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        ``(ny, nx)`` projection, helical axis along x.
+    factor : float
+        The stretch: 2 doubles every distance along the axis.
+    length : int
+        Width of the output, in pixels.
+
+    Returns
+    -------
+    np.ndarray
+        ``(ny, length)`` float32.
+    """
+    from scipy.ndimage import gaussian_filter1d, map_coordinates
+
+    image = np.asarray(image, dtype=np.float32)
+    ny, nx = image.shape
+    factor = float(factor)
+    length = int(length)
+    if factor == 1.0 and length == nx:
+        return image.copy()
+    if factor < 1.0:
+        sigma = 0.5 * math.sqrt(1.0 / factor**2 - 1.0)
+        if sigma > 0.1:
+            image = gaussian_filter1d(image, sigma=sigma, axis=1, mode="constant")
+    x = (np.arange(length, dtype=np.float64) - length // 2) / factor + nx // 2
+    y = np.arange(ny, dtype=np.float64)
+    yy, xx = np.meshgrid(y, x, indexing="ij")
+    out = map_coordinates(image, [yy, xx], order=1, mode="constant", cval=0.0)
+    return out.astype(np.float32)
+
+
+def _stretch_mixture(mixture, factor, length, apix):
+    """A projection mixture stretched along the axis and cut to a window.
+
+    The centres move, the width does not: a stretched filament with the same
+    packing has subunits of the same size further apart, which is also the
+    assumption the image stretch makes at the resolution it is used at.
+    """
+    from dataclasses import replace
+
+    centers = np.array(mixture.centers, dtype=np.float64)
+    centers[:, 1] *= float(factor)
+    reach = 0.5 * length * apix + 4.0 * float(mixture.sigma)
+    inside = np.abs(centers[:, 1]) <= reach
+    return replace(
+        mixture,
+        amplitudes=np.asarray(mixture.amplitudes)[inside],
+        centers=centers[inside].astype(np.float32),
+    )
+
+
 def has_twist(map_info) -> bool:
     """Whether a map can be searched at all.
 
@@ -353,7 +492,45 @@ def symmetrize_project_align_one_map(
     scale_range,
     projection_method="volume",
     query_fits=None,
+    stretch_factors=(1.0,),
 ):
+    """Project one map and match the query images to it.
+
+    Parameters
+    ----------
+    map_info : MapInfo
+        The map and its helical parameters.
+    image_query : np.ndarray or list of np.ndarray
+        One query image, or several to be scored jointly.
+    image_query_label : str or list of str
+        Their labels.
+    image_query_apix : float
+        Pixel size of the queries.
+    rescale_apix : bool
+        Make the projection at the queries' pixel size, a pitch long.
+    length_xy_factor : float
+        Extra projection length, in query widths.
+    match_sf : bool
+        Match the projection's structure factor to the placed queries.
+    angle_range, scale_range : float
+        Passed to ``align_images``.
+    projection_method : {"volume", "gaussian"}, optional
+        Symmetrise the voxels, or render the map's gaussian fit.
+    query_fits : list of ImageGaussians, optional
+        The queries as gaussians, to match by overlap in gaussian mode.
+    stretch_factors : sequence of float, optional
+        Stretches of the projection along the helical axis to try, as from
+        :func:`axial_stretch_factors`: a coarse search for a filament of the
+        same packing with another twist. The best is kept. Defaults to none.
+
+    Returns
+    -------
+    tuple
+        ``(map_info, result)``, where ``result`` is None when the map could
+        not be searched, and otherwise ``(flip, scale, rotation, shift,
+        score, placed_queries, query_label, projection, map_label,
+        stretch_factor, stretched_twist)``.
+    """
     if abs(map_info.twist) < 1e-3:
         return map_info, None
 
@@ -376,6 +553,8 @@ def symmetrize_project_align_one_map(
     rise = map_info.rise
     csym = map_info.csym
     label = map_info.label
+    factors = tuple(float(k) for k in (stretch_factors or (1.0,)) if float(k) > 0)
+    factors = factors or (1.0,)
 
     # The gaussian route never reads the volume: the fit is cached, and the
     # projection is rendered from it. Loading and filtering a map only to
@@ -402,11 +581,24 @@ def symmetrize_project_align_one_map(
             pitch = 360 / (180 - abs(twist_work)) * rise
         else:
             pitch = image_nx * new_apix
-        length = int(pitch / new_apix + image_nx * length_xy_factor) // 2 * 2
-        new_size = (length, image_ny, image_ny)
+        # A pitch and a query long, so a query can slide over every part of a
+        # period; stretched by k the pitch is k times as long, and so is the
+        # projection it is compared with.
+        lengths = [
+            int(pitch * k / new_apix + image_nx * length_xy_factor) // 2 * 2
+            for k in factors
+        ]
     else:
         new_apix = apix
-        new_size = (nz, ny, nx)
+        lengths = [nz] * len(factors)
+    # The projection every stretch is cut from: long enough that the most
+    # compressed one still fills its window. With no stretch it is the length
+    # the search has always used.
+    base_length = max(int(math.ceil(n / k - 1e-6)) for n, k in zip(lengths, factors))
+    if rescale_apix:
+        new_size = (base_length, image_ny, image_ny)
+    else:
+        new_size = (base_length, ny, nx)
 
     if projection_method == "gaussian":
         # The map as a few hundred gaussians, fitted once and cached, so the
@@ -507,19 +699,47 @@ def symmetrize_project_align_one_map(
         )
         proj = data_sym.sum(axis=2).T
 
-    if mixture is not None:
-        return map_info, _align_in_gaussian_space(
-            queries,
-            query_labels,
-            query_fits,
-            mixture,
-            proj,
-            new_apix,
-            new_size,
-            match_sf,
-            label,
-        )
+    # One projection, stretched along the axis once per factor: the same
+    # packing at another twist (see axial_stretch_factors). Every stretch is
+    # matched the way an unstretched projection is, and the one the queries
+    # agree with best -- by the mean score, as across maps -- is the result.
+    chosen = None
+    for factor, length in zip(factors, lengths):
+        if factor == 1.0 and length == proj.shape[1]:
+            proj_k = proj
+        else:
+            proj_k = stretch_along_axis(proj, factor, length)
+        if mixture is not None:
+            mixture_k = mixture
+            if factor != 1.0 or length != new_size[0]:
+                mixture_k = _stretch_mixture(mixture, factor, length, new_apix)
+            scores, placed, best = _gaussian_matches(
+                queries, query_fits, mixture_k, proj_k, new_apix
+            )
+        else:
+            scores, placed, best = _pixel_matches(
+                queries, proj_k, scale_range, angle_range
+            )
+        mean_score = float(np.mean(scores))
+        if chosen is None or mean_score > chosen[0]:
+            chosen = (mean_score, factor, scores, placed, best, proj_k)
 
+    _, factor, scores, placed, best, proj_k = chosen
+    result = _compose_result(
+        scores, placed, best, query_labels, proj_k, new_apix, match_sf, label
+    )
+    return map_info, result + (factor, stretched_twist(twist, rise, factor))
+
+
+def _pixel_matches(queries, proj, scale_range, angle_range):
+    """Align every query to a projection image with ``align_images``.
+
+    Returns
+    -------
+    tuple
+        ``(scores, placed, best)``: a score and a placed image per query, and
+        ``(score, flip, scale, rotation, shift)`` of the best of them.
+    """
     scores = []
     placed = []
     best = None
@@ -544,10 +764,7 @@ def symmetrize_project_align_one_map(
         placed.append(one_aligned)
         if best is None or one_score > best[0]:
             best = (one_score, one_flip, one_scale, one_rotation, one_shift)
-
-    return map_info, _compose_result(
-        scores, placed, best, query_labels, proj, new_apix, match_sf, label
-    )
+    return scores, placed, best
 
 
 def _compose_result(
@@ -602,17 +819,7 @@ def _compose_result(
     )
 
 
-def _align_in_gaussian_space(
-    queries,
-    query_labels,
-    query_fits,
-    mixture,
-    proj,
-    new_apix,
-    new_size,
-    match_sf,
-    label,
-):
+def _gaussian_matches(queries, query_fits, mixture, proj, new_apix):
     """Match every query to one map by the overlap of their gaussians.
 
     The pixel route pads each query into the projection's box and correlates
@@ -626,14 +833,19 @@ def _align_in_gaussian_space(
     The picture is still made of pixels: the transform the mixtures agree on is
     applied to the original image, so the display keeps the detail the fit
     discarded.
+
+    Returns
+    -------
+    tuple
+        ``(scores, placed, best)`` as :func:`_pixel_matches` returns them.
     """
     from . import gauss_align
 
     # The query is centred across the filament by the auto transform, so the
     # shift across it is small; along it a short average slides anywhere on a
     # projection a pitch long.
-    half_y = max(4.0 * mixture.sigma, 0.25 * new_size[1] * new_apix)
-    half_x = 0.5 * new_size[0] * new_apix
+    half_y = max(4.0 * mixture.sigma, 0.25 * proj.shape[0] * new_apix)
+    half_x = 0.5 * proj.shape[1] * new_apix
 
     scores = []
     placed = []
@@ -663,10 +875,7 @@ def _align_in_gaussian_space(
         )
         if best is None or entry[0] > best[0]:
             best = entry
-
-    return _compose_result(
-        scores, placed, best, query_labels, proj, new_apix, match_sf, label
-    )
+    return scores, placed, best
 
 
 def placement_agreement(placed, proj) -> float:
@@ -739,38 +948,23 @@ def refine_placement_for_display(result, queries, scale_range, angle_range=0.0):
         The entry with the better placement, and the flip, scale and rotation
         that go with it.
     """
-    _, _, _, _, score, current, query_label, proj, label = result
-    scores = []
-    placed = []
-    best = None
-    for one_query in queries:
-        (
-            one_flip,
-            one_scale,
-            one_rotation,
-            one_shift,
-            one_score,
-            one_aligned,
-        ) = align_images(
-            image_moving=one_query,
-            image_ref=proj,
-            scale_range=scale_range,
-            angle_range=angle_range,
-            check_polarity=True,
-            check_flip=True,
-            return_aligned_moving_image=True,
-        )
-        scores.append(one_score)
-        placed.append(one_aligned)
-        if best is None or one_score > best[0]:
-            best = (one_score, one_flip, one_scale, one_rotation, one_shift)
+    _, _, _, _, score, current, query_label, proj, label = result[:9]
+    scores, placed, best = _pixel_matches(queries, proj, scale_range, angle_range)
 
     refined = _compose_result(
         scores, placed, best, [query_label], proj, 1.0, False, label
     )
     if placement_agreement(refined[5], proj) <= placement_agreement(current, proj):
         return result
-    return refined[:4] + (score,) + refined[5:6] + (query_label, proj, label)
+    # the stretch the search chose, if any, belongs to the projection, which
+    # is unchanged
+    return (
+        refined[:4]
+        + (score,)
+        + refined[5:6]
+        + (query_label, proj, label)
+        + tuple(result[9:])
+    )
 
 
 def anisotropic_low_high_pass_filter(

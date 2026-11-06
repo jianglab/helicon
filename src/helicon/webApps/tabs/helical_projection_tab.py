@@ -123,12 +123,44 @@ BOOKMARK_DEFAULTS = {
     "length_z": ("length_z", 1),
     "length_xy": ("length_xy", 1.2),
     "scale_range": ("scale_range", 5),
+    "twist_range": ("twist_search_range", 0),
+    "twist_step": ("twist_search_step", 5),
     "rescale_apix": ("rescale_apix", True),
     "match_sf": ("match_sf", True),
     "projection_method": ("projection_method", "gaussian"),
     "plot_scores": ("plot_scores", True),
     "hide_query": ("hide_query_image", False),
 }
+
+
+def _stretch_label(result, factors=()):
+    """What the twist search found for one map, for its projection's label.
+
+    Empty when the projection was not stretched, so a search without a twist
+    range labels its results as before. Otherwise the stretch along the axis
+    and the twist it stands for at the map's rise -- marked when it is the
+    first or last stretch of the search, where the best twist may well lie
+    outside the range and the range should be widened.
+
+    Parameters
+    ----------
+    result : tuple
+        One search result.
+    factors : sequence of float, optional
+        The stretches the search tried.
+
+    Returns
+    -------
+    str
+    """
+    if len(result) < 11 or result[9] is None or abs(result[9] - 1.0) < 1e-6:
+        return ""
+    text = "|×%.3g twist=%.3f°" % (result[9], result[10])
+    if len(factors) > 1 and (
+        abs(result[9] - min(factors)) < 1e-9 or abs(result[9] - max(factors)) < 1e-9
+    ):
+        text += " (range edge)"
+    return text
 
 
 @module.ui
@@ -265,6 +297,41 @@ def helical_projection_tab_ui():
                                 max=100,
                                 step=1,
                                 update_on="blur",
+                            ),
+                            col_widths=6,
+                        ),
+                        ui.layout_columns(
+                            ui.tooltip(
+                                ui.input_numeric(
+                                    "twist_search_range",
+                                    "Twist search range (±%)",
+                                    value=0,
+                                    min=0,
+                                    max=200,
+                                    step=5,
+                                    update_on="blur",
+                                ),
+                                "Also match each map's side projection stretched "
+                                "and compressed along the filament axis: the same "
+                                "packing with a smaller or larger twist, as it "
+                                "looks at low resolution. 20 tries twists from "
+                                "1.2 times smaller to 1.2 times larger; 0 searches "
+                                "the map's own twist only.",
+                            ),
+                            ui.tooltip(
+                                ui.input_numeric(
+                                    "twist_search_step",
+                                    "Twist search step (%)",
+                                    value=5,
+                                    min=0.5,
+                                    max=50,
+                                    step=0.5,
+                                    update_on="blur",
+                                ),
+                                "Relative step between the stretches tried. A step "
+                                "of resolution / segment length is fine enough, "
+                                "e.g. 5% for 20 Å over 400 Å. Every step is one "
+                                "more match per map and image.",
                             ),
                             col_widths=6,
                         ),
@@ -455,6 +522,8 @@ def helical_projection_tab_server(input, output, session):
     map_side_projection_title = reactive.value("Map side projections:")
     map_side_projection_labels = reactive.value([])
     map_side_projection_links = reactive.value([])
+    # the stretches the displayed results were searched over
+    searched_stretch_factors = reactive.value(())
     map_side_projection_vertical_display_size = reactive.value(128)
 
     # -- Render slots for image_gallery (must run inside session) --
@@ -535,6 +604,7 @@ def helical_projection_tab_server(input, output, session):
         req(input.plot_scores())
         req(len(map_side_projections_with_alignments()) > 1)
         work = sorted(map_side_projections_with_alignments(), key=lambda x: -x[4])
+        factors = searched_stretch_factors()
         scores = [item[4] for item in work]
         labels = [item[8] for item in work]
         titles = [""] * len(labels)
@@ -550,7 +620,10 @@ def helical_projection_tab_server(input, output, session):
         fig = px.scatter(
             x=range(1, len(scores) + 1),
             y=scores,
-            hover_name=labels,
+            hover_name=[
+                label + _stretch_label(item, factors)
+                for label, item in zip(labels, work)
+            ],
             hover_data=dict(titles=titles),
             labels={"x": "Rank", "y": "Similarity Score"},
         )
@@ -1580,6 +1653,7 @@ def helical_projection_tab_server(input, output, session):
                     scale_range,
                     job["projection_method"],
                     query_fits,
+                    job["stretch_factors"],
                 ): m
                 for m in active_maps
             }
@@ -1657,6 +1731,7 @@ def helical_projection_tab_server(input, output, session):
                     for label in failed
                 ],
             )
+        searched_stretch_factors.set(tuple(job["stretch_factors"]))
         map_side_projections_with_alignments.set(good)
 
     def _compare_error(job, e):
@@ -1684,6 +1759,9 @@ def helical_projection_tab_server(input, output, session):
         match_sf = input.match_sf()
         projection_method = input.projection_method()
         scale_range = input.scale_range() / 100.0
+        stretch_factors = compute.axial_stretch_factors(
+            input.twist_search_range(), input.twist_search_step()
+        )
         active_maps = [m for m in maps() if compute.has_twist(m)]
         no_twist = [m.label for m in maps() if not compute.has_twist(m)]
         if not active_maps:
@@ -1707,6 +1785,7 @@ def helical_projection_tab_server(input, output, session):
                 match_sf=match_sf,
                 projection_method=projection_method,
                 scale_range=scale_range,
+                stretch_factors=stretch_factors,
             )
         )
 
@@ -1719,6 +1798,7 @@ def helical_projection_tab_server(input, output, session):
     def _update_side_projections_display():
         req(len(map_side_projections_with_alignments()))
         work = list(map_side_projections_with_alignments())
+        factors = searched_stretch_factors()
         if input.sort_map_side_projections_by() == "similarity score":
             work = sorted(work, key=lambda x: -x[4])
         df = emdb_df()
@@ -1738,7 +1818,7 @@ def helical_projection_tab_server(input, output, session):
                 query_lbl,
                 proj_img,
                 proj_lbl,
-            ) = item
+            ) = item[:9]
             if df is not None and proj_lbl in df["emdb_id"].values:
                 row_index = df.index[df["emdb_id"] == proj_lbl][0]
                 df.loc[row_index, "rank"] = i + 1
@@ -1760,7 +1840,10 @@ def helical_projection_tab_server(input, output, session):
                 )
                 links.append("")
             displayed.append(proj_img)
-            labels.append("%d/%d: %s|score=%.3f" % (i + 1, len(work), proj_lbl, score))
+            labels.append(
+                "%d/%d: %s|score=%.3f%s"
+                % (i + 1, len(work), proj_lbl, score, _stretch_label(item, factors))
+            )
             if proj_lbl.startswith("emd_") or proj_lbl.startswith("EMD-"):
                 num = proj_lbl.split("_")[-1].split("-")[-1]
                 links.append("https://www.ebi.ac.uk/emdb/EMD-%s" % num)
