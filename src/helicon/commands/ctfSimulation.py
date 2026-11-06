@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Pinned to a commit rather than to the branch: whatever the branch holds at
 # launch time would run on the user's machine without a helicon release.
 # Re-pin deliberately when the upstream app changes.
-URL = "https://raw.githubusercontent.com/jianglab/ctfsimulation/7616a7991cc3e2e28904ed141789f8e24b1a0ac2/ctf_simulation.py"
+URL = "https://raw.githubusercontent.com/jianglab/ctfsimulation/ba7d02175f15c5c253a439275a0407c868d7346b/ctf_simulation.py"
 
 
 def main(args):
