@@ -115,6 +115,26 @@ class TestRange:
         err = capsys.readouterr().err
         assert "message" in err and "c.txt" in err
 
+    def test_a_range_starts_when_the_guard_was_added(self, repo, capsys):
+        private_line = "Extract/job670/particles.star\n"  # private-ok
+        (repo / "old.txt").write_text(private_line)
+        _git(repo, "add", "old.txt")
+        _git(repo, "commit", "-q", "-m", "before the guard")
+
+        (repo / "tools").mkdir()
+        (repo / "tools" / "check_private_names.py").write_text("guard\n")
+        _git(repo, "add", "tools/check_private_names.py")
+        _git(repo, "commit", "-q", "-m", "add the guard")
+
+        (repo / "new.txt").write_text(private_line)
+        _git(repo, "add", "new.txt")
+        _git(repo, "commit", "-q", "-m", "after the guard")
+
+        assert cpn.main(["--range", "HEAD~3..HEAD"]) == 1
+        err = capsys.readouterr().err
+        assert "new.txt" in err
+        assert "old.txt" not in err
+
 
 def _hits(text):
     return cpn.find(text, cpn.shape_rules())

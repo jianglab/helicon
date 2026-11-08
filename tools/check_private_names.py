@@ -162,9 +162,21 @@ def check_staged(patterns: list[Rule]) -> list[str]:
 
 
 def check_range(patterns: list[Rule], revision_range: str) -> list[str]:
-    """The commit messages and the added lines of commits in a range."""
+    """The commits after this guard was introduced in a range."""
     problems = []
-    for sha in _git("rev-list", revision_range).split():
+    commits = _git("rev-list", "--reverse", revision_range).split()
+    introductions = _git(
+        "log",
+        "--reverse",
+        "--diff-filter=A",
+        "--format=%H",
+        revision_range,
+        "--",
+        "tools/check_private_names.py",
+    ).split()
+    if introductions:
+        commits = commits[commits.index(introductions[0]) :]
+    for sha in commits:
         message = _git("show", "-s", "--format=%B", sha)
         problems += [f"{sha[:8]} message {h}" for h in find(message, patterns)]
         diff = _git("show", "--unified=0", "--no-color", "--format=", sha)
