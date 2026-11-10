@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import numpy as np
-import plotly.io as pio
 import helicon
 from shiny import ui, module
 from shiny.module import resolve_id
@@ -269,10 +268,12 @@ def _filament_joint_figure(
 
 def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
     """Convert a plotly figure to responsive HTML for rendering via render.ui."""
+    import plotly.io as pio
+
     html = pio.to_html(
         fig,
         full_html=False,
-        include_plotlyjs=True,
+        include_plotlyjs=False,
         div_id=plot_id,
         config={"responsive": True, "displayModeBar": False},
         post_script=_RESIZE_WITH_BOX,
@@ -780,6 +781,7 @@ def abinitio3d_tab_ui():
             width="33vw",
             style="display: flex; flex-direction: column; height: 100%;",
         ),
+        helicon.shiny.plotly_dependency(),
         ui.h1(
             "AbInitio3D: ab initio 3D map from the 2D classes of helical filaments",
             style="font-weight: bold;",

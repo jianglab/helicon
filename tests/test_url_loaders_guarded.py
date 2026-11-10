@@ -1,6 +1,7 @@
 """Every web app handler that fetches a user's URL first refuses what a hosting service must not read."""
 
 import ast
+import sys
 from pathlib import Path
 
 import pytest
@@ -95,3 +96,35 @@ class TestRedirectsOnAHostedCopy:
         with pytest.raises(IOError):
             path_utils._get("https://public.example/x")
         assert seen == ["https://public.example/x"]
+
+
+class TestRequestsPatchedForBrowser:
+    """requests makes a real socket connection, which Pyodide has none of;
+    _get must route it through pyodide-http's browser-fetch patch instead,
+    but only in the browser -- pyodide-http is not one of helicon's own
+    dependencies, so outside the browser it must not even be imported."""
+
+    def test_outside_the_browser_nothing_is_imported(self, monkeypatch):
+        from helicon.lib import path_utils
+        from helicon.webApps import deployment
+
+        monkeypatch.setattr(deployment, "is_browser", lambda: False)
+        # import pyodide_http would raise (None is the standard sentinel
+        # for "block this import"): reaching the end proves it was never
+        # attempted
+        monkeypatch.setitem(sys.modules, "pyodide_http", None)
+        path_utils._patch_requests_for_browser()
+
+    def test_in_the_browser_pyodide_http_is_patched(self, monkeypatch):
+        from types import ModuleType
+
+        from helicon.lib import path_utils
+        from helicon.webApps import deployment
+
+        monkeypatch.setattr(deployment, "is_browser", lambda: True)
+        calls = []
+        fake = ModuleType("pyodide_http")
+        fake.patch_all = lambda: calls.append("patched")
+        monkeypatch.setitem(sys.modules, "pyodide_http", fake)
+        path_utils._patch_requests_for_browser()
+        assert calls == ["patched"]

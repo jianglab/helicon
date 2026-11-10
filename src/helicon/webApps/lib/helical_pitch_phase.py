@@ -210,6 +210,7 @@ def _class_medians(values, seg_class, n_classes):
 def _class_axis(delta, seg_class, n_classes):
     """Axis angle (radians, modulo 180 degrees) of each class from its ``delta``."""
     delta = np.deg2rad(np.asarray(delta, dtype=float))
+    seg_class = np.asarray(seg_class, dtype=np.intp)
     z = np.bincount(seg_class, weights=np.cos(2 * delta), minlength=n_classes) + 1j * (
         np.bincount(seg_class, weights=np.sin(2 * delta), minlength=n_classes)
     )
@@ -585,8 +586,8 @@ def prepare_pairs(
         ok = same & (d > 0) & (d <= max_sep)
         I.append(i[ok])
         J.append(j[ok])
-    I = np.concatenate(I).astype(np.int64) if I else np.zeros(0, np.int64)
-    J = np.concatenate(J).astype(np.int64) if J else np.zeros(0, np.int64)
+    I = np.concatenate(I).astype(np.intp) if I else np.zeros(0, np.intp)
+    J = np.concatenate(J).astype(np.intp) if J else np.zeros(0, np.intp)
     D = (seg_pos[J] - seg_pos[I]) * seg_pol[I]
     W = w[I] * w[J]
     return SegmentPairs(
@@ -603,7 +604,7 @@ def prepare_pairs(
         filament_keys=keys,
         refined_path=bool(refined),
         max_sep=float(max_sep),
-        seg_row=np.concatenate(seg_row).astype(np.int64),
+        seg_row=np.concatenate(seg_row).astype(np.intp),
         seg_small=seg_small,
         seg_ref=np.concatenate(seg_ref),
         seg_weight=w,
@@ -625,14 +626,14 @@ def class_pair_histogram(pairs, labels=None, pair_weights=None, bin_width=5.0):
     ``labels`` replaces the segments' class rows (synthetic labels use this);
     ``pair_weights`` multiplies the pair weights (bootstrap resampling uses it).
     """
-    labels = pairs.seg_class if labels is None else labels
+    labels = np.asarray(pairs.seg_class if labels is None else labels, dtype=np.intp)
     K = int(max(pairs.n_classes, labels.max() + 1 if len(labels) else 0))
     nb = int(2 * pairs.max_sep / bin_width) + 1
     idx = np.clip(
-        np.round((pairs.D + pairs.max_sep) / bin_width).astype(np.int64), 0, nb - 1
+        np.round((pairs.D + pairs.max_sep) / bin_width).astype(np.intp), 0, nb - 1
     )
     w = pairs.W if pair_weights is None else pairs.W * pair_weights
-    flat = (labels[pairs.I].astype(np.int64) * K + labels[pairs.J]) * nb + idx
+    flat = (labels[pairs.I] * K + labels[pairs.J]) * nb + idx
     hist = np.bincount(flat, weights=w, minlength=K * K * nb).reshape(K, K, nb)
     centers = np.arange(nb) * bin_width - pairs.max_sep
     return hist, centers
@@ -880,7 +881,11 @@ def _pool_workers(pairs, n_tasks):
     """
     try:
         import helicon
+        from helicon.lib.system import has_real_threads
 
+        if not has_real_threads():
+            # e.g. Pyodide: ProcessPoolExecutor cannot fork/spawn at all
+            return 1
         bins = int(2 * pairs.max_sep / 5.0) + 1
         hist_gb = float(pairs.n_classes) ** 2 * bins * 8 / 1024**3
         gb = max(0.1, 0.3 + 250.0 * len(pairs.D) / 1024**3 + 4.0 * hist_gb)
@@ -1134,7 +1139,7 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
     if not n_fil or not len(d):
         return curves
     lo = float(d.min())
-    b = np.round((d - lo) / bin_width).astype(np.int64)
+    b = np.round((d - lo) / bin_width).astype(np.intp)
     # as many bins as the rounded positions reach: with int() a pair at the
     # longest separation could round one bin past the end, into the next
     # filament's first bin (or past the array, for the last filament)
@@ -1151,14 +1156,14 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
     # the bins, most of the product multiplied zeros, more so the longer the
     # repeat searched. The filaments are taken shortest first, in batches that
     # each use only the rows of E their pairs reach (the same bins and sums).
-    first = np.full(n_fil, nb, np.int64)
-    last = np.full(n_fil, -1, np.int64)
+    first = np.full(n_fil, nb, np.intp)
+    last = np.full(n_fil, -1, np.intp)
     np.minimum.at(first, fi, b)
     np.maximum.at(last, fi, b)
     zero = int(np.round(-lo / bin_width))  # the bin of separation 0
     reach = np.maximum(zero - first, last - zero).clip(min=0)
     by_reach = np.argsort(reach, kind="stable")
-    rank = np.empty(n_fil, np.int64)
+    rank = np.empty(n_fil, np.intp)
     rank[by_reach] = np.arange(n_fil)
     order = np.argsort(rank[fi], kind="stable")
     fr, b, c = rank[fi][order], b[order], c[order]
@@ -1207,7 +1212,9 @@ def _filament_curves(fi, n_fil, d, w, dphi, grid, bin_width=0.5):
         # several run side by side instead of one product using many threads.
         from concurrent.futures import ThreadPoolExecutor
 
-        with threadpool_limits(1), ThreadPoolExecutor(workers) as pool:
+        from helicon.lib.system import pool_executor
+
+        with threadpool_limits(1), pool_executor(ThreadPoolExecutor, workers) as pool:
             list(pool.map(run, batches))
     return curves
 
@@ -2023,8 +2030,10 @@ def _register_all(prepared, todo, turn, progress=None, refine=False):
     workers = 1
     try:
         import helicon
+        from helicon.lib.system import has_real_threads
 
-        workers = max(1, min(int(helicon.available_cpu(mem_gb_per_cpu=0.5)), 32))
+        if has_real_threads():
+            workers = max(1, min(int(helicon.available_cpu(mem_gb_per_cpu=0.5)), 32))
     except Exception:
         pass
     if workers == 1 or len(todo) < 40:
@@ -2357,9 +2366,9 @@ def suggest_expansion(
         over all filaments with an unselected segment) and ``z``, best first.
     """
     selected = {int(c) for c in selected}
-    cls = params["rlnClassNumber"].astype(int).values
+    cls = params["rlnClassNumber"].astype(np.intp).to_numpy()
     fil = params.groupby(["rlnMicrographName", "rlnHelicalTubeID"], sort=False).ngroup()
-    fil = fil.values
+    fil = fil.to_numpy(dtype=np.intp)
     nf = fil.max() + 1
     is_sel = np.isin(cls, list(selected))
     n_seg = np.bincount(fil, minlength=nf)

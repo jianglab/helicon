@@ -17,7 +17,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dynamic = ["version"]
-dependencies = ['cryosparc-tools', 'finufft', 'joblib', 'matplotlib', 'mrcfile', 'numba', 'numpy', 'pandas[html]', 'psutil', 'requests', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
+dependencies = ['joblib', 'matplotlib', 'mrcfile', 'numpy', 'pandas[html]', 'requests', 'rich', 'scikit-image', 'scikit-learn', 'scipy', 'starfile', 'tqdm']
 keywords = ["cryo-EM", "structural biology", "helical symmetry", "helical indexing", "image analysis", "Web apps"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -53,6 +53,33 @@ gui = ['napari', 'PySide6', 'pyqtgraph', 'qtawesome']
 # wheels for the Python versions this project supports; helicon imports without
 # it and simply does not expose those names.
 gauss = ['torch']
+
+# numba, finufft, cryosparc-tools and psutil were hard dependencies until a
+# Shinylive (Pyodide/WebAssembly) build of helicon webApps needed to
+# pip-install plain helicon in the browser: none of the four has a Pyodide
+# wheel (no JIT backend, no wasm32 build, or -- psutil -- no pure-Python
+# wheel at all, being a thin wrapper over OS calls Pyodide has none of
+# anyway), so a hard dependency on any one of them made micropip's install
+# fail outright, even for a tab that never touches the one it couldn't get.
+# Every call site already imports these lazily and already tolerates their
+# absence (numba: lib/numba_compat.py's lazy_jit falls back to plain Python,
+# much slower but correct; finufft, cryosparc-tools: deferred imports inside
+# the one function or command that needs each; psutil:
+# lib/system.py's _psutil_or_none(), used wherever it is read) -- `helicon`
+# itself, and every command and plugin that does not touch one of these,
+# behave exactly as before. Only a command that does -- `helicon cryosparc`,
+# `images2star --calibratepixelsize`, a numba-accelerated kernel wanting its
+# fast path, an accurate (rather than conservative-default) CPU/memory
+# reading -- now needs the matching extra explicitly.
+numba = ['numba']
+finufft = ['finufft']
+cryosparc = ['cryosparc-tools']
+psutil = ['psutil']
+
+# All four at once, for a desktop/server install that wants every fast path
+# and accurate system reading (not pulled in by `all`, which is about UI
+# backends, not accelerators -- same reasoning as `gauss` above).
+accelerate = ['helicon[numba]', 'helicon[finufft]', 'helicon[cryosparc]', 'helicon[psutil]']
 
 # Everything the test suite needs beyond the runtime dependencies. Without
 # these, parts of the suite skip themselves quietly or cannot run at all:

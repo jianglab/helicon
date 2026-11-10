@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import plotly.express as px
-import plotly.io as pio
 import helicon
 from shiny import ui, module
 from .. import deployment
@@ -38,10 +36,12 @@ def _fig_to_html(fig, click_input=None):
         Full id of the Shiny input that receives ``{twist, rise}`` when a point
         carrying that pair as its customdata is clicked.
     """
+    import plotly.io as pio
+
     html = pio.to_html(
         fig,
         full_html=False,
-        include_plotlyjs=True,
+        include_plotlyjs=False,
         config={"responsive": True, "displayModeBar": False},
         default_height=400,
         post_script=None if click_input is None else _CLICK_TO_INPUT % click_input,
@@ -84,6 +84,9 @@ def _scores_figure(res, picked=None):
 
     n_twists = len(np.unique(results_arr[0, :]))
     n_rises = len(np.unique(results_arr[1, :]))
+    if n_twists <= 1 and n_rises <= 1:
+        return None
+    import plotly.express as px
 
     if n_twists > 1 and n_rises > 1:
         x = results_arr[0, :]
@@ -183,6 +186,34 @@ def _scores_figure(res, picked=None):
     else:
         return None
     return fig
+
+
+# Cards and action buttons in the twist/rise/Csym row size intrinsically to
+# their content (avoiding clipped range sliders and inner scrollbars) while
+# stretching equally along the cross axis.
+_SEARCH_ROW_CSS = ui.tags.style(
+    """
+.dn-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 10px;
+  margin-block-end: 0;
+}
+.dn-search-row > .shiny-html-output {
+  display: flex;
+}
+.dn-search-row .card,
+.dn-search-row .shiny-input-container {
+  margin-block-end: 0;
+}
+.dn-search-row .btn {
+  inline-size: 115px;
+  block-size: 100%;
+  padding-inline: 6px;
+}
+"""
+)
 
 
 @module.ui
@@ -516,6 +547,7 @@ def denovo3d_tab_ui():
             style="display: flex; flex-direction: column; height: 100%;",
         ),
         # ── Main content ──
+        helicon.shiny.plotly_dependency(),
         ui.h1(
             "Denovo3D: de novo helical indexing and 3D reconstruction",
             style="font-weight: bold;",
@@ -595,13 +627,8 @@ def denovo3d_tab_ui():
             style="display: flex; flex-direction: row; flex-wrap: wrap;"
             " align-items: flex-start; gap: 10px; margin-bottom: 0",
         ),
+        _SEARCH_ROW_CSS,
         ui.div(
-            ui.tooltip(
-                ui.card(
-                    style="height: 115px",
-                ),
-                "Will reconstruct 3D map when min. twist = max twist and min. rise = max rise",
-            ),
             ui.output_ui("dn_twist_card"),
             ui.output_ui("dn_rise_card"),
             # Server-rendered like its two neighbours, not static. Built into
@@ -617,10 +644,9 @@ def denovo3d_tab_ui():
                     "dn_stop_denovo3D",
                     label="Stop",
                     class_="btn-danger",
-                    style="width: 115px; height: 115px;",
                 ),
             ),
-            style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
+            class_="dn-search-row",
         ),
         ui.div(
             ui.output_ui("dn_scores_plot"),

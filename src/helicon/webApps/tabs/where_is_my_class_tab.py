@@ -22,7 +22,10 @@ from ..lib import whereismyclass_compute as compute
 
 logger = logging.getLogger(__name__)
 
-from .where_is_my_class_bookmark import BOOKMARK_DEFAULTS  # noqa: E402
+from .where_is_my_class_bookmark import (  # noqa: E402
+    BOOKMARK_DEFAULTS,
+    EXAMPLE_URL_STAR,
+)
 
 
 @module.ui
@@ -59,7 +62,7 @@ def where_is_my_class_tab_ui():
                             ui.input_text(
                                 "wimc_url_star",
                                 "URL for a RELION star or cryoSPARC cs file",
-                                value="",
+                                value=EXAMPLE_URL_STAR,
                                 placeholder="https://...",
                             ),
                         ),
@@ -226,7 +229,7 @@ def where_is_my_class_tab_ui():
 @module.server
 def where_is_my_class_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "star_browse",
             "wimc_server_star",

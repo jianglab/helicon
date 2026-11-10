@@ -14,6 +14,17 @@ outright (for a host not listed here, or to override one that is). Otherwise
 the environment variables the common hosting services set are checked, and
 with none of them the app is taken to run locally, as ``helicon webApps`` and
 the file browser start it.
+
+A Shinylive export has no server at all -- the "server" is Pyodide, running
+in the visitor's own browser -- so it is cloud-like by definition: there is no
+``os.environ`` a visitor's export could set, only the interpreter itself
+(:func:`is_browser`), and :func:`is_cloud` treats that as cloud unless
+``HELICON_DEPLOYMENT`` overrides it.
+
+Its "server files" are then the folders the visitor chooses to give the page
+(:mod:`helicon.webApps.local_folder`): they are mounted in Pyodide's own file
+system, so every loader that reads a path, and the file dialog, work on them as
+they do on a lab server's files (:func:`has_server_files`).
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import sys
 from urllib.parse import urlsplit
 
 # (host, variable, value or None for "set to anything"), checked in order.
@@ -84,11 +96,26 @@ def hosting_service(environ=None) -> str | None:
     return None
 
 
+def is_browser() -> bool:
+    """Whether this process is Pyodide running in a visitor's browser.
+
+    Pyodide sets ``sys.platform`` to ``"emscripten"``; nothing else does. A
+    Shinylive export has no environment variables of its own to check (there
+    is no host process to set them), so this is read from the interpreter
+    itself rather than from ``environ`` the way the rest of this module is.
+
+    Returns
+    -------
+    bool
+    """
+    return sys.platform == "emscripten"
+
+
 def is_cloud(environ=None) -> bool:
     """Whether the app runs on a hosting service rather than locally.
 
     ``HELICON_DEPLOYMENT`` (``cloud`` or ``local``) decides it when set;
-    otherwise :func:`hosting_service`.
+    otherwise :func:`is_browser`, then :func:`hosting_service`.
 
     Parameters
     ----------
@@ -105,6 +132,8 @@ def is_cloud(environ=None) -> bool:
         return True
     if forced in ("local", "lab"):
         return False
+    if is_browser():
+        return True
     return hosting_service(env) is not None
 
 
@@ -115,7 +144,13 @@ def url_allowed(url, environ=None) -> bool:
     """Whether a "url" input may be read: on a hosting service, a URL only.
 
     The functions that read a URL also read a local path, which on a hosting
-    service would let a visitor make the server read its own files.
+    service would let a visitor make the server read its own files. In a
+    Shinylive export (:func:`is_browser`) there is no shared server to
+    protect that way -- the fetch runs in the visitor's own browser (see
+    ``lib.path_utils._patch_requests_for_browser``), reaching only what that
+    visitor's own browser could already reach by typing the URL into its
+    address bar -- so :func:`host_is_public`'s check is skipped there; only
+    the scheme is still required, which already excludes a local path.
 
     Parameters
     ----------
@@ -132,6 +167,8 @@ def url_allowed(url, environ=None) -> bool:
     text = str(url).strip()
     if not text.lower().startswith(_URL_SCHEMES):
         return False
+    if is_browser():
+        return True
     try:
         host = urlsplit(text).hostname
     except ValueError:
@@ -215,6 +252,20 @@ def refuse_local_path(url) -> bool:
     return True
 
 
+def has_server_files() -> bool:
+    """Whether the app can read files by a path: where the user's files are.
+
+    That is a local run, and a browser-side (Shinylive) copy, whose "server
+    files" are the folders the visitor has chosen (see
+    :mod:`helicon.webApps.local_folder`). A hosting service has neither.
+
+    Returns
+    -------
+    bool
+    """
+    return is_browser() or not is_cloud()
+
+
 def refuse_server_mode() -> bool:
     """Tell the user, and return True, when server files may not be read.
 
@@ -223,14 +274,15 @@ def refuse_server_mode() -> bool:
     that reads a path on the server (the "server" input mode, companion-file
     lookups, a RELION project folder) starts with ``if
     deployment.refuse_server_mode(): return``, as a server-side check behind
-    the UI that already hides those choices.
+    the UI that already hides those choices. A browser-side copy is the
+    visitor's own: what it can read is what they gave it.
 
     Returns
     -------
     bool
         True (after showing a popup) on a hosting service, else False.
     """
-    if not is_cloud():
+    if has_server_files():
         return False
     from shiny import ui
 

@@ -182,6 +182,190 @@ class TestForwardBackward:
         assert out["ntr"] == pytest.approx(2.0)  # the two steps of the other filament
 
 
+class TestNumpyFallback:
+    """The vectorised numpy kernels (what runs with no numba, as under Pyodide)
+    agree with the numba-fused ones they stand in for -- at the kernel level
+    directly, and through the whole forward-backward driver against the same
+    brute-force ground truth :class:`TestForwardBackward` checks the numba
+    path with."""
+
+    T, K = 3, 4
+
+    def _inputs(self, n0, rng):
+        G = (rng.random((self.T, n0, self.K)) + 0.1).astype(np.float32)
+        s_prev = (rng.random((self.T, n0)) + 0.1).astype(np.float32)
+        q = (rng.random((self.T, self.K)) + 0.1).astype(np.float32)
+        q /= q.sum(1, keepdims=True)
+        eps = (rng.random(n0) * 0.5 + 0.3).astype(np.float32)
+        # -1 included: the "unknown class" segments carry
+        cls = rng.integers(-1, self.K, size=n0).astype(np.int64)
+        return G, s_prev, q, eps, cls
+
+    @pytest.mark.parametrize("n", [0, 1, 3, 7])
+    def test_forward_step_matches_the_numba_kernel(self, n):
+        rng = np.random.default_rng(0)
+        n0 = 7
+        G, s_prev, q, eps, cls = self._inputs(n0, rng)
+        rho, sw = 0.07, 0.07 / (self.T - 1)
+        s_new_a, s_new_b = np.zeros((self.T, n0), np.float32), np.zeros(
+            (self.T, n0), np.float32
+        )
+        ll_a, ll_b = np.zeros(n0), np.zeros(n0)
+        G_a, G_b = G.copy(), G.copy()
+        hc._forward_step(G_a, s_prev, q, rho, sw, eps[:n], cls[:n], s_new_a, ll_a, n)
+        hc._forward_step_np(G_b, s_prev, q, rho, sw, eps[:n], cls[:n], s_new_b, ll_b, n)
+        np.testing.assert_allclose(G_a, G_b, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(s_new_a, s_new_b, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ll_a, ll_b, rtol=1e-5, atol=1e-6)
+
+    @pytest.mark.parametrize("n1", [0, 1, 3, 7])
+    def test_backward_prepare_matches_the_numba_kernel(self, n1):
+        rng = np.random.default_rng(1)
+        n0 = 7
+        beta = (rng.random((self.T, n0, self.K)) + 0.1).astype(np.float32)
+        q = (rng.random((self.T, self.K)) + 0.1).astype(np.float32)
+        eps = (rng.random(n0) * 0.5 + 0.3).astype(np.float32)
+        cls = rng.integers(-1, self.K, size=n0).astype(np.int64)
+        V_a, V_b = np.zeros((self.T, n0, self.K), np.float32), np.zeros(
+            (self.T, n0, self.K), np.float32
+        )
+        Q_a, Q_b = np.zeros((self.T, n0), np.float32), np.zeros(
+            (self.T, n0), np.float32
+        )
+        hc._backward_prepare(beta, q, eps[:n1], cls[:n1], V_a, Q_a, n1)
+        hc._backward_prepare_np(beta, q, eps[:n1], cls[:n1], V_b, Q_b, n1)
+        np.testing.assert_allclose(V_a, V_b, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(Q_a, Q_b, rtol=1e-5, atol=1e-6)
+
+    @pytest.mark.parametrize(
+        "n, n1, collect",
+        [(5, 3, True), (5, 3, False), (4, 4, True), (4, 0, True), (1, 0, True)],
+    )
+    def test_backward_finish_matches_the_numba_kernel(self, n, n1, collect):
+        rng = np.random.default_rng(2)
+        n0 = 6
+        TMP = (rng.random((self.T, n0, self.K)) + 0.1).astype(np.float32)
+        alpha = (rng.random((self.T, n0, self.K)) + 0.1).astype(np.float32)
+        Q = (rng.random((self.T, n0)) + 0.1).astype(np.float32)
+        wt = rng.integers(0, 2, size=n0).astype(np.float32)
+        rho, sw = 0.07, 0.07 / (self.T - 1)
+        n_blocks = 4
+
+        def buffers():
+            return (
+                np.zeros((self.T, n0, self.K), np.float32),  # beta_out
+                np.zeros((self.T, n0, self.K), np.float32),  # a_out
+                np.zeros((n_blocks, self.T, self.K)),  # g_blk
+                np.zeros(n_blocks),  # nsw_blk
+                np.zeros(n_blocks),  # ntr_blk
+                np.zeros((n0, self.T), np.float32),  # tpost
+                np.zeros(n0, np.int32),  # cbest
+            )
+
+        beta_out_a, a_out_a, g_blk_a, nsw_blk_a, ntr_blk_a, tpost_a, cbest_a = buffers()
+        beta_out_b, a_out_b, g_blk_b, nsw_blk_b, ntr_blk_b, tpost_b, cbest_b = buffers()
+        hc._backward_finish(
+            TMP.copy(),
+            alpha.copy(),
+            Q.copy(),
+            wt.copy(),
+            rho,
+            sw,
+            n,
+            n1,
+            collect,
+            beta_out_a,
+            a_out_a,
+            g_blk_a,
+            nsw_blk_a,
+            ntr_blk_a,
+            tpost_a,
+            cbest_a,
+            n_blocks,
+        )
+        hc._backward_finish_np(
+            TMP.copy(),
+            alpha.copy(),
+            Q.copy(),
+            wt.copy(),
+            rho,
+            sw,
+            n,
+            n1,
+            collect,
+            beta_out_b,
+            a_out_b,
+            g_blk_b,
+            nsw_blk_b,
+            ntr_blk_b,
+            tpost_b,
+            cbest_b,
+            n_blocks,
+        )
+        np.testing.assert_allclose(beta_out_a, beta_out_b, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(a_out_a, a_out_b, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(tpost_a, tpost_b, rtol=1e-4, atol=1e-5)
+        np.testing.assert_array_equal(cbest_a, cbest_b)
+        # the n_blocks split is a numba-parallelism device only: the numpy
+        # kernel always writes block 0, so only the totals need to agree
+        np.testing.assert_allclose(
+            g_blk_a.sum(axis=0), g_blk_b.sum(axis=0), rtol=1e-4, atol=1e-5
+        )
+        assert nsw_blk_a.sum() == pytest.approx(nsw_blk_b.sum(), rel=1e-4, abs=1e-5)
+        assert ntr_blk_a.sum() == pytest.approx(ntr_blk_b.sum())
+
+    def test_period_scores_matches_the_numba_kernel(self):
+        rng = np.random.default_rng(4)
+        n_fil, n_classes, n = 6, 5, 300
+        x = rng.uniform(0.0, 2000.0, n)
+        ch = rng.integers(0, n_fil, n).astype(np.int64)
+        cl = rng.integers(0, n_classes, n).astype(np.int64)
+        phase0 = rng.uniform(0.0, 2.0 * np.pi, n_fil)
+        periods = np.arange(100.0, 500.0, 10.0)
+        out_a, out_b = np.zeros(len(periods)), np.zeros(len(periods))
+        hc._period_scores(x, ch, cl, phase0, n_classes, periods, 8, out_a)
+        hc._period_scores_np(x, ch, cl, phase0, n_classes, periods, 8, out_b)
+        np.testing.assert_allclose(out_a, out_b, rtol=1e-6, atol=1e-9)
+
+    def test_period_scores_handles_an_unweighted_class_or_filament(self):
+        # a class or filament that nothing votes for at some round: the
+        # normalisation's "m > 0" branch, not just its common case
+        x = np.array([0.0, 50.0, 999.0])
+        ch = np.array([0, 0, 1], dtype=np.int64)
+        cl = np.array([0, 0, 2], dtype=np.int64)  # class 1 gets no votes
+        phase0 = np.array([0.3, 1.1])
+        periods = np.array([200.0, 350.0])
+        out_a, out_b = np.zeros(2), np.zeros(2)
+        hc._period_scores(x, ch, cl, phase0, 3, periods, 4, out_a)
+        hc._period_scores_np(x, ch, cl, phase0, 3, periods, 4, out_b)
+        np.testing.assert_allclose(out_a, out_b, rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("seq", [[1, 2, 3, 1], [2, 2, 1, 3, 3]])
+    def test_forward_backward_without_numba_still_agrees_with_brute_force(
+        self, monkeypatch, seq
+    ):
+        monkeypatch.setattr(hc, "_HAS_NUMBA", False)
+        ch = _chains([seq], prob=0.6, n_classes=self.K)
+        rng = np.random.default_rng(3)
+        A = rng.random((self.T, self.K, self.K)) + 0.1
+        A /= A.sum(2, keepdims=True)
+        q = rng.random((self.T, self.K)) + 0.1
+        q /= q.sum(1, keepdims=True)
+        pi0 = rng.random(self.T * self.K) + 0.1
+        pi0 /= pi0.sum()
+        model = hc.Model(A=A, q=q, pi0=pi0, rho=0.07)
+        chunk = hc._Chunk(ch, 0, 1)
+        out = hc._forward_backward(
+            chunk, self.K, model, None, collect=True, posterior=True
+        )
+        total, tpost, xi = _brute_force(
+            [c - 1 for c in seq], [float(ch.eps[0])] * len(seq), model, self.K
+        )
+        assert out["ll_train"] == pytest.approx(np.log(total), rel=1e-4)
+        np.testing.assert_allclose(out["tpost"], tpost, atol=2e-4)
+        np.testing.assert_allclose(out["xi"], xi, atol=2e-4)
+
+
 class TestFit:
     @staticmethod
     def _simulate(n_fil=300, seed=0):
@@ -845,6 +1029,41 @@ class TestPeriods:
         ref = [_reference_period_score(x, ch, cl, phase0, K, C) for C in periods]
         np.testing.assert_allclose(out, ref, rtol=1e-6)
 
+    def test_without_numba_the_numpy_kernel_matches_the_c_code_too(self, monkeypatch):
+        rng = np.random.default_rng(0)
+        n, F, K = 300, 7, 5
+        x = rng.uniform(0, 600, n)
+        ch = rng.integers(0, F, n)
+        cl = rng.integers(0, K, n)
+        phase0 = rng.uniform(0, 2 * np.pi, F)
+        periods = np.array([100.0, 130.0, 250.0, 333.0])
+        out = np.zeros(len(periods))
+        monkeypatch.setattr(hc, "_HAS_NUMBA", False)
+        hc._period_scores_np(
+            x, ch.astype(np.int64), cl.astype(np.int64), phase0, K, periods, 8, out
+        )
+        ref = [_reference_period_score(x, ch, cl, phase0, K, C) for C in periods]
+        np.testing.assert_allclose(out, ref, rtol=1e-6)
+
+    def test_fit_periods_does_not_need_numba(self, monkeypatch):
+        """Exercises the dispatch in :func:`fit_periods` itself, not just the
+        kernel directly."""
+        monkeypatch.setattr(hc, "_HAS_NUMBA", False)
+        rng = np.random.default_rng(1)
+        seqs = []
+        for f in range(40):
+            phase = int(rng.integers(10))
+            seq = [(phase + s) % 10 for s in range(60)]
+            seq = [int(rng.integers(10)) if rng.random() < 0.1 else c for c in seq]
+            seqs.append([c + 1 for c in seq])
+        ch = _chains(seqs, prob=0.9, n_classes=10, step=15.0)
+        seg_type = np.zeros(ch.n_segments, dtype=int)
+        period, score = hc.fit_periods(
+            ch, seg_type, np.ones(ch.n_segments), ch.cls, 2, min_segments=100
+        )
+        assert period[0] == pytest.approx(150.0, abs=10.0)
+        assert score[0] > 0.7
+
     def test_filaments_that_cycle_through_their_classes_have_that_period(self):
         # 10 classes, a step of 15 A: the cycle is 150 A; the filaments start anywhere
         rng = np.random.default_rng(1)
@@ -1029,3 +1248,66 @@ class TestAlike:
         ch = _chains(seqs, prob=0.8, n_classes=18)
         best, scores = hc.select_n_types(ch, 1, 3, cpu=2)
         assert set(scores) == {1, 2, 3}
+
+
+class TestPyodide32BitBincount:
+    """Under 32-bit WebAssembly (Pyodide), ``np.intp`` is ``np.int32``, numba is
+    unavailable, and ``np.bincount`` rejects ``int64`` arrays."""
+
+    def test_context_groups_and_period_scores_np_use_intp(self, monkeypatch):
+        import pandas as pd
+
+        class _Wasm32Numpy:
+            intp = np.int32
+
+            @staticmethod
+            def bincount(x, weights=None, minlength=0):
+                arr = np.asarray(x)
+                if not np.can_cast(arr.dtype, np.int32, casting="safe"):
+                    raise TypeError(
+                        f"Cannot cast array data from {arr.dtype!r} to "
+                        f"dtype('int32') according to the rule 'safe'"
+                    )
+                return np.bincount(arr, weights=weights, minlength=minlength)
+
+            def __getattr__(self, name):
+                return getattr(np, name)
+
+        monkeypatch.setattr(hc, "np", _Wasm32Numpy())
+        monkeypatch.setattr(hc, "_HAS_NUMBA", False)
+
+        seqs, _ = TestFit._simulate(60, seed=5)
+        rows = [
+            (f"m{f}", 0, 10.0 * s, c, 0.9)
+            for f, seq in enumerate(seqs)
+            for s, c in enumerate(seq)
+        ]
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "rlnMicrographName",
+                "rlnHelicalTubeID",
+                "rlnHelicalTrackLengthAngst",
+                "rlnClassNumber",
+                "rlnMaxValueProbDistribution",
+            ],
+        )
+        keys = [(f"m{f}", 0) for f in range(len(seqs))]
+        classes = list(range(1, 19))
+        labels, info = hc.context_groups(
+            df["rlnMicrographName"],
+            df["rlnHelicalTubeID"],
+            df["rlnHelicalTrackLengthAngst"],
+            df["rlnClassNumber"],
+            df["rlnMaxValueProbDistribution"],
+            classes,
+            keys,
+            [1, 2],
+            max_fit_segments=800,
+            n_iter=2,
+            cpu=1,
+            select=True,
+            detail=True,
+        )
+        assert set(labels) == {1, 2}
+        assert len(info["detail"][2]["period"]) == 2

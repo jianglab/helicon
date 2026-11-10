@@ -335,3 +335,18 @@ class TestTwoPitchTests:
         out = mx.two_pitch_tests([bad, jobs[1]], restarts=2, workers=2)
         assert isinstance(out[0], Exception)
         assert isinstance(out[1], dict)
+
+    def test_without_real_threads_the_default_worker_count_is_one(
+        self, jobs, monkeypatch
+    ):
+        """As under Pyodide: ProcessPoolExecutor cannot fork/spawn there, so
+        the default (workers=None) must resolve to 1, not an available-CPU
+        count it could never actually use."""
+        from helicon.lib import system
+
+        one = mx.two_pitch_tests(jobs, restarts=2, workers=1)
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        default = mx.two_pitch_tests(jobs, restarts=2, workers=None)
+        for x, y in zip(one, default):
+            assert x["heldout"] == pytest.approx(y["heldout"], abs=1e-9)
+            assert x["periods"] == pytest.approx(y["periods"], abs=1e-6)

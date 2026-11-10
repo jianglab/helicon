@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-import plotly.io as pio
 
 import helicon
 from shiny import reactive, ui, module, req, render
@@ -54,11 +53,13 @@ MAX_BINS = 10000
 
 def _fig_to_html(fig, multi_crosshair=False, plot_id=None):
     """Convert a plotly figure to responsive HTML for rendering via render.ui."""
+    import plotly.io as pio
+
     postscript = ""
     html = pio.to_html(
         fig,
         full_html=False,
-        include_plotlyjs=True,
+        include_plotlyjs=False,
         div_id=plot_id,
         config={"responsive": True, "displayModeBar": False},
         post_script=postscript,
@@ -247,6 +248,7 @@ def helical_pitch_tab_ui():
             width="33vw",
             style="display: flex; flex-direction: column; height: 100%;",
         ),
+        helicon.shiny.plotly_dependency(),
         ui.h1(
             "HelicalPitch: determine helical pitch/twist using 2D Classification info",
             style="font-weight: bold;",
@@ -571,7 +573,7 @@ def helical_pitch_tab_server(input, output, session):
             return None, int(n_images), None
 
     # Browse... in the server mode: pick the files on this computer
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "params_browse",
             "server_params",
@@ -590,7 +592,7 @@ def helical_pitch_tab_server(input, output, session):
     # A server file chosen or typed in one of the two server fields brings the
     # other file of the same 2D classification with it, when it is beside it.
     def _fill_companion(given, other_id, other_value):
-        if deployment.is_cloud():  # no looking at the server's files
+        if not deployment.has_server_files():  # no looking at the server's files
             return
         found = class2d_files.companion(given)
         if (

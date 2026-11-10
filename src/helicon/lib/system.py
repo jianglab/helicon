@@ -15,6 +15,9 @@ __all__ = [
     "has_streamlit",
     "available_cpu",
     "available_memory",
+    "has_real_threads",
+    "SerialExecutor",
+    "pool_executor",
     "omp_get_max_threads",
     "omp_set_num_threads",
     "get_terminal_size",
@@ -191,6 +194,23 @@ def _numba_thread_limit() -> int | None:
         return max(1, os.cpu_count() or 1)
 
 
+def _psutil_or_none():
+    """``psutil``, or None where it cannot be imported.
+
+    Pyodide (where ``helicon webApps`` can run as a Shinylive export, entirely
+    in the browser) has no ``psutil`` wheel -- and no real process/CPU/memory
+    info to read anyway, since it runs single-threaded in the browser's own
+    heap. Every caller here treats that the way a single-core, memory-tight
+    machine would be treated, rather than raising.
+    """
+    try:
+        import psutil
+
+        return psutil
+    except ImportError:
+        return None
+
+
 def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
     """Return the number of available CPUs accounting for SLURM, numba, and memory.
 
@@ -209,9 +229,11 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
     if "SLURM_CPUS_ON_NODE" in os.environ:
         cpu = int(os.environ["SLURM_CPUS_ON_NODE"])
     else:
-        import psutil
-
-        cpu = max(1, int(psutil.cpu_count() * (1 - psutil.cpu_percent() / 100)))
+        psutil = _psutil_or_none()
+        if psutil is None:
+            cpu = os.cpu_count() or 1
+        else:
+            cpu = max(1, int(psutil.cpu_count() * (1 - psutil.cpu_percent() / 100)))
     try:
         limit = _numba_thread_limit()
         if limit is not None:
@@ -220,10 +242,12 @@ def available_cpu(mem_gb_per_cpu: float | None = None) -> int:
         pass
 
     if mem_gb_per_cpu is not None:
-        import psutil
-
-        mem = psutil.virtual_memory()
-        cpu = min(cpu, int(mem.available / 1024**3 / mem_gb_per_cpu))
+        psutil = _psutil_or_none()
+        if psutil is not None:
+            mem = psutil.virtual_memory()
+            cpu = min(cpu, int(mem.available / 1024**3 / mem_gb_per_cpu))
+        # without psutil there is no per-CPU memory figure to compare
+        # against; cpu is left at what was already found above
 
     return max(1, cpu)
 
@@ -243,7 +267,11 @@ def available_memory() -> int:
     """
     from pathlib import Path
 
-    import psutil
+    psutil = _psutil_or_none()
+    if psutil is None:
+        # a conservative, always-safe figure rather than raising (see
+        # _psutil_or_none); Pyodide's actual heap is typically well under this
+        return 1024**3
 
     available = psutil.virtual_memory().available
     # Slurm may enforce --mem by watching the job, without a cgroup limit
@@ -319,6 +347,99 @@ def _load_omp_library():
                 except OSError:
                     continue
     return None
+
+
+_HAS_REAL_THREADS: bool | None = None
+
+
+def has_real_threads() -> bool:
+    """Whether this process can actually start an OS thread.
+
+    True nearly everywhere; false under Pyodide, where
+    ``threading.Thread.start()`` raises ``RuntimeError: can't start new
+    thread`` -- which is what ``concurrent.futures.ThreadPoolExecutor`` and
+    ``ProcessPoolExecutor`` both do there too, since each starts at least one
+    management thread of its own before any worker. (``asyncio.to_thread``
+    needs no such check: Pyodide's own event loop just runs it inline rather
+    than raising.)
+
+    Checked once, by actually starting a thread, and cached: a platform guess
+    (``sys.platform == "emscripten"``) could miss an environment this does
+    not yet know lacks real threads.
+
+    Returns
+    -------
+    bool
+    """
+    global _HAS_REAL_THREADS
+    if _HAS_REAL_THREADS is None:
+        import threading
+
+        try:
+            t = threading.Thread(target=lambda: None)
+            t.start()
+            t.join()
+            _HAS_REAL_THREADS = True
+        except RuntimeError:
+            _HAS_REAL_THREADS = False
+    return _HAS_REAL_THREADS
+
+
+class SerialExecutor:
+    """A ``concurrent.futures.Executor`` that runs every task immediately, in
+    the calling thread, instead of on a worker pool.
+
+    A drop-in for ``ThreadPoolExecutor``/``ProcessPoolExecutor`` where real
+    threads or processes cannot be started (see :func:`has_real_threads`):
+    correct, just not concurrent. ``submit`` returns an already-finished
+    ``Future``, so ``as_completed`` and ``.result()`` work against it exactly
+    as they do against a real pool -- callers need no code of their own for
+    this case; see :func:`pool_executor`.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def submit(self, fn, /, *args, **kwargs):
+        from concurrent.futures import Future
+
+        future = Future()
+        if future.set_running_or_notify_cancel():
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as e:
+                future.set_exception(e)
+        return future
+
+    def map(self, fn, *iterables, timeout=None, chunksize=1):
+        return map(fn, *iterables)
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        pass
+
+
+def pool_executor(executor_cls, *args, **kwargs):
+    """``executor_cls(*args, **kwargs)``, or :class:`SerialExecutor` where
+    real threads/processes cannot be started.
+
+    Parameters
+    ----------
+    executor_cls : type
+        ``concurrent.futures.ThreadPoolExecutor`` or ``ProcessPoolExecutor``
+        (or anything sharing their constructor and ``Executor`` interface).
+    *args, **kwargs
+        Passed to ``executor_cls`` when it is used.
+
+    Returns
+    -------
+    An ``executor_cls`` instance, or a :class:`SerialExecutor`.
+    """
+    if has_real_threads():
+        return executor_cls(*args, **kwargs)
+    return SerialExecutor()
 
 
 _omp_lib = None

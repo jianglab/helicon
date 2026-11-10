@@ -10,11 +10,11 @@ from, and reconstructs a 3D map from a single 2D image or from a set of 2D class
 
 It comes as command-line programs, a file viewer, and a set of web apps that run in
 your browser, on your own computer or on a cloud server. You can 
-[try the web apps online](https://01a01bc0-00db-fb4f-bfe0-f0ba9f0dd427.share.connect.posit.cloud)
+[try the web apps online](https://jianglab.github.io/helicon/)
 without installing anything.
 
 <p align="center">
-  <a href="https://01a01bc0-00db-fb4f-bfe0-f0ba9f0dd427.share.connect.posit.cloud">
+  <a href="https://jianglab.github.io/helicon/">
     <img src="https://raw.githubusercontent.com/jianglab/helicon/main/docs/images/helicon-home.jpeg"
          alt="The Home tab of the Helicon web apps: a diagram of the helical data processing workflow, with one box for each app" width="720">
   </a>

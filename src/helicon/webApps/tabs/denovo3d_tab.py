@@ -18,9 +18,6 @@ import random
 import tempfile
 import traceback
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
 
 import helicon
 from shiny import reactive, render, req, ui, module
@@ -157,7 +154,9 @@ def _display_redraw_plan(tasks, results, ranked, top_n, display_model):
         key = (round(float(task[5]), 6), round(float(task[6]), 6), task[4])
         if key[:2] in wanted and key in slot:
             t = list(task)
-            t[-3] = dict(t[-3], model=display_model)
+            algo = dict(t[-3], model=display_model)
+            algo.pop("score_only", None)
+            t[-3] = algo
             redo.append(tuple(t))
     return redo, slot
 
@@ -215,6 +214,8 @@ def _prepare_download_map(
     download-size cost of padding a long helical reconstruction to a cube.
     """
     _score, return_data, params = result
+    if return_data is None:
+        raise ValueError("The reconstructed map is unavailable")
     rec3d = return_data[3]
     compact_map = return_data[8]
 
@@ -255,7 +256,7 @@ def _prepare_download_map(
 @module.server
 def denovo3d_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "images_browse",
             "dn_server_images",
@@ -1640,7 +1641,6 @@ def denovo3d_tab_server(input, output, session):
                 width="70px",
                 update_on="blur",
             ),
-            style="height: 115px",
         )
 
     @render.ui
@@ -1680,7 +1680,6 @@ def denovo3d_tab_server(input, output, session):
                 ),
                 style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
             ),
-            style="height: 115px",
         )
 
     @render.ui
@@ -1707,7 +1706,6 @@ def denovo3d_tab_server(input, output, session):
                 ),
                 style="display: flex; flex-direction: row; align-items: flex-start; gap: 10px; margin-bottom: 0",
             ),
-            style="height: 115px",
         )
 
     @render.ui
@@ -1716,7 +1714,6 @@ def denovo3d_tab_server(input, output, session):
             "dn_run_denovo3D",
             run_button_text(),
             class_="btn-primary",
-            style="width: 115px; height: 115px;",
         )
 
     def _dn_map_for_download():
@@ -1782,7 +1779,7 @@ def denovo3d_tab_server(input, output, session):
     def dn_download_map_section():
         res = reconstruction_results()
         req(len(res) == 1)
-        req(res[0][1][3] is not None)
+        req(res[0][1] is not None and res[0][1][3] is not None)
         from htmltools import tags
 
         return map_viewers.button_row(
@@ -3029,8 +3026,14 @@ def denovo3d_tab_server(input, output, session):
         # input image. Drawing them with the search solver shows a map the
         # reconstruction selector was never going to produce -- so when the two
         # differ, redraw the displayed pairs with the reconstruction solver.
+        # When score_only is used for a multi-candidate scan, the top_n pairs
+        # also need redrawing even when the search and reconstruction solvers
+        # match, because the scan skipped volume rendering and projections.
         # The scores, and therefore the ranking, stay the search solver's.
-        if return_3d or input.dn_rec_algorithm() == input.dn_lr_algorithm():
+        use_score_only = len(tasks) > 1 and not return_3d and not _projmatch_active()
+        if return_3d or (
+            not use_score_only and input.dn_rec_algorithm() == input.dn_lr_algorithm()
+        ):
             display_model = None
         else:
             display_model = input.dn_rec_algorithm()
@@ -3099,331 +3102,25 @@ def denovo3d_tab_server(input, output, session):
         is_scan=False,
         threads=1,
     ):
-        log = _denovo3d_logger()
-
-        try:
-            with ui.Progress(min=0, max=len(tasks)) as p:
-                p.set(
-                    message="Calculation in progress",
-                    detail="This may take a while ...",
-                )
-
-                from time import time
-
-                # The tasks run in worker processes, and their results are
-                # awaited on the event loop in steps of 0.2 s: a blocking wait
-                # would stop every other session between results (seconds
-                # each), and would not see a Stop until a task had finished. A
-                # Stop ends the workers themselves, at once: a task in a thread
-                # cannot be interrupted, and ran on, using the CPUs.
-                pool = pools.TaskPool(min(cpu, len(tasks)), threads=threads)
-                waiting = []
-                stopped = False
-                try:
-                    future_tasks = [
-                        pool.submit(denovo3d_pipeline.process_one_task, *task)
-                        for task in tasks
-                    ]
-                    t0 = time()
-                    results = []
-                    n_discarded = 0
-                    update_interval = max(1, len(tasks) // 20)
-
-                    waiting = [asyncio.wrap_future(f) for f in future_tasks]
-                    pending = set(waiting)
-                    while pending and not stopped:
-                        finished, pending = await asyncio.wait(
-                            pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        if abort_ref[0] is True:
-                            log.warning("User aborted the denovo3D run early.")
-                            stopped = True
-                            break
-                        for completed_task in finished:
-                            try:
-                                result, error = completed_task.result(), None
-                            except Exception:
-                                result, error = None, traceback.format_exc()
-
-                            if error is not None:
-                                log.error("Task raised an exception:\n%s", error)
-                                n_discarded += 1
-                                continue
-                            if result is None:
-                                n_discarded += 1
-                                continue
-
-                            results.append(result)
-                            t1 = time()
-                            remaining = (
-                                (len(tasks) - len(results) - n_discarded)
-                                / max(len(results), 1)
-                                * (t1 - t0)
-                            )
-                            p.set(
-                                len(results) + n_discarded,
-                                message=f"Completed {len(results) + n_discarded}/{len(tasks)}",
-                                detail=f"{helicon.timedelta2string(remaining)} remaining",
-                            )
-
-                            if len(results) % update_interval == 0:
-                                reconstruction_results_raw.set(list(results))
-                                reconstruction_results.set(_rank(results, n_images))
-
-                    t_final = time()
-                    log.info("reconstruction time: %s", t_final - t0)
-                finally:
-                    for w in waiting:
-                        w.cancel()  # those not awaited (after a Stop)
-                    if stopped:
-                        pool.stop()
-                    else:
-                        pool.shutdown()
-
-            if n_discarded:
-                log.info(
-                    f"{n_discarded}/{len(tasks)} results are None and thus discarded"
-                )
-            if not results and not stopped:
-                ui.notification_show(
-                    f"All {len(tasks)} calculations failed, so there is nothing to"
-                    f" show. See helicon.denovo3D.log under {helicon.cache_dir / 'logs'}"
-                    " for the reason.",
-                    type="error",
-                    duration=15,
-                )
-
-            async def _rank_final(results, log=None):
-                """Rank, by whichever joint method the route asks for.
-
-                Used everywhere a *final* ranking is produced -- including after
-                the display re-solve, which otherwise re-ranked with the plain
-                joint method and silently undid the projection-matching order.
-                The interim rankings inside the solve loop deliberately stay on
-                the cheap method: projection matching costs a refinement per
-                twist, which is worth paying once, not on every progress update.
-
-                Run in a worker thread, for the same reason the solve above is:
-                it takes minutes, and called straight from this coroutine it
-                blocked the event loop for all of them. Nothing was serviced
-                while it ran -- no progress, no other effects -- and a session
-                left unattended that long can lose its connection, after which
-                the *next* run looks stuck whichever route it uses.
-                """
-                from concurrent.futures import ThreadPoolExecutor
-
-                ranked = _rank(results, n_images, log)
-                if not (projmatch and n_images > 1 and images and not abort_ref[0]):
-                    projmatch_composites.set({})
-                    return ranked
-
-                # The per-image results are kept exactly as solved, so the
-                # per-image views are identical on both joint routes and only
-                # the ordering -- and the composite -- differ.
-                seen = dict(i=0, n=0, twist=0.0)
-
-                def _on_pair(i, n, twist):
-                    seen.update(i=i, n=n, twist=twist)
-                    return not abort_ref[0]
-
-                def _work():
-                    return denovo3d_joint.rank_by_projection_matching(
-                        results,
-                        images,
-                        algorithm=dict(model=lr_algorithm),
-                        display_algorithm=(
-                            dict(model=rec_algorithm)
-                            if rec_algorithm and rec_algorithm != lr_algorithm
-                            else None
-                        ),
-                        log=log,
-                        progress=_on_pair,
-                    )
-
-                loop = asyncio.get_running_loop()
-                # Not a "with" block: leaving one waits for the thread, and a Stop
-                # must not. The thread sees the flag at its next pair of images
-                # (see _on_pair) and ends by itself; nothing waits for it.
-                pool = ThreadPoolExecutor(max_workers=1)
-                try:
-                    future = loop.run_in_executor(pool, _work)
-                    with ui.Progress(min=0, max=1) as pm:
-                        pm.set(0, message="Matching projections across images")
-                        while not future.done() and not abort_ref[0]:
-                            await asyncio.sleep(0.1)
-                            if seen["n"]:
-                                pm.set(
-                                    seen["i"] / seen["n"],
-                                    message="Matching projections across images",
-                                    detail=f"twist {seen['twist']:.3f}"
-                                    f" ({seen['i'] + 1}/{seen['n']})",
-                                )
-                        if not abort_ref[0]:
-                            matched, composites = await future
-                finally:
-                    pool.shutdown(wait=False, cancel_futures=True)
-
-                if abort_ref[0]:
-                    projmatch_composites.set({})
-                    return ranked
-                projmatch_composites.set(composites)
-
-                # Hand the winning twist's placements to the manual stitch, the
-                # same way the automatic stitcher hands over its own layout. An
-                # azimuth is an axial position, so the search has already
-                # worked out where every image sits; making the user press a
-                # button to have that computed again -- which is what this used
-                # to do -- was redundant twice over, since the answer was
-                # already in hand.
-                best = matched[0][2] if matched else None
-                found = (
-                    composites.get((round(float(best[5]), 6), round(float(best[6]), 6)))
-                    if best is not None
-                    else None
-                )
-                if found and found.get("two_fold"):
-                    ui.notification_show(
-                        "A two-fold about the helical axis (a 2\u2081 screw) was "
-                        "found: the model repeats at half a period, so the "
-                        "placements were searched over half of it.",
-                        type="message",
-                        duration=15,
-                    )
-                if found and found.get("placed") is not None:
-                    try:
-                        autostitch_transforms.set(
-                            denovo3d_joint.placements_as_transforms(
-                                found["phis"],
-                                found["placed"],
-                                found["twist"],
-                                found["rise"],
-                                found["apix2d"],
-                                int(np.shape(images[0])[1]),
-                                two_fold=found["two_fold"],
-                            )
-                        )
-                    except Exception:  # pragma: no cover - a layout is a bonus
-                        logger.warning(
-                            "could not express the placements as a manual"
-                            " stitch layout:\n%s",
-                            traceback.format_exc(),
-                        )
-                return matched
-
-            ranked = await _rank_final(results, log)
-            reconstruction_results_raw.set(list(results))
-            reconstruction_results.set(ranked)
-            if is_scan:
-                scan_results.set(list(ranked))
-
-            if display_model and results and not abort_ref[0]:
-                results = await _redraw_with(
-                    tasks,
-                    results,
-                    ranked,
-                    top_n,
-                    display_model,
-                    cpu,
-                    abort_ref,
-                    log,
-                    threads,
-                )
-                reconstruction_results_raw.set(list(results))
-                ranked = await _rank_final(results, log)
-                reconstruction_results.set(ranked)
-                if is_scan:
-                    scan_results.set(list(ranked))
-        except Exception:
-            log.error("Reconstruction task failed:\n%s", traceback.format_exc())
-            # Say so on screen. Swallowed silently, a failure here is
-            # indistinguishable from a slow run: the progress bar goes, no
-            # results appear, and the app looks hung rather than broken. That
-            # is exactly how a RuntimeError raised inside this task -- for
-            # reading a reactive source, which an extended task may not do --
-            # presented itself.
-            try:
-                ui.notification_show(
-                    "The search failed. See helicon.denovo3D.log under"
-                    f" {helicon.cache_dir / 'logs'} for the details.",
-                    type="error",
-                    duration=15,
-                )
-            except Exception:  # pragma: no cover - no session to notify
-                pass
-
-    async def _redraw_with(
-        tasks, results, ranked, top_n, display_model, cpu, abort_ref, log, threads=1
-    ):
-        """Re-solve the displayed twist/rise pairs with another solver.
-
-        Only the projections are taken from the second solve. Every score keeps
-        the value the search produced, so the ranking the user is looking at is
-        the one the search actually computed -- this changes the picture, not
-        the answer.
-
-        Returns
-        -------
-        list
-            ``results`` with the displayed entries' return_data replaced. Pairs
-            that were not displayed, and any re-solve that failed, are left as
-            they were.
-        """
-        redo, slot = _display_redraw_plan(tasks, results, ranked, top_n, display_model)
-        if not redo:
-            return results
-
-        log.info(
-            f"redrawing {len(redo)} displayed reconstructions with {display_model}"
+        await _run_reconstruction_task(
+            tasks,
+            cpu,
+            abort_ref,
+            reconstruction_results_raw=reconstruction_results_raw,
+            reconstruction_results=reconstruction_results,
+            scan_results=scan_results,
+            projmatch_composites=projmatch_composites,
+            autostitch_transforms=autostitch_transforms,
+            n_images=n_images,
+            display_model=display_model,
+            top_n=top_n,
+            projmatch=projmatch,
+            lr_algorithm=lr_algorithm,
+            images=images,
+            rec_algorithm=rec_algorithm,
+            is_scan=is_scan,
+            threads=threads,
         )
-        results = list(results)
-        with ui.Progress(min=0, max=len(redo)) as p:
-            p.set(message=f"Reconstructing with {display_model}", detail="for display")
-            # in worker processes, awaited on the event loop in steps, as in the
-            # search above: a Stop ends them at once
-            pool = pools.TaskPool(min(cpu, len(redo)), threads=threads)
-            waiting = []
-            stopped = False
-            try:
-                futures = [
-                    pool.submit(denovo3d_pipeline.process_one_task, *t) for t in redo
-                ]
-                done = 0
-                waiting = [asyncio.wrap_future(f) for f in futures]
-                pending = set(waiting)
-                while pending and not stopped:
-                    finished, pending = await asyncio.wait(
-                        pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    if abort_ref[0] is True:
-                        stopped = True
-                        break
-                    for completed_task in finished:
-                        try:
-                            result, error = completed_task.result(), None
-                        except Exception:
-                            result, error = None, traceback.format_exc()
-                        done += 1
-                        p.set(done, message=f"Reconstructed {done}/{len(redo)}")
-                        if error is not None:
-                            log.error(
-                                "Display reconstruction raised an exception:\n%s",
-                                error,
-                            )
-                            continue
-                        if result is None:
-                            continue
-                        i = slot.get(_display_key(result[2]))
-                        if i is not None:
-                            # Score and parameters from the search, images from here.
-                            results[i] = (results[i][0], result[1], results[i][2])
-            finally:
-                for w in waiting:
-                    w.cancel()  # those not awaited (after a Stop)
-                if stopped:
-                    pool.stop()
-                else:
-                    pool.shutdown()
-        return results
 
     @reactive.effect
     @reactive.event(input.dn_stop_denovo3D)
@@ -3442,118 +3139,14 @@ def denovo3d_tab_server(input, output, session):
         ranked = reconstruction_results()
         req(len(ranked))
 
-        top_n = input.dn_top_n_results()
-        if top_n <= 0:
-            top_n = len(ranked)
-
-        # Group the raw results by twist/rise so each ranked pair can show every
-        # image's reconstruction. Ordered rank-major and image-minor: the best
-        # twist for image 1, 2, ... n, then the second-best for image 1, 2, ...
-        # so the same twist can be compared across images side by side. That is
-        # n * top_n entries for n selected images.
-        by_pair = {}
-        for r in reconstruction_results_raw():
-            key = (round(float(r[2][5]), 6), round(float(r[2][6]), 6))
-            by_pair.setdefault(key, {})[r[2][2]] = r
-        image_order = [str(l) for l in selected_images_labels()]
-        n_solved = len(selected_images_thresholded_rotated_shifted_cropped())
-        joint = n_solved > 1
-
-        labels = []
-        images = []
-        for ri, ranked_result in enumerate(ranked[:top_n]):
-            joint_score = ranked_result[0]
-            pair = (
-                round(float(ranked_result[2][5]), 6),
-                round(float(ranked_result[2][6]), 6),
-            )
-            group = by_pair.get(pair, {})
-            # Selection order where known, so the images stay in a stable,
-            # recognisable sequence; anything unmatched is appended.
-            ordered = [group[k] for k in image_order if k in group]
-            ordered += [v for k, v in group.items() if k not in image_order]
-            if not ordered:
-                ordered = [ranked_result]
-
-            # The whole-set views come first, before this twist's per-image
-            # rows: every selected image laid onto one canvas at the axial
-            # position its azimuth implies, and directly beneath it the long
-            # side projection of the volume that placement produced. They share
-            # a canvas -- one period plus an image width -- so they line up
-            # column for column and can be read against each other.
-            #
-            # A picture, not a score. Measured, the composite's contrast peaks
-            # at a different twist from the fit (see placement_composite), so
-            # take the ranking from the score and this from the eye.
-            pictures = projmatch_composites().get(pair) or {}
-            twist_val, rise_val = pair
-            stamp = f"|twist={round(twist_val, 3)}deg|rise={round(rise_val, 6)}A"
-            composite = pictures.get("composite")
-            model = pictures.get("model")
-            if composite is not None and np.size(composite):
-                labels.append(f"{ri+1}: all {len(ordered)} images placed{stamp}")
-                images.append(np.asarray(composite, dtype=np.float32))
-            if model is not None and np.size(model):
-                labels.append(f"{ri+1}: model projection{stamp}")
-                images.append(np.asarray(model, dtype=np.float32))
-            zview = pictures.get("zview")
-            if zview is not None and np.size(zview):
-                labels.append(f"{ri+1}: model Z{stamp}")
-                images.append(np.asarray(zview, dtype=np.float32))
-
-            for result in ordered:
-                (
-                    score,
-                    (rec3d_x_proj, _rec3d_y_proj, rec3d_z_sections, rec3d, *_rest1),
-                    (
-                        query_image,
-                        _imageFile,
-                        imageIndex,
-                        _apix3d,
-                        _apix2d,
-                        twist,
-                        rise,
-                        _csym,
-                        _tilt,
-                        _psi,
-                        _dy,
-                    ),
-                ) = result
-
-                # The query image comes from the result itself, so it is always
-                # the image this reconstruction was solved from.
-                query_image_padded = helicon.pad_to_size(
-                    query_image, shape=rec3d_x_proj.shape
-                )
-                rec3d_z_sections_padded = helicon.pad_to_size(
-                    rec3d_z_sections, shape=rec3d_x_proj.shape
-                )
-
-                pitch_val = (
-                    int(round(rise * 360 / abs(twist))) if abs(twist) > 0.01 else 0
-                )
-                if joint:
-                    label_x = (
-                        f"{ri+1}: X|{imageIndex}|score={score:.4f}"
-                        f"|joint={joint_score:.4f}|pitch={pitch_val:,}A"
-                        f"|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
-                    )
-                else:
-                    label_x = (
-                        f"{ri+1}: X|score={score:.4f}|pitch={pitch_val:,}A"
-                        f"|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
-                    )
-                labels += [
-                    f"Input image: {imageIndex}",
-                    label_x,
-                    f"{ri+1}: Z",
-                ]
-                images += [
-                    query_image_padded,
-                    rec3d_x_proj,
-                    rec3d_z_sections_padded,
-                ]
-
+        labels, images = _collect_projection_gallery(
+            ranked,
+            reconstruction_results_raw(),
+            input.dn_top_n_results(),
+            selected_labels=selected_images_labels(),
+            n_solved=len(selected_images_thresholded_rotated_shifted_cropped()),
+            composites=projmatch_composites(),
+        )
         reconstructed_projection_labels.set(labels)
         reconstructed_projection_images.set(images)
 
@@ -3571,3 +3164,555 @@ def denovo3d_tab_server(input, output, session):
             mem = Memory(location=str(cache_dir_path), verbose=0)
             mem.clear()
             logger.info(f"Cleared joblib cache at {cache_dir_path}")
+
+
+async def _run_reconstruction_task(
+    tasks,
+    cpu,
+    abort_ref,
+    *,
+    reconstruction_results_raw,
+    reconstruction_results,
+    scan_results,
+    projmatch_composites=None,
+    autostitch_transforms=None,
+    n_images=1,
+    display_model=None,
+    top_n=1,
+    projmatch=False,
+    lr_algorithm="elasticnet",
+    images=None,
+    rec_algorithm=None,
+    is_scan=False,
+    threads=1,
+):
+    """Execute the parameter scan (or single-pair reconstruction) and top-N redraw."""
+    log = _denovo3d_logger()
+    use_score_only = (
+        len(tasks) > 1 and not projmatch and not any(bool(t[-5]) for t in tasks)
+    )
+    if use_score_only:
+        scan_tasks = []
+        for task in tasks:
+            t = list(task)
+            t[-3] = dict(t[-3], score_only=True)
+            scan_tasks.append(tuple(t))
+    else:
+        scan_tasks = tasks
+
+    redraw_model = display_model
+    if use_score_only and not redraw_model:
+        redraw_model = rec_algorithm or tasks[0][-3].get("model") or lr_algorithm
+
+    try:
+        with ui.Progress(min=0, max=len(scan_tasks)) as p:
+            p.set(
+                message="Calculation in progress",
+                detail="This may take a while ...",
+            )
+
+            from time import time
+
+            # The tasks run in worker processes, and their results are
+            # awaited on the event loop in steps of 0.2 s: a blocking wait
+            # would stop every other session between results (seconds
+            # each), and would not see a Stop until a task had finished. A
+            # Stop ends the workers themselves, at once: a task in a thread
+            # cannot be interrupted, and ran on, using the CPUs.
+            pool = pools.TaskPool(min(cpu, len(scan_tasks)), threads=threads)
+            waiting = []
+            stopped = False
+            try:
+                t0 = time()
+                results = []
+                n_discarded = 0
+                update_interval = max(1, len(scan_tasks) // 20)
+
+                def _record_result(result, error):
+                    nonlocal n_discarded
+                    if error is not None:
+                        log.error("Task raised an exception:\n%s", error)
+                        n_discarded += 1
+                        return
+                    if result is None:
+                        n_discarded += 1
+                        return
+
+                    results.append(result)
+                    t1 = time()
+                    remaining = (
+                        (len(scan_tasks) - len(results) - n_discarded)
+                        / max(len(results), 1)
+                        * (t1 - t0)
+                    )
+                    p.set(
+                        len(results) + n_discarded,
+                        message=f"Completed {len(results) + n_discarded}/{len(scan_tasks)}",
+                        detail=f"{helicon.timedelta2string(remaining)} remaining",
+                    )
+
+                    if len(results) % update_interval == 0:
+                        reconstruction_results_raw.set(list(results))
+                        reconstruction_results.set(_rank(results, n_images))
+
+                if helicon.has_real_threads():
+                    future_tasks = [
+                        pool.submit(denovo3d_pipeline.process_one_task, *task)
+                        for task in scan_tasks
+                    ]
+                    waiting = [asyncio.wrap_future(f) for f in future_tasks]
+                    pending = set(waiting)
+                    while pending and not stopped:
+                        finished, pending = await asyncio.wait(
+                            pending,
+                            timeout=0.2,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if abort_ref[0] is True:
+                            log.warning("User aborted the denovo3D run early.")
+                            stopped = True
+                            break
+                        for completed_task in finished:
+                            try:
+                                result, error = completed_task.result(), None
+                            except Exception:
+                                result, error = None, traceback.format_exc()
+                            _record_result(result, error)
+                else:
+                    # Single-threaded (e.g. Pyodide / SerialExecutor): submit
+                    # one task per iteration after yielding to the event loop
+                    # so progress updates, live score plots, and Stop work.
+                    for task in scan_tasks:
+                        await asyncio.sleep(0)
+                        if abort_ref[0] is True:
+                            log.warning("User aborted the denovo3D run early.")
+                            stopped = True
+                            break
+                        try:
+                            completed_task = asyncio.wrap_future(
+                                pool.submit(denovo3d_pipeline.process_one_task, *task)
+                            )
+                            result, error = await completed_task, None
+                        except Exception:
+                            result, error = None, traceback.format_exc()
+                        _record_result(result, error)
+                        if abort_ref[0] is True:
+                            log.warning("User aborted the denovo3D run early.")
+                            stopped = True
+                            break
+
+                t_final = time()
+                log.info("reconstruction time: %s", t_final - t0)
+            finally:
+                for w in waiting:
+                    w.cancel()  # those not awaited (after a Stop)
+                if stopped:
+                    pool.stop()
+                else:
+                    pool.shutdown()
+
+        if n_discarded:
+            log.info(
+                f"{n_discarded}/{len(scan_tasks)} results are None and thus discarded"
+            )
+        if not results and not stopped:
+            ui.notification_show(
+                f"All {len(scan_tasks)} calculations failed, so there is nothing to"
+                f" show. See helicon.denovo3D.log under {helicon.cache_dir / 'logs'}"
+                " for the reason.",
+                type="error",
+                duration=15,
+            )
+
+        async def _rank_final(results, log=None):
+            """Rank, by whichever joint method the route asks for.
+
+            Used everywhere a *final* ranking is produced -- including after
+            the display re-solve, which otherwise re-ranked with the plain
+            joint method and silently undid the projection-matching order.
+            The interim rankings inside the solve loop deliberately stay on
+            the cheap method: projection matching costs a refinement per
+            twist, which is worth paying once, not on every progress update.
+
+            Run in a worker thread, for the same reason the solve above is:
+            it takes minutes, and called straight from this coroutine it
+            blocked the event loop for all of them. Nothing was serviced
+            while it ran -- no progress, no other effects -- and a session
+            left unattended that long can lose its connection, after which
+            the *next* run looks stuck whichever route it uses.
+            """
+            from concurrent.futures import ThreadPoolExecutor
+
+            ranked = _rank(results, n_images, log)
+            if not (projmatch and n_images > 1 and images and not abort_ref[0]):
+                if projmatch_composites is not None:
+                    projmatch_composites.set({})
+                return ranked
+
+            # The per-image results are kept exactly as solved, so the
+            # per-image views are identical on both joint routes and only
+            # the ordering -- and the composite -- differ.
+            seen = dict(i=0, n=0, twist=0.0)
+
+            def _on_pair(i, n, twist):
+                seen.update(i=i, n=n, twist=twist)
+                return not abort_ref[0]
+
+            def _work():
+                return denovo3d_joint.rank_by_projection_matching(
+                    results,
+                    images,
+                    algorithm=dict(model=lr_algorithm),
+                    display_algorithm=(
+                        dict(model=rec_algorithm)
+                        if rec_algorithm and rec_algorithm != lr_algorithm
+                        else None
+                    ),
+                    log=log,
+                    progress=_on_pair,
+                )
+
+            loop = asyncio.get_running_loop()
+            # Not a "with" block: leaving one waits for the thread, and a Stop
+            # must not. The thread sees the flag at its next pair of images
+            # (see _on_pair) and ends by itself; nothing waits for it.
+            pool = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = loop.run_in_executor(pool, _work)
+                with ui.Progress(min=0, max=1) as pm:
+                    pm.set(0, message="Matching projections across images")
+                    while not future.done() and not abort_ref[0]:
+                        await asyncio.sleep(0.1)
+                        if seen["n"]:
+                            pm.set(
+                                seen["i"] / seen["n"],
+                                message="Matching projections across images",
+                                detail=f"twist {seen['twist']:.3f}"
+                                f" ({seen['i'] + 1}/{seen['n']})",
+                            )
+                    if not abort_ref[0]:
+                        matched, composites = await future
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+            if abort_ref[0]:
+                if projmatch_composites is not None:
+                    projmatch_composites.set({})
+                return ranked
+            if projmatch_composites is not None:
+                projmatch_composites.set(composites)
+
+            # Hand the winning twist's placements to the manual stitch, the
+            # same way the automatic stitcher hands over its own layout. An
+            # azimuth is an axial position, so the search has already
+            # worked out where every image sits; making the user press a
+            # button to have that computed again -- which is what this used
+            # to do -- was redundant twice over, since the answer was
+            # already in hand.
+            best = matched[0][2] if matched else None
+            found = (
+                composites.get((round(float(best[5]), 6), round(float(best[6]), 6)))
+                if best is not None
+                else None
+            )
+            if found and found.get("two_fold"):
+                ui.notification_show(
+                    "A two-fold about the helical axis (a 2\u2081 screw) was "
+                    "found: the model repeats at half a period, so the "
+                    "placements were searched over half of it.",
+                    type="message",
+                    duration=15,
+                )
+            if (
+                found
+                and found.get("placed") is not None
+                and autostitch_transforms is not None
+            ):
+                try:
+                    autostitch_transforms.set(
+                        denovo3d_joint.placements_as_transforms(
+                            found["phis"],
+                            found["placed"],
+                            found["twist"],
+                            found["rise"],
+                            found["apix2d"],
+                            int(np.shape(images[0])[1]),
+                            two_fold=found["two_fold"],
+                        )
+                    )
+                except Exception:  # pragma: no cover - a layout is a bonus
+                    logger.warning(
+                        "could not express the placements as a manual"
+                        " stitch layout:\n%s",
+                        traceback.format_exc(),
+                    )
+            return matched
+
+        ranked = await _rank_final(results, log)
+        reconstruction_results_raw.set(list(results))
+        reconstruction_results.set(ranked)
+        if is_scan:
+            scan_results.set(list(ranked))
+
+        if redraw_model and results and not abort_ref[0]:
+            results = await _redraw_with(
+                tasks,
+                results,
+                ranked,
+                top_n,
+                redraw_model,
+                cpu,
+                abort_ref,
+                log,
+                threads,
+            )
+            reconstruction_results_raw.set(list(results))
+            ranked = await _rank_final(results, log)
+            reconstruction_results.set(ranked)
+            if is_scan:
+                scan_results.set(list(ranked))
+    except Exception:
+        log.error("Reconstruction task failed:\n%s", traceback.format_exc())
+        # Say so on screen. Swallowed silently, a failure here is
+        # indistinguishable from a slow run: the progress bar goes, no
+        # results appear, and the app looks hung rather than broken. That
+        # is exactly how a RuntimeError raised inside this task -- for
+        # reading a reactive source, which an extended task may not do --
+        # presented itself.
+        try:
+            ui.notification_show(
+                "The search failed. See helicon.denovo3D.log under"
+                f" {helicon.cache_dir / 'logs'} for the details.",
+                type="error",
+                duration=15,
+            )
+        except Exception:  # pragma: no cover - no session to notify
+            pass
+
+
+async def _redraw_with(
+    tasks, results, ranked, top_n, display_model, cpu, abort_ref, log, threads=1
+):
+    """Re-solve the displayed twist/rise pairs with another solver.
+
+    Only the projections are taken from the second solve. Every score keeps
+    the value the search produced, so the ranking the user is looking at is
+    the one the search actually computed -- this changes the picture, not
+    the answer.
+
+    Returns
+    -------
+    list
+        ``results`` with the displayed entries' return_data replaced. Pairs
+        that were not displayed, and any re-solve that failed, are left as
+        they were.
+    """
+    redo, slot = _display_redraw_plan(tasks, results, ranked, top_n, display_model)
+    if not redo:
+        return results
+
+    log.info(f"redrawing {len(redo)} displayed reconstructions with {display_model}")
+    results = list(results)
+    with ui.Progress(min=0, max=len(redo)) as p:
+        p.set(message=f"Reconstructing with {display_model}", detail="for display")
+        # in worker processes, awaited on the event loop in steps, as in the
+        # search above: a Stop ends them at once
+        pool = pools.TaskPool(min(cpu, len(redo)), threads=threads)
+        waiting = []
+        stopped = False
+        try:
+            done = 0
+
+            def _apply_redraw_result(result, error):
+                nonlocal done
+                done += 1
+                p.set(done, message=f"Reconstructed {done}/{len(redo)}")
+                if error is not None:
+                    log.error(
+                        "Display reconstruction raised an exception:\n%s",
+                        error,
+                    )
+                    return
+                if result is None:
+                    return
+                i = slot.get(_display_key(result[2]))
+                if i is not None:
+                    # Score and parameters from the search, images from here.
+                    results[i] = (results[i][0], result[1], results[i][2])
+
+            if helicon.has_real_threads():
+                futures = [
+                    pool.submit(denovo3d_pipeline.process_one_task, *t) for t in redo
+                ]
+                waiting = [asyncio.wrap_future(f) for f in futures]
+                pending = set(waiting)
+                while pending and not stopped:
+                    finished, pending = await asyncio.wait(
+                        pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if abort_ref[0] is True:
+                        stopped = True
+                        break
+                    for completed_task in finished:
+                        try:
+                            result, error = completed_task.result(), None
+                        except Exception:
+                            result, error = None, traceback.format_exc()
+                        _apply_redraw_result(result, error)
+            else:
+                for t in redo:
+                    await asyncio.sleep(0)
+                    if abort_ref[0] is True:
+                        stopped = True
+                        break
+                    try:
+                        completed_task = asyncio.wrap_future(
+                            pool.submit(denovo3d_pipeline.process_one_task, *t)
+                        )
+                        result, error = await completed_task, None
+                    except Exception:
+                        result, error = None, traceback.format_exc()
+                    _apply_redraw_result(result, error)
+                    if abort_ref[0] is True:
+                        stopped = True
+                        break
+        finally:
+            for w in waiting:
+                w.cancel()  # those not awaited (after a Stop)
+            if stopped:
+                pool.stop()
+            else:
+                pool.shutdown()
+    return results
+
+
+def _collect_projection_gallery(
+    ranked,
+    raw_results,
+    top_n,
+    *,
+    selected_labels=(),
+    n_solved=1,
+    composites=None,
+):
+    """Build ``(labels, images)`` for the displayed top-N reconstructions.
+
+    Entries whose ``rec3d_z_sections`` (or ``rec3d_x_proj``) is ``None`` —
+    such as intermediate ticks of a ``score_only`` scan, or candidates outside
+    ``top_n`` — are skipped cleanly instead of raising.
+    """
+    if top_n <= 0:
+        top_n = len(ranked)
+
+    # Group the raw results by twist/rise so each ranked pair can show every
+    # image's reconstruction. Ordered rank-major and image-minor: the best
+    # twist for image 1, 2, ... n, then the second-best for image 1, 2, ...
+    # so the same twist can be compared across images side by side. That is
+    # n * top_n entries for n selected images.
+    by_pair = {}
+    for r in raw_results:
+        key = (round(float(r[2][5]), 6), round(float(r[2][6]), 6))
+        by_pair.setdefault(key, {})[r[2][2]] = r
+    image_order = [str(l) for l in selected_labels]
+    joint = n_solved > 1
+    composites = composites or {}
+
+    labels = []
+    images = []
+    for ri, ranked_result in enumerate(ranked[:top_n]):
+        joint_score = ranked_result[0]
+        pair = (
+            round(float(ranked_result[2][5]), 6),
+            round(float(ranked_result[2][6]), 6),
+        )
+        group = by_pair.get(pair, {})
+        # Selection order where known, so the images stay in a stable,
+        # recognisable sequence; anything unmatched is appended.
+        ordered = [group[k] for k in image_order if k in group]
+        ordered += [v for k, v in group.items() if k not in image_order]
+        if not ordered:
+            ordered = [ranked_result]
+
+        # The whole-set views come first, before this twist's per-image
+        # rows: every selected image laid onto one canvas at the axial
+        # position its azimuth implies, and directly beneath it the long
+        # side projection of the volume that placement produced. They share
+        # a canvas -- one period plus an image width -- so they line up
+        # column for column and can be read against each other.
+        #
+        # A picture, not a score. Measured, the composite's contrast peaks
+        # at a different twist from the fit (see placement_composite), so
+        # take the ranking from the score and this from the eye.
+        pictures = composites.get(pair) or {}
+        twist_val, rise_val = pair
+        stamp = f"|twist={round(twist_val, 3)}deg|rise={round(rise_val, 6)}A"
+        composite = pictures.get("composite")
+        model = pictures.get("model")
+        if composite is not None and np.size(composite):
+            labels.append(f"{ri+1}: all {len(ordered)} images placed{stamp}")
+            images.append(np.asarray(composite, dtype=np.float32))
+        if model is not None and np.size(model):
+            labels.append(f"{ri+1}: model projection{stamp}")
+            images.append(np.asarray(model, dtype=np.float32))
+        zview = pictures.get("zview")
+        if zview is not None and np.size(zview):
+            labels.append(f"{ri+1}: model Z{stamp}")
+            images.append(np.asarray(zview, dtype=np.float32))
+
+        for result in ordered:
+            (
+                score,
+                return_data,
+                (
+                    query_image,
+                    _imageFile,
+                    imageIndex,
+                    _apix3d,
+                    _apix2d,
+                    twist,
+                    rise,
+                    _csym,
+                    _tilt,
+                    _psi,
+                    _dy,
+                ),
+            ) = result
+            if return_data is None:
+                continue
+            rec3d_x_proj, _rec3d_y_proj, rec3d_z_sections, rec3d, *_rest1 = return_data
+            if rec3d_x_proj is None or rec3d_z_sections is None:
+                continue
+
+            # The query image comes from the result itself, so it is always
+            # the image this reconstruction was solved from.
+            query_image_padded = helicon.pad_to_size(
+                query_image, shape=rec3d_x_proj.shape
+            )
+            rec3d_z_sections_padded = helicon.pad_to_size(
+                rec3d_z_sections, shape=rec3d_x_proj.shape
+            )
+
+            pitch_val = int(round(rise * 360 / abs(twist))) if abs(twist) > 0.01 else 0
+            if joint:
+                label_x = (
+                    f"{ri+1}: X|{imageIndex}|score={score:.4f}"
+                    f"|joint={joint_score:.4f}|pitch={pitch_val:,}A"
+                    f"|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
+                )
+            else:
+                label_x = (
+                    f"{ri+1}: X|score={score:.4f}|pitch={pitch_val:,}A"
+                    f"|twist={round(twist, 3)}deg|rise={round(rise, 6)}A"
+                )
+            labels += [
+                f"Input image: {imageIndex}",
+                label_x,
+                f"{ri+1}: Z",
+            ]
+            images += [
+                query_image_padded,
+                rec3d_x_proj,
+                rec3d_z_sections_padded,
+            ]
+
+    return labels, images

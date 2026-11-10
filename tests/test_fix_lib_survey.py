@@ -138,6 +138,10 @@ def _blob(shape, sigma=3.0):
 
 
 class TestFftRescale:
+    @pytest.fixture(autouse=True)
+    def _requires_finufft(self):
+        pytest.importorskip("finufft")
+
     @pytest.mark.parametrize("n", [30, 31])
     def test_identity_2d(self, n):
         a = np.random.default_rng(0).random((n, n))
@@ -282,7 +286,7 @@ class TestReadImage2d:
 
 class TestAvailableCpu:
     def test_never_below_one(self):
-        import psutil
+        psutil = pytest.importorskip("psutil")
 
         class _Mem:
             available = 1024**3  # 1 GB

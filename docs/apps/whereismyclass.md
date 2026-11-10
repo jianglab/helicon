@@ -22,7 +22,8 @@ classes of each filament and the distances between segments work without them.
 ## Steps
 
 1. On **Inputs**, choose *server* (a file on the computer that runs Helicon: *Browse…*, or type its
-   path) or *url*, give the file, and click **Run**. The classes appear in the gallery, sorted by
+   path) or *url* (the `run_it020_data.star` of EMPIAR-10940 by default), give the file, and click
+   **Run**. The classes appear in the gallery, sorted by
    abundance, and the filaments in a table (its *length*, and the *classes* of its segments).
 2. **Click a class** to select it: the histogram of the distances between the segments of that class on
    the same filament is plotted (see [HelicalPitch](helicalpitch.md)).

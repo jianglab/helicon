@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import helicon
 from scipy.sparse import csr_matrix
 from helicon.webApps.lib import denovo3d_solver as solver
@@ -456,3 +457,215 @@ class TestRefineTiltPsiDy:
         )
         assert np.all(np.isfinite(rec3d))
         assert isinstance(score, float)
+
+
+class TestNumpyFallbackHelicalSymMatrix:
+    """build_A_helical_sym_matrix's loop_kji without numba (as under
+    Pyodide): the vectorised numpy fallback agrees with the numba kernel it
+    stands in for."""
+
+    @pytest.mark.parametrize("interpolation", ["nn", "linear"])
+    def test_matches_numba_path(self, monkeypatch, interpolation):
+        kw = dict(
+            nz=8,
+            ny=8,
+            nx=8,
+            twist_degree=30,
+            rise_pixel=2,
+            csym=1,
+            rmin=0,
+            rmax=3,
+            min_sym_pairs=10,
+            interpolation=interpolation,
+            verbose=0,
+        )
+        solver.build_A_helical_sym_matrix.clear_cache()
+        A_numba, b_numba = solver.build_A_helical_sym_matrix(**kw)
+        solver.build_A_helical_sym_matrix.clear_cache()
+        monkeypatch.setattr(solver, "_HAS_NUMBA", False)
+        A_np, b_np = solver.build_A_helical_sym_matrix(**kw)
+
+        assert A_numba is not None and A_np is not None
+        assert A_numba.shape == A_np.shape
+        # rows are independent equations generated while scanning symmetry
+        # pairs in a fixed order; the pair_ids dedup can accept the two
+        # mates of a pair in either order between the two kernels, which
+        # permutes rows (and flips a row's overall sign) without changing
+        # the set of equations -- compare as a sign-invariant multiset.
+        dense_numba = np.asarray(A_numba.todense())
+        dense_np = np.asarray(A_np.todense())
+
+        def row_keys(dense):
+            return sorted(
+                min(tuple(np.round(r, 4)), tuple(np.round(-r, 4))) for r in dense
+            )
+
+        assert row_keys(dense_numba) == row_keys(dense_np)
+
+    def test_pair_ids_dedup_across_sequential_calls(self):
+        """pair_ids is a mutable set threaded across sequential loop_kji
+        calls (one per symmetry pair); a call that covers pairs already
+        registered by an earlier call must contribute nothing new."""
+        mask, (Z, Y, X) = helicon.get_cylindrical_mask(
+            8, 8, 8, rmin=0, rmax=3, return_xyz=True
+        )
+        mask_nonzero_indices_zyx_tuple = np.nonzero(mask)
+        n_x = np.count_nonzero(mask)
+        mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=int) - 1
+        mask_nonzero_indices_matrix[mask_nonzero_indices_zyx_tuple] = np.arange(n_x)
+
+        Zi, Yi, Xi = Z.astype(np.float32), Y.astype(np.float32), X.astype(np.float32)
+        # a fixed offset along x for the symmetry mate, so each voxel's pair
+        # is well defined and (mostly) stays inside the mask
+        Zj, Yj, Xj = Zi, Yi, Xi + 1.0
+
+        pair_ids = {-1}
+        _, _, _, count_first = solver._build_A_helical_sym_matrix_loop_kji_nn_np(
+            Zi,
+            Yi,
+            Xi,
+            Zj,
+            Yj,
+            Xj,
+            mask,
+            mask_nonzero_indices_zyx_tuple,
+            mask_nonzero_indices_matrix,
+            pair_ids,
+        )
+        assert count_first > 0
+
+        _, _, _, count_second = solver._build_A_helical_sym_matrix_loop_kji_nn_np(
+            Zi,
+            Yi,
+            Xi,
+            Zj,
+            Yj,
+            Xj,
+            mask,
+            mask_nonzero_indices_zyx_tuple,
+            mask_nonzero_indices_matrix,
+            pair_ids,
+        )
+        assert count_second == 0
+
+    def test_empty_mask_returns_empty_arrays(self):
+        shape = (2, 2, 2)
+        zeros = np.zeros(shape, dtype=np.float32)
+        mask = np.zeros(shape, dtype=bool)
+        empty_idx = np.array([], dtype=np.int64)
+        mask_nonzero_indices_zyx_tuple = (empty_idx, empty_idx, empty_idx)
+        mask_nonzero_indices_matrix = np.zeros(shape, dtype=int) - 1
+        pair_ids = {-1}
+        for fn in (
+            solver._build_A_helical_sym_matrix_loop_kji_linear_np,
+            solver._build_A_helical_sym_matrix_loop_kji_nn_np,
+        ):
+            row, col, data, count = fn(
+                zeros,
+                zeros,
+                zeros,
+                zeros,
+                zeros,
+                zeros,
+                mask,
+                mask_nonzero_indices_zyx_tuple,
+                mask_nonzero_indices_matrix,
+                pair_ids,
+            )
+            assert count == 0
+            assert row.size == 0
+            assert col.size == 0
+            assert data.size == 0
+
+
+class TestNumpyFallbackDataMatrix:
+    """build_A_data_matrix's loop_kji without numba (as under Pyodide): the
+    vectorised numpy fallback agrees with the numba kernel it stands in
+    for."""
+
+    def setup_method(self, method):
+        self.image = np.random.default_rng(0).random((12, 12)).astype(np.float32)
+
+    @pytest.mark.parametrize("interpolation", ["nn", "linear"])
+    def test_matches_numba_path(self, monkeypatch, interpolation):
+        kw = dict(
+            image=self.image,
+            scale2d_to_3d=1.0,
+            twist_degree=30,
+            rise_pixel=2,
+            csym=1,
+            tilt_degree=5,
+            psi_degree=10,
+            dy_pixel=0.5,
+            reconstruct_diameter_2d_pixel=8,
+            reconstruct_length_2d_pixel=8,
+            reconstruct_diameter_3d_pixel=8,
+            reconstruct_diameter_3d_inner_pixel=0,
+            reconstruct_length_3d_pixel=8,
+            min_projection_lines=50,
+            interpolation=interpolation,
+            verbose=0,
+        )
+        solver.build_A_data_matrix.clear_cache()
+        A_numba, b_numba, bpid_numba = solver.build_A_data_matrix(**kw)
+        solver.build_A_data_matrix.clear_cache()
+        monkeypatch.setattr(solver, "_HAS_NUMBA", False)
+        A_np, b_np, bpid_np = solver.build_A_data_matrix(**kw)
+
+        assert A_numba.shape == A_np.shape
+        assert np.array_equal(np.sort(bpid_numba), np.sort(bpid_np))
+        order_numba = np.argsort(bpid_numba)
+        order_np = np.argsort(bpid_np)
+        np.testing.assert_allclose(
+            b_numba[order_numba], b_np[order_np], atol=1e-5, rtol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.asarray(A_numba.todense())[order_numba],
+            np.asarray(A_np.todense())[order_np],
+            atol=1e-4,
+            rtol=1e-4,
+        )
+
+    def test_dispatch_end_to_end_without_numba(self, monkeypatch):
+        monkeypatch.setattr(solver, "_HAS_NUMBA", False)
+        A, b, b_pid = solver.build_A_data_matrix(
+            image=self.image,
+            scale2d_to_3d=1.0,
+            twist_degree=30,
+            rise_pixel=2,
+            csym=1,
+            tilt_degree=0,
+            psi_degree=0,
+            dy_pixel=0,
+            reconstruct_diameter_2d_pixel=4,
+            reconstruct_length_2d_pixel=4,
+            reconstruct_diameter_3d_pixel=4,
+            reconstruct_diameter_3d_inner_pixel=0,
+            reconstruct_length_3d_pixel=4,
+            min_projection_lines=10,
+            interpolation="nn",
+            verbose=0,
+        )
+        assert isinstance(A, csr_matrix)
+        assert A.shape[1] > 0
+        assert len(b) == A.shape[0]
+        assert len(b_pid) == len(b)
+
+    def test_empty_mask_returns_empty_arrays(self):
+        shape = (2, 2, 2)
+        zeros = np.zeros(shape, dtype=np.float32)
+        mask = np.zeros(shape, dtype=bool)
+        mask_nonzero_indices_matrix = np.zeros(shape, dtype=int) - 1
+        pixel_vals = np.zeros((2, 2), dtype=np.float32)
+        for fn in (
+            solver._build_A_data_matrix_loop_kji_linear_np,
+            solver._build_A_data_matrix_loop_kji_nn_np,
+        ):
+            row, col, data, b, b_pid = fn(
+                zeros, zeros, zeros, mask, mask_nonzero_indices_matrix, 0, pixel_vals
+            )
+            assert row.size == 0
+            assert col.size == 0
+            assert data.size == 0
+            assert b.size == 0
+            assert b_pid.size == 0

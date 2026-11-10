@@ -47,3 +47,13 @@ class TestTheEntryIdsAreLinks:
         body = _source()
         body = body[body.index("def _emdb_link_script") :]
         assert "MutationObserver" in body
+
+    def test_script_targets_the_module_namespaced_grid_id(self):
+        # helicon webApps mounts the tab as "helical_projection", while the
+        # standalone Shinylive bundle mounts it as "helical_projection_tab";
+        # the script must resolve the grid's DOM id in both routes.
+        for ns in ("helical_projection", "helical_projection_tab"):
+            html = str(tab.helical_projection_tab_ui(ns))
+            expected_id = f"{ns}-display_emdb_dataframe"
+            assert f'id="{expected_id}"' in html
+            assert f"var GRID = '{expected_id}';" in html

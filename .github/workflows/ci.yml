@@ -74,7 +74,7 @@ jobs:
           path: .numba_cache
           key: numba-${{ runner.os }}-${{ hashFiles('src/**/*.py') }}
           restore-keys: numba-${{ runner.os }}-
-      - run: pip install -e ".[test,gui,shiny]"
+      - run: pip install -e ".[test,gui,shiny,accelerate]"
       - run: pytest tests -n auto -m "not slow and not browser" -p no:cacheprovider --durations=15
 
   docs:
@@ -117,6 +117,13 @@ jobs:
           heavy = [m for m in ("numba", "torch", "napari", "shiny", "PySide6", "h5py") if m in sys.modules]
           assert not heavy, f"import helicon loaded {heavy}"
           PY
+      # numba, finufft and cryosparc-tools are now optional (helicon[numba],
+      # helicon[finufft], helicon[cryosparc]; together, helicon[accelerate]):
+      # none is installed here, so this is the one job that actually proves
+      # the commands and plugins that do not need one of them still work
+      - run: helicon proc3d --help
+      - run: helicon images2star --help
+      - run: helicon cryosparc --help
 
   full:
     # the whole suite, nightly or on request
@@ -142,7 +149,7 @@ jobs:
       # the default torch wheel is the CUDA build, which brings several GB of nvidia-* packages and
       # filled the runner's disk ("No space left on device"); the tests need only the CPU build
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e ".[test,gui,shiny,gauss]"
+      - run: pip install -e ".[test,gui,shiny,gauss,accelerate]"
       - run: df -h /
       - run: playwright install --with-deps chromium
       - run: pytest tests -n auto -p no:cacheprovider --durations=30

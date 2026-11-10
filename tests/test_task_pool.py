@@ -99,6 +99,23 @@ class TestDenovo3dStop:
         assert "cpu = min(helicon.available_cpu(), max(1, int(n_cpu)))" in src
 
 
+class TestWithoutRealThreads:
+    """As under Pyodide: ProcessPoolExecutor cannot fork/spawn there, so the
+    pool must fall back to running tasks synchronously in-process instead."""
+
+    def test_submit_still_works(self, monkeypatch):
+        from helicon.lib import system
+
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        pool = pools.TaskPool(2)
+        try:
+            assert pool.submit(pow, 2, 10).result(timeout=5) == 1024
+            futures = [pool.submit(pow, 3, k) for k in range(6)]
+            assert [f.result(timeout=5) for f in futures] == [3**k for k in range(6)]
+        finally:
+            pool.shutdown()
+
+
 class TestMemoryCap:
     def test_workers_fit_in_the_free_memory(self):
         pool = pools.TaskPool(10_000, gb_per_worker=1.0)

@@ -868,3 +868,111 @@ class TestCurvesInBatches:
             ]
         )
         assert np.allclose(direct, threaded, atol=1e-9)
+
+    def test_without_real_threads_still_gives_the_serial_curves(self, monkeypatch):
+        """As under Pyodide: ThreadPoolExecutor cannot start a thread there, so
+        this must still work through helicon.pool_executor's serial stand-in."""
+        from helicon.lib import system
+
+        rng = np.random.default_rng(3)
+        n_fil, per = 40, 60
+        fi = np.repeat(np.arange(n_fil), per)
+        d = rng.uniform(-900, 900, len(fi))
+        w = rng.uniform(0.5, 1.5, len(fi))
+        dphi = rng.uniform(-np.pi, np.pi, len(fi))
+        grid = np.arange(250.0, 450.0, 2.0)
+        monkeypatch.setattr(ph, "CURVES_PARALLEL_MIN", 10**9)
+        serial = ph._filament_curves(fi, n_fil, d, w, dphi, grid)
+        monkeypatch.setattr(ph, "CURVES_PARALLEL_MIN", 1)
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        threaded = ph._filament_curves(fi, n_fil, d, w, dphi, grid)
+        assert np.allclose(serial, threaded, atol=1e-9)
+
+
+class TestPyodide32BitBincount:
+    """Under 32-bit WebAssembly (Pyodide), ``np.intp`` is ``np.int32`` and
+    ``np.bincount`` rejects ``int64`` arrays with ``casting='safe'``."""
+
+    @staticmethod
+    def _wasm32_numpy():
+        class _Wasm32Numpy:
+            intp = np.int32
+
+            @staticmethod
+            def bincount(x, weights=None, minlength=0):
+                arr = np.asarray(x)
+                if not np.can_cast(arr.dtype, np.int32, casting="safe"):
+                    raise TypeError(
+                        f"Cannot cast array data from {arr.dtype!r} to "
+                        f"dtype('int32') according to the rule 'safe'"
+                    )
+                return np.bincount(arr, weights=weights, minlength=minlength)
+
+            def __getattr__(self, name):
+                return getattr(np, name)
+
+        return _Wasm32Numpy()
+
+    def test_analyze_expansion_and_mixture_use_intp_indices(self, monkeypatch):
+        from helicon.lib import system
+        from helicon.webApps.lib import helical_pitch_mixture as mix
+
+        wasm_np = self._wasm32_numpy()
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        monkeypatch.setattr(ph, "np", wasm_np)
+        monkeypatch.setattr(mix, "np", wasm_np)
+        df = make_params(n_fil=25, period=300.0, n_classes=8, n_seg=80, seed=7)
+        res = ph.analyze(df, class_ids=[1, 2, 3, 4, 5, 6], n_boot=2)
+        assert abs(res.period - 300.0) < 15.0
+
+        pairs = ph.prepare_pairs(df)
+        # int64 synthetic labels (e.g. from rng.integers on 32-bit) must still bin
+        rng = np.random.default_rng(0)
+        synth_labels = rng.integers(
+            0, pairs.n_classes, len(pairs.seg_class), dtype=np.int64
+        )
+        hist, _ = ph.class_pair_histogram(pairs, labels=synth_labels)
+        assert hist.shape[0] == pairs.n_classes
+
+        sugg = ph.suggest_expansion(df, [1, 2, 3, 4], min_filaments=2, min_z=0.0)
+        assert isinstance(sugg, list)
+        cfit = ph.candidate_fit(df, res, [7, 8])
+        assert set(cfit) == {7, 8}
+
+        full_pairs = ph.prepare_pairs(df, class_ids=[1, 2, 3, 4, 5, 6])
+        scores, _ = mix.segment_scores(full_pairs, [(res.period, res.phases)])
+        assert scores.shape == (1, len(full_pairs.seg_class))
+
+    def test_map_fit_bootstrap_uses_intp_indices(self, monkeypatch):
+        import synthetic_pitch as syn
+        from helicon.lib import system
+        from helicon.webApps.lib import helical_pitch_mapfit as mf
+
+        wasm_np = self._wasm32_numpy()
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        monkeypatch.setattr(ph, "np", wasm_np)
+        monkeypatch.setattr(mf, "np", wasm_np)
+        period, n_classes, apix = 400.0, 6, 12.0
+        nx = 2 * int(round(0.96 * period / apix / 2))
+        images, _ = syn.class_averages(
+            period,
+            n_classes,
+            nx=nx,
+            apix=apix,
+            contamination=0.2,
+            seed=4,
+            structure_seed=1,
+        )
+        table = syn.class2d_table(
+            period, n_classes, n_fil=20, length=0.6 * period, mislabel=0.2, seed=4
+        )
+        classes = list(range(1, n_classes + 1))
+        res = ph.analyze(
+            table,
+            class_ids=classes,
+            n_boot=2,
+            image_apix=apix,
+            class_images={c: images[c - 1] for c in classes},
+            map_fit=dict(rise=4.75),
+        )
+        assert res.map_fit is not None

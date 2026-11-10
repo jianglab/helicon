@@ -113,17 +113,31 @@ class _Spectra:
         ny, nx = shape
         fy = np.fft.fftfreq(ny)[:, None] * ny
         fx = np.arange(nx // 2 + 1)[None, :].astype(float)
-        ring = np.rint(np.hypot(fy, fx)).astype(int)
+        ring = np.rint(np.hypot(fy, fx)).astype(np.intp)
         k_max = min(0.5 / apix, 1.0 / cutoff_res) * ny * apix
         # the equator is in every candidate and is left out; so is what is beyond the limit
         self.valid = (np.abs(fy) > 3.0) & (np.hypot(fy, fx) < k_max)
         self._ring = ring[self.valid]
         self._count = np.maximum(
-            np.bincount(self._ring, minlength=ring.max() + 1), 1
+            np.bincount(self._ring, minlength=int(ring.max()) + 1), 1
         ).astype(float)
         self._excess_valid = excess[self.valid]
+        ring_mean = (
+            np.bincount(
+                self._ring, weights=self._excess_valid, minlength=len(self._count)
+            )
+            / self._count
+        )
+        self._excess_centred = self._excess_valid - ring_mean[self._ring]
         self._fy = np.fft.fftfreq(ny, apix)
         self._fx = np.fft.rfftfreq(nx, apix)
+
+    def _mask_table(self, csym, radius, width=3.0):
+        key = (int(csym), round(float(radius), 6), float(width))
+        cache = self.__dict__.setdefault("_mask_tables", {})
+        if key not in cache:
+            cache[key] = _MaskContrastTable(self, int(csym), float(radius), width)
+        return cache[key]
 
     def observed(self, z_on=ONSET_SIGMA):
         """Where the transform is there: its excess, smoothed over 3 x 3 pixels, is above ``z_on`` noise sigmas."""
@@ -285,26 +299,42 @@ class _Spectra:
         the line itself, whatever its order, which is the same for helices that put
         their lines at the same heights.
         """
-        from scipy.special import jv
-
         ny = self.shape[0]
         n_columns = int(np.searchsorted(self._fx, 1.0 / self.cutoff_res, side="right"))
-        fx = self._fx[:n_columns]
         offsets = np.arange(-half_rows, half_rows + 1)
         sigma_rows = 1.27
+        if flat:
+            if n_columns == 0 or len(heights) == 0:
+                return np.array([])
+            exact = np.asarray(heights, dtype=float) * (ny * self.apix)
+            rows = np.rint(exact).astype(np.intp)
+            keep = (rows > 3) & (rows < ny // 2)
+            if not keep.any():
+                return np.array([])
+            exact = exact[keep]
+            rows = rows[keep]
+            row_sums = self.excess[:, :n_columns].sum(axis=1)
+            idx = (rows[:, None] + offsets[None, :]) % ny
+            weight = np.exp(
+                -0.5
+                * ((rows[:, None] + offsets[None, :] - exact[:, None]) / sigma_rows)
+                ** 2
+            )
+            along = (weight * row_sums[idx]).sum(axis=1)
+            return along / np.sqrt(n_columns * (weight**2).sum(axis=1) * self.n_images)
+
+        from scipy.special import jv
+
+        fx = self._fx[:n_columns]
         profiles = {}
         out = []
         for height, order in zip(heights, orders):
             row = int(round(height * ny * self.apix))
             if row <= 3 or row >= ny // 2:
                 continue
-            n = -1 if flat else abs(int(order))
+            n = abs(int(order))
             if n not in profiles:
-                g = (
-                    np.ones(n_columns)
-                    if flat
-                    else jv(n, 2.0 * np.pi * radius * fx) ** 2
-                )
+                g = jv(n, 2.0 * np.pi * radius * fx) ** 2
                 peak = g.max()
                 profiles[n] = g / peak if peak > 0 else g * 0.0
             g = profiles[n]
@@ -599,17 +629,22 @@ def parity_agreement(spectra, heights, orders):
     ny = spectra.shape[0]
     rows = spectra.rows
     usable = (rows > 3) & (rows / (ny * spectra.apix) <= 1.0 / spectra.cutoff_res)
-    predicted = np.zeros(len(rows))
-    # the highest orders first, so that the lowest, which dominates near the meridian, wins
-    for i in np.argsort(-np.abs(orders)):
-        centre = int(round(abs(heights[i]) * ny * spectra.apix))
-        sign = 1.0 if int(orders[i]) % 2 == 0 else -1.0
-        for row in (centre - 1, centre, centre + 1):
-            if 1 <= row < ny // 2:
-                predicted[row - 1] = sign
-    total = np.abs(spectra.signed[usable]).sum()
-    if total <= 0:
+    total = float(np.abs(spectra.signed[usable]).sum())
+    if total <= 0.0 or len(orders) == 0:
         return 0.0
+    n_rows = len(rows)
+    centres = np.rint(np.abs(heights) * (ny * spectra.apix)).astype(np.intp)
+    in_range = centres <= n_rows + 1
+    if not in_range.any():
+        return 0.0
+    # the lowest |order| wins where lines overlap near the meridian; +n and -n have the same parity
+    inf = 1 << 29
+    min_ord = np.full(n_rows + 3, inf, dtype=np.intp)
+    np.minimum.at(
+        min_ord, centres[in_range], np.abs(np.asarray(orders, dtype=np.intp))[in_range]
+    )
+    best_ord = np.minimum(np.minimum(min_ord[:-2], min_ord[1:-1]), min_ord[2:])[:n_rows]
+    predicted = np.where(best_ord < inf, np.where((best_ord & 1) == 0, 1.0, -1.0), 0.0)
     return float((predicted[usable] * spectra.signed[usable].real).sum() / total)
 
 
@@ -777,6 +812,105 @@ def _stacked_rings(csym, twist, tolerance):
     return min(turn, 360.0 - turn) <= tolerance
 
 
+def _j_max_for(csym: int, radius: float, x_max: float) -> int:
+    from helicon.lib import layerlines
+
+    z_max = 2.0 * np.pi * radius * x_max
+    on = layerlines.bessel_onsets(int(z_max) + 8)
+    n_cap = int(np.searchsorted(on, z_max, side="right")) - 1
+    n_cap = (max(n_cap, 0) // csym) * csym
+    return n_cap // csym
+
+
+class _MaskContrastTable:
+    """Precomputed per-``(csym, radius)`` weights for evaluating ``spectra.contrast(mask**2)`` across grids."""
+
+    def __init__(self, spectra: _Spectra, csym: int, radius: float, width: float = 3.0):
+        from helicon.lib import layerlines
+
+        ny, nx = spectra.shape
+        apix = spectra.apix
+        x_max = min(0.5 / apix, 1.0 / spectra.cutoff_res)
+        self.csym = int(csym)
+        self.x_max = float(x_max)
+        self.y_max_parity = float(1.0 / spectra.cutoff_res)
+        self.sigma_pix = width / 2.3548
+
+        self.j_max_mask = _j_max_for(self.csym, radius, self.x_max)
+        self.j_max_parity = _j_max_for(self.csym, radius, self.y_max_parity)
+        self.n_levels_mask = self.j_max_mask + 1
+        self.n_levels_parity = self.j_max_parity + 1
+
+        half_rows = (ny - 1) // 2
+        row_has_valid = spectra.valid[1 : half_rows + 1].any(axis=1)
+        self.rows_pos = (np.flatnonzero(row_has_valid) + 1).astype(np.intp)
+        n_ry = len(self.rows_pos)
+        self.n_ry = n_ry
+
+        fx = spectra._fx
+        levels = np.arange(self.n_levels_mask, dtype=np.intp) * self.csym
+        onsets_all = layerlines.bessel_onsets(max(int(levels[-1]), 1)) / (
+            2.0 * np.pi * radius
+        )
+        start = onsets_all[levels]
+        col_level = np.clip(
+            np.searchsorted(start, fx, side="right") - 1, 0, self.n_levels_mask - 1
+        ).astype(np.intp)
+
+        valid_sub = spectra.valid[self.rows_pos]
+        used_levels = (
+            np.unique(col_level[valid_sub.any(axis=0)])
+            if n_ry > 0
+            else np.empty(0, dtype=np.intp)
+        )
+        self.used_levels = used_levels
+        n_used = len(used_levels)
+        if n_ry == 0 or n_used == 0:
+            self.w_num_flat = np.empty(0)
+            self.w_sq_flat = np.empty(0)
+            self.a_ring = np.empty((0, 0))
+            self.inv_ring_count = np.empty(0)
+            return
+
+        fy = spectra._fy
+        edge = 0.1 * x_max
+        fy_pix = np.fft.fftfreq(ny)[:, None] * ny
+        fx_pix = np.arange(nx // 2 + 1)[None, :].astype(float)
+        ring_2d = np.rint(np.hypot(fy_pix, fx_pix)).astype(np.intp)
+
+        excess_centred_2d = np.zeros_like(spectra.excess)
+        excess_centred_2d[spectra.valid] = spectra._excess_centred
+
+        active_rings = np.unique(spectra._ring)
+        ring_remap = np.full(len(spectra._count), -1, dtype=np.intp)
+        ring_remap[active_rings] = np.arange(len(active_rings), dtype=np.intp)
+        n_rings = len(active_rings)
+        self.inv_ring_count = (1.0 / spectra._count[active_rings]).astype(np.float64)
+
+        level_remap = np.full(self.n_levels_mask, -1, dtype=np.intp)
+        level_remap[used_levels] = np.arange(n_used, dtype=np.intp)
+
+        w_num = np.zeros((n_used, n_ry), dtype=np.float64)
+        w_sq = np.zeros((n_used, n_ry), dtype=np.float64)
+        a_ring = np.zeros((n_used * n_ry, n_rings), dtype=np.float64)
+
+        for ry_idx, row in enumerate(self.rows_pos):
+            mirror = ny - int(row)
+            cols = np.flatnonzero(spectra.valid[row])
+            r_freq = np.hypot(fy[row], fx[cols])
+            taper_sq = np.clip((x_max - r_freq) / edge, 0.0, 1.0) ** 2
+            ul = level_remap[col_level[cols]]
+            ec_sum = excess_centred_2d[row, cols] + excess_centred_2d[mirror, cols]
+            np.add.at(w_num[:, ry_idx], ul, ec_sum * taper_sq)
+            np.add.at(w_sq[:, ry_idx], ul, 2.0 * (taper_sq**2))
+            rings_here = ring_remap[ring_2d[row, cols]]
+            np.add.at(a_ring, (ul * n_ry + ry_idx, rings_here), 2.0 * taper_sq)
+
+        self.w_num_flat = w_num.ravel()
+        self.w_sq_flat = w_sq.ravel()
+        self.a_ring = a_ring
+
+
 def _first_pass(spectra, csym, twists, rises, radius, tolerance=0.0):
     """The first-pass scores of one symmetry over some twists and all rises (a worker's share).
 
@@ -801,17 +935,168 @@ def _first_pass(spectra, csym, twists, rises, radius, tolerance=0.0):
     """
     from threadpoolctl import threadpool_limits
 
+    rises = np.asarray(rises, dtype=np.float64)
+    n_rises = len(rises)
+    if n_rises == 0 or len(twists) == 0:
+        return []
+    table = spectra._mask_table(csym, radius, width=3.0)
+    if table.n_ry == 0 or len(table.used_levels) == 0:
+        return []
+
+    csym = table.csym
+    ny = spectra.shape[0]
+    ny_apix = ny * spectra.apix
+    y_max_p = table.y_max_parity
+    x_max_m = table.x_max
+
+    rows = spectra.rows
+    usable = (rows > 3) & (rows / ny_apix <= y_max_p)
+    parity_total = float(np.abs(spectra.signed[usable]).sum())
+    if parity_total <= 0.0:
+        return []
+    usable_rows_max = int(rows[usable][-1]) if usable.any() else 0
+    pw = np.where(usable, spectra.signed.real / parity_total, 0.0)[:usable_rows_max]
+
+    m_max_p = np.floor(y_max_p * rises).astype(np.intp) + 1
+    m_max_m = np.floor(x_max_m * rises).astype(np.float64) + 1.0
+    m_all_p = int(m_max_p.max())
+    ms_p = np.arange(-m_all_p, m_all_p + 1, dtype=np.float64)
+    abs_ms_p = np.abs(ms_p)
+
+    ks_p = np.arange(table.n_levels_parity, dtype=np.float64)
+    ks_ord_p = np.arange(table.n_levels_parity, dtype=np.intp) * csym
+    used_levels = table.used_levels
+    n_ul = len(used_levels)
+    n_km = int(used_levels[-1]) + 1
+    ks_m = np.arange(n_km, dtype=np.float64)
+
+    n_ry = table.n_ry
+    fy_pos = table.rows_pos.astype(np.float64) / ny_apix
+    inv_sigma_pix = 1.0 / table.sigma_pix
+    even_csym = (csym % 2) == 0
+    inv_rises = 1.0 / rises
+    max_c = usable_rows_max + 1
+
+    chunk = min(24, n_rises)
+    buf_ta = np.empty((chunk, n_km, n_ry), dtype=np.float64)
+    buf_m = np.empty((chunk, n_km, n_ry), dtype=np.float64)
+    buf_d = np.empty((chunk, n_km, n_ry), dtype=np.float64)
+    buf_c = np.empty((chunk, n_ul, n_ry), dtype=np.float64)
+
     found = []
     with threadpool_limits(1):
         for twist in twists:
-            if _stacked_rings(csym, twist, tolerance):
+            twist_f = float(twist)
+            if _stacked_rings(csym, twist_f, tolerance):
                 continue
-            for rise in rises:
-                score, contrast = _score(
-                    spectra, csym, float(twist), float(rise), [radius], model="mask"
-                )[:2]
-                if score > 0:
-                    found.append((score, contrast, csym, float(twist), float(rise)))
+            p = np.where(twist_f != 0.0, 360.0 * rises / abs(twist_f), rises)
+            inv_p = 1.0 / np.maximum(p, 1.0)
+            limit_p = y_max_p + inv_p
+            limit_m = x_max_m + inv_p
+            max_u_p = float((limit_p * rises).max()) + 1e-9
+            alpha = (csym * abs(twist_f) / 360.0) if twist_f != 0.0 else float(csym)
+
+            # parity agreement across all rises at once
+            u_grid = np.abs(ks_p[:, None] * alpha + ms_p[None, :])
+            keep_km = u_grid <= max_u_p
+            keep_km[0, ms_p < 0] = False
+            k_idx, m_idx = np.nonzero(keep_km)
+            u_kept = u_grid[k_idx, m_idx]
+            abs_m_kept = abs_ms_p[m_idx]
+
+            y = inv_rises[:, None] * u_kept[None, :]
+            valid = (abs_m_kept[None, :] <= m_max_p[:, None]) & (y <= limit_p[:, None])
+            centres = np.rint(y * ny_apix).astype(np.intp)
+            valid &= centres <= max_c
+
+            r_i, p_i = np.nonzero(valid)
+            c_i = centres[r_i, p_i]
+            if even_csym:
+                covered = np.zeros((n_rises, max_c + 2), dtype=bool)
+                covered[r_i, c_i] = True
+                row_hit = covered[:, :-2] | covered[:, 1:-1] | covered[:, 2:]
+                parities = row_hit[:, :usable_rows_max] @ pw
+            else:
+                inf = 1 << 29
+                min_ord = np.full((n_rises, max_c + 2), inf, dtype=np.intp)
+                np.minimum.at(min_ord, (r_i, c_i), ks_ord_p[k_idx[p_i]])
+                best_ord = np.minimum(
+                    np.minimum(min_ord[:, :-2], min_ord[:, 1:-1]), min_ord[:, 2:]
+                )[:, :usable_rows_max]
+                pred = np.where(
+                    best_ord < inf, np.where((best_ord & 1) == 0, 1.0, -1.0), 0.0
+                )
+                parities = pred @ pw
+
+            keep_r = np.flatnonzero(parities >= MIN_PARITY)
+            if len(keep_r) == 0:
+                continue
+
+            # closed-form nearest-integer layer-line profile & precomputed ring contrast
+            a = ks_m * alpha
+            for start_b in range(0, len(keep_r), chunk):
+                kr = keep_r[start_b : start_b + chunk]
+                b = len(kr)
+                rises_b = rises[kr]
+                m_max_b = m_max_m[kr]
+                l_b = limit_m[kr] * rises_b
+                m_lo = np.maximum(
+                    -m_max_b[:, None], np.ceil(-l_b[:, None] - a[None, :] - 1e-12)
+                )
+                m_hi = np.minimum(
+                    m_max_b[:, None], np.floor(l_b[:, None] - a[None, :] + 1e-12)
+                )
+                has_m = m_lo <= m_hi
+
+                t = rises_b[:, None] * fy_pos[None, :]
+                neg_scale_u2 = -(((ny_apix * inv_sigma_pix) / rises_b) ** 2)
+
+                ta = buf_ta[:b]
+                mm = buf_m[:b]
+                dd = buf_d[:b]
+                cc = buf_c[:b]
+
+                np.subtract(t[:, None, :], a[None, :, None], out=ta)
+                np.rint(ta, out=mm)
+                np.clip(mm, m_lo[:, :, None], m_hi[:, :, None], out=mm)
+                np.subtract(mm, ta, out=dd)
+                np.abs(dd, out=dd)
+
+                np.negative(t[:, None, :], out=ta)
+                np.subtract(ta, a[None, :, None], out=ta)
+                np.rint(ta, out=mm)
+                np.clip(mm, m_lo[:, :, None], m_hi[:, :, None], out=mm)
+                np.subtract(mm, ta, out=ta)
+                np.abs(ta, out=ta)
+                np.minimum(dd, ta, out=dd)
+
+                dd[~has_m] = 1e9
+                np.minimum.accumulate(dd, axis=1, out=dd)
+                np.take(dd, used_levels, axis=1, out=cc)
+                np.square(cc, out=cc)
+                np.multiply(cc, neg_scale_u2[:, None, None], out=cc)
+                np.exp(cc, out=cc)
+
+                c_flat = cc.reshape(b, -1)
+                num = c_flat @ table.w_num_flat
+                sum_m2 = (c_flat**2) @ table.w_sq_flat
+                ring_sums = c_flat @ table.a_ring
+                var = sum_m2 - (ring_sums**2) @ table.inv_ring_count
+                scale = np.sqrt(np.maximum(var, 0.0))
+                contrasts = np.where(scale >= 1e-9, num / np.maximum(scale, 1e-30), 0.0)
+                scores = contrasts * parities[kr]
+
+                for idx_in_b in np.flatnonzero(scores > 0.0):
+                    ri = int(kr[idx_in_b])
+                    found.append(
+                        (
+                            float(scores[idx_in_b]),
+                            float(contrasts[idx_in_b]),
+                            csym,
+                            twist_f,
+                            float(rises[ri]),
+                        )
+                    )
     return found
 
 
@@ -914,6 +1199,11 @@ def _run_first_pass(
         for k in range(0, len(twists), per_share)
     ]
     workers = max(1, min(workers, len(tasks)))
+    from helicon.lib.system import has_real_threads
+
+    if not has_real_threads():
+        # e.g. Pyodide: ProcessPoolExecutor cannot fork/spawn at all
+        workers = 1
     logging.getLogger(__name__).info(
         "layer-line search: %d candidates in %d shares, %d process%s%s",
         len(csyms) * len(twists) * len(rises),
@@ -1105,15 +1395,13 @@ def index_images(
         for k, (score, contrast, csym, twist, rise) in enumerate(places):
             best_place = places[k]
             span = step_twist * 6.0 / csym
-            for t in twist + np.linspace(-span, span, 5):
-                for r in rise + np.linspace(-step_rise, step_rise, 5):
-                    if t <= 0 or r <= 0:
-                        continue
-                    sc, ct = _score(
-                        spectra, csym, float(t), float(r), [radius], model="mask"
-                    )[:2]
-                    if sc > best_place[0]:
-                        best_place = (sc, ct, csym, float(t), float(r))
+            ts = [float(t) for t in twist + np.linspace(-span, span, 5) if t > 0]
+            rs = [
+                float(r) for r in rise + np.linspace(-step_rise, step_rise, 5) if r > 0
+            ]
+            for cand in _first_pass(spectra, csym, ts, rs, radius):
+                if cand[0] > best_place[0]:
+                    best_place = cand
             places[k] = best_place
 
     # the second: which symmetry, among those that put the lines there. The fits of

@@ -155,7 +155,7 @@ or a known structure. When the resolution limit is coarser than the rise (in Å)
 **Example data:** in *Input Mode* select *url*, with the address
 
 ```text
-https://tinyurl.com/y5tq9fqa
+https://raw.githubusercontent.com/jianglab/testdata/main/hill/cryosparc_P115_J50.templates_selected.mrc
 ```
 
 (the default of the app), and choose the 2nd of the 13 images.

@@ -298,7 +298,9 @@ def estimate(
     n_fil = int(pairs.seg_filament.max()) + 1
     meta_boot = []
     for _ in range(N_BOOT_FILAMENTS):
-        count = np.bincount(rng.integers(0, n_fil, n_fil), minlength=n_fil)
+        count = np.bincount(
+            rng.integers(0, n_fil, n_fil, dtype=np.intp), minlength=n_fil
+        )
         h, _ = ph.class_pair_histogram(
             pairs, pair_weights=count[pairs.seg_filament[pairs.I]]
         )

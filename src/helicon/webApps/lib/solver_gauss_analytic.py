@@ -567,8 +567,8 @@ def design_matrix(
     A = np.zeros(ny * nx * G)
     for lo in range(0, yc.size, chunk):
         hi = min(yc.size, lo + chunk)
-        r0 = np.floor(yc[lo:hi]).astype(np.int64)[:, None] + offy[None, :]
-        c0 = np.floor(zc[lo:hi]).astype(np.int64)[:, None] + offz[None, :]
+        r0 = np.floor(yc[lo:hi]).astype(np.intp)[:, None] + offy[None, :]
+        c0 = np.floor(zc[lo:hi]).astype(np.intp)[:, None] + offz[None, :]
         ey = np.exp(-0.5 * ((r0 - yc[lo:hi, None]) / s[lo:hi, None]) ** 2)
         ez = np.exp(-0.5 * ((c0 - zc[lo:hi, None]) / s_z[lo:hi, None]) ** 2)
         vals = a[lo:hi, None, None] * ey[:, :, None] * ez[:, None, :]
@@ -584,18 +584,8 @@ def design_matrix(
     return A.reshape(ny * nx, G)
 
 
-def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
-    """``min a^T M a - 2 a^T u + lam1||a||_1 + lam2||a||^2``, ``a >= 0``.
-
-    Least squares, not a cosine: a cosine is scale-invariant, so L1/L2 against
-    it is degenerate -- shrinking every amplitude lowers the penalty without
-    changing the fit, and the penalties simply do nothing.
-
-    ``tol`` is relative to the largest coefficient, so the sweeps stop on the
-    same criterion whatever the scale of the data; an absolute threshold could
-    never be reached when the amplitudes are large, and the loop then always
-    ran all ``iters`` sweeps.
-    """
+def _nn_elasticnet_py(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
+    """Pure-Python coordinate-descent fallback for :func:`nn_elasticnet`."""
     G = len(u)
     a = np.zeros(G)
     d = np.diag(M).copy()
@@ -617,6 +607,63 @@ def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12):
     return a
 
 
+def nn_elasticnet(M, u, lam1=0.0, lam2=0.0, iters=500, tol=1e-12, yy=None):
+    """``min a^T M a - 2 a^T u + lam1||a||_1 + lam2||a||^2``, ``a >= 0``.
+
+    Least squares, not a cosine: a cosine is scale-invariant, so L1/L2 against
+    it is degenerate -- shrinking every amplitude lowers the penalty without
+    changing the fit, and the penalties simply do nothing.
+
+    ``tol`` is relative to the largest coefficient, so the sweeps stop on the
+    same criterion whatever the scale of the data; an absolute threshold could
+    never be reached when the amplitudes are large, and the loop then always
+    ran all ``iters`` sweeps.
+    """
+    G = len(u)
+    if G == 0:
+        return np.zeros(0, dtype=np.float64)
+    if lam1 > 0.0:
+        try:
+            import warnings
+
+            from sklearn.exceptions import ConvergenceWarning
+            from sklearn.linear_model._cd_fast import enet_coordinate_descent_gram
+            from sklearn.utils import check_random_state
+
+            Q = np.array(M, dtype=np.float64, order="C", copy=True)
+            q = np.array(u, dtype=np.float64, order="C", copy=True)
+            if yy is None:
+                diag_max = float(np.abs(np.diag(Q)).max())
+                reg = max(float(lam2), 1e-9 * max(diag_max, 1.0))
+                yy_val = (
+                    float(q @ np.linalg.solve(Q + reg * np.eye(G), q)) * 1.01 + 1e-12
+                )
+            else:
+                yy_val = float(yy)
+            w = np.zeros(G, dtype=np.float64)
+            y_arr = np.array([np.sqrt(max(yy_val, 1e-30))], dtype=np.float64)
+            tol_cd = max(float(tol), 1e-8)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                enet_coordinate_descent_gram(
+                    w,
+                    0.5 * float(lam1),
+                    float(lam2),
+                    Q,
+                    q,
+                    y_arr,
+                    int(iters),
+                    tol_cd,
+                    check_random_state(0),
+                    False,
+                    True,
+                )
+            return w
+        except (ImportError, np.linalg.LinAlgError):
+            pass
+    return _nn_elasticnet_py(M, u, lam1=lam1, lam2=lam2, iters=iters, tol=tol)
+
+
 def explained_variance(M, u, tt, a):
     """``1 - ||f_a - t||^2 / ||t||^2``; comparable across twists, at most 1."""
     if tt <= 0:
@@ -630,10 +677,11 @@ def twist_score(image, grid, twist_deg, rise_px, csym=1, lam1=1e-2, lam2=1e-2):
     n_repeats = int(nx / 2 / max(rise_px, 1e-6)) + 2
     A = design_matrix(grid, twist_deg, rise_px, csym, n_repeats, ny, nx)
     b = np.asarray(image, float).ravel()
+    tt = float(b @ b)
     M = A.T @ A
     u = A.T @ b
-    a = nn_elasticnet(M, u, lam1 * np.abs(u).max(), lam2 * np.trace(M) / len(M))
-    return explained_variance(M, u, float(b @ b), a)
+    a = nn_elasticnet(M, u, lam1 * np.abs(u).max(), lam2 * np.trace(M) / len(M), yy=tt)
+    return explained_variance(M, u, tt, a)
 
 
 # Basis defaults, in angstroms so they follow the pixel size rather than being
@@ -784,52 +832,97 @@ def _render_volume(
     voxel symmetrisation has nothing to alias.
     """
     vol = np.zeros((nz, ny, nx), dtype=np.float32)
-    if not len(centres_px):
+    if not len(centres_px) or nz <= 0 or ny <= 0 or nx <= 0:
         return vol
     c = np.asarray(centres_px, float) * scale2d_to_3d
-    s = np.asarray(sigmas_px, float) * scale2d_to_3d
+    s = np.broadcast_to(
+        np.asarray(sigmas_px, float) * scale2d_to_3d, (len(centres_px),)
+    )
     amps = np.asarray(amps, float)
+    pos = amps > 0
+    if not np.any(pos):
+        return vol
+    c = c[pos]
+    s = s[pos]
+    amps = amps[pos]
+
     rise = abs(float(rise_px)) * scale2d_to_3d
-    half = max(1, int(np.ceil(cutoff_sigma * float(s.max()))))
-    off = np.arange(-half, half + 1)
+    s_max = float(s.max())
+    half = max(1, int(np.ceil(cutoff_sigma * s_max)))
 
     if rise > 1e-6:
-        k_max = int(np.ceil((nz / 2.0 + cutoff_sigma * float(s.max())) / rise)) + 1
-        ks = np.arange(-k_max, k_max + 1)
+        k_max = int(np.ceil((nz / 2.0 + cutoff_sigma * s_max) / rise)) + 1
+        ks = np.arange(-k_max, k_max + 1, dtype=np.float64)
     else:
-        ks = np.array([0])
-    js = np.arange(max(int(csym), 1))
+        ks = np.array([0.0], dtype=np.float64)
+    n_csym = max(int(csym), 1)
+    js = np.arange(n_csym, dtype=np.float64)
 
-    for k in ks:
-        for j in js:
-            ang = np.deg2rad(float(twist_deg)) * k + 2 * np.pi * j / max(int(csym), 1)
-            ca, sa = np.cos(ang), np.sin(ang)
-            for (cx, cy, cz), sg, a in zip(c, s, amps):
-                if a <= 0:
-                    continue
-                rx = cx * ca - cy * sa
-                ry = cx * sa + cy * ca
-                rz = cz + rise * k
-                zi = int(round(nz // 2 + rz))
-                if zi + half < 0 or zi - half > nz - 1:
-                    continue
-                xi = int(round(nx // 2 + rx))
-                yi = int(round(ny // 2 + ry))
-                xs = xi + off
-                ys = yi + off
-                zs = zi + off
-                okx = (xs >= 0) & (xs < nx)
-                oky = (ys >= 0) & (ys < ny)
-                okz = (zs >= 0) & (zs < nz)
-                if not (okx.any() and oky.any() and okz.any()):
-                    continue
-                vx = np.exp(-0.5 * ((xs - (nx // 2 + rx)) / sg) ** 2)
-                vy = np.exp(-0.5 * ((ys - (ny // 2 + ry)) / sg) ** 2)
-                vz = np.exp(-0.5 * ((zs - (nz // 2 + rz)) / sg) ** 2)
-                blob = (
-                    a * vz[okz, None, None] * vy[None, oky, None] * vx[None, None, okx]
-                )
-                vol[np.ix_(zs[okz], ys[oky], xs[okx])] += blob.astype(np.float32)
+    kk, jj = np.meshgrid(ks, js, indexing="ij")
+    kk_flat = kk.ravel()
+    ang = np.deg2rad(float(twist_deg)) * kk_flat + (2.0 * np.pi / n_csym) * jj.ravel()
+    ca = np.cos(ang)[:, None]
+    sa = np.sin(ang)[:, None]
+
+    cx = c[:, 0][None, :]
+    cy = c[:, 1][None, :]
+    cz = c[:, 2][None, :]
+    n_sym = len(ang)
+    n_pos = len(amps)
+
+    xc = (nx // 2 + (cx * ca - cy * sa)).ravel()
+    yc = (ny // 2 + (cx * sa + cy * ca)).ravel()
+    zc = (nz // 2 + (cz + (rise * kk_flat)[:, None])).ravel()
+    sg = np.broadcast_to(s[None, :], (n_sym, n_pos)).ravel()
+    aa = np.broadcast_to(amps[None, :], (n_sym, n_pos)).ravel()
+
+    zi = np.rint(zc).astype(np.intp)
+    yi = np.rint(yc).astype(np.intp)
+    xi = np.rint(xc).astype(np.intp)
+    keep = (
+        (zi + half >= 0)
+        & (zi - half <= nz - 1)
+        & (yi + half >= 0)
+        & (yi - half <= ny - 1)
+        & (xi + half >= 0)
+        & (xi - half <= nx - 1)
+    )
+    if not np.any(keep):
+        return vol
+
+    xc, yc, zc = xc[keep], yc[keep], zc[keep]
+    xi, yi, zi = xi[keep], yi[keep], zi[keep]
+    sg, aa = sg[keep], aa[keep]
+
+    gz = np.arange(nz, dtype=np.float64)[None, :]
+    gy = np.arange(ny, dtype=np.float64)[None, :]
+    gx = np.arange(nx, dtype=np.float64)[None, :]
+    gz_i = np.arange(nz, dtype=np.intp)[None, :]
+    gy_i = np.arange(ny, dtype=np.intp)[None, :]
+    gx_i = np.arange(nx, dtype=np.intp)[None, :]
+
+    vol64 = np.zeros((nz, ny, nx), dtype=np.float64)
+    chunk = 512
+    for lo in range(0, len(aa), chunk):
+        hi = min(len(aa), lo + chunk)
+        inv_s = 1.0 / sg[lo:hi, None]
+        vz = np.where(
+            np.abs(gz_i - zi[lo:hi, None]) <= half,
+            np.exp(-0.5 * ((gz - zc[lo:hi, None]) * inv_s) ** 2),
+            0.0,
+        )
+        vy = np.where(
+            np.abs(gy_i - yi[lo:hi, None]) <= half,
+            np.exp(-0.5 * ((gy - yc[lo:hi, None]) * inv_s) ** 2),
+            0.0,
+        )
+        vx = np.where(
+            np.abs(gx_i - xi[lo:hi, None]) <= half,
+            np.exp(-0.5 * ((gx - xc[lo:hi, None]) * inv_s) ** 2),
+            0.0,
+        )
+        vol64 += np.einsum("m,mz,my,mx->zyx", aa[lo:hi], vz, vy, vx, optimize=True)
+    vol[:] = vol64.astype(np.float32)
     return vol
 
 
@@ -916,6 +1009,7 @@ def gauss_analytic_reconstruct(
     verbose=0,
     algorithm=None,
     cpu=1,
+    score_only: bool = False,
     **_ignored,
 ):
     """Solve one (twist, rise) on a Gaussian basis, with the standard signature.
@@ -966,10 +1060,13 @@ def gauss_analytic_reconstruct(
     # (unchanged over a hundredfold range), so this is about not surprising the
     # user rather than about accuracy.
     lam1, lam2 = _penalties(algorithm, M, u)
-    coef = nn_elasticnet(M, u, lam1, lam2)
+    coef = nn_elasticnet(M, u, lam1, lam2, yy=float(b @ b))
 
     pred = A @ coef
     score = correlation_score(pred, b)
+    if score_only:
+        x_proj = pred.reshape(ny, nx).astype(np.float32)
+        return (x_proj, None, None), score
 
     nz3 = int(reconstruct_length_3d_pixel) if reconstruct_length_3d_pixel > 0 else 4
     d3 = int(reconstruct_diameter_3d_pixel) if reconstruct_diameter_3d_pixel > 0 else ny
@@ -1088,10 +1185,14 @@ def gauss_joint_reconstruct(
 
         from threadpoolctl import threadpool_limits
 
+        from helicon.lib.system import pool_executor
+
         # the matrix products inside each worker share the cores out rather
         # than each asking BLAS for all of them
         with threadpool_limits(limits=max(1, int(cpu) // workers), user_api="blas"):
-            with ThreadPoolExecutor(workers) as pool:
+            # pool_executor: a real ThreadPoolExecutor, or (Pyodide, which has
+            # no real threads) a drop-in that runs each image in turn instead
+            with pool_executor(ThreadPoolExecutor, workers) as pool:
                 systems = list(pool.map(one_image, images, phis))
     else:
         systems = [one_image(image, phi) for image, phi in zip(images, phis)]
@@ -1104,7 +1205,7 @@ def gauss_joint_reconstruct(
     del systems
 
     lam1, lam2 = _penalties(algorithm, M, u)
-    coef = nn_elasticnet(M, u, lam1, lam2)
+    coef = nn_elasticnet(M, u, lam1, lam2, yy=float(sum(float(t @ t) for t in targets)))
 
     per_image = [correlation_score(A @ coef, b) for A, b in zip(mats, targets)]
     score = correlation_score(

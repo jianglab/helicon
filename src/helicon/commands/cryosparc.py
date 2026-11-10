@@ -7,7 +7,6 @@ import argparse, sys, logging
 from pathlib import Path
 import numpy as np
 import helicon
-from cryosparc.dataset import Dataset
 from helicon.lib.exceptions import HeliconError, HeliconValidationError
 
 logger = logging.getLogger(__name__)
@@ -24,6 +23,11 @@ def main(args: argparse.Namespace) -> None:
     args : argparse.Namespace
         Parsed CLI arguments.
     """
+    # deferred: cryosparc-tools is an optional extra (helicon[cryosparc]), and
+    # only this function needs it -- `helicon cryosparc --help`, add_args and
+    # check_args must still work without it installed
+    from cryosparc.dataset import Dataset
+
     helicon.log_command_line()
     logging.basicConfig(
         level=(

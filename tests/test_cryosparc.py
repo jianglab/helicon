@@ -4,6 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from unittest.mock import patch
+
+# cryosparc-tools is an optional extra (helicon[cryosparc]); the command
+# module itself needs it at import time, so skip rather than fail collection
+# where it is absent.
+pytest.importorskip("cryosparc")
+
 from helicon.commands import cryosparc
 from helicon.lib.exceptions import HeliconValidationError
 

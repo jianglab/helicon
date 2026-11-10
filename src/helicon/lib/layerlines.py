@@ -24,12 +24,12 @@ The axis is along the rows of the image (axis 0), as in HILL.
 
 from __future__ import annotations
 
-import functools
-
 import numpy as np
 
 # below this share of its first maximum, the Bessel function J_n is taken as zero
 BESSEL_FLOOR = 0.05
+
+_ONSETS_CACHE: dict[float, np.ndarray] = {}
 
 
 def pitch(twist: float, rise: float) -> float:
@@ -38,7 +38,6 @@ def pitch(twist: float, rise: float) -> float:
     return 360.0 * rise / abs(twist) if twist else rise
 
 
-@functools.lru_cache(maxsize=8)
 def bessel_onsets(n_max: int, floor: float = BESSEL_FLOOR) -> np.ndarray:
     """The argument ``z`` above which ``|J_n(z)|`` reaches ``floor`` of its first maximum.
 
@@ -56,14 +55,25 @@ def bessel_onsets(n_max: int, floor: float = BESSEL_FLOOR) -> np.ndarray:
     """
     from scipy.special import jn_zeros, jv
 
-    onsets = np.zeros(n_max + 1)
-    for n in range(1, n_max + 1):
-        # J_n rises from 0 to a single maximum before its first zero
-        z = np.linspace(0.0, float(jn_zeros(n, 1)[0]), 400)
-        j = np.abs(jv(n, z))
-        above = np.flatnonzero(j >= floor * j.max())
-        onsets[n] = float(z[above[0]]) if len(above) else 0.0
-    return onsets
+    n_max = int(n_max)
+    key = float(floor)
+    cached = _ONSETS_CACHE.get(key)
+    if cached is None or len(cached) <= n_max:
+        onsets = np.zeros(n_max + 1)
+        start = 1
+        if cached is not None:
+            onsets[: len(cached)] = cached
+            start = len(cached)
+        for n in range(start, n_max + 1):
+            # J_n rises from 0 to a single maximum before its first zero
+            z = np.linspace(0.0, float(jn_zeros(n, 1)[0]), 400)
+            j = np.abs(jv(n, z))
+            above = np.flatnonzero(j >= key * j.max())
+            onsets[n] = float(z[above[0]]) if len(above) else 0.0
+        onsets.flags.writeable = False
+        _ONSETS_CACHE[key] = onsets
+        cached = onsets
+    return cached[: n_max + 1]
 
 
 def layer_line_heights(twist, rise, csym=1, y_max=None, radius=None, x_max=None):
@@ -99,19 +109,24 @@ def layer_line_heights(twist, rise, csym=1, y_max=None, radius=None, x_max=None)
         n_cap = (max(n_cap, 0) // csym) * csym
     y_max = float(y_max) if y_max is not None else 0.5 / 1.0
     m_max = int(np.floor(y_max * rise)) + 1
-    heights, orders = [], []
-    for m in range(-m_max, m_max + 1):
-        y0 = m / rise
-        if n_cap is None:
-            j_max = int(np.ceil((y_max + abs(y0)) / step)) + 1
-        else:
-            j_max = n_cap // csym
-        for j in range(-j_max, j_max + 1):
-            y = y0 + j * step
-            if abs(y) <= y_max + 1.0 / max(p, 1.0):
-                heights.append(y)
-                orders.append(j * csym)
-    return np.asarray(heights), np.asarray(orders)
+    ms = np.arange(-m_max, m_max + 1, dtype=float)
+    y0 = ms / rise
+    if n_cap is None:
+        j_max_m = np.ceil((y_max + np.abs(y0)) / step).astype(np.intp) + 1
+        j_top = int(j_max_m.max())
+        js = np.arange(-j_top, j_top + 1, dtype=int)
+        y = y0[:, None] + js[None, :] * step
+        keep = (np.abs(js)[None, :] <= j_max_m[:, None]) & (
+            np.abs(y) <= y_max + 1.0 / max(p, 1.0)
+        )
+    else:
+        j_top = n_cap // csym
+        js = np.arange(-j_top, j_top + 1, dtype=int)
+        y = y0[:, None] + js[None, :] * step
+        keep = np.abs(y) <= y_max + 1.0 / max(p, 1.0)
+    heights = y[keep]
+    orders = np.broadcast_to(js * csym, y.shape)[keep]
+    return heights, np.array(orders)
 
 
 def layer_line_mask(
@@ -167,27 +182,26 @@ def layer_line_mask(
     y_max = x_max
     sigma = width * (1.0 / (ny * apix)) / 2.3548
     heights, orders = layer_line_heights(twist, rise, csym, y_max, radius, x_max)
+    if len(orders) == 0:
+        return np.zeros((ny, len(fx)))
 
     # the layer lines of each order, as one profile along Y; an order's signal
     # starts at the radius-dependent onset, and every smaller order's does earlier
-    n_top = int(np.abs(orders).max()) if len(orders) else 0
+    abs_orders = np.abs(orders)
+    levels = np.unique(abs_orders)
+    n_top = int(levels[-1])
     onsets = bessel_onsets(max(n_top, 1), floor) / (2.0 * np.pi * radius)
-    by_order = {}
-    for y, n in zip(heights, orders):
-        by_order.setdefault(abs(int(n)), []).append(y)
-    levels = sorted(by_order)
-    cumulative = np.zeros(ny)
-    columns = np.zeros((len(levels), ny))
+    min_d2 = np.full((len(levels), ny), np.inf)
     for k, n in enumerate(levels):
-        ys = np.asarray(by_order[n])
-        # max over the lines of this order, in chunks to bound the memory
-        prof = np.zeros(ny)
+        ys = heights[abs_orders == n]
+        # min squared distance over the lines of this order, in chunks to bound the memory
+        d2 = np.full(ny, np.inf)
         for lo in range(0, len(ys), 64):
             d = fy[:, None] - ys[None, lo : lo + 64]
-            prof = np.maximum(prof, np.exp(-0.5 * (d / sigma) ** 2).max(axis=1))
-        cumulative = np.maximum(cumulative, prof)
-        columns[k] = cumulative
-    start = np.array([onsets[n] if n < len(onsets) else np.inf for n in levels])
+            d2 = np.minimum(d2, (d * d).min(axis=1))
+        min_d2[k] = d2
+    columns = np.exp(-0.5 * (np.minimum.accumulate(min_d2, axis=0) / (sigma * sigma)))
+    start = np.array([onsets[int(n)] if n < len(onsets) else np.inf for n in levels])
     # for each column of the transform, the highest order whose signal has started
     idx = np.searchsorted(start, fx, side="right") - 1
     idx = np.clip(idx, 0, len(levels) - 1)

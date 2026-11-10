@@ -63,6 +63,6 @@ if you have uncommitted changes.
 
 ## Without installing anything
 
-You can [try the web apps online](https://01a01bc0-00db-fb4f-bfe0-f0ba9f0dd427.share.connect.posit.cloud)
-on example data. On that server you cannot browse files on the server: upload a file, give a URL,
-or give an EMDB ID.
+You can [try the web apps online](https://jianglab.github.io/helicon/)
+on example data. It runs entirely in your browser (no server), so there is no server
+filesystem to browse: upload a file, give a URL, or give an EMDB ID.

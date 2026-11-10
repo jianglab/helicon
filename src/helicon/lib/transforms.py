@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from contextlib import contextmanager
 import platform
 
 import numpy as np
+
+# finufft has no Pyodide/wasm wheel (see tools/shinylive/README.md): fft_rescale
+# falls back to an exact direct DFT (_nonuniform_grid_dft) when it is missing.
+# A find_spec check, not an import, so checking this costs nothing at module
+# load even when finufft is installed but not yet needed.
+_HAS_FINUFFT = importlib.util.find_spec("finufft") is not None
 
 
 @contextmanager
@@ -49,7 +56,7 @@ __all__ = [
 
 from .filters import low_high_pass_filter, normalize_percentile
 
-from .numba_compat import lazy_jit, set_num_threads
+from .numba_compat import has_numba, lazy_jit, set_num_threads
 
 # numba.prange when the function below is compiled (on its first call); plain
 # range when it runs without numba
@@ -57,6 +64,14 @@ prange = range
 
 
 _USE_NUMBA_PARALLEL = platform.system() != "Darwin"
+
+# numba itself is imported, and this kernel compiled, on its first call.
+# Without it, lazy_jit's own fallback would still run the *same* nested
+# Python loops, un-jitted, which measured ~500x slower than the compiled
+# kernel on a 48**3 volume (tools/shinylive/README.md) -- the vectorised
+# numpy/scipy version below is used instead when numba is unavailable (as
+# under Pyodide, where numba cannot run at all).
+_HAS_NUMBA = has_numba()
 
 
 @lazy_jit(
@@ -190,6 +205,143 @@ def _apply_helical_symmetry_jit(
     return data_work
 
 
+def _apply_helical_symmetry_np(
+    data,
+    apix,
+    twist_degree,
+    rise_angstrom,
+    csym=1,
+    fraction=1.0,
+    new_size=None,
+    new_apix=None,
+):
+    """Vectorised equivalent of :func:`_apply_helical_symmetry_jit`.
+
+    Same gather-and-average: for every symmetry copy (a helical rise/twist
+    ``hi`` and a point-group fold ``ci``) every *output* voxel's source
+    position in ``data`` is found by the inverse transform, and its trilinear
+    interpolate is accumulated; a voxel with no copy landing inside it is left
+    0. Only the loop over copies (``hsyms`` x ``csyms``, typically a few tens)
+    stays a Python loop -- the triple loop over output voxels that loop's body
+    held is array arithmetic over the whole volume at once.
+    """
+    if new_apix is None:
+        new_apix = apix
+    nz0, ny0, nx0 = data.shape
+    if new_size != data.shape:
+        nz1, ny1, nx1 = new_size
+    else:
+        nz1, ny1, nx1 = nz0, ny0, nx0
+
+    data_work = np.zeros((nz1, ny1, nx1), dtype=np.float32)
+    w = np.zeros((nz1, ny1, nx1), dtype=np.float32)
+    nz, ny, nx = nz1, ny1, nx1
+
+    hsym_max = max(1, int(nz * new_apix / rise_angstrom))
+    hsyms = range(-hsym_max, hsym_max + 1)
+    csyms = range(csym)
+
+    profile_z = data.sum(axis=(-1, -2))
+    threshold = 0.01 * profile_z.max()
+    non_zero_indices = np.flatnonzero(profile_z > threshold)
+    if non_zero_indices.size == 0:
+        # see _apply_helical_symmetry_jit: an unmasked map normalised to a
+        # slightly negative background can have no slice above threshold
+        profile_z = np.abs(data).sum(axis=(-1, -2))
+        threshold = 0.01 * profile_z.max()
+        non_zero_indices = np.flatnonzero(profile_z > threshold)
+    if non_zero_indices.size == 0:
+        z0, z1 = 0, nz0 - 1
+    else:
+        z0, z1 = int(non_zero_indices[0]), int(non_zero_indices[-1])
+    zmid = (z0 + z1) // 2 + (z0 + z1) % 2
+    z0 = max(z0, zmid - int(nz0 * fraction + 0.5) // 2)
+    z1 = min(z1, zmid + int(nz0 * fraction + 0.5) // 2)
+
+    if z0 >= z1 or nz == 0 or ny0 < 2 or nx0 < 2:
+        return data_work
+
+    j, i = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    j_off = j - ny // 2
+    i_off = i - nx // 2
+    scale_xy = new_apix / apix
+
+    if rise_angstrom != 0:
+        hi_bounds = (
+            ((z0 - nz0 // 2) * apix - (0 - nz // 2) * new_apix) / rise_angstrom,
+            ((z0 - nz0 // 2) * apix - (nz - 1 - nz // 2) * new_apix) / rise_angstrom,
+            ((z1 - nz0 // 2) * apix - (0 - nz // 2) * new_apix) / rise_angstrom,
+            ((z1 - nz0 // 2) * apix - (nz - 1 - nz // 2) * new_apix) / rise_angstrom,
+        )
+        hi_lo = max(-hsym_max, int(np.floor(min(hi_bounds))) - 1)
+        hi_hi = min(hsym_max, int(np.ceil(max(hi_bounds))) + 1)
+        hsyms = range(hi_lo, hi_hi + 1)
+
+    for hi in hsyms:
+        k_a = ((z0 - nz0 // 2) * apix - hi * rise_angstrom) / new_apix + nz // 2
+        k_b = ((z1 - nz0 // 2) * apix - hi * rise_angstrom) / new_apix + nz // 2
+        k_min = max(0, int(np.floor(min(k_a, k_b))) - 1)
+        k_max = min(nz, int(np.ceil(max(k_a, k_b))) + 2)
+        if k_min >= k_max:
+            continue
+        k_sub = np.arange(k_min, k_max, dtype=np.intp)
+        k2_sub = ((k_sub - nz // 2) * new_apix + hi * rise_angstrom) / apix + nz0 // 2
+        k_valid = (k2_sub >= z0) & (k2_sub < z1)
+        if not k_valid.any():
+            continue
+        ks = k_sub[k_valid]
+        k2 = k2_sub[k_valid]
+        k2_floor = np.floor(k2).astype(np.intp)
+        k2_ceil = np.ceil(k2).astype(np.intp)
+        wk3 = (k2 - k2_floor)[:, None, None]
+        K0 = np.clip(k2_floor, 0, nz0 - 1)[:, None, None]
+        K1 = np.clip(k2_ceil, 0, nz0 - 1)[:, None, None]
+
+        for ci in csyms:
+            rot = np.deg2rad(twist_degree * hi + 360 * ci / csym)
+            m00, m01 = np.cos(rot), np.sin(rot)
+            m10, m11 = -m01, m00
+            j2 = (m00 * j_off + m01 * i_off) * scale_xy + ny0 // 2
+            i2 = (m10 * j_off + m11 * i_off) * scale_xy + nx0 // 2
+            j2_floor = np.floor(j2).astype(np.intp)
+            i2_floor = np.floor(i2).astype(np.intp)
+            ji_valid = (
+                (j2_floor >= 0)
+                & (j2_floor < ny0 - 1)
+                & (i2_floor >= 0)
+                & (i2_floor < nx0 - 1)
+            )[None, :, :]
+            wj3 = (j2 - j2_floor)[None, :, :]
+            wi3 = (i2 - i2_floor)[None, :, :]
+            J0 = np.clip(j2_floor, 0, ny0 - 2)[None, :, :]
+            I0 = np.clip(i2_floor, 0, nx0 - 2)[None, :, :]
+            J1 = np.clip(np.ceil(j2).astype(np.intp), 0, ny0 - 1)[None, :, :]
+            I1 = np.clip(np.ceil(i2).astype(np.intp), 0, nx0 - 1)[None, :, :]
+
+            c000, c001 = data[K0, J0, I0], data[K0, J0, I1]
+            c010, c011 = data[K0, J1, I0], data[K0, J1, I1]
+            c100, c101 = data[K1, J0, I0], data[K1, J0, I1]
+            c110, c111 = data[K1, J1, I0], data[K1, J1, I1]
+
+            contrib = (
+                (1 - wk3) * (1 - wj3) * (1 - wi3) * c000
+                + (1 - wk3) * (1 - wj3) * wi3 * c001
+                + (1 - wk3) * wj3 * (1 - wi3) * c010
+                + (1 - wk3) * wj3 * wi3 * c011
+                + wk3 * (1 - wj3) * (1 - wi3) * c100
+                + wk3 * (1 - wj3) * wi3 * c101
+                + wk3 * wj3 * (1 - wi3) * c110
+                + wk3 * wj3 * wi3 * c111
+            )
+            data_work[ks] += np.where(ji_valid, contrib, 0.0).astype(np.float32)
+            w[ks] += ji_valid
+
+    mask = w > 0
+    out = data_work.copy()
+    np.divide(data_work, w, out=out, where=mask)
+    return out
+
+
 def apply_helical_symmetry(
     data,
     apix,
@@ -207,6 +359,17 @@ def apply_helical_symmetry(
     new_size = tuple(int(n) for n in new_size)
     if new_apix is None:
         new_apix = apix
+    if not _HAS_NUMBA:
+        return _apply_helical_symmetry_np(
+            data,
+            apix,
+            twist_degree,
+            rise_angstrom,
+            csym,
+            fraction,
+            new_size,
+            new_apix,
+        )
     set_num_threads(cpu)
     return _apply_helical_symmetry_jit(
         data,
@@ -706,6 +869,39 @@ def fft_crop(
     return np.fft.irfftn(fft_truncated, s=output_size, axes=axes) * scale
 
 
+def _nonuniform_grid_dft(data: np.ndarray, freqs: list[np.ndarray]) -> np.ndarray:
+    """What ``finufft.nufft{2,3}d2`` computes when its query points happen to
+    form a separable (tensor-product) grid -- which is all :func:`fft_rescale`
+    ever asks for, since its query points are a uniform grid along each axis,
+    just possibly a different size/spacing than the input. Exact (to float64
+    rounding), not approximate to any ``eps``, and needs no finufft wheel, so
+    it is also what runs under Pyodide, where finufft has none (see
+    tools/shinylive/README.md).
+
+    Parameters
+    ----------
+    data : np.ndarray
+        2D or 3D complex input, as ``fft_rescale`` passes it.
+    freqs : list of np.ndarray
+        One 1D array of angular frequencies per axis of ``data``, in axis
+        order (what ``fft_rescale`` builds as ``Y, X`` or ``Z, Y, X`` before
+        flattening them for finufft).
+
+    Returns
+    -------
+    np.ndarray
+        Shape ``tuple(len(f) for f in freqs)``, matching what finufft would
+        return reshaped the same way.
+    """
+    out = data.astype(np.complex128)
+    for axis, f in enumerate(freqs):
+        n = out.shape[axis]
+        k = np.arange(n) - n // 2  # finufft's own mode centring
+        basis = np.exp(-1j * np.outer(f, k))  # (len(f), n)
+        out = np.moveaxis(np.tensordot(basis, out, axes=([1], [axis])), 0, axis)
+    return out
+
+
 def _half_box_phase(shape: tuple[int, ...]) -> np.ndarray:
     """Phase factors that shift a centred box so its centre is at the origin.
 
@@ -774,11 +970,17 @@ def fft_rescale(
         Y = (2 * np.pi * Y).flatten(order="C")
         X = (2 * np.pi * X).flatten(order="C")
 
-        with _single_omp_thread():
-            from finufft import nufft2d2
+        if _HAS_FINUFFT:
+            with _single_omp_thread():
+                from finufft import nufft2d2
 
-            fft = nufft2d2(x=Y, y=X, f=data.astype(np.complex128), eps=1e-6)
-        fft = fft.reshape((ony, onx))
+                fft = nufft2d2(x=Y, y=X, f=data.astype(np.complex128), eps=1e-6)
+            fft = fft.reshape((ony, onx))
+        else:
+            # finufft has no Pyodide/wasm wheel: freq_y/freq_x are each
+            # independently uniform, so the query grid is separable and this
+            # direct DFT is exact, not an eps-approximation like finufft's
+            fft = _nonuniform_grid_dft(data, [2 * np.pi * freq_y, 2 * np.pi * freq_x])
 
         # move the box centre (index n//2) back to the origin; exact for odd and
         # even sizes ((-1)^k is the special case of an even output size)
@@ -802,11 +1004,18 @@ def fft_rescale(
         Y = (2 * np.pi * Y).flatten(order="C")
         X = (2 * np.pi * X).flatten(order="C")
 
-        with _single_omp_thread():
-            from finufft import nufft3d2
+        if _HAS_FINUFFT:
+            with _single_omp_thread():
+                from finufft import nufft3d2
 
-            fft = nufft3d2(x=Z, y=Y, z=X, f=data.astype(np.complex128), eps=1e-6)
-        fft = fft.reshape((onz, ony, onx))
+                fft = nufft3d2(x=Z, y=Y, z=X, f=data.astype(np.complex128), eps=1e-6)
+            fft = fft.reshape((onz, ony, onx))
+        else:
+            # see the 2D branch above: freq_z/freq_y/freq_x are each
+            # independently uniform, so this direct DFT is exact
+            fft = _nonuniform_grid_dft(
+                data, [2 * np.pi * freq_z, 2 * np.pi * freq_y, 2 * np.pi * freq_x]
+            )
 
         # move the box centre (index n//2) back to the origin; exact for odd and
         # even sizes ((-1)^k is the special case of an even output size)

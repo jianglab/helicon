@@ -76,6 +76,24 @@ class TestKilledWorker:
         )
         assert ph._POOL_IMAGES == {}
 
+    def test_without_real_threads_the_registrations_still_agree(self, monkeypatch):
+        """As under Pyodide: ProcessPoolExecutor cannot fork/spawn there, so
+        this must fall back to the one-at-a-time path on its own, not only
+        when a worker is killed."""
+        from helicon.lib import system
+
+        a = syn.class_averages(400.0, 12, apix=4.0)[0]
+        prepared, _ = ph._register_prepared(a, list(range(12)), 128)
+        todo = [(i, j) for i in range(12) for j in range(i + 1, 12)]
+        assert len(todo) >= 40  # enough for the pool to be used otherwise
+        monkeypatch.setattr(helicon, "available_cpu", lambda *a, **k: 4)
+        reference = ph._register_all(prepared, todo, [(False, False)], None)
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        again = ph._register_all(prepared, todo, [(False, False)], None)
+        assert [r["corr"] for r in again] == pytest.approx(
+            [r["corr"] for r in reference]
+        )
+
 
 class TestWorkersFitTheMemory:
     @staticmethod
@@ -114,6 +132,20 @@ class TestWorkersFitTheMemory:
     def test_a_big_machine_keeps_its_workers(self, monkeypatch):
         n, _ = self._workers(monkeypatch, 1_000_000, 50, machine_gb=256.0, cpus=8)
         assert n == 8
+
+    def test_without_real_threads_it_is_always_one(self, monkeypatch):
+        """As under Pyodide: ProcessPoolExecutor cannot fork/spawn at all,
+        whatever the CPU/memory budget says is otherwise affordable."""
+        from helicon.lib import system
+
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+
+        class P:
+            D = np.zeros(1_000_000)
+            max_sep = 5700.0
+            n_classes = 20
+
+        assert ph._pool_workers(P, 20) == 1
 
 
 class TestWorkersReadTheSharedPairs:

@@ -205,3 +205,42 @@ class TestThroughThePowerSpectrumFunctions:
         assert out.min() >= 0 and out.max() <= 1
         plain = resize(data, shell_median=False, log=True, **kwargs)
         assert not np.allclose(out, plain)
+
+
+class TestPyodide32BitBincount:
+    """Under 32-bit WebAssembly (Pyodide), ``np.intp`` is ``np.int32`` and
+    ``np.bincount`` rejects ``int64`` arrays with ``casting='safe'``."""
+
+    def test_shell_median_ratio_uses_intp_shells(self, monkeypatch):
+        from helicon.lib import rings
+
+        class _Wasm32Numpy:
+            intp = np.int32
+
+            @staticmethod
+            def bincount(x, weights=None, minlength=0):
+                arr = np.asarray(x)
+                if not np.can_cast(arr.dtype, np.int32, casting="safe"):
+                    raise TypeError(
+                        f"Cannot cast array data from {arr.dtype!r} to "
+                        f"dtype('int32') according to the rule 'safe'"
+                    )
+                return np.bincount(arr, weights=weights, minlength=minlength)
+
+            def __getattr__(self, name):
+                return getattr(np, name)
+
+        wasm_np = _Wasm32Numpy()
+        monkeypatch.setattr(hill, "np", wasm_np)
+        monkeypatch.setattr(rings, "np", wasm_np)
+        hill.fourier_shells.cache_clear()
+        hill._shell_pixels.cache_clear()
+        try:
+            shells = hill.fourier_shells((64, 32), CUTOFF)
+            assert shells.dtype == np.int32
+            amp, _ = _spectrum(ny=64, nx=32)
+            ratio = hill.shell_median_ratio(amp, CUTOFF)
+            assert np.isfinite(ratio).all()
+        finally:
+            hill.fourier_shells.cache_clear()
+            hill._shell_pixels.cache_clear()

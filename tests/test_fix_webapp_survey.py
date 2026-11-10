@@ -168,7 +168,9 @@ class TestRefuseServerMode:
         for module in (abinitio3d_tab, helical_pitch_tab):
             src = tab_source(module)
             body = src[src.index("def _fill_companion") :][:300]
-            assert "deployment.is_cloud()" in body
+            # a hosting service has no server files; a browser-side copy has the
+            # folder its visitor gave it
+            assert "not deployment.has_server_files()" in body
 
 
 class TestClientIsLocal:

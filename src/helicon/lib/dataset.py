@@ -667,21 +667,26 @@ def get_emd_entries(fields: list[str]) -> pd.DataFrame:
 
 
 @helicon.cache(
-    cache_dir=str(helicon.cache_dir / "emdb"), expires_after=30, verbose=0
-)  # 30 days
+    cache_dir=str(helicon.cache_dir / "emdb"), expires_after=7, verbose=0
+)  # the mirror itself is refreshed weekly; see get_amyloid_atlas's docstring
 def get_amyloid_atlas(
-    url: str = "https://people.mbi.ucla.edu/sawaya/amyloidatlas",
+    url: str = "https://raw.githubusercontent.com/jianglab/testdata/main/amyloid_atlas/amyloid_atlas.json",
 ) -> pd.DataFrame:
-    """Fetch and process the Amyloid Atlas table, mapping PDB IDs to EMDB entries.
+    """Return the Amyloid Atlas table, mapping PDB IDs to EMDB entries.
 
-    Scrapes the Amyloid Atlas web page, filters for cryo-EM entries, and maps
-    PDB IDs to corresponding EMDB IDs.
+    Reads a mirror of the Amyloid Atlas (https://people.mbi.ucla.edu/sawaya/amyloidatlas),
+    filtered for cryo-EM entries and already mapped from PDB IDs to EMDB IDs --
+    not the live page itself: unlike ``update_helical_parameters_from_curated_table``'s
+    CSV, it sends no CORS header, which a page fetching it from a different
+    origin (the Shinylive/Pyodide build) needs. The mirror is kept current by
+    a scheduled job in the mirror's own repository, which also holds the
+    scrape-and-map logic this function used to run itself.
 
     Parameters
     ----------
     url : str, optional
-        URL of the Amyloid Atlas web page. Defaults to
-        https://people.mbi.ucla.edu/sawaya/amyloidatlas.
+        URL of the mirrored table (JSON, the same columns this function
+        returns). Defaults to the Jiang lab's own mirror.
 
     Returns
     -------
@@ -689,40 +694,15 @@ def get_amyloid_atlas(
         Table of Amyloid Atlas entries with emd_id, resolution, pdb_id, and
         sample columns.
     """
+    import io
+
     import pandas as pd
 
-    replaced_pdb_ids = {"7z40": "8ade"}
+    from .path_utils import _get
 
-    df = pd.read_html(url, header=0, flavor="html5lib")[0]
-
-    mask = df["PDB ID"].isin(replaced_pdb_ids)
-    df.loc[mask, "PDB ID"] = df.loc[mask, "PDB ID"].str.lower().map(replaced_pdb_ids)
-
-    df = df[df["Method"].str.lower() == "cryoem"].copy()
-
-    emdb = EMDB()
-    assert emdb.meta is not None, "Failed to get the list of EMDB entries"
-
-    pdb2emd_mapping = {}
-    for index, row in emdb.meta.iterrows():
-        for pdb_id in str(row["pdb"]).lower().split(","):
-            if pdb_id:
-                pdb2emd_mapping[pdb_id] = row["emd_id"]
-    df["emd_id"] = df["PDB ID"].map(pdb2emd_mapping)
-
-    df["sample"] = df["Protein"] + " - " + df["Fibril Origins"]
-    cols = dict(
-        emd_id="emd_id",
-        resolution="Resol- ution (Å)",
-        pdb_id="PDB ID",
-        sample="sample",
-        others=["Residues Ordered", "Reference"],
-    )
-    df = df[helicon.flatten(cols.values())]
-    df = df.rename(columns={cols[k]: k for k in cols if k != "others"})
-    df = df.drop_duplicates(subset=["emd_id", "pdb_id"])
-    df = df.reset_index()
-
+    with _get(url) as r:
+        r.raise_for_status()
+        df = pd.read_json(io.StringIO(r.text), dtype={"emd_id": str, "pdb_id": str})
     return df
 
 

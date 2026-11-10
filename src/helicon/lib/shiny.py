@@ -1,3 +1,4 @@
+from functools import lru_cache
 from pathlib import Path
 
 import shiny
@@ -18,6 +19,7 @@ from .shiny_file_picker import (  # noqa: E402
 
 __all__ = [
     "SERVER",
+    "bokeh_dependency",
     "source_modes",
     "file_picker_button",
     "file_picker_field",
@@ -26,9 +28,86 @@ __all__ = [
     "google_analytics",
     "image_gallery",
     "launch_shiny_app",
+    "plotly_dependency",
     "range_slider",
     "slider",
 ]
+
+
+@lru_cache(maxsize=1)
+def bokeh_dependency():
+    """Bokeh's JavaScript bundle as a deduplicated ``HTMLDependency`` for ``<head>``.
+
+    Embeds ``bokeh``, ``bokeh-widgets``, and ``bokeh-tables`` inline once via
+    ``htmltools.HTMLDependency`` so ``bokeh.embed.components(fig)`` and
+    ``jupyter_bokeh`` widgets render 100% offline in both ``helicon webApps`` and
+    standalone Shinylive exports without per-figure script duplication or external
+    CDN fetches. Importing ``bokeh`` is delayed until UI construction time.
+
+    Returns
+    -------
+    htmltools.HTMLDependency
+        Dependency node injecting ``window.Bokeh`` once into ``<head>``.
+    """
+    import bokeh
+    from bokeh.resources import Resources
+    from htmltools import HTMLDependency
+
+    resources = Resources(
+        mode="inline", components=["bokeh", "bokeh-widgets", "bokeh-tables"]
+    )
+    head_tags = [
+        *(shiny.ui.tags.style(shiny.ui.HTML(css)) for css in resources.css_raw),
+        *(
+            shiny.ui.tags.script(
+                shiny.ui.HTML(
+                    js.replace("</script>", "<\\/script>").replace(
+                        "</head>", "<\\/head>"
+                    )
+                )
+            )
+            for js in resources.js_raw
+        ),
+    ]
+    return HTMLDependency(
+        "bokeh",
+        version=bokeh.__version__,
+        head=shiny.ui.TagList(*head_tags),
+    )
+
+
+@lru_cache(maxsize=1)
+def plotly_dependency():
+    """Plotly's JavaScript bundle as a deduplicated ``HTMLDependency`` for ``<head>``.
+
+    Embeds ``plotly.offline.get_plotlyjs()`` once via ``htmltools.HTMLDependency`` so
+    every ``pio.to_html(..., include_plotlyjs=False)`` render sends only its ~9 KB
+    figure spec instead of re-inlining the ~4.8 MB library, while remaining 100%
+    offline in both ``helicon webApps`` and standalone Shinylive exports. Importing
+    ``plotly`` is delayed until UI construction time rather than module import time.
+
+    Returns
+    -------
+    htmltools.HTMLDependency
+        Dependency node injecting ``window.Plotly`` once into ``<head>``.
+    """
+    from htmltools import HTMLDependency
+    import plotly
+    from plotly import offline as plotly_offline
+
+    version_fn = getattr(
+        plotly_offline, "get_plotlyjs_version", lambda: plotly.__version__
+    )
+    js = (
+        plotly_offline.get_plotlyjs()
+        .replace("</script>", "<\\/script>")
+        .replace("</head>", "<\\/head>")
+    )
+    return HTMLDependency(
+        "plotly",
+        version=version_fn(),
+        head=shiny.ui.tags.script(shiny.ui.HTML(js)),
+    )
 
 
 # The script every editable slider carries (it does its work once per page):
@@ -390,7 +469,23 @@ class ThreadProgress:
         self._progress = core_ui.Progress(min=min, max=max, session=session)
 
     def _call(self, fn, *args, **kwargs):
-        self._loop.call_soon_threadsafe(lambda: fn(*args, **kwargs))
+        from .system import has_real_threads
+
+        if has_real_threads():
+            self._loop.call_soon_threadsafe(lambda: fn(*args, **kwargs))
+        else:
+            # Pyodide: background_task's own asyncio.to_thread runs `work`
+            # inline on this one event loop rather than on a second thread
+            # (see has_real_threads's own docstring), so a callback queued
+            # with call_soon_threadsafe here would sit until `work` returns
+            # -- by which point there is nothing left to report. Call it
+            # directly instead: Shiny's own send is a coroutine that steps
+            # synchronously up to its first real suspension
+            # (_utils.run_coro_hybrid), and Shinylive's transport (unlike a
+            # real browser's websocket) never actually suspends, so this
+            # reaches the page the moment it is called, with no thread and
+            # no event-loop turn needed.
+            fn(*args, **kwargs)
 
     def set(self, value=None, message=None, detail=None):
         """Set the bar, as ``shiny.ui.Progress.set``. Safe from any thread."""
@@ -403,6 +498,57 @@ class ThreadProgress:
     def close(self):
         """Remove the bar. Safe from any thread."""
         self._call(self._progress.close)
+
+
+def push_output_ui(output_id, content, session=None):
+    """Show *content* next to an ``output_ui`` right now, bypassing the reactive flush.
+
+    For progress that a plain dict (not a ``reactive.value``) carries out of
+    a thread, read by a poll (``@reactive.effect`` with
+    ``reactive.invalidate_later``) that feeds a ``@render.ui`` -- the pattern
+    :class:`ThreadProgress` exists for, before Shiny grew its own
+    ``ui.Progress``. Under Pyodide, the thread is really the one event loop
+    running inline (see :func:`has_real_threads`), so the poll's timer never
+    gets a turn until the work it is timing returns, by which point there is
+    nothing left to show. Call this instead, only when
+    :func:`has_real_threads` is false -- the poll already covers it
+    everywhere else, and calling this too would just fight the poll's own
+    render over the same output.
+
+    The output's own div is left untouched (``content`` goes beside it, not
+    inside it): the client marks that div ``recalculating`` -- dimmed, as if
+    disabled -- the moment its ``@render.ui`` is invalidated, and only clears
+    it on that output's own next update message, which this bypass never
+    sends; putting content inside would leave it dimmed for as long as the
+    work runs.
+
+    Parameters
+    ----------
+    output_id : str
+        The ``output_ui`` id (unresolved: this resolves it against the
+        current module namespace, same as the tag the UI side declared).
+    content : shiny.ui.TagChild or None
+        What to show next to it; None clears what an earlier call showed.
+    session : shiny.Session, optional
+        The session. Defaults to the current one.
+    """
+    from shiny import ui as core_ui
+    from shiny.module import resolve_id
+
+    rid = resolve_id(output_id)
+    live_id = f"{rid}-push-output-ui-live"
+    core_ui.remove_ui(f"#{live_id}", immediate=True, session=session)
+    if content is not None:
+        # what the output last rendered is stale now, and would sit dimmed
+        # above the new content; its own next render fills it again
+        core_ui.remove_ui(f"#{rid} > *", multiple=True, immediate=True, session=session)
+        core_ui.insert_ui(
+            core_ui.div(content, id=live_id),
+            selector=f"#{rid}",
+            where="afterEnd",
+            immediate=True,
+            session=session,
+        )
 
 
 def background_task(

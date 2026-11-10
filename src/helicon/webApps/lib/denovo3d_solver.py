@@ -14,6 +14,8 @@ try:
     from numba import jit, set_num_threads, prange
 
     from ...lib.numba_compat import cached_jit
+
+    _HAS_NUMBA = True
 except ImportError:
     logger.warning(
         "failed to load numba. The program will run correctly but will be much slower. Run 'pip install numba' to install numba and speed up the program"
@@ -29,6 +31,8 @@ except ImportError:
         return
 
     prange = range
+
+    _HAS_NUMBA = False
 
 cache_dir = helicon.cache_dir / "denovo3D"
 
@@ -914,6 +918,258 @@ def refine_tilt_psi_dy(
     return t[0], t[1], t[2], x_cur, final_score
 
 
+def _build_A_helical_sym_matrix_loop_kji_linear_np(
+    Zi,
+    Yi,
+    Xi,
+    Zj,
+    Yj,
+    Xj,
+    mask,
+    mask_nonzero_indices_zyx_tuple,
+    mask_nonzero_indices_matrix,
+    pair_ids,
+):
+    """Numpy fallback for the trilinear ``loop_kji`` of
+    :func:`build_A_helical_sym_matrix` (no numba, as under Pyodide).
+
+    Validity, geometry and the 16 trilinear weights are computed for every
+    masked voxel at once; only the ``pair_ids`` de-duplication -- a running
+    set threaded across every symmetry pair this function is called for --
+    stays a lean Python loop over the surviving candidates, in increasing
+    voxel-index order so the first occurrence of a pair wins exactly as the
+    numba loop's early ``continue`` does.
+    """
+    mask_indices_Z, mask_indices_Y, mask_indices_X = mask_nonzero_indices_zyx_tuple
+    mz, my, mx = mask.shape
+    n_indices = len(mask_indices_Z)
+    n_x = n_indices
+    k, j, i = mask_indices_Z, mask_indices_Y, mask_indices_X
+
+    Zi_v, Yi_v, Xi_v = Zi[k, j, i], Yi[k, j, i], Xi[k, j, i]
+    Zj_v, Yj_v, Xj_v = Zj[k, j, i], Yj[k, j, i], Xj[k, j, i]
+
+    zi = np.floor(Zi_v).astype(np.intp)
+    yi = np.floor(Yi_v).astype(np.intp)
+    xi = np.floor(Xi_v).astype(np.intp)
+    zj = np.floor(Zj_v).astype(np.intp)
+    yj = np.floor(Yj_v).astype(np.intp)
+    xj = np.floor(Xj_v).astype(np.intp)
+
+    valid = (
+        (zi >= 0)
+        & (zi <= mz - 1)
+        & (zj >= 0)
+        & (zj <= mz - 1)
+        & (yi >= 0)
+        & (yi <= my - 1)
+        & (yj >= 0)
+        & (yj <= my - 1)
+        & (xi >= 0)
+        & (xi <= mx - 1)
+        & (xj >= 0)
+        & (xj <= mx - 1)
+        & (zi + 1 <= mz - 1)
+        & (yi + 1 <= my - 1)
+        & (xi + 1 <= mx - 1)
+        & (zj + 1 <= mz - 1)
+        & (yj + 1 <= my - 1)
+        & (xj + 1 <= mx - 1)
+    )
+
+    zi_c, yi_c, xi_c = (
+        np.clip(zi, 0, mz - 2),
+        np.clip(yi, 0, my - 2),
+        np.clip(xi, 0, mx - 2),
+    )
+    zj_c, yj_c, xj_c = (
+        np.clip(zj, 0, mz - 2),
+        np.clip(yj, 0, my - 2),
+        np.clip(xj, 0, mx - 2),
+    )
+
+    for za, ya, xa in ((zi_c, yi_c, xi_c), (zj_c, yj_c, xj_c)):
+        valid &= mask[za, ya, xa]
+        valid &= mask[za + 1, ya, xa]
+        valid &= mask[za, ya + 1, xa]
+        valid &= mask[za + 1, ya + 1, xa]
+        valid &= mask[za, ya, xa + 1]
+        valid &= mask[za + 1, ya, xa + 1]
+        valid &= mask[za, ya + 1, xa + 1]
+        valid &= mask[za + 1, ya + 1, xa + 1]
+
+    def _corners(za, ya, xa):
+        return [
+            mask_nonzero_indices_matrix[za, ya, xa],
+            mask_nonzero_indices_matrix[za, ya, xa + 1],
+            mask_nonzero_indices_matrix[za, ya + 1, xa],
+            mask_nonzero_indices_matrix[za, ya + 1, xa + 1],
+            mask_nonzero_indices_matrix[za + 1, ya, xa],
+            mask_nonzero_indices_matrix[za + 1, ya, xa + 1],
+            mask_nonzero_indices_matrix[za + 1, ya + 1, xa],
+            mask_nonzero_indices_matrix[za + 1, ya + 1, xa + 1],
+        ]
+
+    i_corners = _corners(zi_c, yi_c, xi_c)
+    j_corners = _corners(zj_c, yj_c, xj_c)
+    for idx in i_corners + j_corners:
+        valid &= (idx >= 0) & (idx <= n_x - 1)
+
+    valid &= ~((np.abs(zi - zj) < 3) & (np.abs(yi - yj) < 3) & (np.abs(xi - xj) < 3))
+
+    zir = np.clip(np.round(Zi_v).astype(np.intp), 0, mz - 1)
+    yir = np.clip(np.round(Yi_v).astype(np.intp), 0, my - 1)
+    xir = np.clip(np.round(Xi_v).astype(np.intp), 0, mx - 1)
+    zjr = np.clip(np.round(Zj_v).astype(np.intp), 0, mz - 1)
+    yjr = np.clip(np.round(Yj_v).astype(np.intp), 0, my - 1)
+    xjr = np.clip(np.round(Xj_v).astype(np.intp), 0, mx - 1)
+    ir = mask_nonzero_indices_matrix[zir, yir, xir].astype(np.int64)
+    jr = mask_nonzero_indices_matrix[zjr, yjr, xjr].astype(np.int64)
+    pair_id = ir * n_indices + jr
+    pair_id2 = jr * n_indices + ir
+
+    zf_i = (Zi_v - zi).astype(np.float32)
+    yf_i = (Yi_v - yi).astype(np.float32)
+    xf_i = (Xi_v - xi).astype(np.float32)
+    zf_j = (Zj_v - zj).astype(np.float32)
+    yf_j = (Yj_v - yj).astype(np.float32)
+    xf_j = (Xj_v - xj).astype(np.float32)
+
+    w_i = np.stack(
+        [
+            (1 - zf_i) * (1 - yf_i) * (1 - xf_i),
+            (1 - zf_i) * (1 - yf_i) * xf_i,
+            (1 - zf_i) * yf_i * (1 - xf_i),
+            (1 - zf_i) * yf_i * xf_i,
+            zf_i * (1 - yf_i) * (1 - xf_i),
+            zf_i * (1 - yf_i) * xf_i,
+            zf_i * yf_i * (1 - xf_i),
+            zf_i * yf_i * xf_i,
+        ],
+        axis=-1,
+    )
+    w_j = -np.stack(
+        [
+            (1 - zf_j) * (1 - yf_j) * (1 - xf_j),
+            (1 - zf_j) * (1 - yf_j) * xf_j,
+            (1 - zf_j) * yf_j * (1 - xf_j),
+            (1 - zf_j) * yf_j * xf_j,
+            zf_j * (1 - yf_j) * (1 - xf_j),
+            zf_j * (1 - yf_j) * xf_j,
+            zf_j * yf_j * (1 - xf_j),
+            zf_j * yf_j * xf_j,
+        ],
+        axis=-1,
+    )
+    columns = np.stack(i_corners + j_corners, axis=-1)
+    weights = np.concatenate([w_i, w_j], axis=-1)
+
+    csr_row, csr_col, csr_data = [], [], []
+    row_count_tmp = 0
+    for mi in np.flatnonzero(valid):
+        pid = int(pair_id[mi])
+        if pid in pair_ids:
+            continue
+        pair_ids.add(pid)
+        pair_ids.add(int(pair_id2[mi]))
+        csr_row.append(np.full(16, row_count_tmp, dtype=np.float32))
+        csr_col.append(columns[mi])
+        csr_data.append(weights[mi])
+        row_count_tmp += 1
+
+    if row_count_tmp:
+        csr_row_tmp = np.concatenate(csr_row).astype(np.float32)
+        csr_col_tmp = np.concatenate(csr_col).astype(np.float32)
+        csr_data_tmp = np.concatenate(csr_data).astype(np.float32)
+    else:
+        csr_row_tmp = np.zeros(0, dtype=np.float32)
+        csr_col_tmp = np.zeros(0, dtype=np.float32)
+        csr_data_tmp = np.zeros(0, dtype=np.float32)
+    return csr_row_tmp, csr_col_tmp, csr_data_tmp, row_count_tmp
+
+
+def _build_A_helical_sym_matrix_loop_kji_nn_np(
+    Zi,
+    Yi,
+    Xi,
+    Zj,
+    Yj,
+    Xj,
+    mask,
+    mask_nonzero_indices_zyx_tuple,
+    mask_nonzero_indices_matrix,
+    pair_ids,
+):
+    """Numpy fallback for the nearest-neighbor ``loop_kji`` of
+    :func:`build_A_helical_sym_matrix`; see the linear variant above."""
+    mask_indices_Z, mask_indices_Y, mask_indices_X = mask_nonzero_indices_zyx_tuple
+    mz, my, mx = mask.shape
+    n_indices = len(mask_indices_Z)
+    k, j, i = mask_indices_Z, mask_indices_Y, mask_indices_X
+
+    zi = np.round(Zi[k, j, i]).astype(np.intp)
+    yi = np.round(Yi[k, j, i]).astype(np.intp)
+    xi = np.round(Xi[k, j, i]).astype(np.intp)
+    zj = np.round(Zj[k, j, i]).astype(np.intp)
+    yj = np.round(Yj[k, j, i]).astype(np.intp)
+    xj = np.round(Xj[k, j, i]).astype(np.intp)
+
+    valid = (
+        (zi >= 0)
+        & (zi <= mz - 1)
+        & (zj >= 0)
+        & (zj <= mz - 1)
+        & (yi >= 0)
+        & (yi <= my - 1)
+        & (yj >= 0)
+        & (yj <= my - 1)
+        & (xi >= 0)
+        & (xi <= mx - 1)
+        & (xj >= 0)
+        & (xj <= mx - 1)
+    )
+    zi_c, yi_c, xi_c = (
+        np.clip(zi, 0, mz - 1),
+        np.clip(yi, 0, my - 1),
+        np.clip(xi, 0, mx - 1),
+    )
+    zj_c, yj_c, xj_c = (
+        np.clip(zj, 0, mz - 1),
+        np.clip(yj, 0, my - 1),
+        np.clip(xj, 0, mx - 1),
+    )
+    valid &= mask[zi_c, yi_c, xi_c]
+    valid &= mask[zj_c, yj_c, xj_c]
+
+    index_i = mask_nonzero_indices_matrix[zi_c, yi_c, xi_c]
+    index_j = mask_nonzero_indices_matrix[zj_c, yj_c, xj_c]
+    valid &= (index_i >= 0) & (index_i <= n_indices - 1)
+    valid &= (index_j >= 0) & (index_j <= n_indices - 1)
+
+    pair_id = index_i.astype(np.int64) * n_indices + index_j.astype(np.int64)
+    pair_id2 = index_j.astype(np.int64) * n_indices + index_i.astype(np.int64)
+
+    csr_row, csr_col, csr_data = [], [], []
+    row_count_tmp = 0
+    for mi in np.flatnonzero(valid):
+        pid = int(pair_id[mi])
+        if pid in pair_ids:
+            continue
+        pair_ids.add(pid)
+        pair_ids.add(int(pair_id2[mi]))
+        csr_row += [row_count_tmp, row_count_tmp]
+        csr_col += [int(index_i[mi]), int(index_j[mi])]
+        csr_data += [1.0, -1.0]
+        row_count_tmp += 1
+
+    return (
+        np.array(csr_row, dtype=np.float32),
+        np.array(csr_col, dtype=np.float32),
+        np.array(csr_data, dtype=np.float32),
+        row_count_tmp,
+    )
+
+
 @helicon.cache(
     cache_dir=cache_dir, ignore=["verbose"], expires_after=7, verbose=0
 )  # 7 days
@@ -962,15 +1218,43 @@ def build_A_helical_sym_matrix(
         Symmetry constraint matrix A and zero vector b.
     """
 
+    is_linear = interpolation in ["linear", "linear01", "linear11"]
+    if is_linear and (nz < 2 or ny < 2 or nx < 2):
+        return None, None
+    if not is_linear and (nz < 1 or ny < 1 or nx < 1):
+        return None, None
+
     hcsym_pairs = sorted_hsym_csym_pairs(twist_degree, rise_pixel, csym, nz)
+    if is_linear:
+        k_arr = np.arange(nz, dtype=np.float64)
+        rmax_pos = max(float(rmax), 0.0)
+        kept_pairs = []
+        for p in hcsym_pairs:
+            (hsym_i, csym_i), (hsym_j, csym_j) = p[-1]
+            zi_k = np.floor(k_arr + rise_pixel * hsym_i)
+            zj_k = np.floor(k_arr + rise_pixel * hsym_j)
+            k_ok = (zi_k >= 0) & (zi_k <= nz - 2) & (zj_k >= 0) & (zj_k <= nz - 2)
+            if not np.any(k_ok):
+                continue
+            ang_i = twist_degree * hsym_i + csym_i * 360.0 / csym
+            ang_j = twist_degree * hsym_j + csym_j * 360.0 / csym
+            max_dxy = 2.0 * rmax_pos * abs(np.sin(np.deg2rad(ang_i - ang_j) * 0.5))
+            if max_dxy <= 2.0 - 1e-6 and np.all(np.abs(zi_k[k_ok] - zj_k[k_ok]) < 3):
+                continue
+            kept_pairs.append(p)
+        hcsym_pairs = kept_pairs
+        if not hcsym_pairs:
+            return None, None
 
     mask, (Z, Y, X) = helicon.get_cylindrical_mask(
         nz, ny, nx, rmin=rmin, rmax=rmax, return_xyz=True
     )
     n_x = np.count_nonzero(mask)
     mask_nonzero_indices_zyx_tuple = np.nonzero(mask)
-    mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=int) - 1
-    mask_nonzero_indices_matrix[mask_nonzero_indices_zyx_tuple] = np.arange(n_x)
+    mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=np.intp) - 1
+    mask_nonzero_indices_matrix[mask_nonzero_indices_zyx_tuple] = np.arange(
+        n_x, dtype=np.intp
+    )
     xyz = np.vstack((X.ravel(), Y.ravel(), Z.ravel())).transpose()
 
     # sparse A matrix
@@ -979,320 +1263,326 @@ def build_A_helical_sym_matrix(
     from scipy.spatial.transform import Rotation as R
 
     if interpolation in ["linear", "linear01", "linear11"]:
+        if not _HAS_NUMBA:
+            loop_kji = _build_A_helical_sym_matrix_loop_kji_linear_np
+        else:
 
-        @cached_jit(jit, nopython=True, nogil=True)
-        def loop_kji(
-            Zi,
-            Yi,
-            Xi,
-            Zj,
-            Yj,
-            Xj,
-            mask,
-            mask_nonzero_indices_zyx_tuple,
-            mask_nonzero_indices_matrix,
-            pair_ids,
-        ):
-            mask_indices_Z, mask_indices_Y, mask_indices_X = (
-                mask_nonzero_indices_zyx_tuple
-            )
-            mz, my, mx = mask.shape
-            n_indices = len(mask_indices_Z)
-            csr_row_tmp = np.zeros(n_indices * 16, dtype=np.float32)
-            csr_col_tmp = np.zeros(n_indices * 16, dtype=np.float32)
-            csr_data_tmp = np.zeros(n_indices * 16, dtype=np.float32)
-            csr_rc_tmp_count = 0
-            row_count_tmp = 0
-            for mi in range(n_indices):
-                k = mask_indices_Z[mi]
-                j = mask_indices_Y[mi]
-                i = mask_indices_X[mi]
-                # floor, not int(): int() rounds a coordinate in (-1, 0) up to 0,
-                # which gives that point a fraction below 0 and a weight above 1
-                zi = int(np.floor(Zi[k, j, i]))
-                yi = int(np.floor(Yi[k, j, i]))
-                xi = int(np.floor(Xi[k, j, i]))
-                zj = int(np.floor(Zj[k, j, i]))
-                yj = int(np.floor(Yj[k, j, i]))
-                xj = int(np.floor(Xj[k, j, i]))
-                if zi < 0 or zi > mz - 1:
-                    continue
-                if zj < 0 or zj > mz - 1:
-                    continue
-                if yi < 0 or yi > my - 1:
-                    continue
-                if yj < 0 or yj > my - 1:
-                    continue
-                if xi < 0 or xi > mx - 1:
-                    continue
-                if xj < 0 or xj > mx - 1:
-                    continue
-                if zi + 1 > mz - 1 or yi + 1 > my - 1 or xi + 1 > mx - 1:
-                    continue
-                if zj + 1 > mz - 1 or yj + 1 > my - 1 or xj + 1 > mx - 1:
-                    continue
-                if not mask[zi, yi, xi]:
-                    continue
-                if not mask[zi + 1, yi, xi]:
-                    continue
-                if not mask[zi, yi + 1, xi]:
-                    continue
-                if not mask[zi + 1, yi + 1, xi]:
-                    continue
-                if not mask[zi, yi, xi + 1]:
-                    continue
-                if not mask[zi + 1, yi, xi + 1]:
-                    continue
-                if not mask[zi, yi + 1, xi + 1]:
-                    continue
-                if not mask[zi + 1, yi + 1, xi + 1]:
-                    continue
-                if not mask[zj, yj, xj]:
-                    continue
-                if not mask[zj + 1, yj, xj]:
-                    continue
-                if not mask[zj, yj + 1, xj]:
-                    continue
-                if not mask[zj + 1, yj + 1, xj]:
-                    continue
-                if not mask[zj, yj, xj + 1]:
-                    continue
-                if not mask[zj + 1, yj, xj + 1]:
-                    continue
-                if not mask[zj, yj + 1, xj + 1]:
-                    continue
-                if not mask[zj + 1, yj + 1, xj + 1]:
-                    continue
+            @cached_jit(jit, nopython=True, nogil=True)
+            def loop_kji(
+                Zi,
+                Yi,
+                Xi,
+                Zj,
+                Yj,
+                Xj,
+                mask,
+                mask_nonzero_indices_zyx_tuple,
+                mask_nonzero_indices_matrix,
+                pair_ids,
+            ):
+                mask_indices_Z, mask_indices_Y, mask_indices_X = (
+                    mask_nonzero_indices_zyx_tuple
+                )
+                mz, my, mx = mask.shape
+                n_indices = len(mask_indices_Z)
+                csr_row_tmp = np.zeros(n_indices * 16, dtype=np.float32)
+                csr_col_tmp = np.zeros(n_indices * 16, dtype=np.float32)
+                csr_data_tmp = np.zeros(n_indices * 16, dtype=np.float32)
+                csr_rc_tmp_count = 0
+                row_count_tmp = 0
+                for mi in range(n_indices):
+                    k = mask_indices_Z[mi]
+                    j = mask_indices_Y[mi]
+                    i = mask_indices_X[mi]
+                    # floor, not int(): int() rounds a coordinate in (-1, 0) up to 0,
+                    # which gives that point a fraction below 0 and a weight above 1
+                    zi = int(np.floor(Zi[k, j, i]))
+                    yi = int(np.floor(Yi[k, j, i]))
+                    xi = int(np.floor(Xi[k, j, i]))
+                    zj = int(np.floor(Zj[k, j, i]))
+                    yj = int(np.floor(Yj[k, j, i]))
+                    xj = int(np.floor(Xj[k, j, i]))
+                    if zi < 0 or zi > mz - 1:
+                        continue
+                    if zj < 0 or zj > mz - 1:
+                        continue
+                    if yi < 0 or yi > my - 1:
+                        continue
+                    if yj < 0 or yj > my - 1:
+                        continue
+                    if xi < 0 or xi > mx - 1:
+                        continue
+                    if xj < 0 or xj > mx - 1:
+                        continue
+                    if zi + 1 > mz - 1 or yi + 1 > my - 1 or xi + 1 > mx - 1:
+                        continue
+                    if zj + 1 > mz - 1 or yj + 1 > my - 1 or xj + 1 > mx - 1:
+                        continue
+                    if not mask[zi, yi, xi]:
+                        continue
+                    if not mask[zi + 1, yi, xi]:
+                        continue
+                    if not mask[zi, yi + 1, xi]:
+                        continue
+                    if not mask[zi + 1, yi + 1, xi]:
+                        continue
+                    if not mask[zi, yi, xi + 1]:
+                        continue
+                    if not mask[zi + 1, yi, xi + 1]:
+                        continue
+                    if not mask[zi, yi + 1, xi + 1]:
+                        continue
+                    if not mask[zi + 1, yi + 1, xi + 1]:
+                        continue
+                    if not mask[zj, yj, xj]:
+                        continue
+                    if not mask[zj + 1, yj, xj]:
+                        continue
+                    if not mask[zj, yj + 1, xj]:
+                        continue
+                    if not mask[zj + 1, yj + 1, xj]:
+                        continue
+                    if not mask[zj, yj, xj + 1]:
+                        continue
+                    if not mask[zj + 1, yj, xj + 1]:
+                        continue
+                    if not mask[zj, yj + 1, xj + 1]:
+                        continue
+                    if not mask[zj + 1, yj + 1, xj + 1]:
+                        continue
 
-                i_000 = mask_nonzero_indices_matrix[zi, yi, xi]
-                if i_000 < 0 or i_000 > n_x - 1:
-                    continue
-                i_001 = mask_nonzero_indices_matrix[zi, yi, xi + 1]
-                if i_001 < 0 or i_001 > n_x - 1:
-                    continue
-                i_010 = mask_nonzero_indices_matrix[zi, yi + 1, xi]
-                if i_010 < 0 or i_010 > n_x - 1:
-                    continue
-                i_011 = mask_nonzero_indices_matrix[zi, yi + 1, xi + 1]
-                if i_011 < 0 or i_011 > n_x - 1:
-                    continue
-                i_100 = mask_nonzero_indices_matrix[zi + 1, yi, xi]
-                if i_100 < 0 or i_100 > n_x - 1:
-                    continue
-                i_101 = mask_nonzero_indices_matrix[zi + 1, yi, xi + 1]
-                if i_101 < 0 or i_101 > n_x - 1:
-                    continue
-                i_110 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi]
-                if i_110 < 0 or i_110 > n_x - 1:
-                    continue
-                i_111 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi + 1]
-                if i_111 < 0 or i_111 > n_x - 1:
-                    continue
+                    i_000 = mask_nonzero_indices_matrix[zi, yi, xi]
+                    if i_000 < 0 or i_000 > n_x - 1:
+                        continue
+                    i_001 = mask_nonzero_indices_matrix[zi, yi, xi + 1]
+                    if i_001 < 0 or i_001 > n_x - 1:
+                        continue
+                    i_010 = mask_nonzero_indices_matrix[zi, yi + 1, xi]
+                    if i_010 < 0 or i_010 > n_x - 1:
+                        continue
+                    i_011 = mask_nonzero_indices_matrix[zi, yi + 1, xi + 1]
+                    if i_011 < 0 or i_011 > n_x - 1:
+                        continue
+                    i_100 = mask_nonzero_indices_matrix[zi + 1, yi, xi]
+                    if i_100 < 0 or i_100 > n_x - 1:
+                        continue
+                    i_101 = mask_nonzero_indices_matrix[zi + 1, yi, xi + 1]
+                    if i_101 < 0 or i_101 > n_x - 1:
+                        continue
+                    i_110 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi]
+                    if i_110 < 0 or i_110 > n_x - 1:
+                        continue
+                    i_111 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi + 1]
+                    if i_111 < 0 or i_111 > n_x - 1:
+                        continue
 
-                j_000 = mask_nonzero_indices_matrix[zj, yj, xj]
-                if j_000 < 0 or j_000 > n_x - 1:
-                    continue
-                j_001 = mask_nonzero_indices_matrix[zj, yj, xj + 1]
-                if j_001 < 0 or j_001 > n_x - 1:
-                    continue
-                j_010 = mask_nonzero_indices_matrix[zj, yj + 1, xj]
-                if j_010 < 0 or j_010 > n_x - 1:
-                    continue
-                j_011 = mask_nonzero_indices_matrix[zj, yj + 1, xj + 1]
-                if j_011 < 0 or j_011 > n_x - 1:
-                    continue
-                j_100 = mask_nonzero_indices_matrix[zj + 1, yj, xj]
-                if j_100 < 0 or j_100 > n_x - 1:
-                    continue
-                j_101 = mask_nonzero_indices_matrix[zj + 1, yj, xj + 1]
-                if j_101 < 0 or j_101 > n_x - 1:
-                    continue
-                j_110 = mask_nonzero_indices_matrix[zj + 1, yj + 1, xj]
-                if j_110 < 0 or j_110 > n_x - 1:
-                    continue
-                j_111 = mask_nonzero_indices_matrix[zj + 1, yj + 1, xj + 1]
-                if j_111 < 0 or j_111 > n_x - 1:
-                    continue
+                    j_000 = mask_nonzero_indices_matrix[zj, yj, xj]
+                    if j_000 < 0 or j_000 > n_x - 1:
+                        continue
+                    j_001 = mask_nonzero_indices_matrix[zj, yj, xj + 1]
+                    if j_001 < 0 or j_001 > n_x - 1:
+                        continue
+                    j_010 = mask_nonzero_indices_matrix[zj, yj + 1, xj]
+                    if j_010 < 0 or j_010 > n_x - 1:
+                        continue
+                    j_011 = mask_nonzero_indices_matrix[zj, yj + 1, xj + 1]
+                    if j_011 < 0 or j_011 > n_x - 1:
+                        continue
+                    j_100 = mask_nonzero_indices_matrix[zj + 1, yj, xj]
+                    if j_100 < 0 or j_100 > n_x - 1:
+                        continue
+                    j_101 = mask_nonzero_indices_matrix[zj + 1, yj, xj + 1]
+                    if j_101 < 0 or j_101 > n_x - 1:
+                        continue
+                    j_110 = mask_nonzero_indices_matrix[zj + 1, yj + 1, xj]
+                    if j_110 < 0 or j_110 > n_x - 1:
+                        continue
+                    j_111 = mask_nonzero_indices_matrix[zj + 1, yj + 1, xj + 1]
+                    if j_111 < 0 or j_111 > n_x - 1:
+                        continue
 
-                # skip a pair only when the two points are close in all three
-                # directions, so that their interpolation stencils would overlap
-                if abs(zi - zj) < 3 and abs(yi - yj) < 3 and abs(xi - xj) < 3:
-                    continue
+                    # skip a pair only when the two points are close in all three
+                    # directions, so that their interpolation stencils would overlap
+                    if abs(zi - zj) < 3 and abs(yi - yj) < 3 and abs(xi - xj) < 3:
+                        continue
 
-                zir = round(Zi[k, j, i])
-                yir = round(Yi[k, j, i])
-                xir = round(Xi[k, j, i])
-                zjr = round(Zj[k, j, i])
-                yjr = round(Yj[k, j, i])
-                xjr = round(Xj[k, j, i])
-                ir = mask_nonzero_indices_matrix[zir, yir, xir]
-                jr = mask_nonzero_indices_matrix[zjr, yjr, xjr]
-                pair_id = ir * n_indices + jr
-                if pair_id in pair_ids:
-                    continue
-                pair_id2 = jr * n_indices + ir
-                pair_ids.add(pair_id)
-                pair_ids.add(pair_id2)
+                    zir = round(Zi[k, j, i])
+                    yir = round(Yi[k, j, i])
+                    xir = round(Xi[k, j, i])
+                    zjr = round(Zj[k, j, i])
+                    yjr = round(Yj[k, j, i])
+                    xjr = round(Xj[k, j, i])
+                    ir = mask_nonzero_indices_matrix[zir, yir, xir]
+                    jr = mask_nonzero_indices_matrix[zjr, yjr, xjr]
+                    pair_id = ir * n_indices + jr
+                    if pair_id in pair_ids:
+                        continue
+                    pair_id2 = jr * n_indices + ir
+                    pair_ids.add(pair_id)
+                    pair_ids.add(pair_id2)
 
-                zf = Zi[k, j, i] - zi
-                yf = Yi[k, j, i] - yi
-                xf = Xi[k, j, i] - xi
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_000
-                csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * (1 - yf) * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_001
-                csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * (1 - yf) * xf
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_010
-                csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * yf * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_011
-                csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * yf * xf
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_100
-                csr_data_tmp[csr_rc_tmp_count] = zf * (1 - yf) * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_101
-                csr_data_tmp[csr_rc_tmp_count] = zf * (1 - yf) * xf
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_110
-                csr_data_tmp[csr_rc_tmp_count] = zf * yf * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = i_111
-                csr_data_tmp[csr_rc_tmp_count] = xf * yf * zf
-                csr_rc_tmp_count += 1
+                    zf = Zi[k, j, i] - zi
+                    yf = Yi[k, j, i] - yi
+                    xf = Xi[k, j, i] - xi
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_000
+                    csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * (1 - yf) * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_001
+                    csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * (1 - yf) * xf
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_010
+                    csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * yf * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_011
+                    csr_data_tmp[csr_rc_tmp_count] = (1 - zf) * yf * xf
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_100
+                    csr_data_tmp[csr_rc_tmp_count] = zf * (1 - yf) * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_101
+                    csr_data_tmp[csr_rc_tmp_count] = zf * (1 - yf) * xf
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_110
+                    csr_data_tmp[csr_rc_tmp_count] = zf * yf * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = i_111
+                    csr_data_tmp[csr_rc_tmp_count] = xf * yf * zf
+                    csr_rc_tmp_count += 1
 
-                zf = Zj[k, j, i] - zj
-                yf = Yj[k, j, i] - yj
-                xf = Xj[k, j, i] - xj
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_000
-                csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * (1 - yf) * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_001
-                csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * (1 - yf) * xf
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_010
-                csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * yf * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_011
-                csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * yf * xf
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_100
-                csr_data_tmp[csr_rc_tmp_count] = -zf * (1 - yf) * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_101
-                csr_data_tmp[csr_rc_tmp_count] = -zf * (1 - yf) * xf
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_110
-                csr_data_tmp[csr_rc_tmp_count] = -zf * yf * (1 - xf)
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = j_111
-                csr_data_tmp[csr_rc_tmp_count] = -xf * yf * zf
-                csr_rc_tmp_count += 1
+                    zf = Zj[k, j, i] - zj
+                    yf = Yj[k, j, i] - yj
+                    xf = Xj[k, j, i] - xj
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_000
+                    csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * (1 - yf) * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_001
+                    csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * (1 - yf) * xf
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_010
+                    csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * yf * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_011
+                    csr_data_tmp[csr_rc_tmp_count] = -(1 - zf) * yf * xf
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_100
+                    csr_data_tmp[csr_rc_tmp_count] = -zf * (1 - yf) * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_101
+                    csr_data_tmp[csr_rc_tmp_count] = -zf * (1 - yf) * xf
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_110
+                    csr_data_tmp[csr_rc_tmp_count] = -zf * yf * (1 - xf)
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = j_111
+                    csr_data_tmp[csr_rc_tmp_count] = -xf * yf * zf
+                    csr_rc_tmp_count += 1
 
-                row_count_tmp += 1
-            return (
-                csr_row_tmp[:csr_rc_tmp_count],
-                csr_col_tmp[:csr_rc_tmp_count],
-                csr_data_tmp[:csr_rc_tmp_count],
-                row_count_tmp,
-            )
+                    row_count_tmp += 1
+                return (
+                    csr_row_tmp[:csr_rc_tmp_count],
+                    csr_col_tmp[:csr_rc_tmp_count],
+                    csr_data_tmp[:csr_rc_tmp_count],
+                    row_count_tmp,
+                )
 
     else:  # nearest neighbor
+        if not _HAS_NUMBA:
+            loop_kji = _build_A_helical_sym_matrix_loop_kji_nn_np
+        else:
 
-        @cached_jit(jit, nopython=True, nogil=True)
-        def loop_kji(
-            Zi,
-            Yi,
-            Xi,
-            Zj,
-            Yj,
-            Xj,
-            mask,
-            mask_nonzero_indices_zyx_tuple,
-            mask_nonzero_indices_matrix,
-            pair_ids,
-        ):
-            mask_indices_Z, mask_indices_Y, mask_indices_X = (
-                mask_nonzero_indices_zyx_tuple
-            )
-            mz, my, mx = mask.shape
-            n_indices = len(mask_indices_Z)
-            csr_row_tmp = np.zeros(n_indices * 2, dtype=np.float32)
-            csr_col_tmp = np.zeros(n_indices * 2, dtype=np.float32)
-            csr_data_tmp = np.zeros(n_indices * 2, dtype=np.float32)
-            csr_rc_tmp_count = 0
-            row_count_tmp = 0
-            for mi in range(n_indices):
-                k = mask_indices_Z[mi]
-                j = mask_indices_Y[mi]
-                i = mask_indices_X[mi]
-                zi = round(Zi[k, j, i])
-                yi = round(Yi[k, j, i])
-                xi = round(Xi[k, j, i])
-                zj = round(Zj[k, j, i])
-                yj = round(Yj[k, j, i])
-                xj = round(Xj[k, j, i])
-                if zi < 0 or zi > mz - 1:
-                    continue
-                if zj < 0 or zj > mz - 1:
-                    continue
-                if yi < 0 or yi > my - 1:
-                    continue
-                if yj < 0 or yj > my - 1:
-                    continue
-                if xi < 0 or xi > mx - 1:
-                    continue
-                if xj < 0 or xj > mx - 1:
-                    continue
-                if not mask[zi, yi, xi]:
-                    continue
-                if not mask[zj, yj, xj]:
-                    continue
-                index_i = mask_nonzero_indices_matrix[zi, yi, xi]
-                if index_i < 0 or index_i > n_indices - 1:
-                    continue
-                index_j = mask_nonzero_indices_matrix[zj, yj, xj]
-                if index_j < 0 or index_j > n_indices - 1:
-                    continue
-                pair_id = index_i * n_indices + index_j
-                if pair_id in pair_ids:
-                    continue
-                pair_ids.add(pair_id)
-                pair_id2 = index_j * n_indices + index_i
-                pair_ids.add(pair_id2)
+            @cached_jit(jit, nopython=True, nogil=True)
+            def loop_kji(
+                Zi,
+                Yi,
+                Xi,
+                Zj,
+                Yj,
+                Xj,
+                mask,
+                mask_nonzero_indices_zyx_tuple,
+                mask_nonzero_indices_matrix,
+                pair_ids,
+            ):
+                mask_indices_Z, mask_indices_Y, mask_indices_X = (
+                    mask_nonzero_indices_zyx_tuple
+                )
+                mz, my, mx = mask.shape
+                n_indices = len(mask_indices_Z)
+                csr_row_tmp = np.zeros(n_indices * 2, dtype=np.float32)
+                csr_col_tmp = np.zeros(n_indices * 2, dtype=np.float32)
+                csr_data_tmp = np.zeros(n_indices * 2, dtype=np.float32)
+                csr_rc_tmp_count = 0
+                row_count_tmp = 0
+                for mi in range(n_indices):
+                    k = mask_indices_Z[mi]
+                    j = mask_indices_Y[mi]
+                    i = mask_indices_X[mi]
+                    zi = round(Zi[k, j, i])
+                    yi = round(Yi[k, j, i])
+                    xi = round(Xi[k, j, i])
+                    zj = round(Zj[k, j, i])
+                    yj = round(Yj[k, j, i])
+                    xj = round(Xj[k, j, i])
+                    if zi < 0 or zi > mz - 1:
+                        continue
+                    if zj < 0 or zj > mz - 1:
+                        continue
+                    if yi < 0 or yi > my - 1:
+                        continue
+                    if yj < 0 or yj > my - 1:
+                        continue
+                    if xi < 0 or xi > mx - 1:
+                        continue
+                    if xj < 0 or xj > mx - 1:
+                        continue
+                    if not mask[zi, yi, xi]:
+                        continue
+                    if not mask[zj, yj, xj]:
+                        continue
+                    index_i = mask_nonzero_indices_matrix[zi, yi, xi]
+                    if index_i < 0 or index_i > n_indices - 1:
+                        continue
+                    index_j = mask_nonzero_indices_matrix[zj, yj, xj]
+                    if index_j < 0 or index_j > n_indices - 1:
+                        continue
+                    pair_id = index_i * n_indices + index_j
+                    if pair_id in pair_ids:
+                        continue
+                    pair_ids.add(pair_id)
+                    pair_id2 = index_j * n_indices + index_i
+                    pair_ids.add(pair_id2)
 
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = index_i
-                csr_data_tmp[csr_rc_tmp_count] = 1
-                csr_rc_tmp_count += 1
-                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                csr_col_tmp[csr_rc_tmp_count] = index_j
-                csr_data_tmp[csr_rc_tmp_count] = -1
-                csr_rc_tmp_count += 1
-                row_count_tmp += 1
-            return (
-                csr_row_tmp[:csr_rc_tmp_count],
-                csr_col_tmp[:csr_rc_tmp_count],
-                csr_data_tmp[:csr_rc_tmp_count],
-                row_count_tmp,
-            )
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = index_i
+                    csr_data_tmp[csr_rc_tmp_count] = 1
+                    csr_rc_tmp_count += 1
+                    csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                    csr_col_tmp[csr_rc_tmp_count] = index_j
+                    csr_data_tmp[csr_rc_tmp_count] = -1
+                    csr_rc_tmp_count += 1
+                    row_count_tmp += 1
+                return (
+                    csr_row_tmp[:csr_rc_tmp_count],
+                    csr_col_tmp[:csr_rc_tmp_count],
+                    csr_data_tmp[:csr_rc_tmp_count],
+                    row_count_tmp,
+                )
 
     with helicon.Timer(f"\tbuild csr matrix - {interpolation}", verbose=verbose > 10):
         pair_ids = set([-1])
@@ -1373,6 +1663,156 @@ def build_A_helical_sym_matrix(
             A = None
             b = None
         return A, b
+
+
+def _build_A_data_matrix_loop_kji_linear_np(
+    Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals
+):
+    """Numpy fallback for the trilinear ``loop_kji`` of
+    :func:`build_A_data_matrix` (no numba, as under Pyodide).
+
+    Unlike the helical-symmetry matrix's kernel, this one has no cross-call
+    dedup state: a ray's repeated corner indices are meant to be *summed*
+    (``row_tmp[index] += weight``), which scipy.sparse's COO constructor
+    already does for duplicate (row, col) entries when the caller builds
+    ``csr_matrix((data, (row, col)), ...)`` from this function's raw
+    triples -- so no Python loop is needed here at all.
+    """
+    nz, ny, nx = Z.shape
+    mz, my, mx = mask.shape
+
+    zi = Z.astype(np.intp)  # int(), not floor(): matches the numba kernel
+    yi = Y.astype(np.intp)
+    xi = X.astype(np.intp)
+
+    valid = (
+        (zi >= 0)
+        & (zi <= mz - 1)
+        & (yi >= 0)
+        & (yi <= my - 1)
+        & (xi >= 0)
+        & (xi <= mx - 1)
+        & (zi + 1 <= mz - 1)
+        & (yi + 1 <= my - 1)
+        & (xi + 1 <= mx - 1)
+    )
+    zi_c = np.clip(zi, 0, mz - 2)
+    yi_c = np.clip(yi, 0, my - 2)
+    xi_c = np.clip(xi, 0, mx - 2)
+
+    valid &= mask[zi_c, yi_c, xi_c]
+    valid &= mask[zi_c + 1, yi_c, xi_c]
+    valid &= mask[zi_c, yi_c + 1, xi_c]
+    valid &= mask[zi_c + 1, yi_c + 1, xi_c]
+    valid &= mask[zi_c, yi_c, xi_c + 1]
+    valid &= mask[zi_c + 1, yi_c, xi_c + 1]
+    valid &= mask[zi_c, yi_c + 1, xi_c + 1]
+    valid &= mask[zi_c + 1, yi_c + 1, xi_c + 1]
+
+    indices = [
+        mask_nonzero_indices_matrix[zi_c, yi_c, xi_c],
+        mask_nonzero_indices_matrix[zi_c, yi_c, xi_c + 1],
+        mask_nonzero_indices_matrix[zi_c, yi_c + 1, xi_c],
+        mask_nonzero_indices_matrix[zi_c, yi_c + 1, xi_c + 1],
+        mask_nonzero_indices_matrix[zi_c + 1, yi_c, xi_c],
+        mask_nonzero_indices_matrix[zi_c + 1, yi_c, xi_c + 1],
+        mask_nonzero_indices_matrix[zi_c + 1, yi_c + 1, xi_c],
+        mask_nonzero_indices_matrix[zi_c + 1, yi_c + 1, xi_c + 1],
+    ]
+    for idx in indices:
+        valid &= (idx >= 0) & (idx <= n_x - 1)
+
+    zf = (Z - zi).astype(np.float32)
+    yf = (Y - yi).astype(np.float32)
+    xf = (X - xi).astype(np.float32)
+    weights = [
+        (1 - zf) * (1 - yf) * (1 - xf),
+        (1 - zf) * (1 - yf) * xf,
+        (1 - zf) * yf * (1 - xf),
+        (1 - zf) * yf * xf,
+        zf * (1 - yf) * (1 - xf),
+        zf * (1 - yf) * xf,
+        zf * yf * (1 - xf),
+        zf * yf * xf,
+    ]
+
+    has_data = valid.any(axis=2)
+    kept_positions = np.flatnonzero(has_data.ravel())
+    row_count_tmp = len(kept_positions)
+    row_id_map = np.full(nz * ny, -1, dtype=np.intp)
+    row_id_map[kept_positions] = np.arange(row_count_tmp, dtype=np.intp)
+    row_full = np.broadcast_to(row_id_map.reshape(nz, ny, 1), (nz, ny, nx))
+
+    valid_flat = valid.ravel()
+    rows = row_full.ravel()[valid_flat]
+    csr_row_parts, csr_col_parts, csr_data_parts = [], [], []
+    for idx, w in zip(indices, weights):
+        csr_row_parts.append(rows)
+        csr_col_parts.append(idx.ravel()[valid_flat])
+        csr_data_parts.append(w.ravel()[valid_flat])
+
+    if row_count_tmp:
+        csr_row_tmp = np.concatenate(csr_row_parts).astype(np.intp, copy=False)
+        csr_col_tmp = np.concatenate(csr_col_parts).astype(np.intp, copy=False)
+        csr_data_tmp = np.concatenate(csr_data_parts).astype(np.float32)
+    else:
+        csr_row_tmp = np.zeros(0, dtype=np.intp)
+        csr_col_tmp = np.zeros(0, dtype=np.intp)
+        csr_data_tmp = np.zeros(0, dtype=np.float32)
+
+    # pixel_vals[j, k] at flattened position k * ny + j == pixel_vals.T raveled
+    pv_by_kj = pixel_vals.T.ravel()
+    b_tmp = pv_by_kj[kept_positions].astype(np.float32)
+    b_pid_tmp = kept_positions.astype(np.int32)
+
+    return csr_row_tmp, csr_col_tmp, csr_data_tmp, b_tmp, b_pid_tmp
+
+
+def _build_A_data_matrix_loop_kji_nn_np(
+    Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals
+):
+    """Numpy fallback for the nearest-neighbor ``loop_kji`` of
+    :func:`build_A_data_matrix`; see the linear variant above."""
+    nz, ny, nx = Z.shape
+    mz, my, mx = mask.shape
+
+    zi = np.round(Z).astype(np.intp)
+    yi = np.round(Y).astype(np.intp)
+    xi = np.round(X).astype(np.intp)
+
+    valid = (
+        (zi >= 0)
+        & (zi <= mz - 1)
+        & (yi >= 0)
+        & (yi <= my - 1)
+        & (xi >= 0)
+        & (xi <= mx - 1)
+    )
+    zi_c = np.clip(zi, 0, mz - 1)
+    yi_c = np.clip(yi, 0, my - 1)
+    xi_c = np.clip(xi, 0, mx - 1)
+    valid &= mask[zi_c, yi_c, xi_c]
+
+    index = mask_nonzero_indices_matrix[zi_c, yi_c, xi_c]
+    valid &= (index >= 0) & (index <= n_x - 1)
+
+    has_data = valid.any(axis=2)
+    kept_positions = np.flatnonzero(has_data.ravel())
+    row_count_tmp = len(kept_positions)
+    row_id_map = np.full(nz * ny, -1, dtype=np.intp)
+    row_id_map[kept_positions] = np.arange(row_count_tmp, dtype=np.intp)
+    row_full = np.broadcast_to(row_id_map.reshape(nz, ny, 1), (nz, ny, nx))
+
+    valid_flat = valid.ravel()
+    csr_row_tmp = row_full.ravel()[valid_flat].astype(np.intp, copy=False)
+    csr_col_tmp = index.ravel()[valid_flat].astype(np.intp, copy=False)
+    csr_data_tmp = np.ones(csr_row_tmp.shape, dtype=np.float32)
+
+    pv_by_kj = pixel_vals.T.ravel()
+    b_tmp = pv_by_kj[kept_positions].astype(np.float32)
+    b_pid_tmp = kept_positions.astype(np.int32)
+
+    return csr_row_tmp, csr_col_tmp, csr_data_tmp, b_tmp, b_pid_tmp
 
 
 @helicon.cache(
@@ -1465,8 +1905,8 @@ def build_A_data_matrix(
         nz=reconstruct_length_3d_pixel, ny=ny, nx=nx, rmin=rmin, rmax=rmax
     )
     n_x = np.count_nonzero(mask)
-    mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=int) - 1
-    mask_nonzero_indices_matrix[np.nonzero(mask)] = np.arange(n_x)
+    mask_nonzero_indices_matrix = np.zeros(mask.shape, dtype=np.intp) - 1
+    mask_nonzero_indices_matrix[np.nonzero(mask)] = np.arange(n_x, dtype=np.intp)
 
     coords0 = np.vstack((X0.ravel(), Y0.ravel(), Z0.ravel())).transpose()
     from scipy.spatial.transform import Rotation as R
@@ -1490,167 +1930,174 @@ def build_A_data_matrix(
         )
 
     # sparse A matrix
-    csr_A = []
     csr_b = []  # one value for each pixel in pixel_vals
     b_pid = []
     n_b = 0
     if interpolation in ["linear", "linear10", "linear11"]:
+        if not _HAS_NUMBA:
+            loop_kji = _build_A_data_matrix_loop_kji_linear_np
+        else:
 
-        @cached_jit(jit, nopython=True, nogil=True)
-        def loop_kji(Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals):
-            nz, ny, nx = Z.shape
-            mz, my, mx = mask.shape
-            csr_row_tmp = np.zeros(nz * ny * nx * 8, dtype=np.float32)
-            csr_col_tmp = np.zeros(nz * ny * nx * 8, dtype=np.float32)
-            csr_data_tmp = np.zeros(nz * ny * nx * 8, dtype=np.float32)
-            b_tmp = np.zeros(nz * ny, dtype=np.float32)
-            b_pid_tmp = np.zeros(nz * ny, dtype=np.int32)
-            csr_rc_tmp_count = 0
-            row_count_tmp = 0
-            for k in range(nz):  # old x axis before back projection
-                for j in range(ny):  # same y axis before back projection
-                    row_tmp = {}
-                    has_projection_data = False
-                    for i in range(nx):  # old z axis before back projection
-                        zi = int(Z[k, j, i])
-                        yi = int(Y[k, j, i])
-                        xi = int(X[k, j, i])
-                        if zi < 0 or zi > mz - 1:
-                            continue
-                        if yi < 0 or yi > my - 1:
-                            continue
-                        if xi < 0 or xi > mx - 1:
-                            continue
-                        if zi + 1 > mz - 1 or yi + 1 > my - 1 or xi + 1 > mx - 1:
-                            continue
-                        if not mask[zi, yi, xi]:
-                            continue
-                        if not mask[zi + 1, yi, xi]:
-                            continue
-                        if not mask[zi, yi + 1, xi]:
-                            continue
-                        if not mask[zi + 1, yi + 1, xi]:
-                            continue
-                        if not mask[zi, yi, xi + 1]:
-                            continue
-                        if not mask[zi + 1, yi, xi + 1]:
-                            continue
-                        if not mask[zi, yi + 1, xi + 1]:
-                            continue
-                        if not mask[zi + 1, yi + 1, xi + 1]:
-                            continue
-                        index_000 = mask_nonzero_indices_matrix[zi, yi, xi]
-                        if index_000 < 0 or index_000 > n_x - 1:
-                            continue
-                        index_001 = mask_nonzero_indices_matrix[zi, yi, xi + 1]
-                        if index_001 < 0 or index_001 > n_x - 1:
-                            continue
-                        index_010 = mask_nonzero_indices_matrix[zi, yi + 1, xi]
-                        if index_010 < 0 or index_010 > n_x - 1:
-                            continue
-                        index_011 = mask_nonzero_indices_matrix[zi, yi + 1, xi + 1]
-                        if index_011 < 0 or index_011 > n_x - 1:
-                            continue
-                        index_100 = mask_nonzero_indices_matrix[zi + 1, yi, xi]
-                        if index_100 < 0 or index_100 > n_x - 1:
-                            continue
-                        index_101 = mask_nonzero_indices_matrix[zi + 1, yi, xi + 1]
-                        if index_101 < 0 or index_101 > n_x - 1:
-                            continue
-                        index_110 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi]
-                        if index_110 < 0 or index_110 > n_x - 1:
-                            continue
-                        index_111 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi + 1]
-                        if index_111 < 0 or index_111 > n_x - 1:
-                            continue
-                        has_projection_data = True
+            @cached_jit(jit, nopython=True, nogil=True)
+            def loop_kji(Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals):
+                nz, ny, nx = Z.shape
+                mz, my, mx = mask.shape
+                csr_row_tmp = np.zeros(nz * ny * nx * 8, dtype=np.float32)
+                csr_col_tmp = np.zeros(nz * ny * nx * 8, dtype=np.float32)
+                csr_data_tmp = np.zeros(nz * ny * nx * 8, dtype=np.float32)
+                b_tmp = np.zeros(nz * ny, dtype=np.float32)
+                b_pid_tmp = np.zeros(nz * ny, dtype=np.int32)
+                csr_rc_tmp_count = 0
+                row_count_tmp = 0
+                for k in range(nz):  # old x axis before back projection
+                    for j in range(ny):  # same y axis before back projection
+                        row_tmp = {}
+                        has_projection_data = False
+                        for i in range(nx):  # old z axis before back projection
+                            zi = int(Z[k, j, i])
+                            yi = int(Y[k, j, i])
+                            xi = int(X[k, j, i])
+                            if zi < 0 or zi > mz - 1:
+                                continue
+                            if yi < 0 or yi > my - 1:
+                                continue
+                            if xi < 0 or xi > mx - 1:
+                                continue
+                            if zi + 1 > mz - 1 or yi + 1 > my - 1 or xi + 1 > mx - 1:
+                                continue
+                            if not mask[zi, yi, xi]:
+                                continue
+                            if not mask[zi + 1, yi, xi]:
+                                continue
+                            if not mask[zi, yi + 1, xi]:
+                                continue
+                            if not mask[zi + 1, yi + 1, xi]:
+                                continue
+                            if not mask[zi, yi, xi + 1]:
+                                continue
+                            if not mask[zi + 1, yi, xi + 1]:
+                                continue
+                            if not mask[zi, yi + 1, xi + 1]:
+                                continue
+                            if not mask[zi + 1, yi + 1, xi + 1]:
+                                continue
+                            index_000 = mask_nonzero_indices_matrix[zi, yi, xi]
+                            if index_000 < 0 or index_000 > n_x - 1:
+                                continue
+                            index_001 = mask_nonzero_indices_matrix[zi, yi, xi + 1]
+                            if index_001 < 0 or index_001 > n_x - 1:
+                                continue
+                            index_010 = mask_nonzero_indices_matrix[zi, yi + 1, xi]
+                            if index_010 < 0 or index_010 > n_x - 1:
+                                continue
+                            index_011 = mask_nonzero_indices_matrix[zi, yi + 1, xi + 1]
+                            if index_011 < 0 or index_011 > n_x - 1:
+                                continue
+                            index_100 = mask_nonzero_indices_matrix[zi + 1, yi, xi]
+                            if index_100 < 0 or index_100 > n_x - 1:
+                                continue
+                            index_101 = mask_nonzero_indices_matrix[zi + 1, yi, xi + 1]
+                            if index_101 < 0 or index_101 > n_x - 1:
+                                continue
+                            index_110 = mask_nonzero_indices_matrix[zi + 1, yi + 1, xi]
+                            if index_110 < 0 or index_110 > n_x - 1:
+                                continue
+                            index_111 = mask_nonzero_indices_matrix[
+                                zi + 1, yi + 1, xi + 1
+                            ]
+                            if index_111 < 0 or index_111 > n_x - 1:
+                                continue
+                            has_projection_data = True
 
-                        zf = Z[k, j, i] - zi
-                        yf = Y[k, j, i] - yi
-                        xf = X[k, j, i] - xi
-                        for index in (
-                            index_000,
-                            index_001,
-                            index_010,
-                            index_011,
-                            index_100,
-                            index_101,
-                            index_110,
-                            index_111,
-                        ):
-                            if index not in row_tmp:
-                                row_tmp[index] = 0.0
-                        row_tmp[index_000] += (1 - zf) * (1 - yf) * (1 - xf)
-                        row_tmp[index_001] += (1 - zf) * (1 - yf) * (xf)
-                        row_tmp[index_010] += (1 - zf) * (yf) * (1 - xf)
-                        row_tmp[index_011] += (1 - zf) * (yf) * (xf)
-                        row_tmp[index_100] += (zf) * (1 - yf) * (1 - xf)
-                        row_tmp[index_101] += (zf) * (1 - yf) * (xf)
-                        row_tmp[index_110] += (zf) * (yf) * (1 - xf)
-                        row_tmp[index_111] += (zf) * (yf) * (xf)
-                    if has_projection_data:
-                        for index in row_tmp:
-                            csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                            csr_col_tmp[csr_rc_tmp_count] = index
-                            csr_data_tmp[csr_rc_tmp_count] = row_tmp[index]
-                            csr_rc_tmp_count += 1
-                        b_tmp[row_count_tmp] = pixel_vals[j, k]
-                        b_pid_tmp[row_count_tmp] = k * ny + j
-                        row_count_tmp += 1
-            return (
-                csr_row_tmp[:csr_rc_tmp_count],
-                csr_col_tmp[:csr_rc_tmp_count],
-                csr_data_tmp[:csr_rc_tmp_count],
-                b_tmp[:row_count_tmp],
-                b_pid_tmp[:row_count_tmp],
-            )
+                            zf = Z[k, j, i] - zi
+                            yf = Y[k, j, i] - yi
+                            xf = X[k, j, i] - xi
+                            for index in (
+                                index_000,
+                                index_001,
+                                index_010,
+                                index_011,
+                                index_100,
+                                index_101,
+                                index_110,
+                                index_111,
+                            ):
+                                if index not in row_tmp:
+                                    row_tmp[index] = 0.0
+                            row_tmp[index_000] += (1 - zf) * (1 - yf) * (1 - xf)
+                            row_tmp[index_001] += (1 - zf) * (1 - yf) * (xf)
+                            row_tmp[index_010] += (1 - zf) * (yf) * (1 - xf)
+                            row_tmp[index_011] += (1 - zf) * (yf) * (xf)
+                            row_tmp[index_100] += (zf) * (1 - yf) * (1 - xf)
+                            row_tmp[index_101] += (zf) * (1 - yf) * (xf)
+                            row_tmp[index_110] += (zf) * (yf) * (1 - xf)
+                            row_tmp[index_111] += (zf) * (yf) * (xf)
+                        if has_projection_data:
+                            for index in row_tmp:
+                                csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                                csr_col_tmp[csr_rc_tmp_count] = index
+                                csr_data_tmp[csr_rc_tmp_count] = row_tmp[index]
+                                csr_rc_tmp_count += 1
+                            b_tmp[row_count_tmp] = pixel_vals[j, k]
+                            b_pid_tmp[row_count_tmp] = k * ny + j
+                            row_count_tmp += 1
+                return (
+                    csr_row_tmp[:csr_rc_tmp_count],
+                    csr_col_tmp[:csr_rc_tmp_count],
+                    csr_data_tmp[:csr_rc_tmp_count],
+                    b_tmp[:row_count_tmp],
+                    b_pid_tmp[:row_count_tmp],
+                )
 
     else:  # nearest neighbor
+        if not _HAS_NUMBA:
+            loop_kji = _build_A_data_matrix_loop_kji_nn_np
+        else:
 
-        @cached_jit(jit, nopython=True, nogil=True)
-        def loop_kji(Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals):
-            nz, ny, nx = Z.shape
-            mz, my, mx = mask.shape
-            csr_row_tmp = np.zeros(nz * ny * nx, dtype=np.float32)
-            csr_col_tmp = np.zeros(nz * ny * nx, dtype=np.float32)
-            csr_data_tmp = np.ones(nz * ny * nx, dtype=np.float32)
-            b_tmp = np.zeros(nz * ny, dtype=np.float32)
-            b_pid_tmp = np.zeros(nz * ny, dtype=np.int32)
-            csr_rc_tmp_count = 0
-            row_count_tmp = 0
-            for k in range(nz):  # old x axis before back projection
-                for j in range(ny):  # same y axis before back projection
-                    has_projection_data = False
-                    for i in range(nx):  # old z axis before back projection
-                        zi = round(Z[k, j, i])
-                        yi = round(Y[k, j, i])
-                        xi = round(X[k, j, i])
-                        if zi < 0 or zi > mz - 1:
-                            continue
-                        if yi < 0 or yi > my - 1:
-                            continue
-                        if xi < 0 or xi > mx - 1:
-                            continue
-                        if not mask[zi, yi, xi]:
-                            continue
-                        index = mask_nonzero_indices_matrix[zi, yi, xi]
-                        if index < 0 or index > n_x - 1:
-                            continue
-                        has_projection_data = True
-                        csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
-                        csr_col_tmp[csr_rc_tmp_count] = index
-                        csr_rc_tmp_count += 1
-                    if has_projection_data:
-                        b_tmp[row_count_tmp] = pixel_vals[j, k]
-                        b_pid_tmp[row_count_tmp] = k * ny + j
-                        row_count_tmp += 1
-            return (
-                csr_row_tmp[:csr_rc_tmp_count],
-                csr_col_tmp[:csr_rc_tmp_count],
-                csr_data_tmp[:csr_rc_tmp_count],
-                b_tmp[:row_count_tmp],
-                b_pid_tmp[:row_count_tmp],
-            )
+            @cached_jit(jit, nopython=True, nogil=True)
+            def loop_kji(Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals):
+                nz, ny, nx = Z.shape
+                mz, my, mx = mask.shape
+                csr_row_tmp = np.zeros(nz * ny * nx, dtype=np.float32)
+                csr_col_tmp = np.zeros(nz * ny * nx, dtype=np.float32)
+                csr_data_tmp = np.ones(nz * ny * nx, dtype=np.float32)
+                b_tmp = np.zeros(nz * ny, dtype=np.float32)
+                b_pid_tmp = np.zeros(nz * ny, dtype=np.int32)
+                csr_rc_tmp_count = 0
+                row_count_tmp = 0
+                for k in range(nz):  # old x axis before back projection
+                    for j in range(ny):  # same y axis before back projection
+                        has_projection_data = False
+                        for i in range(nx):  # old z axis before back projection
+                            zi = round(Z[k, j, i])
+                            yi = round(Y[k, j, i])
+                            xi = round(X[k, j, i])
+                            if zi < 0 or zi > mz - 1:
+                                continue
+                            if yi < 0 or yi > my - 1:
+                                continue
+                            if xi < 0 or xi > mx - 1:
+                                continue
+                            if not mask[zi, yi, xi]:
+                                continue
+                            index = mask_nonzero_indices_matrix[zi, yi, xi]
+                            if index < 0 or index > n_x - 1:
+                                continue
+                            has_projection_data = True
+                            csr_row_tmp[csr_rc_tmp_count] = row_count_tmp
+                            csr_col_tmp[csr_rc_tmp_count] = index
+                            csr_rc_tmp_count += 1
+                        if has_projection_data:
+                            b_tmp[row_count_tmp] = pixel_vals[j, k]
+                            b_pid_tmp[row_count_tmp] = k * ny + j
+                            row_count_tmp += 1
+                return (
+                    csr_row_tmp[:csr_rc_tmp_count],
+                    csr_col_tmp[:csr_rc_tmp_count],
+                    csr_data_tmp[:csr_rc_tmp_count],
+                    b_tmp[:row_count_tmp],
+                    b_pid_tmp[:row_count_tmp],
+                )
 
     hsym_max = max(
         1, int(np.ceil((reconstruct_length_3d_pixel + nz) / (2 * rise_pixel)))
@@ -1663,38 +2110,71 @@ def build_A_data_matrix(
     hcsyms.sort(key=lambda x: (abs(x[0]), x[1]))
     hcsyms = [hcsyms[i] for i in halton_permutation(len(hcsyms))]
 
-    def _process_hcsym(hci, hi, ci):
-        """Process a single (h, csym) symmetry combination."""
+    coords0_3d = coords0.reshape((nz, ny, nx, 3))
+    z0_min_k = coords0_3d[:, :, :, 2].min(axis=(1, 2))
+    z0_max_k = coords0_3d[:, :, :, 2].max(axis=(1, 2))
+    mz = mask.shape[0]
+    half_mz = reconstruct_length_3d_pixel // 2
+    is_linear_interp = interpolation in ["linear", "linear10", "linear11"]
+    if is_linear_interp:
+        z_lo_lim = -1.0 - 1e-5
+        z_hi_lim = (mz - 1) + 1e-5
+    else:
+        z_lo_lim = -0.5 - 1e-5
+        z_hi_lim = (mz - 0.5) + 1e-5
+
+    def _eval_hcsym(hi, ci):
+        """Evaluate projection rows for a single (hi, ci) symmetry mate."""
+        if (is_linear_interp and mz < 2) or mz < 1 or n_x == 0:
+            return None
+        shift_z = half_mz - hi * rise_pixel
+        ks = np.flatnonzero(
+            (z0_max_k + shift_z >= z_lo_lim) & (z0_min_k + shift_z <= z_hi_lim)
+        )
+        if len(ks) == 0:
+            return None
+        nk = len(ks)
         angle = twist_degree * hi + 360 * ci / csym
         r = R.from_euler("z", angle, degrees=True)
-        coords = r.apply(coords0, inverse=True)
+        coords = r.apply(coords0_3d[ks].reshape(-1, 3), inverse=True)
         coords[:, 2] -= hi * rise_pixel
-        X = coords[:, 0].reshape((nz, ny, nx)) + nx // 2
-        Y = coords[:, 1].reshape((nz, ny, nx)) + ny // 2
-        Z = coords[:, 2].reshape((nz, ny, nx)) + reconstruct_length_3d_pixel // 2
+        X = coords[:, 0].reshape((nk, ny, nx)) + nx // 2
+        Y = coords[:, 1].reshape((nk, ny, nx)) + ny // 2
+        Z = coords[:, 2].reshape((nk, ny, nx)) + half_mz
+        pv_sub = np.ascontiguousarray(pixel_vals[:, ks])
         cr, cc, cd, bt, bpid = loop_kji(
-            Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals
+            Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pv_sub
         )
         if len(bt):
-            bt = np.array(bt, dtype=np.float32)
-            csr_At = csr_matrix((cd, (cr, cc)), shape=(len(bt), n_x), dtype=np.float32)
-            return (csr_At, bt, bpid)
+            bpid = (ks[bpid // ny] * ny + (bpid % ny)).astype(np.int32)
+            return (
+                cr.astype(np.intp, copy=False),
+                cc.astype(np.intp, copy=False),
+                cd,
+                np.asarray(bt, dtype=np.float32),
+                bpid,
+            )
         return None
 
+    row_parts = []
+    col_parts = []
+    data_parts = []
     n_hcsyms = len(hcsyms)
     if cpu > 1 and n_hcsyms > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=cpu) as ex:
             futures = {
-                ex.submit(_process_hcsym, hci, hi, ci): (hci, hi, ci)
+                ex.submit(_eval_hcsym, hi, ci): (hci, hi, ci)
                 for hci, (hi, ci) in enumerate(hcsyms)
             }
             for f in as_completed(futures):
                 res = f.result()
                 if res is not None:
-                    csr_A_tmp, b_tmp, b_pid_tmp = res
-                    csr_A.append(csr_A_tmp)
+                    cr_tmp, cc_tmp, cd_tmp, b_tmp, b_pid_tmp = res
+                    row_parts.append(cr_tmp + n_b)
+                    col_parts.append(cc_tmp)
+                    data_parts.append(cd_tmp)
                     csr_b.append(b_tmp)
                     b_pid.append(b_pid_tmp)
                     n_b += len(b_tmp)
@@ -1704,18 +2184,17 @@ def build_A_data_matrix(
                     break
     else:
         for hci, (hi, ci) in enumerate(hcsyms):
-            angle = twist_degree * hi + 360 * ci / csym
-            r = R.from_euler("z", angle, degrees=True)
-            coords = r.apply(coords0, inverse=True)
-            coords[:, 2] -= hi * rise_pixel
-            X = coords[:, 0].reshape((nz, ny, nx)) + nx // 2
-            Y = coords[:, 1].reshape((nz, ny, nx)) + ny // 2
-            Z = coords[:, 2].reshape((nz, ny, nx)) + reconstruct_length_3d_pixel // 2
-
-            csr_row_tmp, csr_col_tmp, csr_data_tmp, b_tmp, b_pid_tmp = loop_kji(
-                Z, Y, X, mask, mask_nonzero_indices_matrix, n_x, pixel_vals
-            )
-            n_b += len(b_tmp)
+            res = _eval_hcsym(hi, ci)
+            added = 0
+            if res is not None:
+                cr_tmp, cc_tmp, cd_tmp, b_tmp, b_pid_tmp = res
+                added = len(b_tmp)
+                row_parts.append(cr_tmp + n_b)
+                col_parts.append(cc_tmp)
+                data_parts.append(cd_tmp)
+                csr_b.append(b_tmp)
+                b_pid.append(b_pid_tmp)
+                n_b += added
             if verbose > 20:
                 logger.debug(
                     "%s/%s: hi=%s ci=%s +%s %s target_lines=%s",
@@ -1723,27 +2202,28 @@ def build_A_data_matrix(
                     n_hcsyms,
                     hi,
                     ci,
-                    f"{len(b_tmp):,}",
+                    f"{added:,}",
                     f"{n_b:,}",
                     f"{min_projection_lines:,}",
                 )
-            if len(b_tmp):
-                b_tmp = np.array(b_tmp, dtype=np.float32)
-                csr_A_tmp = csr_matrix(
-                    (csr_data_tmp, (csr_row_tmp, csr_col_tmp)),
-                    shape=(len(b_tmp), n_x),
-                    dtype=np.float32,
-                )
-                csr_A.append(csr_A_tmp)
-                csr_b.append(b_tmp)
-                b_pid += [b_pid_tmp]
             if min_projection_lines > 0 and n_b > min_projection_lines:
                 break
-    from scipy.sparse import vstack
 
-    A = vstack(csr_A)
-    b = np.concatenate(csr_b, dtype=np.float32)
-    b_pid = np.concatenate(b_pid)
+    if n_b:
+        A = csr_matrix(
+            (
+                np.concatenate(data_parts),
+                (np.concatenate(row_parts), np.concatenate(col_parts)),
+            ),
+            shape=(n_b, n_x),
+            dtype=np.float32,
+        )
+        b = np.concatenate(csr_b, dtype=np.float32)
+        b_pid = np.concatenate(b_pid)
+    else:
+        A = csr_matrix((0, n_x), dtype=np.float32)
+        b = np.zeros(0, dtype=np.float32)
+        b_pid = np.zeros(0, dtype=np.int32)
     return A, b, b_pid
 
 

@@ -46,9 +46,17 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from helicon.lib.numba_compat import lazy_jit
+from helicon.lib.numba_compat import has_numba, lazy_jit
 
 logger = logging.getLogger(__name__)
+
+# numba itself is imported, and these kernels compiled, on their first call.
+# Without it, lazy_jit's own fallback would still run (the *same* nested
+# Python loops, un-jitted) but that is ~500x slower than the fused kernel
+# (see tools/shinylive/README.md) -- the vectorised numpy versions below,
+# used instead when numba is unavailable, cost closer to 5x (the fusion the
+# kernels below exist for in the first place; see their docstring).
+_HAS_NUMBA = has_numba()
 
 # the builtin range, when numba is not there (lazy_jit swaps in numba.prange)
 prange = range
@@ -200,7 +208,7 @@ def build_chains(
     """
     import pandas as pd
 
-    cls = np.asarray(cls).astype(np.int64) - 1
+    cls = np.asarray(cls).astype(np.intp) - 1
     n = len(cls)
     if n_classes is None:
         n_classes = int(cls.max()) + 1
@@ -211,6 +219,7 @@ def build_chains(
         + pd.Series(np.asarray(tube).astype(str))
     )
     fil, uniq = pd.factorize(key)
+    fil = np.asarray(fil, dtype=np.intp)
     track = np.asarray(track, dtype=float)
     order = np.lexsort((track, fil))
     tr, fl = track[order], fil[order]
@@ -223,15 +232,15 @@ def build_chains(
     brk = np.r_[True, (~same) | (d / step > max_gap_steps)]
     chain_sorted = np.cumsum(brk) - 1
     first = tr[brk][chain_sorted]
-    pos_sorted = np.rint((tr - first) / step).astype(np.int64)
+    pos_sorted = np.rint((tr - first) / step).astype(np.intp)
     n_chain = int(chain_sorted[-1]) + 1
-    length = np.zeros(n_chain, dtype=np.int64)
+    length = np.zeros(n_chain, dtype=np.intp)
     np.maximum.at(length, chain_sorted, pos_sorted + 1)
-    chain_filament = np.zeros(n_chain, dtype=np.int64)
+    chain_filament = np.zeros(n_chain, dtype=np.intp)
     chain_filament[chain_sorted] = fl
     # numbered by length, the longest first (the positions that have all the
     # chains of a chunk are then the first ones: see _Chunk)
-    rank = np.empty(n_chain, dtype=np.int64)
+    rank = np.empty(n_chain, dtype=np.intp)
     rank[np.argsort(-length, kind="stable")] = np.arange(n_chain)
     pos_before = pos_sorted
     if backward is not None:
@@ -244,13 +253,13 @@ def build_chains(
         pos_sorted = np.where(
             flipped, length[chain_sorted] - 1 - pos_sorted, pos_sorted
         )
-    chain = np.empty(n, dtype=np.int64)
-    pos = np.empty(n, dtype=np.int64)
+    chain = np.empty(n, dtype=np.intp)
+    pos = np.empty(n, dtype=np.intp)
     chain[order] = rank[chain_sorted]
     pos[order] = pos_sorted
-    chain_len = np.empty(n_chain, dtype=np.int64)
+    chain_len = np.empty(n_chain, dtype=np.intp)
     chain_len[rank] = length
-    chain_fil = np.empty(n_chain, dtype=np.int64)
+    chain_fil = np.empty(n_chain, dtype=np.intp)
     chain_fil[rank] = chain_filament
     unknown = cls < 0
     # of the segments that fall on one grid position the first along the filament counts
@@ -265,7 +274,7 @@ def build_chains(
     return Chains(
         step=step,
         n_classes=int(n_classes),
-        filament=fil.astype(np.int64),
+        filament=fil,
         filament_key=np.asarray(uniq, dtype=object),
         chain=chain,
         pos=pos,
@@ -319,6 +328,24 @@ def _forward_step(G, s_prev, q, rho, sw, eps, cls, s_new, ll, n):
             s_new[t, i] = acc
 
 
+def _forward_step_np(G, s_prev, q, rho, sw, eps, cls, s_new, ll, n):
+    """Vectorised equivalent of :func:`_forward_step`, for when numba is not
+    available (as under Pyodide, where numba cannot run at all)."""
+    Gn = G[:, :n, :]
+    sp = s_prev[:, :n]
+    K = q.shape[1]
+    stot = sp.sum(axis=0)
+    sin = sw * (stot[None, :] - sp)
+    v = (1.0 - rho) * Gn + sin[:, :, None] * q[:, None, :]
+    other_class = np.arange(K)[None, None, :] != cls[None, :n, None]
+    v = np.where(other_class, v * eps[None, :n, None], v)
+    z = v.sum(axis=(0, 2))
+    ll[:n] += np.log(z)
+    v /= z[None, :, None]
+    Gn[:] = v
+    s_new[:, :n] = v.sum(axis=2)
+
+
 @lazy_jit("njit", parallel=True, fastmath=True, nogil=True)
 def _backward_prepare(beta, q, eps, cls, V, Q, n1):
     """``V = e * beta`` for the first ``n1`` chains, and ``Q[t] = sum_k q[t,k] V[t,k]``."""
@@ -336,6 +363,16 @@ def _backward_prepare(beta, q, eps, cls, V, Q, n1):
                 V[t, i, k] = v
                 acc += q[t, k] * v
             Q[t, i] = acc
+
+
+def _backward_prepare_np(beta, q, eps, cls, V, Q, n1):
+    """Vectorised equivalent of :func:`_backward_prepare`."""
+    K = q.shape[1]
+    b = beta[:, :n1, :]
+    other_class = np.arange(K)[None, None, :] != cls[None, :n1, None]
+    v = np.where(other_class, b * eps[None, :n1, None], b)
+    V[:, :n1, :] = v
+    Q[:, :n1] = np.einsum("tk,tik->ti", q, v)
 
 
 @lazy_jit("njit", parallel=True, fastmath=True, nogil=True)
@@ -426,6 +463,75 @@ def _backward_finish(
                 if cm[k] > cm[best]:
                     best = k
             cbest[i] = best
+
+
+def _backward_finish_np(
+    TMP,
+    alpha,
+    Q,
+    wt,
+    rho,
+    sw,
+    n,
+    n1,
+    collect,
+    beta_out,
+    a_out,
+    g_blk,
+    nsw_blk,
+    ntr_blk,
+    tpost,
+    cbest,
+    n_blocks,
+):
+    """Vectorised equivalent of :func:`_backward_finish`.
+
+    ``n_blocks`` is a parallel-reduction device of the numba kernel only
+    (separate running sums, summed together once the backward pass ends, so
+    that threads never write the same cell): with no threads to protect
+    against here, everything accumulates straight into block 0.
+    """
+    alpha_n = alpha[:, :n, :]
+    T, K = alpha_n.shape[0], alpha_n.shape[2]
+    # go_on (i < n1) chains get a real message from TMP/Q (never read past
+    # :n1 -- those columns may hold another chunk's stale, un-initialised
+    # buffer data); the rest get the constant "no message yet" one.
+    v = np.ones((T, n, K))
+    qtot1 = Q[:, :n1].sum(axis=0)
+    add1 = sw * (qtot1[None, :] - Q[:, :n1])
+    v[:, :n1, :] = (1.0 - rho) * TMP[:, :n1, :] + add1[:, :, None]
+    beta_out[:, :n, :] = v
+    zsum = (alpha_n * v).sum(axis=(0, 2))
+    bsum = v.sum(axis=(0, 2))
+
+    # a_out and the two running sums are read only for i < n1 (go_on is True
+    # there, always: n1 <= n), so there is nothing to compute for i >= n1
+    if collect:
+        zsum1 = zsum[:n1]
+        do = zsum1 > 0.0
+        coef = np.zeros(n1)
+        coef[do] = wt[:n1][do] / zsum1[do]
+        ntr_blk[0] += np.count_nonzero(coef > 0.0)
+        alpha1 = alpha_n[:, :n1, :]
+        a_out[:, :n1, :] = np.where(
+            do[None, :, None], alpha1 * (1.0 - rho) * coef[None, :, None], 0.0
+        )
+        st = alpha1.sum(axis=2)  # (T, n1)
+        nsw_blk[0] += np.where(
+            do[None, :], st * sw * (qtot1[None, :] - Q[:, :n1]) * coef[None, :], 0.0
+        ).sum()
+
+    # the posterior of this position, and the normalised message
+    inv = np.zeros(n)
+    positive = zsum > 0.0
+    inv[positive] = 1.0 / zsum[positive]
+    ib = 1.0 / bsum
+    gm = alpha_n * v * inv[None, :, None]  # (T, n, K), from v before *= ib
+    cm = gm.sum(axis=0)  # (n, K): per chain, summed over T
+    tpost[:n, :] = gm.sum(axis=2).T  # (n, T): per chain and T, summed over K
+    g_blk[0] += (wt[None, :n, None] * gm).sum(axis=1)  # (T, K), summed over i
+    beta_out[:, :n, :] = v * ib[None, :, None]
+    cbest[:n] = cm.argmax(axis=1)
 
 
 _LOCAL = threading.local()
@@ -717,7 +823,7 @@ def _forward_backward(
         cur = a_view(s)
         for t in range(T):
             np.matmul(ap[t, :n], A[t], out=cur[t])
-        _forward_step(
+        (_forward_step if _HAS_NUMBA else _forward_step_np)(
             cur,
             s_view(s - 1),
             q,
@@ -773,10 +879,12 @@ def _forward_backward(
     for s in range(L - 2, -1, -1):
         n, n1 = int(n_s[s]), int(n_s[s + 1])
         lo1, hi1 = off[s + 1], off[s + 2]
-        _backward_prepare(beta, q, eps_pm[lo1:hi1], cls_pm[lo1:hi1], V, Q, n1)
+        (_backward_prepare if _HAS_NUMBA else _backward_prepare_np)(
+            beta, q, eps_pm[lo1:hi1], cls_pm[lo1:hi1], V, Q, n1
+        )
         for t in range(T):
             np.matmul(V[t, :n1], AT[t], out=TMP[t, :n1])
-        _backward_finish(
+        (_backward_finish if _HAS_NUMBA else _backward_finish_np)(
             TMP,
             a_view(s),
             Q,
@@ -1170,18 +1278,18 @@ def _relayout(chains, sel):
     key, new_fil = np.unique(fil, return_inverse=True)
     ch = chains.chain[sel]
     uniq_ch, new_ch = np.unique(ch, return_inverse=True)
-    length = np.zeros(len(uniq_ch), dtype=np.int64)
+    length = np.zeros(len(uniq_ch), dtype=np.intp)
     np.maximum.at(length, new_ch, chains.pos[sel] + 1)
-    rank = np.empty(len(uniq_ch), dtype=np.int64)
+    rank = np.empty(len(uniq_ch), dtype=np.intp)
     rank[np.argsort(-length, kind="stable")] = np.arange(len(uniq_ch))
-    chain_filament = np.empty(len(uniq_ch), dtype=np.int64)
+    chain_filament = np.empty(len(uniq_ch), dtype=np.intp)
     chain_filament[rank[new_ch]] = new_fil
-    chain_len = np.empty(len(uniq_ch), dtype=np.int64)
+    chain_len = np.empty(len(uniq_ch), dtype=np.intp)
     chain_len[rank] = length
     return Chains(
         step=chains.step,
         n_classes=chains.n_classes,
-        filament=new_fil.astype(np.int64),
+        filament=new_fil.astype(np.intp),
         filament_key=chains.filament_key[key],
         chain=rank[new_ch],
         pos=chains.pos[sel],
@@ -1256,7 +1364,7 @@ def segment_types(chains, tpost):
         new_run = np.r_[True, (ch[1:] != ch[:-1]) | (ty[1:] != ty[:-1])]
     section_sorted = np.cumsum(new_run) - 1
     out_type = np.empty_like(t)
-    section = np.empty(len(t), dtype=np.int64)
+    section = np.empty(len(t), dtype=np.intp)
     out_type[order] = ty
     section[order] = section_sorted
     return out_type, prob, section
@@ -1398,7 +1506,7 @@ def context_groups(
         classes of each pair of types). ``coverage``: how much of the class cycle a
         filament shows (:func:`filament_coverage`).
     """
-    cls = np.asarray(cls).astype(np.int64)
+    cls = np.asarray(cls).astype(np.intp)
     top = int(max(cls.max(), max(classes), 1))
     classes = [int(c) for c in classes]
     # a counterpart is its partner, faced the other way
@@ -1413,7 +1521,7 @@ def context_groups(
         partner[gone] = keep
         is_back[gone] = True
     modelled = sorted({int(partner[c]) for c in classes})
-    to_new = np.zeros(top + 1, dtype=np.int64)
+    to_new = np.zeros(top + 1, dtype=np.intp)
     in_play = np.zeros(top + 1, dtype=bool)
     in_play[classes] = True
     to_new[modelled] = np.arange(1, len(modelled) + 1)
@@ -1432,7 +1540,7 @@ def context_groups(
         backward=backward if backward.any() else None,
     )
     lookup = {k: i for i, k in enumerate(chains.filament_key)}
-    row = np.array([lookup.get(f"{m}|{t}", -1) for m, t in keys], dtype=np.int64)
+    row = np.array([lookup.get(f"{m}|{t}", -1) for m, t in keys], dtype=np.intp)
     labels, info = {}, dict(
         n_segments=chains.n_segments,
         n_filaments=chains.n_filaments,
@@ -1776,6 +1884,46 @@ def _period_scores(x, ch, cl, phase0, n_classes, periods, rounds, out):
         out[ic] = np.sqrt(r_re**2 + r_im**2) / n
 
 
+def _period_scores_np(x, ch, cl, phase0, n_classes, periods, rounds, out):
+    """Vectorised equivalent of :func:`_period_scores`, for when numba is not
+    available (as under Pyodide, where numba cannot run at all). The trial
+    periods stay a plain loop (what :func:`_period_scores` parallelises with
+    ``prange``); within each, every segment's agreement is computed at once."""
+    n = x.shape[0]
+    F = phase0.shape[0]
+    p0_re, p0_im = np.cos(phase0), np.sin(phase0)
+    for ic in range(periods.shape[0]):
+        a = 2.0 * np.pi * x / periods[ic]
+        e_re, e_im = np.cos(a), np.sin(a)
+        p_re, p_im = p0_re.copy(), p0_im.copy()
+        t_re, t_im = np.ones(n_classes), np.zeros(n_classes)
+        for _ in range(rounds):
+            pf_re, pf_im = p_re[ch], p_im[ch]
+            q_re = e_re * pf_re - e_im * pf_im
+            q_im = e_re * pf_im + e_im * pf_re
+            z_re = np.bincount(cl, weights=q_re, minlength=n_classes)
+            z_im = np.bincount(cl, weights=q_im, minlength=n_classes)
+            m = np.sqrt(z_re**2 + z_im**2)
+            nz = m > 0.0
+            t_re = np.divide(z_re, m, out=np.ones_like(z_re), where=nz)
+            t_im = np.divide(z_im, m, out=np.zeros_like(z_im), where=nz)
+
+            tk_re, tk_im = t_re[cl], t_im[cl]
+            f_re = np.bincount(ch, weights=tk_re * e_re + tk_im * e_im, minlength=F)
+            f_im = np.bincount(ch, weights=tk_im * e_re - tk_re * e_im, minlength=F)
+            m2 = np.sqrt(f_re**2 + f_im**2)
+            nz2 = m2 > 0.0
+            p_re = np.divide(f_re, m2, out=np.ones_like(f_re), where=nz2)
+            p_im = np.divide(f_im, m2, out=np.zeros_like(f_im), where=nz2)
+        pf_re, pf_im = p_re[ch], p_im[ch]
+        q_re = e_re * pf_re - e_im * pf_im
+        q_im = e_re * pf_im + e_im * pf_re
+        tk_re, tk_im = t_re[cl], t_im[cl]
+        r_re = np.sum(tk_re * q_re + tk_im * q_im)
+        r_im = np.sum(tk_im * q_re - tk_re * q_im)
+        out[ic] = np.sqrt(r_re**2 + r_im**2) / n
+
+
 MAX_PERIOD_ANGST = 2000.0
 
 
@@ -1834,10 +1982,10 @@ def fit_periods(
         _, ch = np.unique(chains.chain[use], return_inverse=True)
         phase0 = np.random.default_rng(1).uniform(0.0, 2.0 * np.pi, int(ch.max()) + 1)
         out = np.zeros(len(periods))
-        _period_scores(
+        (_period_scores if _HAS_NUMBA else _period_scores_np)(
             (chains.pos[use] * chains.step).astype(np.float64),
-            ch.astype(np.int64),
-            class_best[use].astype(np.int64),
+            ch.astype(np.intp),
+            class_best[use].astype(np.intp),
             phase0,
             chains.n_classes,
             periods,
@@ -1874,11 +2022,11 @@ def segment_labels(seg_type, seg_prob, section, ctx_prob=None, chains=None):
 
     if chains is not None:
         n_sec = int(section.max()) + 1
-        first = np.full(n_sec, len(section), dtype=np.int64)
+        first = np.full(n_sec, len(section), dtype=np.intp)
         np.minimum.at(first, section, np.arange(len(section)))
-        fil = np.zeros(n_sec, dtype=np.int64)
+        fil = np.zeros(n_sec, dtype=np.intp)
         fil[section] = chains.filament
-        rank = np.empty(n_sec, dtype=np.int64)
+        rank = np.empty(n_sec, dtype=np.intp)
         rank[np.lexsort((first, fil))] = np.arange(n_sec)
         section = rank[section]
     return pd.DataFrame(

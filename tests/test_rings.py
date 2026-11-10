@@ -177,3 +177,31 @@ class TestRfft2RingsShapeTypes:
         a = rings.rfft2_rings((12, 7))
         assert rings.rfft2_rings([12, 7]) is a
         assert rings.rfft2_rings(np.array([12, 7])) is a
+
+
+class TestPyodide32BitBincount:
+    def test_group_index_accepts_int64_labels_when_intp_is_int32(self, monkeypatch):
+        class _Wasm32Numpy:
+            intp = np.int32
+
+            @staticmethod
+            def bincount(x, weights=None, minlength=0):
+                arr = np.asarray(x)
+                if not np.can_cast(arr.dtype, np.int32, casting="safe"):
+                    raise TypeError(
+                        f"Cannot cast array data from {arr.dtype!r} to "
+                        f"dtype('int32') according to the rule 'safe'"
+                    )
+                return np.bincount(arr, weights=weights, minlength=minlength)
+
+            def __getattr__(self, name):
+                return getattr(np, name)
+
+        monkeypatch.setattr(rings, "np", _Wasm32Numpy())
+        rng = np.random.default_rng(0)
+        labels = rng.integers(0, 6, size=100, dtype=np.int64)
+        values = rng.standard_normal(100)
+        index = rings.group_index(labels)
+        np.testing.assert_allclose(
+            rings.grouped_median(values, index), _brute(values, labels, 6)
+        )

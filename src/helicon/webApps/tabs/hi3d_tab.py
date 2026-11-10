@@ -307,6 +307,19 @@ def lattice_line_segments(twist, phase_degree, rise, y_min, y_max):
     return xs, ys
 
 
+def _bokeh_to_html(fig):
+    """Convert a Bokeh figure to lightweight HTML via ``bokeh.embed.components``.
+
+    ``window.Bokeh`` is loaded once in ``<head>`` via
+    ``helicon.shiny.bokeh_dependency()``, so each render sends only the figure's
+    model JSON and ``embed_items`` call.
+    """
+    from bokeh.embed import components
+
+    script, div = components(fig)
+    return ui.HTML(script + div)
+
+
 @module.ui
 def hi3d_tab_ui():
     return ui.layout_sidebar(
@@ -517,6 +530,7 @@ def hi3d_tab_ui():
                 ),
             ),
         ),
+        helicon.shiny.bokeh_dependency(),
         ui.h1(
             "HI3D: Helical indexing using the cylindrical projection of a 3D map",
             style="font-weight: bold;",
@@ -545,7 +559,7 @@ def hi3d_tab_ui():
 @module.server
 def hi3d_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "map_browse",
             "hi3d_server_map",
@@ -614,11 +628,15 @@ def hi3d_tab_server(input, output, session):
         if not emd_id:
             return
         logger.debug("[HI3D] Auto-loading map emd-%s", emd_id)
-        try:
-            result = await asyncio.to_thread(_download_emd, emd_id)
-            _set_map(*result)
-        except Exception:
-            pass  # silent failure on startup
+        # Through _do_load_emd, not a bare asyncio.to_thread(_download_emd, ...)
+        # with its own try/except: that swallowed every failure silently (a
+        # slow or flaky connection, say), leaving the results pane sat on "Run
+        # indexing to see results" forever with no sign of why. _do_load_emd
+        # already gives every other load path here (the "Change EMDB ID"
+        # button, a URL/server map) a progress bar and a "Download failed"
+        # modal on error, through _run_download -- the same is just as
+        # appropriate for the page's own first, automatic load.
+        await _do_load_emd(emd_id)
 
     # ── EMDB ID change + load ───────────────────────────────
     @reactive.effect
@@ -741,9 +759,9 @@ def hi3d_tab_server(input, output, session):
         worker thread, where reactive writes are not allowed. The coroutine that
         started the thread polls it.
         """
-        from helicon.lib.path_utils import _get
+        from helicon.lib.path_utils import _get, _request_timeout
 
-        with _get(url, timeout=60, stream=True) as resp:
+        with _get(url, timeout=_request_timeout(), stream=True) as resp:
             resp.raise_for_status()
             if progress is not None:
                 progress["total"] = int(resp.headers.get("content-length") or 0)
@@ -1024,10 +1042,7 @@ def hi3d_tab_server(input, output, session):
             aspect_ratio=w / h,
         )
         fig.sizing_mode = "stretch_width"
-        from bokeh.embed import components
-
-        script, div = components(fig)
-        return ui.HTML(script + div)
+        return _bokeh_to_html(fig)
 
     @reactive.effect
     @reactive.event(input.hi3d_radius)
@@ -1095,10 +1110,7 @@ def hi3d_tab_server(input, output, session):
                 )
             )
             fig.legend.visible = False
-            from bokeh.embed import components
-
-            script, div = components(fig)
-            return ui.HTML(script + div)
+            return _bokeh_to_html(fig)
         except Exception:
             return None
 
@@ -1337,10 +1349,7 @@ def hi3d_tab_server(input, output, session):
                     )
         except Exception:
             pass
-        from bokeh.embed import components
-
-        script, div = components(fig)
-        return ui.HTML(script + div)
+        return _bokeh_to_html(fig)
 
     # ── ACF plot (col4) ─────────────────────────────────────
     @render.ui
@@ -1384,10 +1393,7 @@ def hi3d_tab_server(input, output, session):
                 line_color="yellow",
                 fill_alpha=0,
             )
-        from bokeh.embed import components
-
-        script, div = components(fig)
-        return ui.HTML(script + div)
+        return _bokeh_to_html(fig)
 
     # ── Twist/Rise/Csym controls (col4) ─────────────────────
     @render.ui
@@ -1467,10 +1473,18 @@ def hi3d_tab_server(input, output, session):
     # ── Indexing title (col2) ───────────────────────────────
     @render.ui
     def hi3d_indexing_title():
-        t = input.hi3d_twist_manual() if fitted() else 0.0
-        r = input.hi3d_rise_manual() if fitted() else 0.0
-        c = int(input.hi3d_csym_manual()) if fitted() else 1
-        if abs(t) > 0.01 and r > 0.01:
+        if fitted():
+            try:
+                t = input.hi3d_twist_manual()
+                r = input.hi3d_rise_manual()
+                c = int(input.hi3d_csym_manual())
+            except (SilentException, TypeError, ValueError):
+                t = twist_val()
+                r = rise_val()
+                c = int(csym_val())
+        else:
+            t, r, c = 0.0, 0.0, 1
+        if t is not None and r is not None and abs(t) > 0.01 and r > 0.01:
             pitch = 360.0 / abs(t) * r
             title = (
                 f"twist={round(t,3):g}° (pitch={round(pitch, 2):g}Å) "
@@ -1581,7 +1595,4 @@ def hi3d_tab_server(input, output, session):
         fig.xaxis.major_label_text_font_size = "11pt"
         fig.yaxis.major_label_text_font_size = "11pt"
 
-        from bokeh.embed import components
-
-        script, div = components(fig)
-        return ui.HTML(script + div)
+        return _bokeh_to_html(fig)

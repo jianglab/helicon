@@ -149,7 +149,7 @@ def _grid_candidates(
         np.arange(0, nx, step),
         indexing="ij",
     )
-    centers = np.stack([gz.ravel(), gy.ravel(), gx.ravel()], -1).astype(np.int64)
+    centers = np.stack([gz.ravel(), gy.ravel(), gx.ravel()], -1).astype(np.intp)
     smoothed = gaussian_filter(slab, sigma=sigma_voxels, mode="constant")
     sampled = smoothed[centers[:, 0], centers[:, 1], centers[:, 2]].astype(np.float64)
     values = sampled * (2 * np.pi * sigma_voxels**2) ** 1.5
@@ -363,8 +363,8 @@ def _splat_and_blur(centers, amplitudes, nz, ny, apix, sigma):
     cz = centers[:, 2] / apix + nz // 2
     cy = centers[:, 1] / apix + ny // 2
 
-    z0 = np.floor(cz).astype(np.int64)
-    y0 = np.floor(cy).astype(np.int64)
+    z0 = np.floor(cz).astype(np.intp)
+    y0 = np.floor(cy).astype(np.intp)
     fz = cz - z0
     fy = cy - y0
 
@@ -376,7 +376,7 @@ def _splat_and_blur(centers, amplitudes, nz, ny, apix, sigma):
             inside = (yy >= 0) & (yy < ny) & (zz >= 0) & (zz < nz)
             if not inside.any():
                 continue
-            flat = (yy[inside] * nz + zz[inside]).astype(np.int64)
+            flat = (yy[inside] * nz + zz[inside]).astype(np.intp)
             image += np.bincount(
                 flat, weights=(weights * wy * wz)[inside], minlength=ny * nz
             )
@@ -529,7 +529,7 @@ def projection_mixture(
     # sorts a hundred thousand pairs lexicographically and dominated this
     # function -- 2 s a map, more than rendering the projection costs.
     step = max(float(bin_scale) * out_sigma, float(apix))
-    keys = np.rint(centers / step).astype(np.int64)
+    keys = np.rint(centers / step).astype(np.intp)
     keys -= keys.min(axis=0)
     flat = keys[:, 0] * (keys[:, 1].max() + 1) + keys[:, 1]
     _, inverse = np.unique(flat, return_inverse=True)

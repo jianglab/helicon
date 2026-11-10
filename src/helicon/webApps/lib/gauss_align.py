@@ -82,11 +82,11 @@ def _rendered_self_overlap(amplitudes, centers, sigma, samples_per_sigma=4.0) ->
     step = float(sigma) / float(samples_per_sigma)
     pad = 4.0 * float(sigma)
     lo = centers.min(axis=0) - pad
-    n = np.ceil((centers.max(axis=0) + pad - lo) / step).astype(np.int64) + 1
+    n = np.ceil((centers.max(axis=0) + pad - lo) / step).astype(np.intp) + 1
     grid = np.zeros(int(n[0]) * int(n[1]), dtype=np.float64)
 
     coords = (centers - lo) / step
-    base = np.floor(coords).astype(np.int64)
+    base = np.floor(coords).astype(np.intp)
     frac = coords - base
     for dy, wy in ((0, 1.0 - frac[:, 0]), (1, frac[:, 0])):
         for dx, wx in ((0, 1.0 - frac[:, 1]), (1, frac[:, 1])):
@@ -141,8 +141,8 @@ def _landscape_peak(
     differences = m_centers[None, :, :] - q_centers[:, None, :]
     weights = (np.outer(q_amps, m_amps) * pair_factor).ravel()
 
-    iy = np.rint((differences[:, :, 0].ravel() + half_y) / step).astype(np.int64)
-    ix = np.rint((differences[:, :, 1].ravel() + half_x) / step).astype(np.int64)
+    iy = np.rint((differences[:, :, 0].ravel() + half_y) / step).astype(np.intp)
+    ix = np.rint((differences[:, :, 1].ravel() + half_x) / step).astype(np.intp)
     inside = (iy >= 0) & (iy < n_y) & (ix >= 0) & (ix < n_x)
     if not inside.any():
         return -np.inf, 0.0, 0.0

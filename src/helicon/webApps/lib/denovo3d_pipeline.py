@@ -306,6 +306,7 @@ def process_one_task(
             f"Image {imageFile}-{imageIndex}: sym_oversample set to {sym_oversample}"
         )
 
+    score_only = bool(algorithm.get("score_only", False)) and not return_3d
     if algorithm["model"] == "gauss":
         solve_fn = gauss_analytic_reconstruct
         label = "gauss_reconstruct"
@@ -353,6 +354,8 @@ def process_one_task(
             verbose=verbose,
             algorithm=algorithm,
         )
+        if algorithm["model"] == "gauss" and score_only:
+            solve_kwargs["score_only"] = True
         if algorithm.get("model", "lsq") in (
             "lsq",
             "elasticnet",
@@ -369,6 +372,36 @@ def process_one_task(
         solved = solve_fn(**solve_kwargs)
         (rec3d, rec3d_set_1, rec3d_set_2), score = solved[:2]
         refined_params = solved[2] if len(solved) > 2 else {}
+
+    if score_only:
+        rec3d_x_proj = (
+            rec3d if rec3d.ndim == 2 else np.sum(rec3d, axis=2, dtype=np.float32).T
+        )
+        return_data = (
+            rec3d_x_proj,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        params = (
+            data_orig,
+            imageFile,
+            imageIndex,
+            target_apix3d,
+            target_apix2d,
+            twist,
+            rise,
+            csym,
+            tilt,
+            psi,
+            dy,
+        )
+        return (score, return_data, params)
     with helicon.Timer("apply_helical_symmetry", verbose=verbose > 10):
         twist_degree = twist if abs(twist) < 90 else 180 - abs(twist)
         if abs(twist_degree) > 1e-2:

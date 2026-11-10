@@ -145,6 +145,21 @@ class TestSearch:
         found = li.index_images(images, APIX, 77.6, CUTOFF, **self.SEARCH)
         assert found[0].csym == 6
 
+    def test_without_real_threads_several_workers_still_search_serially(
+        self, monkeypatch
+    ):
+        """As under Pyodide: ProcessPoolExecutor cannot fork/spawn there, so
+        asking for several workers must still give the one-process result."""
+        from helicon.lib import system
+
+        images = [_helix(noise=1.0)]
+        serial = li.index_images(images, APIX, 77.6, CUTOFF, workers=1, **self.SEARCH)
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        many = li.index_images(images, APIX, 77.6, CUTOFF, workers=4, **self.SEARCH)
+        assert [(c.csym, c.twist, c.rise) for c in many] == [
+            (c.csym, c.twist, c.rise) for c in serial
+        ]
+
 
 class TestSymmetriesOfOneLattice:
     """C4, C6 and C8 at the same csym * twist put their lines at the same heights;
@@ -485,3 +500,73 @@ class TestPhaseDifferenceQuality:
             pd_weight="image",
         )
         assert found and found[0].csym == 6
+
+
+class TestVectorizedFirstPass:
+    """The vectorized first pass matches per-candidate mask scoring and runs fast on one core."""
+
+    @pytest.mark.parametrize(
+        "shape,apix,cutoff",
+        [
+            ((128, 128), APIX, CUTOFF),
+            ((127, 125), 2.5, 10.0),
+            ((64, 64), 2.5, 5.0),
+        ],
+    )
+    def test_first_pass_matches_single_candidate_mask_scores(self, shape, apix, cutoff):
+        ny, nx = shape
+        img = hill_compute.simulate_helix(
+            29.4, 21.92, 6, 60.0, 8.0, ny, nx, apix, az0=17.0
+        )
+        spectra = li.prepare([img - img.mean()], apix, cutoff)
+        assert spectra._ring.dtype == np.dtype(np.intp)
+
+        twists = [5.0, 18.0, 29.4, 45.0]
+        rises = [8.0, 15.0, 21.92, 30.0]
+        for csym in (1, 3, 6):
+            fast = {
+                (c, t, r): (sc, ct)
+                for sc, ct, c, t, r in li._first_pass(
+                    spectra, csym, twists, rises, 60.0
+                )
+            }
+            ref = {}
+            for t in twists:
+                for r in rises:
+                    sc, ct = li._score(spectra, csym, t, r, [60.0], model="mask")[:2]
+                    if sc > 0:
+                        ref[(csym, t, r)] = (sc, ct)
+            assert set(fast) == set(ref)
+            for key in ref:
+                assert fast[key][0] == pytest.approx(ref[key][0], rel=1e-10, abs=1e-10)
+                assert fast[key][1] == pytest.approx(ref[key][1], rel=1e-10, abs=1e-10)
+
+    def test_spectra_with_cached_mask_tables_is_picklable(self):
+        import pickle
+
+        spectra = li.prepare([_helix()], APIX, CUTOFF)
+        li._first_pass(spectra, 6, [29.4], [21.92], 77.6)
+        restored = pickle.loads(pickle.dumps(spectra))
+        assert li._first_pass(restored, 6, [29.4], [21.92], 77.6) == pytest.approx(
+            li._first_pass(spectra, 6, [29.4], [21.92], 77.6)
+        )
+
+    def test_default_hill_grid_runs_under_four_seconds_on_one_worker(self):
+        import time
+
+        apix = 2.3438
+        img = hill_compute.simulate_helix(
+            29.4, 21.92, 6, 77.6, 8.0, 256, 256, apix, az0=17.0
+        )
+        img = img - img.mean()
+        noisy = [
+            img + np.random.default_rng(s).normal(0, 0.8 * img.std(), img.shape)
+            for s in range(2)
+        ]
+        t0 = time.perf_counter()
+        found = li.index_images(noisy, apix, 77.6, 7.03, top=40, workers=1)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 4.0, f"Single-worker HILL search took {elapsed:.2f}s"
+        assert found[0].csym == 6
+        assert found[0].twist == pytest.approx(29.4, abs=1.5)
+        assert found[0].rise == pytest.approx(21.92, abs=1.0)

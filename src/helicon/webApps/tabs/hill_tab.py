@@ -271,7 +271,7 @@ def hill_tab_server(input, output, session):
     from scipy.signal import find_peaks
     from scipy.interpolate import splev
 
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "image_browse",
             "hill_img_file_server",
@@ -2011,15 +2011,39 @@ def hill_tab_server(input, output, session):
     # Written by the thread the stitch runs in, read by _poll_stitch_progress.
     _stitch_steps = {"done": 0, "total": 0, "start": 0.0}
 
+    def _stitch_status_ui(done, total, left):
+        text = (
+            "Preparing the images ..."
+            if total <= 0
+            else f"Registering images: {done}/{total}"
+        )
+        if left is not None:
+            text += f", about {max(1, round(left))} s left"
+        return ui.div(
+            _progress_bar(done, total),
+            ui.p(text, style="font-size: 0.85em; text-align: center; margin: 0.3em 0;"),
+        )
+
     @reactive.extended_task
     async def _stitch_task(images):
         import asyncio
         import time
 
         from helicon.lib import stitch
+        from helicon.lib.system import has_real_threads
 
         def progress(label):
             _stitch_steps["done"] += 1
+            if not has_real_threads():
+                done, total = _stitch_steps["done"], _stitch_steps["total"]
+                left = None
+                if done:
+                    left = (
+                        (time.time() - _stitch_steps["start"]) * (total - done) / done
+                    )
+                helicon.shiny.push_output_ui(
+                    "hill_stitch_status", _stitch_status_ui(done, total, left)
+                )
 
         # Every pair is registered twice and every image once per refinement
         # round, so the bar knows how many steps there are.
@@ -2037,6 +2061,7 @@ def hill_tab_server(input, output, session):
         """Follow the stitch while it runs: the steps it reports, 3 times a second."""
         if _stitch_task.status() != "running":
             stitch_status.set(None)
+            helicon.shiny.push_output_ui("hill_stitch_status", None)
             return
         reactive.invalidate_later(0.3)
         import time
@@ -2052,13 +2077,7 @@ def hill_tab_server(input, output, session):
         status = stitch_status()
         req(status)
         done, total, left = status
-        text = f"Registering images: {done}/{total}"
-        if left is not None:
-            text += f", about {max(1, round(left))} s left"
-        return ui.div(
-            _progress_bar(done, total),
-            ui.p(text, style="font-size: 0.85em; text-align: center; margin: 0.3em 0;"),
-        )
+        return _stitch_status_ui(done, total, left)
 
     @reactive.effect
     @reactive.event(input.hill_run_auto_stitch)
@@ -2080,6 +2099,16 @@ def hill_tab_server(input, output, session):
                 duration=8,
             )
             return
+        from helicon.lib.system import has_real_threads
+
+        if not has_real_threads():
+            # Pyodide: show it is working right away -- straightening the
+            # images (ahead, synchronous) can itself take a while, with
+            # nothing else to show for it until the stitch's own progress
+            # calls start.
+            helicon.shiny.push_output_ui(
+                "hill_stitch_status", _stitch_status_ui(0, 0, None)
+            )
         apix = input.hill_apix()
         saved = avg_ps_pd_main_in_df()
         # upright, as the auto-transform made them, but not masked
@@ -2434,8 +2463,14 @@ def hill_tab_server(input, output, session):
 
         from ..lib import layerline_index
 
+        from helicon.lib.system import has_real_threads
+
         def progress(done, total):
             _symmetry_steps.update(done=done, total=total)
+            if not has_real_threads():
+                helicon.shiny.push_output_ui(
+                    "hill_symmetry_progress", _progress_bar(done, total)
+                )
 
         _symmetry_steps.update(done=0, total=0)
         # in a thread, so that the page answers; the search spreads itself
@@ -2450,11 +2485,16 @@ def hill_tab_server(input, output, session):
             progress=progress,
         )
 
+    def _symmetry_message_ui(text):
+        return ui.p(text, style="font-size: 0.85em; margin: 0.4em 0;")
+
     @reactive.effect
     def _poll_symmetry_progress():
         """Follow the search while it runs: the steps it reports, 3 times a second."""
         if _symmetry_search.status() != "running":
             symmetry_progress.set((0, 0))
+            helicon.shiny.push_output_ui("hill_symmetry_progress", None)
+            helicon.shiny.push_output_ui("hill_symmetry_message", None)
             return
         reactive.invalidate_later(0.3)
         symmetry_progress.set((_symmetry_steps["done"], _symmetry_steps["total"]))
@@ -2481,6 +2521,14 @@ def hill_tab_server(input, output, session):
         if not valid:
             symmetry_message.set("Select one or more images first.")
             return
+        from helicon.lib.system import has_real_threads
+
+        if not has_real_threads():
+            # Pyodide: show it is working right away -- preparing the images
+            # and the search's own cost estimate (both ahead, synchronous,
+            # before the first progress(done, total) call) can themselves
+            # take a while, with nothing else to show for it until then.
+            helicon.shiny.push_output_ui("hill_symmetry_progress", _progress_bar(0, 0))
         apix = input.hill_apix()
         if stitched or len(valid) == 1:
             # the transform of the image shown is the one in the controls
@@ -2508,10 +2556,16 @@ def hill_tab_server(input, output, session):
         radius = input.hill_diameter() / 2
         cutoff = max(input.hill_cutoff_res_x(), 2.0 * apix)
         symmetry_candidates.set([])
-        symmetry_message.set(
+        searching = (
             f"Searching {len(images)} image{'s' if len(images) > 1 else ''} "
             f"(radius {radius:.0f} Å, resolution limit {cutoff:.1f} Å) ..."
         )
+        symmetry_message.set(searching)
+        if not has_real_threads():
+            # Pyodide: the output itself is not sent before the search ends
+            helicon.shiny.push_output_ui(
+                "hill_symmetry_message", _symmetry_message_ui(searching)
+            )
         _symmetry_search(images, apix, radius, cutoff)
 
     @reactive.effect
@@ -2535,7 +2589,7 @@ def hill_tab_server(input, output, session):
     def hill_symmetry_message():
         text = symmetry_message()
         req(text)
-        return ui.p(text, style="font-size: 0.85em; margin: 0.4em 0;")
+        return _symmetry_message_ui(text)
 
     @render.ui
     def hill_symmetry_warning():

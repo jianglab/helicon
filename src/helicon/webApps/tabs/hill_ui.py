@@ -37,6 +37,7 @@ _DIAMETER_SLIDER_MAX = 1000.0
 @module.ui
 def hill_tab_ui():
     return ui.page_fillable(
+        helicon.shiny.bokeh_dependency(),
         ui.tags.style(
             """
         .hill-scrollable-sidebar {

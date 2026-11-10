@@ -515,7 +515,26 @@ def recent_folders(session, scope=""):
     return lists.setdefault(scope, [])
 
 
-def _start_folder(start, recent=()):
+def _inside(root, path):
+    """Whether ``path`` is ``root`` itself or in it (``..`` resolved by name).
+
+    Parameters
+    ----------
+    root, path : str or Path
+
+    Returns
+    -------
+    bool
+    """
+    try:
+        parts = Path(os.path.normpath(str(path))).parts
+        base = Path(os.path.normpath(str(root))).parts
+    except (TypeError, ValueError):
+        return False
+    return parts[: len(base)] == base
+
+
+def _start_folder(start, recent=(), root=None):
     """The folder (and file to select) the dialog opens at.
 
     Parameters
@@ -524,6 +543,9 @@ def _start_folder(start, recent=()):
         The path to open at, or a function returning it.
     recent : sequence of str, optional
         The recently used folders, newest first, to fall back on.
+    root : str or Path, optional
+        Only this folder and what is in it may be opened; with none of the
+        above in it, the dialog opens at ``root``.
 
     Returns
     -------
@@ -534,18 +556,19 @@ def _start_folder(start, recent=()):
     if value and "://" not in str(value):
         p = Path(str(value).strip()).expanduser()
         try:
-            if p.is_file():
-                return p.absolute().parent, p.name
-            if p.is_dir():
-                return p.absolute(), None
-            if p.parent.is_dir() and str(p.parent) not in ("", "."):
-                return p.absolute().parent, None
+            if root is None or _inside(root, p.absolute()):
+                if p.is_file():
+                    return p.absolute().parent, p.name
+                if p.is_dir():
+                    return p.absolute(), None
+                if p.parent.is_dir() and str(p.parent) not in ("", "."):
+                    return p.absolute().parent, None
         except OSError:
             pass
     for folder in recent:
-        if Path(folder).is_dir():
+        if (root is None or _inside(root, folder)) and Path(folder).is_dir():
             return Path(folder), None
-    return Path.cwd(), None
+    return (Path.cwd() if root is None else Path(root)), None
 
 
 def _remember(folder, recent):
@@ -609,15 +632,17 @@ def _merged(*lists):
     return out
 
 
-def _server_files_refused():
+def _server_files_refused(root=None):
     """True, after telling the user, when the app runs on a hosting service.
 
     The picker lists the server's own files, which a hosted copy must not
     show; the apps hide the Browse button there, and this is a second check.
+    A picker with a ``root`` lists only what is in that folder (in a
+    browser-side copy, the folder the visitor chose), so it is never refused.
     """
     from helicon.webApps import deployment
 
-    if not deployment.is_cloud():
+    if root is not None or not deployment.is_cloud():
         return False
     ui.notification_show(
         "This copy of Helicon runs on a hosting service: the server's files "
@@ -636,6 +661,7 @@ def file_picker_server(
     title="Select a file",
     start=None,
     max_entries=5000,
+    root=None,
 ):
     """Run a file picker opened by :func:`file_picker_button` of the same id.
 
@@ -652,6 +678,11 @@ def file_picker_server(
         dialog opens at the folder used last, or the working folder.
     max_entries : int, optional
         Largest number of entries listed in a folder.
+    root : str or Path, optional
+        Confine the dialog to this folder: it opens in it, cannot go above it,
+        and has no Home or working-folder shortcuts. For the one folder an app
+        may show (in a browser-side copy, the folder the visitor chose), which
+        also lets the dialog open where the app has no server files to show.
 
     Returns
     -------
@@ -659,6 +690,7 @@ def file_picker_server(
         The absolute path of the file chosen, set each time one is chosen.
     """
     patterns = tuple(patterns or ())
+    top = None if root is None else Path(root)
     scope = picker_scope(session)
     recent = recent_folders(session, scope)
     chosen = reactive.value(None)
@@ -668,11 +700,23 @@ def file_picker_server(
     # each drawing of the listing is numbered, so the page script runs once on it
     drawn = itertools.count(1)
 
+    def at_top(folder):
+        return folder.parent == folder or folder == top
+
     def go(folder, select=None):
         try:
             folder = Path(folder).expanduser().absolute()
             if ".." in folder.parts:
-                folder = folder.resolve()
+                folder = (
+                    folder.resolve()
+                    if top is None
+                    else Path(os.path.normpath(str(folder)))
+                )
+            if top is not None and not _inside(top, folder):
+                ui.notification_show(
+                    f"{folder} is not in the folder chosen: {top}", type="warning"
+                )
+                return
             if not folder.is_dir():
                 raise NotADirectoryError(str(folder))
         except OSError as e:
@@ -685,11 +729,16 @@ def file_picker_server(
     @reactive.effect
     @reactive.event(input.open)
     def _open():
-        if _server_files_refused():
+        if _server_files_refused(top):
+            return
+        if top is not None and not top.is_dir():
+            ui.notification_show(
+                "There is no folder to browse yet: choose one first.", type="warning"
+            )
             return
         # this session's folders first, then those of earlier visits
         folder, name = _start_folder(
-            start, _merged(recent, browser_folders(session, scope))
+            start, _merged(recent, browser_folders(session, scope)), top
         )
         go(folder, name)
         ui.modal_show(
@@ -755,7 +804,7 @@ def file_picker_server(
     @reactive.effect
     @reactive.event(input.act)
     def _act():
-        if _server_files_refused():
+        if _server_files_refused(top):
             return
         msg = input.act() or {}
         op = msg.get("op")
@@ -763,17 +812,17 @@ def file_picker_server(
         if op == "open":
             name = msg.get("name", "")
             if name == "..":
-                if here.parent != here:
+                if not at_top(here):
                     go(here.parent, here.name)
             else:
                 go(here / name)
         elif op == "up":
-            if here.parent != here:
+            if not at_top(here):
                 go(here.parent, here.name)
         elif op == "home":
-            go(Path.home())
+            go(Path.home() if top is None else top)
         elif op == "work":
-            go(Path.cwd())
+            go(Path.cwd() if top is None else top)
         elif op == "goto":
             text = (msg.get("path") or "").strip()
             if not text:
@@ -799,8 +848,14 @@ def file_picker_server(
         crumbs = []
         for i, part in enumerate(parts):
             target = Path(*parts[: i + 1])
-            if i:
-                crumbs.append(ui.tags.span("/" if i > 1 else "", class_="hfp-sep"))
+            if top is not None and target != top and _inside(target, top):
+                continue  # above the root: not shown
+            if crumbs:
+                crumbs.append(
+                    ui.tags.span(
+                        "/" if i > 1 or top is not None else "", class_="hfp-sep"
+                    )
+                )
             crumbs.append(
                 ui.tags.button(
                     part if part != "/" else "/",
@@ -819,21 +874,27 @@ def file_picker_server(
                 class_="hfp-btn",
                 data_op="up",
                 title="Up a folder (Backspace)",
-                disabled=here.parent == here,
+                disabled=at_top(here),
             ),
-            ui.tags.button(
-                ui.HTML(_HOME_SVG),
-                type="button",
-                class_="hfp-btn",
-                data_op="home",
-                title=f"Home: {Path.home()}",
-            ),
-            ui.tags.button(
-                ui.HTML(_WORK_SVG),
-                type="button",
-                class_="hfp-btn",
-                data_op="work",
-                title=f"Working folder: {Path.cwd()}",
+            *(
+                ()
+                if top is not None
+                else (
+                    ui.tags.button(
+                        ui.HTML(_HOME_SVG),
+                        type="button",
+                        class_="hfp-btn",
+                        data_op="home",
+                        title=f"Home: {Path.home()}",
+                    ),
+                    ui.tags.button(
+                        ui.HTML(_WORK_SVG),
+                        type="button",
+                        class_="hfp-btn",
+                        data_op="work",
+                        title=f"Working folder: {Path.cwd()}",
+                    ),
+                )
             ),
             ui.div(*crumbs, class_="hfp-crumbs"),
             class_="hfp-bar",
@@ -844,7 +905,12 @@ def file_picker_server(
         cwd()
         seen, chips = set(), []
         folders = _merged(recent, browser_folders(session, scope))[:_MAX_RECENT]
-        for label, folder in [("Home", Path.home()), ("Working folder", Path.cwd())] + [
+        if top is not None:
+            folders = [f for f in folders if _inside(top, f)]
+            fixed = [(top.name or str(top), top)]
+        else:
+            fixed = [("Home", Path.home()), ("Working folder", Path.cwd())]
+        for label, folder in fixed + [
             (Path(f).name or f, Path(f)) for f in folders if Path(f).is_dir()
         ]:
             key = str(folder)
@@ -888,7 +954,7 @@ def file_picker_server(
                 data_stamp=str(next(drawn)),
             )
         rows = []
-        if here.parent != here:
+        if not at_top(here):
             rows.append(
                 '<tr class="hfp-row" data-kind="dir" data-name="..">'
                 f'<td class="hfp-icon">{_UP_SVG}</td><td>..</td><td class="hfp-size"></td>'
@@ -963,14 +1029,33 @@ def file_picker_field(field, picker_id, enabled=True, **button):
     Returns
     -------
     htmltools.Tag
+        In a browser-side copy, with the button that gives the page a folder
+        of the visitor's computer above it (see
+        :mod:`helicon.webApps.local_folder`).
     """
     if not enabled:
         return field
-    return ui.div(field, file_picker_button(picker_id, **button), class_="hfp-field")
+    from helicon.webApps import local_folder
+
+    row = ui.div(field, file_picker_button(picker_id, **button), class_="hfp-field")
+    if not local_folder.available():
+        return row
+    return ui.div(local_folder.choose_button(_folder_input_id(picker_id)), row)
+
+
+def _folder_input_id(picker_id):
+    """The input of the button that chooses the local folder of a picker."""
+    return f"{picker_id}_local_folder"
 
 
 def file_picker_fill(
-    picker_id, field_id, input, patterns=(), title="Select a file", update=None
+    picker_id,
+    field_id,
+    input,
+    patterns=(),
+    title="Select a file",
+    update=None,
+    root=None,
 ):
     """Run the picker of ``picker_id`` for the text field ``field_id``.
 
@@ -990,15 +1075,28 @@ def file_picker_fill(
         The dialog's title.
     update : callable, optional
         ``update(field_id, value=path)``; defaults to ``ui.update_text``.
+    root : str or Path, optional
+        Confine the dialog to this folder (see :func:`file_picker_server`).
+        In a browser-side copy, the folders the visitor gives the page (see
+        :mod:`helicon.webApps.local_folder`), whatever is given here.
 
     Returns
     -------
     reactive.Value
         The path chosen last.
     """
+    from helicon.webApps import local_folder
+
     update = update or ui.update_text
+    if local_folder.available():
+        root = local_folder.ROOT
+        local_folder.local_folder_server(input, _folder_input_id(picker_id))
     chosen = file_picker_server(
-        picker_id, patterns=patterns, title=title, start=lambda: input[field_id]()
+        picker_id,
+        patterns=patterns,
+        title=title,
+        start=lambda: input[field_id](),
+        root=root,
     )
 
     @reactive.effect
@@ -1018,7 +1116,9 @@ def source_modes(cloud=False, modes=("upload", "url")):
 
     ``server`` -- a file on the computer running the app, picked with
     :func:`file_picker_field` -- is offered only when the app runs where the
-    user's files are (``cloud`` False).
+    user's files are (``cloud`` False). In a browser-side copy it is offered
+    as the ``local folder`` the visitor gives the page (see
+    :mod:`helicon.webApps.local_folder`).
 
     Parameters
     ----------
@@ -1032,10 +1132,17 @@ def source_modes(cloud=False, modes=("upload", "url")):
     dict
         Value -> label, for ``ui.input_radio_buttons(choices=...)``.
     """
+    from helicon.webApps import local_folder
+
     choices = {}
     if not cloud:
         choices[SERVER] = ui.span(
             SERVER, title="A file on the computer running Helicon"
+        )
+    elif local_folder.available():
+        choices[SERVER] = ui.span(
+            local_folder.LABEL,
+            title="A file in a folder of your computer: nothing is uploaded",
         )
     for m in modes:
         value, label = m if isinstance(m, (tuple, list)) else (m, m)

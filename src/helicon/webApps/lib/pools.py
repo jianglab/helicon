@@ -91,16 +91,24 @@ class TaskPool:
         from concurrent.futures import ProcessPoolExecutor
 
         import helicon
+        from helicon.lib.system import has_real_threads, pool_executor
 
         max_workers = min(
             int(max_workers), int(helicon.available_cpu(mem_gb_per_cpu=gb_per_worker))
         )
-        self._executor = ProcessPoolExecutor(
-            max_workers=max(1, max_workers),
-            mp_context=pool_context(),
-            initializer=_limit_threads,
-            initargs=(threads,),
-        )
+        if has_real_threads():
+            self._executor = ProcessPoolExecutor(
+                max_workers=max(1, max_workers),
+                mp_context=pool_context(),
+                initializer=_limit_threads,
+                initargs=(threads,),
+            )
+        else:
+            # e.g. Pyodide: no forking/spawning at all, so none of the
+            # process-pool-specific kwargs above apply either
+            self._executor = pool_executor(
+                ProcessPoolExecutor, max_workers=max(1, max_workers)
+            )
 
     def submit(self, fn, *args):
         """A ``concurrent.futures.Future`` of ``fn(*args)`` run in a worker."""

@@ -166,6 +166,50 @@ class TestStartFolder:
         monkeypatch.setenv("HELICON_DEPLOYMENT", "local")
         assert not fp._server_files_refused()
 
+    def test_a_picker_with_a_root_is_not_refused_on_a_host(self, monkeypatch):
+        # a browser-side copy has no server files, but may browse the folder the
+        # visitor chose
+        monkeypatch.setenv("HELICON_DEPLOYMENT", "cloud")
+        assert not fp._server_files_refused(root="/local")
+
+
+class TestRoot:
+    def test_inside_means_the_root_or_what_is_in_it(self):
+        assert fp._inside("/local", "/local")
+        assert fp._inside("/local", "/local/a/b.star")
+        assert not fp._inside("/local", "/localhost/a")
+        assert not fp._inside("/local", "/")
+        assert not fp._inside("/local", "/etc/passwd")
+
+    def test_dotdot_does_not_leave_the_root(self):
+        assert not fp._inside("/local", "/local/../etc")
+        assert fp._inside("/local", "/local/a/../b")
+
+    def test_the_dialog_opens_in_the_root_when_the_field_names_nothing_in_it(
+        self, tmp_path
+    ):
+        job = _tree(tmp_path)
+        root = tmp_path / "project"
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        assert fp._start_folder("", (), root) == (root, None)
+        assert fp._start_folder(str(outside), (), root) == (root, None)
+        assert fp._start_folder(str(job / "gone.star"), (str(outside),), root) == (
+            job,
+            None,
+        )
+        # a file of the root is still selected
+        star = job / "run_it025_data.star"
+        assert fp._start_folder(str(star), (), root) == (job, star.name)
+
+    def test_recent_folders_outside_the_root_are_not_used(self, tmp_path):
+        _tree(tmp_path)
+        root = tmp_path / "project"
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        assert fp._start_folder(None, [str(outside)], root) == (root, None)
+        assert fp._start_folder(None, [str(outside)]) == (outside, None)
+
 
 APP = """
 from shiny import App, reactive, ui
@@ -193,17 +237,8 @@ app = App(app_ui, server)
 """
 
 
-@pytest.fixture(scope="module")
-def picker_app(tmp_path_factory):
-    root = tmp_path_factory.mktemp("file_picker")
-    job = _tree(root)
-    # a second place to pick from, for the browser's memory of folders
-    (root / "project" / "other").mkdir()
-    (root / "project" / "other" / "a_data.star").write_text("x")
-    folder = root / "app"
-    folder.mkdir()
-    start = repr(str(job / "run_it025_data.star"))
-    (folder / "app.py").write_text(APP.replace("__START__", start))
+def _run_app(folder):
+    """Run the Shiny app of ``folder``/app.py; yield its URL, then stop it."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.Popen(
@@ -241,12 +276,45 @@ def picker_app(tmp_path_factory):
     if not port:
         proc.terminate()
         pytest.fail("server did not start\n" + "".join(output))
-    yield f"http://127.0.0.1:{port[0]}/", job
+    yield f"http://127.0.0.1:{port[0]}/"
     proc.terminate()
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+@pytest.fixture(scope="module")
+def picker_app(tmp_path_factory):
+    root = tmp_path_factory.mktemp("file_picker")
+    job = _tree(root)
+    # a second place to pick from, for the browser's memory of folders
+    (root / "project" / "other").mkdir()
+    (root / "project" / "other" / "a_data.star").write_text("x")
+    folder = root / "app"
+    folder.mkdir()
+    start = repr(str(job / "run_it025_data.star"))
+    (folder / "app.py").write_text(APP.replace("__START__", start))
+    for url in _run_app(folder):
+        yield url, job
+
+
+@pytest.fixture(scope="module")
+def rooted_picker_app(tmp_path_factory):
+    """A picker confined to project/Class2D, with files above and beside it."""
+    root = tmp_path_factory.mktemp("rooted_picker")
+    job = _tree(root)
+    (root / "project" / "above.star").write_text("x")
+    folder = root / "app"
+    folder.mkdir()
+    rooted = APP.replace(
+        "start=lambda: input.path()", "start=lambda: input.path(), root=ROOT"
+    )
+    rooted = rooted.replace("__START__", repr(str(root / "project" / "above.star")))
+    rooted = rooted.replace("ROOT", repr(str(job.parent)))
+    (folder / "app.py").write_text(rooted)
+    for url in _run_app(folder):
+        yield url, job.parent, job
 
 
 def _open(page, url):
@@ -320,6 +388,70 @@ class TestTheDialog:
         page.locator(".hfp-choose").click()
         page.wait_for_selector(".modal", state="detached")
         assert page.locator("#path").input_value() == str(job / "run_it010_data.star")
+
+
+class TestRootedDialog:
+    """A picker confined to one folder: what the browser-side copies show of the
+    folder a visitor chose."""
+
+    def _open(self, page, url):
+        page.goto(url)
+        page.wait_for_selector("#browse-open")
+        page.locator("#browse-open").click()
+        page.wait_for_selector(".hfp-row", timeout=15000)
+
+    def _wait_cwd(self, page, folder):
+        page.wait_for_function(
+            f"document.querySelector('.hfp').dataset.cwd === {str(folder)!r}"
+        )
+
+    def test_it_opens_in_the_root_when_the_field_names_a_file_outside_it(
+        self, page, rooted_picker_app
+    ):
+        url, root, _ = rooted_picker_app
+        self._open(page, url)
+        assert _cwd(page) == str(root)
+
+    def test_there_is_nothing_above_the_root(self, page, rooted_picker_app):
+        url, root, _ = rooted_picker_app
+        self._open(page, url)
+        assert ".." not in _names(page)
+        assert page.locator(".hfp-btn[data-op=up]").is_disabled()
+        assert page.locator(".hfp-btn[data-op=home]").count() == 0
+        assert page.locator(".hfp-btn[data-op=work]").count() == 0
+        crumbs = page.locator(".hfp-crumb").evaluate_all(
+            "cs => cs.map(c => c.getAttribute('title'))"
+        )
+        assert crumbs == [str(root)]
+        chips = page.locator(".hfp-chip").evaluate_all(
+            "cs => cs.map(c => c.getAttribute('title'))"
+        )
+        assert chips == [str(root)]
+
+    def test_backspace_stops_at_the_root(self, page, rooted_picker_app):
+        url, root, job = rooted_picker_app
+        self._open(page, url)
+        page.locator(f".hfp-row[data-name={job.name}]").dblclick()
+        self._wait_cwd(page, job)
+        assert not page.locator(".hfp-btn[data-op=up]").is_disabled()
+        page.locator(".hfp-list").focus()
+        page.keyboard.press("Backspace")
+        self._wait_cwd(page, root)
+        page.keyboard.press("Backspace")
+        page.wait_for_timeout(500)
+        assert _cwd(page) == str(root)
+
+    def test_a_typed_path_outside_the_root_is_refused(self, page, rooted_picker_app):
+        url, root, _ = rooted_picker_app
+        self._open(page, url)
+        page.locator(".hfp-path").fill(str(root.parent))
+        page.locator(".hfp-path").press("Enter")
+        page.wait_for_selector(".shiny-notification")
+        assert _cwd(page) == str(root)
+        page.locator(".hfp-path").fill(str(root / ".." / "above.star"))
+        page.locator(".hfp-path").press("Enter")
+        page.wait_for_timeout(500)
+        assert _cwd(page) == str(root)
 
 
 def _names(page):

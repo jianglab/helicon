@@ -225,6 +225,7 @@ class TestProc3dHandlers(object):
         return data
 
     def test_fft_resample_downsample(self):
+        pytest.importorskip("finufft")
         data = np.random.rand(16, 16, 16).astype(np.float32)
         result = self._run_fft_resample(
             data.copy(),
@@ -238,6 +239,7 @@ class TestProc3dHandlers(object):
         assert np.all(np.isfinite(result))
 
     def test_fft_resample_upsample(self):
+        pytest.importorskip("finufft")
         data = np.random.rand(8, 8, 8).astype(np.float32)
         result = self._run_fft_resample(
             data.copy(),
@@ -251,6 +253,7 @@ class TestProc3dHandlers(object):
         assert np.all(np.isfinite(result))
 
     def test_fft_resample_identity(self):
+        pytest.importorskip("finufft")
         data = np.random.rand(12, 12, 12).astype(np.float32)
         result = self._run_fft_resample(
             data.copy(),

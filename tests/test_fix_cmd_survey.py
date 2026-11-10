@@ -184,6 +184,7 @@ class TestCryosparcRepeatedOptions:
     """Repeated cryosparc options are a pipeline: each takes its own value."""
 
     def test_each_occurrence_uses_its_own_value(self, tmp_path, monkeypatch):
+        pytest.importorskip("cryosparc")
         cs_file = _make_cs_particles(tmp_path / "P1")
         outdir = tmp_path / "out"
         outdir.mkdir()
@@ -209,6 +210,7 @@ class TestCryosparcRepeatedOptions:
 
 class TestCryosparcSaveOutput:
     def test_cs_file_result_is_saved(self, tmp_path, monkeypatch):
+        pytest.importorskip("cryosparc")
         from cryosparc.dataset import Dataset
 
         cs_file = _make_cs_particles(tmp_path / "P1")
@@ -237,6 +239,7 @@ class TestCryosparcSaveOutput:
         assert cryosparc.output_cs_filename(args, "->x/y") == "P1_J5_x_y.cs"
 
     def test_extract_particles_from_cs_file(self, tmp_path, monkeypatch):
+        pytest.importorskip("cryosparc")
         from cryosparc.dataset import Dataset
 
         cs_file = _make_cs_particles(tmp_path / "P1")
@@ -266,6 +269,7 @@ class TestCryosparcSaveOutput:
                 assert mrc.data.shape == (2, 8, 8)
 
     def test_copy_exposure_group_parameters_uses_server_client(self):
+        pytest.importorskip("cryosparc")
         from helicon.plugins.cryosparc import copyexposuregroupparameters as mod
 
         class Client:

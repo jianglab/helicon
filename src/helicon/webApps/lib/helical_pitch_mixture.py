@@ -564,10 +564,15 @@ def two_pitch_tests(
     n_tasks = len(jobs) * (1 + restarts + folds)
     if workers is None:
         import helicon
+        from helicon.lib.system import has_real_threads
 
-        # each spawned worker holds its own Python, numpy and numba (about
-        # 0.5 GB) and a group's segments and pairs
-        workers = min(int(helicon.available_cpu(mem_gb_per_cpu=1.5)), n_tasks)
+        if has_real_threads():
+            # each spawned worker holds its own Python, numpy and numba (about
+            # 0.5 GB) and a group's segments and pairs
+            workers = min(int(helicon.available_cpu(mem_gb_per_cpu=1.5)), n_tasks)
+        else:
+            # e.g. Pyodide: ProcessPoolExecutor cannot fork/spawn at all
+            workers = 1
     results = [None] * len(jobs)
     if workers <= 1 or len(jobs) == 0:
         for i, (p, c) in enumerate(jobs):

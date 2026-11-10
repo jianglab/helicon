@@ -33,6 +33,13 @@ class TestBesselOnsets:
     def test_a_higher_floor_starts_later(self):
         assert L.bessel_onsets(10, 0.5)[8] > L.bessel_onsets(10, 0.05)[8]
 
+    def test_smaller_orders_and_explicit_default_floor_share_the_prefix_cache(self):
+        wide = L.bessel_onsets(45)
+        narrow = L.bessel_onsets(20, L.BESSEL_FLOOR)
+        assert np.shares_memory(wide, narrow)
+        assert np.array_equal(narrow, wide[:21])
+        assert not narrow.flags.writeable
+
 
 class TestHeights:
     def test_the_lines_are_m_over_rise_plus_n_over_pitch(self):

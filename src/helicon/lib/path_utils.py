@@ -11,6 +11,23 @@ logger = logging.getLogger(__name__)
 
 # seconds to wait for a server to respond (connect or between bytes)
 _REQUEST_TIMEOUT = 60
+# In the browser this is not "between bytes": pyodide-http only ever sets
+# XMLHttpRequest.timeout (never a per-read one, since Shinylive's Pyodide runs
+# in a worker -- _IN_WORKER in pyodide_http's own _core.py), and that is the
+# TOTAL time allowed for the whole request, start to finish. A multi-ten-MB
+# map or star file -- ordinary for this app -- comfortably outlives 60 s on
+# a slow or congested connection without ever truly stalling, and would be
+# aborted by this same deadline that a native requests.get() would have let
+# ride out. Generous rather than scaled to a guessed file size, since the
+# size is not known until the response headers arrive.
+_BROWSER_REQUEST_TIMEOUT = 600
+
+
+def _request_timeout() -> int:
+    from ..webApps import deployment
+
+    return _BROWSER_REQUEST_TIMEOUT if deployment.is_browser() else _REQUEST_TIMEOUT
+
 
 __all__ = [
     "which",
@@ -145,6 +162,25 @@ def get_direct_url(url: str) -> str:
         return url
 
 
+def _patch_requests_for_browser() -> None:
+    """Make ``requests`` work under Pyodide (no raw sockets to make a real
+    connection with): patch it, via the ``pyodide-http`` package, to route
+    through the browser's own ``fetch``/``XMLHttpRequest`` instead -- the same
+    reasoning as :func:`helicon.webApps.deployment.url_allowed` skipping its
+    own SSRF check in the browser: the request is made by the visitor's own
+    browser, not a shared server. A no-op outside the browser, and safe to
+    call on every :func:`_get` (``pyodide_http.patch_all()`` only patches
+    once).
+    """
+    from ..webApps import deployment
+
+    if not deployment.is_browser():
+        return
+    import pyodide_http
+
+    pyodide_http.patch_all()
+
+
 def _get(url: str, **kwargs):
     """``requests.get``; on a hosting service every redirect hop is checked too.
 
@@ -157,6 +193,7 @@ def _get(url: str, **kwargs):
 
     from ..webApps import deployment
 
+    _patch_requests_for_browser()
     if not deployment.is_cloud():
         return requests.get(url, **kwargs)
     for _ in range(5):
@@ -230,7 +267,7 @@ def download_file_from_url(
             ".%s.%d.%s.part" % (target.name, os.getpid(), uuid.uuid4().hex[:8])
         )
         try:
-            with _get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
+            with _get(url, stream=True, timeout=_request_timeout()) as r:
                 r.raise_for_status()
                 with open(partial, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
@@ -247,7 +284,7 @@ def download_file_from_url(
     try:
         suffix = "." + url.split("/")[-1]
         fileobj = tempfile.NamedTemporaryFile(suffix=suffix)
-        with _get(url, stream=True, timeout=_REQUEST_TIMEOUT) as r:
+        with _get(url, stream=True, timeout=_request_timeout()) as r:
             r.raise_for_status()  # Check for request success
             for chunk in r.iter_content(chunk_size=1 << 20):
                 fileobj.write(chunk)

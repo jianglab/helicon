@@ -228,6 +228,26 @@ class TestPruning:
         time.sleep(0.5)
         assert _n_entries(tmp_path) == 5, "swept despite a fresh stamp file"
 
+    def test_without_real_threads_the_sweep_runs_inline(self, tmp_path, monkeypatch):
+        """As under Pyodide: threading.Thread.start() would raise, so the sweep
+        must run synchronously on the calling thread instead of being skipped."""
+        monkeypatch.setattr("helicon.lib.system.has_real_threads", lambda: False)
+
+        @helicon.cache(expires_after=datetime.timedelta(seconds=1), cache_dir=tmp_path)
+        def f(x):
+            return b"x" * 50_000
+
+        for i in range(10):
+            f(i)
+        assert _n_entries(tmp_path) == 10
+
+        time.sleep(1.5)
+        cache_mod._prune_next.clear()
+        cache_mod._prune_interval.clear()
+        f(0)  # triggers the sweep; must have already happened by the time this returns
+
+        assert _n_entries(tmp_path) == 1
+
 
 class TestSizeCap:
     """A cap bounds total disk use, which age-based expiry cannot do."""

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging, os, time, datetime, threading
+import logging, os, sys, time, datetime, threading
 from pathlib import Path
 from typing import Any, Optional, List
 
@@ -378,7 +378,15 @@ def _prune_expired(memory: Any, cache_dir: Any, age_limit: Any) -> None:
         except Exception:
             logger.debug("could not prune expired cache in %s", key, exc_info=True)
 
-    threading.Thread(target=_run, name="helicon-cache-prune", daemon=True).start()
+    from helicon.lib.system import has_real_threads
+
+    if has_real_threads():
+        threading.Thread(target=_run, name="helicon-cache-prune", daemon=True).start()
+    else:
+        # Pyodide: no real threads (threading.Thread.start() raises
+        # RuntimeError). The sweep is housekeeping that would normally run
+        # off to the side; run it inline instead of not at all.
+        _run()
 
 
 def _clear_function_cache(cached_func: Any) -> None:
@@ -480,19 +488,25 @@ def cache(
     state_lock = threading.Lock()
 
     def _memory():
-        import joblib
-
         with state_lock:
             if "memory" not in state:
-                try:
-                    state["memory"] = joblib.Memory(cache_dir, verbose=verbose)
-                except Exception:
-                    logger.warning(
-                        "cannot create the cache folder %s. Please make sure that you have write permission in the folder (%s)",
-                        cache_dir,
-                        str(Path(cache_dir).parent.absolute()),
-                    )
+                if sys.platform == "emscripten":
+                    # Pyodide's MEMFS lives in WASM linear RAM and disappears on
+                    # reload, so pickling sparse matrices to "disk" only wastes
+                    # CPU and heap.
                     state["memory"] = DummyMemory()
+                else:
+                    import joblib
+
+                    try:
+                        state["memory"] = joblib.Memory(cache_dir, verbose=verbose)
+                    except Exception:
+                        logger.warning(
+                            "cannot create the cache folder %s. Please make sure that you have write permission in the folder (%s)",
+                            cache_dir,
+                            str(Path(cache_dir).parent.absolute()),
+                        )
+                        state["memory"] = DummyMemory()
             return state["memory"]
 
     def decorator(func):

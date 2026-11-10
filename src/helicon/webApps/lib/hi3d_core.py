@@ -414,6 +414,242 @@ def auto_correlation(
 # ── Peak finding ───────────────────────────────────────────────────────
 
 
+def _refine_com_2d(
+    raw_image: np.ndarray,
+    image: np.ndarray,
+    radius: tuple[int, int],
+    coords,
+    max_iterations: int = 10,
+    shift_thresh: float = 0.6,
+):
+    """2D Crocker-Grier center-of-mass refinement (NumPy fallback for trackpy).
+
+    Parameters
+    ----------
+    raw_image : (ny, nx) array
+        Unused when ``characterize`` is off; kept for signature parity with
+        ``trackpy.refine_com``.
+    image : (ny, nx) array
+        Image on which centroids and integrated brightness are computed.
+    radius : (ry, rx) tuple of int
+        Elliptical mask half-widths along y and x (pixels).
+    coords : DataFrame or (N, 2) array
+        Initial ``(y, x)`` peak coordinates.
+    max_iterations : int, optional
+        Maximum centroid-walk iterations per peak. Defaults to 10.
+    shift_thresh : float, optional
+        Sub-pixel offset threshold (pixels) to shift the mask center.
+        Defaults to 0.6.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``["y", "x", "mass"]``.
+    """
+    import pandas as pd
+
+    del raw_image
+    if isinstance(coords, pd.DataFrame):
+        index = coords.index
+        coords_arr = coords[["y", "x"]].values
+    else:
+        index = None
+        coords_arr = np.asarray(coords)
+    if len(coords_arr) == 0:
+        return pd.DataFrame(columns=["y", "x", "mass"], index=index, dtype=np.float64)
+
+    ry, rx = int(radius[0]), int(radius[1])
+    yy, xx = np.meshgrid(np.arange(-ry, ry + 1), np.arange(-rx, rx + 1), indexing="ij")
+    mask = (
+        ((yy / ry) ** 2 + (xx / rx) ** 2 <= 1.0).astype(np.uint8)
+        if (ry > 0 and rx > 0)
+        else np.zeros((2 * ry + 1, 2 * rx + 1), dtype=np.uint8)
+    )
+    gy = np.arange(2 * ry + 1, dtype=np.float64)[:, None]
+    gx = np.arange(2 * rx + 1, dtype=np.float64)[None, :]
+
+    coords_int = np.round(coords_arr).astype(np.intp)
+    rad_arr = np.array([ry, rx], dtype=np.intp)
+    upper = np.array([image.shape[0] - 1 - ry, image.shape[1] - 1 - rx], dtype=np.intp)
+
+    n = coords_int.shape[0]
+    final_coords = np.empty((n, 2), dtype=np.float64)
+    mass = np.empty(n, dtype=np.float64)
+
+    for feat in range(n):
+        coord = np.clip(coords_int[feat].copy(), rad_arr, upper)
+        cm_i_y = float(coord[0])
+        cm_i_x = float(coord[1])
+        total = 0.0
+        for _ in range(max_iterations):
+            cy, cx = int(coord[0]), int(coord[1])
+            neighborhood = mask * image[cy - ry : cy + ry + 1, cx - rx : cx + rx + 1]
+            total = float(neighborhood.sum())
+            if total == 0.0:
+                cm_y, cm_x = float(ry), float(rx)
+            else:
+                cm_y = float((neighborhood * gy).sum()) / total
+                cm_x = float((neighborhood * gx).sum()) / total
+            cm_i_y = cm_y - ry + cy
+            cm_i_x = cm_x - rx + cx
+            off_y = cm_y - ry
+            off_x = cm_x - rx
+            if abs(off_y) < shift_thresh and abs(off_x) < shift_thresh:
+                break
+            if off_y > shift_thresh:
+                coord[0] += 1
+            elif off_y < -shift_thresh:
+                coord[0] -= 1
+            if off_x > shift_thresh:
+                coord[1] += 1
+            elif off_x < -shift_thresh:
+                coord[1] -= 1
+            coord = np.clip(coord, rad_arr, upper)
+        final_coords[feat, 0] = cm_i_y
+        final_coords[feat, 1] = cm_i_x
+        mass[feat] = total
+
+    return pd.DataFrame(
+        {"y": final_coords[:, 0], "x": final_coords[:, 1], "mass": mass},
+        index=index,
+    )
+
+
+def _locate_2d(
+    raw_image: np.ndarray,
+    diameter: tuple[int, int],
+    minmass: float = 0.0,
+    separation: tuple[int, int] | None = None,
+    percentile: float = 64.0,
+):
+    """2D Crocker-Grier blob locator (NumPy/SciPy fallback for trackpy).
+
+    Matches ``trackpy.locate`` (bandpass, uint8 scaling, grey-dilation local
+    maxima, iterative center-of-mass refinement, KD-tree duplicate pruning,
+    and ``minmass`` filtering) so HI3D runs identically when ``trackpy`` is
+    absent, such as under Pyodide/Shinylive where ``trackpy`` has no wheel.
+
+    Parameters
+    ----------
+    raw_image : (ny, nx) array
+        2D image to search for bright peaks.
+    diameter : (dh, dw) tuple of odd int
+        Feature extent along y and x (pixels).
+    minmass : float, optional
+        Minimum integrated brightness after unscaling. Defaults to 0.0.
+    separation : (sep_y, sep_x) tuple of int, optional
+        Minimum separation between peaks (pixels). Defaults to ``diameter + 1``.
+    percentile : float, optional
+        Grayscale percentile threshold on non-zero bandpass pixels.
+        Defaults to 64.0.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``["y", "x", "mass"]``.
+    """
+    import pandas as pd
+    from scipy import ndimage
+    from scipy.spatial import cKDTree
+
+    raw_image = np.squeeze(raw_image)
+    dh, dw = int(diameter[0]), int(diameter[1])
+    if not (dh & 1 and dw & 1):
+        raise ValueError("Feature diameter must be an odd integer. Round up.")
+    if dh <= 1 or dw <= 1:
+        raise ValueError(
+            "The smoothing length scale must be larger than the noise length scale."
+        )
+    ry, rx = dh // 2, dw // 2
+    sep_y, sep_x = (
+        (dh + 1, dw + 1)
+        if separation is None
+        else (int(separation[0]), int(separation[1]))
+    )
+    is_float = not np.issubdtype(raw_image.dtype, np.integer)
+    bp_thresh = (1.0 / 255.0) if is_float else 1
+
+    background = raw_image.copy()
+    ndimage.uniform_filter1d(background, dh, axis=0, output=background, mode="nearest")
+    ndimage.uniform_filter1d(background, dw, axis=1, output=background, mode="nearest")
+
+    kx = np.arange(-4, 5, dtype=np.float64)
+    kernel = np.exp(-0.5 * kx * kx)
+    kernel /= kernel.sum()
+    smoothed = np.array(raw_image, dtype=np.float64)
+    ndimage.correlate1d(
+        smoothed, kernel, axis=0, output=smoothed, mode="constant", cval=0.0
+    )
+    ndimage.correlate1d(
+        smoothed, kernel, axis=1, output=smoothed, mode="constant", cval=0.0
+    )
+    smoothed -= background
+    bp = np.where(smoothed >= bp_thresh, smoothed, 0)
+
+    if is_float:
+        img_max = float(bp.max())
+        scale_factor = 1.0 if img_max == 0.0 else 255.0 / img_max
+        image = (scale_factor * bp.clip(min=0.0)).astype(np.uint8)
+    else:
+        scale_factor = 1.0
+        image = bp
+
+    empty = pd.DataFrame(columns=["y", "x", "mass"], dtype=np.float64)
+    not_black = image[np.nonzero(image)]
+    if len(not_black) == 0:
+        return empty
+    p_thresh = np.percentile(not_black, percentile)
+    if np.isnan(p_thresh):
+        return empty
+
+    size = [int(2 * sep_y / np.sqrt(2.0)), int(2 * sep_x / np.sqrt(2.0))]
+    dilation = ndimage.grey_dilation(image, size, mode="constant")
+    maxima = (image == dilation) & (image > p_thresh)
+    if not np.any(maxima):
+        return empty
+
+    pos = np.vstack(np.where(maxima)).T
+    margin_y = max(ry, sep_y // 2 - 1, dh // 2)
+    margin_x = max(rx, sep_x // 2 - 1, dw // 2)
+    near_edge = (
+        (pos[:, 0] < margin_y)
+        | (pos[:, 0] > image.shape[0] - margin_y - 1)
+        | (pos[:, 1] < margin_x)
+        | (pos[:, 1] > image.shape[1] - margin_x - 1)
+    )
+    pos = pos[~near_edge]
+    if len(pos) == 0:
+        return empty
+
+    refined = _refine_com_2d(image, image, (ry, rx), pos)
+    if len(refined) == 0:
+        return empty
+
+    if sep_y > 0 and sep_x > 0:
+        pos_rescaled = refined[["y", "x"]].values / np.array(
+            [sep_y, sep_x], dtype=np.float64
+        )
+        duplicates = cKDTree(pos_rescaled, 30).query_pairs(1.0 - 1e-7)
+        if len(duplicates) > 0:
+            idx0 = np.fromiter((p[0] for p in duplicates), dtype=np.intp)
+            idx1 = np.fromiter((p[1] for p in duplicates), dtype=np.intp)
+            m0 = refined["mass"].values[idx0]
+            m1 = refined["mass"].values[idx1]
+            to_drop = np.where(m0 > m1, idx1, idx0)
+            ties = m0 == m1
+            if np.any(ties):
+                s0 = pos_rescaled[idx0[ties]].sum(axis=1)
+                s1 = pos_rescaled[idx1[ties]].sum(axis=1)
+                to_drop[ties] = np.where(s0 > s1, idx1[ties], idx0[ties])
+            keep = np.ones(len(refined), dtype=bool)
+            keep[np.unique(to_drop)] = False
+            refined = refined.loc[keep].reset_index(drop=True)
+
+    refined["mass"] /= scale_factor
+    refined = refined.loc[refined["mass"] > minmass].copy()
+    return refined
+
+
 def find_peaks(
     acf: np.ndarray,
     da: float,
@@ -423,20 +659,20 @@ def find_peaks(
     minmass: float = 1.0,
     max_peaks: int = 71,
 ) -> tuple[np.ndarray | None, Any | None]:
-    """Locate peaks in the ACF using *trackpy*.
+    """Locate peaks in the ACF using *trackpy* (or the NumPy/SciPy fallback).
 
     Returns
     -------
     peaks : (N, 2) array or None
         Each row is (twist_degrees, rise_angstrom).
     masses : Series or None
-        Peak quality metric from trackpy.
+        Integrated peak brightness metric.
     """
     try:
         from trackpy import locate, refine_com
     except ImportError:
-        logger.warning("trackpy not installed — cannot find peaks in ACF")
-        return None, None
+        locate = _locate_2d
+        refine_com = _refine_com_2d
 
     diameter_height = int(peak_height / dz + 0.5) // 2 * 2 + 1
     diameter_width = int(peak_width / da + 0.5) // 2 * 2 + 1
@@ -892,8 +1128,8 @@ def refine_twist_rise(
         options={"xatol": 1e-4, "adaptive": True},
     )
     twist_opt, rise_opt = res.x
-    twist_opt = set_to_periodic_range(twist_opt, -180, 180)
-    return twist_opt, rise_opt
+    twist_opt = set_to_periodic_range(float(twist_opt), -180, 180)
+    return float(twist_opt), float(rise_opt)
 
 
 # ── Fit helical lattice (orchestrator) ─────────────────────────────────

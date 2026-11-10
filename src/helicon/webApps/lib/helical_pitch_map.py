@@ -302,6 +302,8 @@ def backproject(images, azimuths, twist, rise, csym, apix, helical_sym_order=1, 
     """
     from concurrent.futures import ThreadPoolExecutor
 
+    from helicon.lib.system import pool_executor
+
     ny, nx = images[0].shape
     nz = nx
     order = int(max(1, helical_sym_order))
@@ -325,7 +327,7 @@ def backproject(images, azimuths, twist, rise, csym, apix, helical_sym_order=1, 
         jobs.append((np.stack(profiles, 1), np.array(angles), ny) if profiles else None)
     volume = np.zeros((nz, ny, ny), dtype=np.float32)
     todo = [(i, j) for i, j in enumerate(jobs) if j is not None]
-    with ThreadPoolExecutor(max(1, int(cpu))) as pool:
+    with pool_executor(ThreadPoolExecutor, max(1, int(cpu))) as pool:
         for (i, _), out in zip(todo, pool.map(_fbp_slice, [j for _, j in todo])):
             volume[i] = out
     return volume

@@ -50,6 +50,14 @@ class HomeApp:
     # there is no command or the server is not on the user's machine.
     command: str | None = None
     url: str | None = None
+    # An integrated app's own Shinylive bundle (tools/shinylive/build.py's
+    # BUNDLES key), used only under deployment.is_browser(): there every tab
+    # is exported as its own standalone page with no shared navbar to switch
+    # within, so the chip links to that sibling page instead (see _app_svg).
+    # Home's own bundle is always exported to the site root (build.py's
+    # main()), with every sibling bundle one level below it, so the link is
+    # the bare "<bundle>/", not "../<bundle>/".
+    bundle: str | None = None
 
     @property
     def is_tab(self) -> bool:
@@ -79,6 +87,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "models to find structures that match.",
         280,
         160,
+        bundle="helical_projection",
     ),
     HomeApp(
         "HILL",
@@ -88,6 +97,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "its Fourier power spectrum.",
         280,
         280,
+        bundle="hill",
     ),
     HomeApp(
         "Denovo3D",
@@ -97,6 +107,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "average, giving a 3D map and its twist and rise.",
         280,
         400,
+        bundle="denovo3d",
     ),
     HomeApp(
         "WhereIsMyClass",
@@ -106,6 +117,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "micrographs, to see where each class came from.",
         830,
         160,
+        bundle="where_is_my_class",
     ),
     HomeApp(
         "HelicalPitch",
@@ -115,6 +127,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "segments of the same 2D class along each filament.",
         830,
         250,
+        bundle="helical_pitch",
     ),
     HomeApp(
         "AbInitio3D",
@@ -125,6 +138,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "share, then a map from the class averages or the segments.",
         830,
         320,
+        bundle="abinitio3d",
     ),
     HomeApp(
         "HI3D",
@@ -134,6 +148,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "check or refine the twist and rise.",
         830,
         400,
+        bundle="hi3d",
     ),
     HomeApp(
         "Map2seq",
@@ -156,7 +171,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         830,
         610,
         command="procart",
-        url="https://jianglab.science.psu.edu/procart",
+        url="https://procart.streamlit.app/?chain_ids=A&chain_ids=B&pdb_id=7MKH",
     ),
     HomeApp(
         "HelicalLattice",
@@ -165,6 +180,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         "Interconvert 2D lattices and helical lattices to explore helical " "symmetry.",
         280,
         510,
+        bundle="helical_lattice",
     ),
     HomeApp(
         "CtfSimulation",
@@ -175,7 +191,7 @@ HOME_APPS: tuple[HomeApp, ...] = (
         280,
         610,
         command="ctfSimulation",
-        url="https://jianglab.science.psu.edu/ctfsimulation",
+        url="https://jianglab.github.io/ctfsimulation",
     ),
 )
 
@@ -295,16 +311,26 @@ def _app_svg(app: HomeApp) -> str:
             f'<text class="hh-abbr" x="{ix + _ICON / 2}" y="{app.cy}" '
             f'dominant-baseline="central">{escape(app.abbr)}</text>'
         )
-    if app.is_tab:
+    # Under a Shinylive export every tab is its own standalone bundle, with
+    # no shared navbar to switch within -- an integrated app's chip then
+    # links to that sibling bundle's own page instead of a navbar tab. Home
+    # is always exported to the site root (build.py's main()), with every
+    # sibling one level below it, hence the bare "<bundle>/".
+    browser_bundle = (
+        f"{app.bundle}/" if deployment.is_browser() and app.bundle else None
+    )
+    if app.is_tab and browser_bundle is None:
         hint, data, external = "Click to open", f' data-tab="{escape(app.name)}"', ""
     else:
-        if app.command:
+        if app.is_tab:
+            hint, data = "Click to open in a new tab", ""
+        elif app.command:
             hint = f"Click to open in a new window (helicon {app.command})"
             data = f' data-command="{escape(app.command)}"'
         else:
             hint, data = "Click to open the hosted site in a new tab", ""
-        if app.url:
-            data += f' data-url="{escape(app.url)}"'
+        if app.url or browser_bundle:
+            data += f' data-url="{escape(app.url or browser_bundle)}"'
         external = (
             f'<text class="hh-external" x="{x + _CHIP_W - 12}" y="{app.cy}" '
             f'dominant-baseline="central">↗</text>'
@@ -352,7 +378,7 @@ def _workflow_svg() -> str:
     parts = [
         '<svg class="hh-diagram" viewBox="0 0 1110 670" '
         'xmlns="http://www.w3.org/2000/svg" role="group" '
-        'aria-label="Helical data processing workflow">',
+        'aria-label="Helicon data processing workflow">',
         "<defs>",
         *(
             f'<marker id="{mid}" viewBox="0 0 10 10" refX="9" refY="5" '
@@ -415,7 +441,10 @@ _CSS = """
     --hh-tip-border: #4a4a4a;
 }
 .helicon-home .hh-title {
-    font-size: 16pt; font-weight: 600; text-align: center;
+    font-size: 16pt; font-weight: 400; text-align: center;
+}
+.helicon-home .hh-title strong {
+    font-size: inherit; font-weight: 700;
 }
 .helicon-home .hh-subtitle {
     color: var(--hh-muted); text-align: center; margin: 4px 0 8px !important;
@@ -524,15 +553,44 @@ _DISPLAY_DESC = (
 )
 
 # Delegated on document so it does not depend on when the tab is rendered.
-_JS = (
-    "var _HH_LOCAL_HOSTS = %s;\n" % list(_LOCAL_HOSTS)
-    + """
+# A template, not a constant: _js() fills in _HH_IS_BROWSER fresh for every
+# render (deployment.is_browser() cannot change mid-process, but computing it
+# per-render, not once at import time, keeps it something a test can drive
+# both ways through home_tab_ui() rather than through a module reload).
+_JS_BODY = r"""
 (function() {
-    var local = _HH_LOCAL_HOSTS.indexOf(location.hostname) >= 0;
+    // A Shinylive export has no server at all behind it, however it is
+    // served -- including from plain localhost, exactly how
+    // tools/shinylive/README.md has a visitor test a build locally, which
+    // would otherwise match _HH_LOCAL_HOSTS and have this try to launch a
+    // helicon subcommand that can never start (home_tab_server's own
+    // deployment.is_cloud() check declines it silently, leaving ProCart/
+    // CtfSimulation's click looking like it did nothing at all).
+    var local = !_HH_IS_BROWSER && _HH_LOCAL_HOSTS.indexOf(location.hostname) >= 0;
     // The file explorer/display opens on the server's desktop, so only offer it there.
     document.querySelectorAll('.helicon-home .hh-toolbar')
         .forEach(function(bar) { bar.hidden = !local; });
     function appOf(el) { return el && el.closest ? el.closest('.helicon-home .hh-app') : null; }
+    // Every Shinylive export runs behind a per-session service-worker proxy
+    // path ("app_<random>/", appended after wherever the page's own
+    // index.html lives -- see shinylive.js's setupAppProxyPath()), so
+    // location.pathname inside Home's own running app is that proxy path,
+    // not the real directory index.html sits in. A plain relative link to a
+    // sibling bundle (HomeApp.bundle's bare "<bundle>/") would resolve one
+    // level too deep, landing on a URL the service worker misroutes back to
+    // Home's own backend instead of serving that bundle's real files (seen
+    // as a top-level tab showing "An internal server error occurred" the
+    // instant it opens). Stripping that proxy segment recovers the real site
+    // root -- where Home, and every sibling bundle one level below it
+    // (promote_to_root(), build.py), actually live -- before resolving the
+    // relative link against it. An absolute external URL (ProCart,
+    // CtfSimulation's hosted sites) never matches the proxy-segment pattern
+    // and passes through unchanged.
+    function resolveAppUrl(url) {
+        if (/^([a-z][a-z0-9+.-]*:)?\/\//i.test(url)) return url;
+        var root = location.pathname.replace(/app_[A-Za-z0-9]+\/$/, "");
+        return root + url;
+    }
     function launch(app) {
         var d = app.dataset;
         if (d.tab) {
@@ -543,7 +601,7 @@ _JS = (
             Shiny.setInputValue('home_launch', d.command, {priority: 'event'});
         } else if (d.url) {
             // Opened here, inside the click, so popup blockers allow it.
-            window.open(d.url, '_blank', 'noopener');
+            window.open(resolveAppUrl(d.url), '_blank', 'noopener');
         }
     }
     function setHot(app, on) {
@@ -558,17 +616,29 @@ _JS = (
         tip.querySelector('strong').textContent = app.dataset.name;
         tip.querySelector('.hh-tip-desc').textContent = app.dataset.desc;
         tip.querySelector('.hh-tip-hint').textContent = app.dataset.hint;
+        tip.style.left = '0px';
+        tip.style.top = '0px';
         tip.hidden = false;
         setHot(app, true);
         var box = home.getBoundingClientRect();
         var r = (app.querySelector('.hh-chip') || app).getBoundingClientRect();
         var left = r.left - box.left + home.scrollLeft + r.width / 2 - tip.offsetWidth / 2;
         left = Math.max(4, Math.min(left, home.clientWidth - tip.offsetWidth - 4));
-        // Open away from the diagram's middle, where most arrows run.
+        // Open away from the diagram's middle, where most arrows run, unless
+        // that side would clip against the container or viewport edge.
         var svg = home.querySelector('.hh-diagram').getBoundingClientRect();
-        var below = r.top + r.height / 2 > svg.top + svg.height / 2;
-        var top = r.top - box.top + home.scrollTop - tip.offsetHeight - 8;
-        if (below || top < home.scrollTop) top = r.bottom - box.top + home.scrollTop + 8;
+        var aboveTop = r.top - box.top + home.scrollTop - tip.offsetHeight - 8;
+        var belowTop = r.bottom - box.top + home.scrollTop + 8;
+        var minTop = home.scrollTop + Math.max(0, -box.top) + 4;
+        var maxBottom = home.scrollTop + Math.min(
+            home.clientHeight, window.innerHeight - box.top) - 4;
+        var fitsAbove = aboveTop >= minTop;
+        var fitsBelow = belowTop + tip.offsetHeight <= maxBottom;
+        var preferBelow = r.top + r.height / 2 > svg.top + svg.height / 2;
+        var top = preferBelow
+            ? ((fitsBelow || !fitsAbove) ? belowTop : aboveTop)
+            : ((fitsAbove || !fitsBelow) ? aboveTop : belowTop);
+        top = Math.max(minTop, Math.min(top, maxBottom - tip.offsetHeight));
         tip.style.left = left + 'px';
         tip.style.top = top + 'px';
     }
@@ -606,13 +676,25 @@ _JS = (
     });
 })();
 """
-)
+
+
+def _js() -> str:
+    return (
+        "var _HH_LOCAL_HOSTS = %s;\n" % list(_LOCAL_HOSTS)
+        + "var _HH_IS_BROWSER = %s;\n"
+        % ("true" if deployment.is_browser() else "false")
+        + _JS_BODY
+    )
 
 
 def home_tab_ui():
     return ui.div(
         ui.tags.style(_CSS),
-        ui.div("Helical data processing workflow", class_="hh-title"),
+        ui.div(
+            ui.tags.strong("Helicon"),
+            " data processing workflow",
+            class_="hh-title",
+        ),
         ui.div(
             "Hover over an app to see what it does; click it to open the app.",
             class_="hh-subtitle",
@@ -650,7 +732,7 @@ def home_tab_ui():
             hidden=True,
             role="tooltip",
         ),
-        ui.tags.script(_JS),
+        ui.tags.script(_js()),
         class_="helicon-home",
     )
 

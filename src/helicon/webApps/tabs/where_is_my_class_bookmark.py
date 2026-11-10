@@ -5,9 +5,12 @@ Kept apart from the tab, which is imported only when it is first opened
 the tab's modules (the widget bridge) take seconds to import.
 """
 
+# the example data of the other tabs (EMPIAR-10940)
+EXAMPLE_URL_STAR = "https://ftp.ebi.ac.uk/empiar/world_availability/10940/data/EMPIAR/Class2D/job010/run_it020_data.star"
+
 BOOKMARK_DEFAULTS = {
     "input_mode": ("wimc_input_mode", "server"),
-    "url_star": ("wimc_url_star", ""),
+    "url_star": ("wimc_url_star", EXAMPLE_URL_STAR),
     "server_star": ("wimc_server_star", ""),
     "ignore_blank": ("wimc_ignore_blank", True),
     "sort_abundance": ("wimc_sort_abundance", True),

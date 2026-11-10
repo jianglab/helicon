@@ -1,0 +1,58 @@
+name: shinylive
+
+# Browser (Shinylive/Pyodide) build of the helicon webApps tabs -- see
+# tools/shinylive/README.md for which tabs qualify and why.
+#
+# Every push and pull request: the bundles still export, so a change that
+# breaks one is caught here rather than after a user clicks the link. Push to
+# main only: publish them to GitHub Pages (needs a one-time repo setting:
+# Settings -> Pages -> Build and deployment -> Source: GitHub Actions).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # shinylive is a build-time tool, not a helicon dependency (it has no
+      # part in what the exported app runs) -- see tools/shinylive/README.md
+      - run: pip install shinylive
+      - name: shinylive package version (the assets cache key)
+        run: |
+          python -c "import importlib.metadata as m; print('SHINYLIVE_VERSION=' + m.version('shinylive'))" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/shinylive
+          key: shinylive-assets-${{ env.SHINYLIVE_VERSION }}
+      - run: python tools/shinylive/build.py
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          path: build/shinylive
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

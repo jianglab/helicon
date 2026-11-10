@@ -766,6 +766,8 @@ def rank_by_projection_matching(
     # called just before each pair's work begins and can still stop the rest.
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+    from helicon.lib.system import pool_executor
+
     if cpu is None:
         try:
             import helicon
@@ -788,7 +790,7 @@ def rank_by_projection_matching(
     except Exception:
         limits = None
     try:
-        with ThreadPoolExecutor(workers) as pool:
+        with pool_executor(ThreadPoolExecutor, workers) as pool:
             running = {}
             for i, pair in enumerate(pairs):
                 # Report before the work, so a caller driving a progress bar

@@ -5,8 +5,6 @@ Kept apart from the tab, which is imported only when it is first opened
 the tab's modules (the widget bridge, SciPy) take seconds to import.
 """
 
-from shiny import ui
-
 from .. import bookmark
 
 # Worked out from the loaded image (its pixel size, the filament's diameter,
@@ -16,7 +14,12 @@ _DERIVED = bookmark.DERIVED
 
 BOOKMARK_DEFAULTS = {
     "input_mode": ("hill_input_mode_params", "2"),
-    "url": ("hill_img_file_url", "https://tinyurl.com/y5tq9fqa"),
+    # served by GitHub, which lets a page on another site fetch it: the browser
+    # build cannot download from a host that does not (box.com, a short link)
+    "url": (
+        "hill_img_file_url",
+        "https://raw.githubusercontent.com/jianglab/testdata/main/hill/cryosparc_P115_J50.templates_selected.mrc",
+    ),
     "server_image": ("hill_img_file_server", ""),
     "selected": ("hill_select_image_ids", [1]),
     "is_3d": ("hill_is_3d", False),
@@ -48,15 +51,12 @@ BOOKMARK_DEFAULTS = {
 
 
 def bokeh_dependency():
-    """Bokeh's scripts, from the CDN, for the page head.
+    """Bokeh's scripts, as a deduplicated offline ``HTMLDependency`` for ``<head>``.
 
     The page loads them at the start, for the HILL tab to use when it is first
     opened: scripts that arrive with the tab's own page come too late for the
     widget that shows the figures ("Bokeh is not defined").
     """
-    from bokeh.resources import Resources
+    import helicon
 
-    resources = Resources(
-        mode="cdn", components=["bokeh", "bokeh-widgets", "bokeh-tables"]
-    )
-    return ui.head_content(ui.HTML(resources.render()))
+    return helicon.shiny.bokeh_dependency()

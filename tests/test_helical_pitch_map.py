@@ -108,6 +108,32 @@ class TestReconstruct:
         assert m["volume"].shape[0] < 20  # a few rises: the symmetry does the rest
 
 
+class TestBackprojectWithoutRealThreads:
+    """As under Pyodide: threading.Thread.start() would raise, so
+    backproject's ThreadPoolExecutor must fall back to running its jobs
+    serially in-process instead (helicon.lib.system.pool_executor)."""
+
+    def test_matches_the_threaded_result(self, monkeypatch):
+        _, az, images = _classes()
+        prepared = maps.straighten_classes(images, az, 5.0, 5.0)
+        kw = dict(
+            images=prepared,
+            azimuths=az * 2,
+            twist=700.0 * 2 / 1400.0 * 360.0,
+            rise=4.75,
+            csym=2,
+            apix=5.0,
+            helical_sym_order=3,
+            cpu=2,
+        )
+        threaded = maps.backproject(**kw)
+        import helicon.lib.system as system
+
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        serial = maps.backproject(**kw)
+        np.testing.assert_allclose(threaded, serial)
+
+
 class TestManyTurnsNeedProjectionMatching:
     """With more than one turn per repeat the ring angles are multiplied by
     turns/csym, and cannot place the averages."""

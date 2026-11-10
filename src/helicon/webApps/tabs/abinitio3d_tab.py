@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-import plotly.io as pio
 
 import helicon
 from shiny import reactive, ui, module, req, render
@@ -327,7 +326,7 @@ def abinitio3d_tab_server(input, output, session):
             return None, int(n_images), None
 
     # Browse... in the server mode: pick the files on this computer
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "params_browse",
             "server_params",
@@ -346,7 +345,7 @@ def abinitio3d_tab_server(input, output, session):
     # A server file chosen or typed in one of the two server fields brings the
     # other file of the same 2D classification with it, when it is beside it.
     def _fill_companion(given, other_id, other_value):
-        if deployment.is_cloud():  # no looking at the server's files
+        if not deployment.has_server_files():  # no looking at the server's files
             return
         found = class2d_files.companion(given)
         if (

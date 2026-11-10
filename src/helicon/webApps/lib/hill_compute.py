@@ -167,7 +167,7 @@ def fourier_shells(shape: tuple, cutoff_res: tuple) -> np.ndarray:
     sy = (np.arange(ny) - ny // 2) * ds_y
     sx = (np.arange(nx) - nx // 2) * ds_x
     radius = np.hypot(sy[:, None], sx[None, :])
-    shells = np.floor(radius / max(ds_y, ds_x)).astype(np.int64)
+    shells = np.floor(radius / max(ds_y, ds_x)).astype(np.intp)
     shells.setflags(write=False)  # shared through the cache
     return shells
 
@@ -327,15 +327,29 @@ def fft_rescale(
     else:
         ony, onx = image.shape
 
-    from finufft import nufft2d2
-
     freq_y = np.fft.fftfreq(ony) * 2 * apix / res_limit_y
     freq_x = np.fft.fftfreq(onx) * 2 * apix / cutoff_res_x
-    Y, X = np.meshgrid(freq_y, freq_x, indexing="ij")
-    Y = (2 * np.pi * Y).flatten(order="C")
-    X = (2 * np.pi * X).flatten(order="C")
-    fft = nufft2d2(x=Y, y=X, f=image.astype(np.complex128), eps=1e-6)
-    fft = fft.reshape((ony, onx))
+
+    from helicon.lib.transforms import (
+        _HAS_FINUFFT,
+        _nonuniform_grid_dft,
+        _single_omp_thread,
+    )
+
+    if _HAS_FINUFFT:
+        with _single_omp_thread():
+            from finufft import nufft2d2
+
+            Y, X = np.meshgrid(freq_y, freq_x, indexing="ij")
+            Y = (2 * np.pi * Y).flatten(order="C")
+            X = (2 * np.pi * X).flatten(order="C")
+            fft = nufft2d2(x=Y, y=X, f=image.astype(np.complex128), eps=1e-6)
+        fft = fft.reshape((ony, onx))
+    else:
+        # finufft has no Pyodide/wasm wheel: freq_y/freq_x are each
+        # independently uniform, so the query grid is separable and this
+        # direct DFT is exact, not an eps-approximation like finufft's
+        fft = _nonuniform_grid_dft(image, [2 * np.pi * freq_y, 2 * np.pi * freq_x])
     # phase shifts for real-space shifts by half the box
     phase_shift = np.ones(fft.shape)
     phase_shift[1::2, :] *= -1

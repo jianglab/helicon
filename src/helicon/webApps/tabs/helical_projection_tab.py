@@ -16,7 +16,6 @@ import pandas as pd
 import helicon
 from shiny import reactive, render, ui, module, req
 from shiny.types import SilentException
-import plotly.express as px
 
 
 from .. import auto_method_ui, deployment
@@ -57,7 +56,7 @@ def _emdb_link_script():
     return ui.tags.script(
         r"""
         (function () {
-            var GRID = 'helical_projection-display_emdb_dataframe';
+            var GRID = '%s';
             var PATTERN = /^EMD-\d+$/;
             function linkify() {
                 var grid = document.getElementById(GRID);
@@ -94,6 +93,7 @@ def _emdb_link_script():
             watch();
         })();
         """
+        % module.resolve_id("display_emdb_dataframe")
     )
 
 
@@ -165,7 +165,10 @@ def _stretch_label(result, factors=()):
 
 @module.ui
 def helical_projection_tab_ui():
-    return ui.div(
+    # fillable (not a plain div) so the sidebar layout is bounded by the window
+    # and its sidebar scrolls on its own
+    return ui.page_fillable(
+        helicon.shiny.plotly_dependency(),
         ui.layout_sidebar(
             ui.sidebar(
                 ui.navset_pill(
@@ -468,7 +471,7 @@ def helical_projection_tab_ui():
 @module.server
 def helical_projection_tab_server(input, output, session):
     # Browse... in the server mode: pick the files on this computer
-    if not deployment.is_cloud():
+    if deployment.has_server_files():
         helicon.shiny.file_picker_fill(
             "images_browse",
             "server_images",
@@ -617,6 +620,9 @@ def helical_projection_tab_server(input, output, session):
                         titles[li] = str(df.loc[mask, "title"].values[0])
         except Exception:
             pass
+        import plotly.express as px
+        import plotly.io as _pio
+
         fig = px.scatter(
             x=range(1, len(scores) + 1),
             y=scores,
@@ -652,9 +658,7 @@ def helical_projection_tab_server(input, output, session):
             autosize=True,
             width=None,
         )
-        import plotly.io as _pio
-
-        return ui.HTML(_pio.to_html(fig, full_html=False))
+        return ui.HTML(_pio.to_html(fig, full_html=False, include_plotlyjs=False))
 
     @render.ui
     @reactive.event(map_side_projections_with_alignments)
@@ -1638,7 +1642,11 @@ def helical_projection_tab_server(input, output, session):
         # volume of its own, so a pool of one-per-core asks for several
         # gigabytes at once on a many-core machine.
         n_workers = compute.projection_workers(len(active_maps))
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        # pool_executor: a real ThreadPoolExecutor, or (Pyodide, which has no
+        # real threads) a drop-in that runs the maps one at a time instead
+        with helicon.pool_executor(
+            ThreadPoolExecutor, max_workers=n_workers
+        ) as executor:
             futures = {
                 executor.submit(
                     compute.symmetrize_project_align_one_map,
@@ -1664,7 +1672,9 @@ def helical_projection_tab_server(input, output, session):
                     m_info, res = f.result()
                 except Exception as e:
                     m_info, res = futures[f], None
-                    logger.error("Failed to search %s: %s", m_info.label, e)
+                    logger.error(
+                        "Failed to search %s: %s", m_info.label, e, exc_info=True
+                    )
                     errors[m_info.label] = str(e)
                 t1 = time()
                 results.append((m_info, res))

@@ -6,11 +6,10 @@ Wrapped as a Shiny module using render.ui + pio.to_html().
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
 from shiny import reactive, render, ui
 from shiny import module
 
@@ -36,12 +35,41 @@ BOOKMARK_DEFAULTS = {
 }
 
 
+@lru_cache(maxsize=1)
+def _plotly_dependency():
+    """Plotly's JavaScript bundle as a deduplicated ``HTMLDependency`` for ``<head>``.
+
+    Kept self-contained (matching ``helicon.shiny.plotly_dependency``'s name and
+    version so ``htmltools`` deduplicates them) because this module is also
+    exported standalone with ``mode="vendor"`` (no ``helicon`` import).
+    """
+    from htmltools import HTMLDependency
+    import plotly
+    from plotly import offline as plotly_offline
+
+    version_fn = getattr(
+        plotly_offline, "get_plotlyjs_version", lambda: plotly.__version__
+    )
+    js = (
+        plotly_offline.get_plotlyjs()
+        .replace("</script>", "<\\/script>")
+        .replace("</head>", "<\\/head>")
+    )
+    return HTMLDependency(
+        "plotly",
+        version=version_fn(),
+        head=ui.tags.script(ui.HTML(js)),
+    )
+
+
 def _fig_to_html(fig):
     """Convert a plotly figure to responsive HTML for rendering via render.ui."""
+    import plotly.io as pio
+
     html = pio.to_html(
         fig,
         full_html=False,
-        include_plotlyjs=True,
+        include_plotlyjs=False,
         config={"responsive": True, "displayModeBar": False},
     )
     return ui.HTML(html)
@@ -301,6 +329,9 @@ def plot_2d_lattice(
                 y.append(v[1])
 
     df = pd.DataFrame({"x": x, "y": y})
+    import plotly.express as px
+    import plotly.graph_objects as go
+
     fig = px.scatter(df, x="x", y="y", color_discrete_sequence=["#636EFA"])
 
     x, y = zip(*corner_points)
@@ -415,6 +446,9 @@ def plot_helical_lattice_unrolled(
     df = pd.DataFrame({"x": x, "y": y, "csym": sym})
     df["csym"] = df["csym"].astype(str)
 
+    import plotly.express as px
+    import plotly.graph_objects as go
+
     fig = px.scatter(
         df,
         x="x",
@@ -528,6 +562,9 @@ def plot_helical_lattice(
 
     df = pd.DataFrame({"x": x, "y": y, "z": z, "csym": sym})
     df["csym"] = df["csym"].astype(str)
+
+    import plotly.express as px
+    import plotly.graph_objects as go
 
     fig = px.scatter_3d(
         df,
@@ -692,6 +729,7 @@ def helical_lattice_tab_ui():
             ),
             width="200px",
         ),
+        _plotly_dependency(),
         ui.h1(
             "HelicalLattice: 2D Lattice \u21c4 Helical Lattice",
             style="font-weight: bold;",

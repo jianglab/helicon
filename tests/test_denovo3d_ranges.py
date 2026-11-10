@@ -4,8 +4,9 @@ import re
 
 import pytest
 
-from helicon.webApps.tabs import denovo3d_tab
+from helicon.webApps.tabs import denovo3d_tab, denovo3d_ui
 from _source import tab_source
+from _ui import page
 
 
 def _slider(input_id):
@@ -33,3 +34,35 @@ class TestSliderBounds:
         args = _slider(input_id)
         lo, hi = args["value"]
         assert float(args["min"]) <= lo <= hi <= float(args["max"])
+
+
+class TestSearchRowLayout:
+    def test_cards_and_buttons_share_an_unclipped_stretch_row(self):
+        dn_page = page(denovo3d_ui.denovo3d_tab_ui)
+        ids = (
+            "dn_twist_card",
+            "dn_rise_card",
+            "dn_csym_card",
+            "dn_show_run_button",
+            "dn_stop_denovo3D",
+        )
+        assert dn_page.comes_before(*ids)
+        rows = [
+            next(
+                up
+                for up in dn_page.element(name).ancestors()
+                if "dn-search-row" in up.classes()
+            )
+            for name in ids
+        ]
+        assert all(r is rows[0] for r in rows)
+        assert not any("card" in node.classes() for node in rows[0].walk())
+        for node in rows[0].walk():
+            assert "height:" not in node.attrs.get("style", "")
+
+    def test_parameter_cards_do_not_fix_their_height(self):
+        src = tab_source(denovo3d_tab)
+        block = src[
+            src.index("def dn_csym_card") : src.index("def _dn_map_for_download")
+        ]
+        assert "height:" not in block

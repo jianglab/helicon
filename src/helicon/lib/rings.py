@@ -49,6 +49,8 @@ def group_index(labels, n_groups: int | None = None) -> GroupIndex:
     GroupIndex
     """
     flat = np.asarray(labels).ravel()
+    if np.issubdtype(flat.dtype, np.integer):
+        flat = flat.astype(np.intp, copy=False)
     if n_groups is None:
         n_groups = int(flat.max()) + 1 if len(flat) else 0
     order = np.argsort(flat, kind="stable")

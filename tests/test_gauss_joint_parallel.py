@@ -66,3 +66,21 @@ class TestParallelDesignMatrices:
             _images(1), [0.0], 1.0, -9.0, 1.0, algorithm=dict(model="gauss"), cpu=7
         )
         assert seen["cpu"] == 7
+
+
+class TestWithoutRealThreads:
+    """As under Pyodide: ThreadPoolExecutor itself cannot start a thread there
+    (see tools/shinylive/README.md), so gauss_joint_reconstruct's design
+    matrices must still build correctly through helicon.pool_executor's
+    serial stand-in."""
+
+    def test_the_fit_is_unchanged_with_cpu_4(self, monkeypatch):
+        from helicon.lib import system
+
+        images = _images()
+        one, info_one = gauss.gauss_joint_reconstruct(images, cpu=1, **_KW)
+        monkeypatch.setattr(system, "_HAS_REAL_THREADS", False)
+        four, info_four = gauss.gauss_joint_reconstruct(images, cpu=4, **_KW)
+        np.testing.assert_allclose(four, one, rtol=1e-6, atol=1e-9)
+        assert info_four["score"] == pytest.approx(info_one["score"], abs=1e-9)
+        assert info_four["per_image"] == pytest.approx(info_one["per_image"])
