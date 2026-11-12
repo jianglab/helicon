@@ -1,0 +1,84 @@
+name: publish
+
+# Publish helicon to PyPI when a release tag (v2026.10, ...) is pushed.
+#
+# The version comes from the tag, through setuptools-scm (see pyproject.toml):
+# there is no version number to edit. PyPI is reached by "trusted publishing"
+# (OpenID Connect), so no token is stored in the repository.
+#
+# One-time setup:
+#   1. PyPI, project helicon -> Manage -> Publishing -> Add a new publisher ->
+#      GitHub: owner jianglab, repository helicon, workflow publish.yml,
+#      environment pypi.
+#   2. GitHub, Settings -> Environments -> New environment "pypi". Add a required
+#      reviewer, so that an upload (public, and cannot be undone) waits for an
+#      approval, and limit deployment to tags v*.
+#
+# A release is then: git tag v2026.12 && git push <remote> v2026.12, and approve
+# the upload in the Actions run.
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # setuptools-scm reads the tags
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: The tag is a commit of main
+        # a tag made on a side branch is not a release
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - run: pip install build twine
+      # separate commands, as a wheel built from the sdist (what a plain
+      # `python -m build` does) has no git information and loses the commit hash
+      - run: python -m build --sdist
+      - run: python -m build --wheel
+      - run: twine check dist/*
+      - name: The files carry the release version
+        run: |
+          ls -l dist
+          if ls dist | grep -q "dev"; then
+            echo "a development version was built: is the tag on this commit?"
+            exit 1
+          fi
+      - name: The wheel installs and runs
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install dist/helicon-*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/venv/bin/helicon" --version
+          "$RUNNER_TEMP/venv/bin/helicon" --help > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    # The environment is where a reviewer can be required to approve an upload,
+    # which is public and cannot be undone (Settings -> Environments -> pypi).
+    environment:
+      name: pypi
+      url: https://pypi.org/project/helicon/
+    permissions:
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
