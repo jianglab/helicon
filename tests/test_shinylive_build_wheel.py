@@ -6,7 +6,9 @@ only ever shells out to `pip wheel`, which this fakes, so there is nothing
 here that needs the shinylive package or a real build.
 """
 
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "tools" / "shinylive"))
@@ -18,7 +20,12 @@ def _fake_pip_wheel(version, out_dir):
     touched to a fresh mtime, as `pip wheel` would."""
 
     def run(cmd, **kwargs):
-        (out_dir / f"helicon-{version}-py3-none-any.whl").touch()
+        wheel = out_dir / f"helicon-{version}-py3-none-any.whl"
+        wheel.touch()
+        # strictly newer than any file made a moment ago: a coarse file-system
+        # clock gives equal mtimes, and build_wheel picks the newest
+        newest = time.time() + 10
+        os.utime(wheel, (newest, newest))
 
     return run
 

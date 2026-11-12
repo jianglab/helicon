@@ -547,9 +547,12 @@ class TestVectorizedFirstPass:
         spectra = li.prepare([_helix()], APIX, CUTOFF)
         li._first_pass(spectra, 6, [29.4], [21.92], 77.6)
         restored = pickle.loads(pickle.dumps(spectra))
-        assert li._first_pass(restored, 6, [29.4], [21.92], 77.6) == pytest.approx(
-            li._first_pass(spectra, 6, [29.4], [21.92], 77.6)
-        )
+        got = li._first_pass(restored, 6, [29.4], [21.92], 77.6)
+        want = li._first_pass(spectra, 6, [29.4], [21.92], 77.6)
+        # newer pytest's approx refuses a list of tuples: compare tuple by tuple
+        assert len(got) == len(want)
+        for g, w in zip(got, want):
+            assert g == pytest.approx(w)
 
     def test_default_hill_grid_runs_under_four_seconds_on_one_worker(self):
         import time

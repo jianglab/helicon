@@ -309,20 +309,27 @@ def build_wheel(out_dir: Path = BUILD_DIR) -> Path:
     in *out_dir* once the current one is known keeps a later call's own
     lookup here from ever finding more than one.
     """
+    import fcntl
+    import tempfile
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-deps",
-            "-w",
-            str(out_dir),
-            str(REPO_ROOT),
-        ],
-        check=True,
-    )
+    # pip builds in the source tree (its build/ folder), so two builds at once
+    # -- parallel test workers -- break each other: one at a time
+    with open(Path(tempfile.gettempdir()) / "helicon-build-wheel.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "wheel",
+                "--no-deps",
+                "-w",
+                str(out_dir),
+                str(REPO_ROOT),
+            ],
+            check=True,
+        )
     # pip (re)writes the wheel matching the checkout's current version,
     # whether or not that filename already existed -- its mtime is always
     # the freshest among any helicon-*.whl here

@@ -15,6 +15,7 @@ fast runs; add it to ``tests/slow_tests.txt`` if ``update_slow_tests.py``
 does not pick it up on its own.
 """
 
+import shutil
 import sys
 import threading
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -24,6 +25,9 @@ import pytest
 from playwright.sync_api import Page
 
 pytest.importorskip("shinylive")
+# the package alone is not enough: the export runs its command-line tool
+if shutil.which("shinylive") is None:
+    pytest.skip("the shinylive command is not on PATH", allow_module_level=True)
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "tools" / "shinylive"))
 import build as shinylive_build  # noqa: E402
