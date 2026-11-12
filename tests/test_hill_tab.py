@@ -2025,3 +2025,95 @@ class TestTransformedImage:
         with reactive.isolate():
             out = h.ns["_transformed"](h.images[1], {"apix": 1.0, "angle": 0.0})
         np.testing.assert_array_equal(out, h.images[1])
+
+
+class TestInitialLoadAndServerSync:
+    """On initial server startup, hidden inputs raise SilentException until the
+    browser reports them, and custom JS inputs like hill_active_image are unset."""
+
+    def test_process_input_data_reraises_silent_exception_until_auto_method_ready(self):
+        from shiny.types import SilentException
+
+        async def run():
+            h = _Effects("Image")
+            h.ns["input_data"] = reactive.Value(np.stack(h.images))
+            h.ns["_last_processed_input_data"] = [None]
+            h.ns["_seeded_initial_params"] = [False]
+            h.ns["initial_selected_image_indices"] = reactive.Value([0])
+            ready = [False]
+
+            def auto_method():
+                if not ready[0]:
+                    raise SilentException()
+                return "threshold"
+
+            h.input.hill_auto_method = auto_method
+            h.ns["hill"].auto_upright_transform = lambda img, apix, method: {
+                "angle": 15.0,
+                "dx": 2.0,
+                "dy": 0.0,
+                "mask_radius": 3.0,
+            }
+            h.add("_process_input_data")
+            try:
+                await reactive.flush()
+                # Not marked processed while SilentException was raised
+                assert h.ns["_last_processed_input_data"][0] is None
+                ready[0] = True
+                h.ns["input_data"].set(np.stack(h.images).copy())
+                await reactive.flush()
+                assert h.ns["_last_processed_input_data"][0] is not None
+                assert h.get("avg_ps_pd_main_in_df")[0]["angle"] == 15.0
+                assert h.ns["_pushed_params"][-1]["angle"] == 15.0
+            finally:
+                h.close()
+
+        asyncio.run(run())
+
+    def test_radial_profile_updates_on_startup_before_active_image_is_clicked(self):
+        from shiny.types import SilentException
+
+        async def run():
+            h = _Effects("Image")
+
+            def unset_active():
+                raise SilentException()
+
+            h.input.hill_active_image = unset_active
+            h.ns["selected_images"].set([h.images[0]])
+            h.ns["data_2d_transformed"].set(h.images[0])
+            h.ns["_pushed_params"].append(
+                {
+                    "angle": 12.0,
+                    "dx": 1.0,
+                    "dy": 0.0,
+                    "mask_radius": 25.0,
+                    "mask_len": 90.0,
+                }
+            )
+            line = lambda: SimpleNamespace(data_source=SimpleNamespace(data=None))
+            lines = {
+                k: line()
+                for k in (
+                    "fig_radial_profile_line_max",
+                    "fig_radial_profile_line_max_flipped",
+                    "fig_radial_profile_line_mean",
+                    "fig_radial_profile_line_mean_flipped",
+                )
+            }
+            rmax = SimpleNamespace(location=0)
+            h.ns.update(
+                lines,
+                _rp_rmin_span=SimpleNamespace(location=0),
+                _rp_rmax_span=rmax,
+            )
+            h.add("_update_radial_profile_data")
+            try:
+                await reactive.flush()
+                assert lines["fig_radial_profile_line_max"].data_source.data is not None
+                assert rmax.location == 25.0
+                assert h.transforms[-1][:2] == (12.0, 1.0)
+            finally:
+                h.close()
+
+        asyncio.run(run())

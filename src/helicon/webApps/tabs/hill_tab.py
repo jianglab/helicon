@@ -337,6 +337,9 @@ def hill_tab_server(input, output, session):
     # What the server last gave the transform controls, oldest first (see
     # _controls_lag).
     _pushed_params = []
+    # The input data (the very array) that _process_input_data has handled, so that
+    # it runs again only for new data, not each time its other inputs change.
+    _last_processed_input_data = [None]
 
     def _note_push(angle, dx, dy, mask_radius, mask_len):
         _pushed_params.append(
@@ -1541,11 +1544,20 @@ def hill_tab_server(input, output, session):
             ui.update_slider("hill_mask_len", value=100.0)
 
     @reactive.effect
-    @reactive.event(input_data, input.hill_is_3d)
+    @reactive.event(input_data, input.hill_is_3d, input.hill_auto_method)
     def _process_input_data():
         req(input_data() is not None)
         if input.hill_is_3d():
+            _last_processed_input_data[0] = None
             return
+        # At start-up the browser has not reported the method yet and this raises
+        # SilentException: leave the data unprocessed; the effect runs again when
+        # the method arrives, rather than estimating with a method that was guessed.
+        method = (
+            input.hill_auto_method() if input.hill_input_type() == "Image" else None
+        )
+        if _last_processed_input_data[0] is input_data():
+            return  # only the method changed: _update_selected_images follows it
         d = input_data()
         if d.ndim == 2:
             d = np.expand_dims(d, axis=0)
@@ -1569,9 +1581,7 @@ def hill_tab_server(input, output, session):
             img0 = included_images[0].astype(np.float64)
             if input.hill_input_type() == "Image":
                 try:
-                    auto = hill.auto_upright_transform(
-                        img0, input.hill_apix(), input.hill_auto_method()
-                    )
+                    auto = hill.auto_upright_transform(img0, input.hill_apix(), method)
                     angle, dx_val, dy_val = auto["angle"], auto["dx"], auto["dy"]
                     mr = auto["mask_radius"]
                     ml = 90.0
@@ -1581,24 +1591,28 @@ def hill_tab_server(input, output, session):
                     ui.update_slider("hill_mask_radius", value=mr)
                     ui.update_slider("hill_mask_len", value=ml)
                     _note_push(angle, dx_val, dy_val, mr, ml)
-                    img0 = _transformed(
-                        img0,
-                        dict(
-                            apix=input.hill_apix(),
-                            negate=input.hill_negate(),
-                            angle=angle,
-                            dx=dx_val,
-                            dy=dy_val,
-                            mask_radius=mr,
-                            mask_len=ml,
-                        ),
+                    params = dict(
+                        apix=input.hill_apix(),
+                        negate=input.hill_negate(),
+                        angle=angle,
+                        dx=dx_val,
+                        dy=dy_val,
+                        mask_radius=mr,
+                        mask_len=ml,
                     )
+                    # kept as the first image's own values, so that the selection
+                    # that follows loads these, not a second estimate
+                    avg_ps_pd_main_in_df.set(
+                        {**avg_ps_pd_main_in_df(), included[0]: params}
+                    )
+                    img0 = _transformed(img0, params)
                 except Exception:
                     pass
             data_2d_transformed.set(img0)
         else:
             selected_images.set([])
             selected_image_labels.set([])
+        _last_processed_input_data[0] = input_data()
 
     @reactive.effect(priority=10)
     @reactive.event(input.hill_auto_method, ignore_init=True)
@@ -2850,7 +2864,9 @@ def hill_tab_server(input, output, session):
     @reactive.effect
     @reactive.event(
         selected_images,
-        input.hill_active_image,
+        # not input.hill_active_image itself: it is unset until the first click,
+        # which would keep the first image's profile from being drawn at start-up
+        _active_position,
         input.hill_apix,
         input.hill_angle,
         input.hill_dx,
@@ -2864,17 +2880,27 @@ def hill_tab_server(input, output, session):
         req(len(selected_images()) > 0)
         req(input.hill_apix() != 0)
         curr_img = selected_images()[_active_position()]
-        if (
-            input.hill_angle()
-            or input.hill_dx()
-            or input.hill_dy()
-            or input.hill_negate()
-        ):
+        try:
+            input.hill_active_image()
+            reported = True
+        except SilentException:
+            reported = False
+        if not reported and _pushed_params:
+            # the browser has not reported the controls yet: use what was set
+            p = _pushed_params[-1]
+        else:
+            p = dict(
+                angle=input.hill_angle(),
+                dx=input.hill_dx(),
+                dy=input.hill_dy(),
+                mask_radius=input.hill_mask_radius(),
+            )
+        if p["angle"] or p["dx"] or p["dy"] or input.hill_negate():
             unmasked_data = hill.transform_2d_image(
                 curr_img,
-                input.hill_angle(),
-                input.hill_dx(),
-                input.hill_dy(),
+                p["angle"],
+                p["dx"],
+                p["dy"],
                 input.hill_negate(),
                 input.hill_apix(),
             )
@@ -2894,8 +2920,8 @@ def hill_tab_server(input, output, session):
             "x": -curr_x,
             "y": curr_ymean,
         }
-        _rp_rmin_span.location = -input.hill_mask_radius()
-        _rp_rmax_span.location = input.hill_mask_radius()
+        _rp_rmin_span.location = -p["mask_radius"]
+        _rp_rmax_span.location = p["mask_radius"]
 
     def _set_acf(img):
         """Plot the auto-correlation of the transformed image ``img``.
