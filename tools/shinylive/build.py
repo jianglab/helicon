@@ -32,6 +32,7 @@ platform equivalent.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -430,6 +431,27 @@ def _stage(bundle: Bundle, staging_dir: Path, wheel: Path | None) -> None:
     )
 
 
+def _brand_page(index: Path, title: str) -> None:
+    """Give the exported page the Helicon tab title and icon.
+
+    Shinylive's own ``index.html`` is titled "Shiny App" and has no icon; the
+    app's ``ui.tags.title`` lives in an iframe, so the browser tab never sees it.
+    """
+    resources = SRC / "resources"
+    for name in ("icon.svg", "icon.png"):
+        shutil.copyfile(resources / name, index.parent / name)
+    html = index.read_text()
+    html = re.sub(
+        r"<title>.*?</title>",
+        f"<title>{title}</title>"
+        '<link rel="icon" type="image/svg+xml" href="icon.svg">'
+        '<link rel="icon" type="image/png" href="icon.png">',
+        html,
+        count=1,
+    )
+    index.write_text(html)
+
+
 def build_bundle(
     bundle: Bundle,
     *,
@@ -477,6 +499,10 @@ def build_bundle(
         )
     subprocess.run(
         [shinylive_cli, "export", str(staging_dir), str(out_dir)], check=True
+    )
+    _brand_page(
+        out_dir / "index.html",
+        "Helicon" if bundle.name == "home" else f"{bundle.title} \u2014 Helicon",
     )
     if bundle.mode == "package":
         shutil.copyfile(wheel, out_dir / wheel.name)
